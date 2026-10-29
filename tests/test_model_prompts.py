@@ -115,3 +115,40 @@ def test_diary_prompt_keeps_message_language_independent_of_interface(
 def test_prompt_loader_rejects_unlisted_files():
     with pytest.raises(ValueError, match="Unknown model prompt"):
         load_prompt("../../LICENSE")
+
+
+@pytest.mark.parametrize(
+    "name", ["analysis_answer", "diary_extract", "safety_reply", "safety_fragment", "form_safety"]
+)
+def test_language_instructions_respect_explicit_language_requests(name):
+    instruction = load_prompt(name)
+    assert "explicitly requests a response language" in instruction
+    assert "response_language" in instruction
+
+
+@pytest.mark.parametrize("name", ["analysis_answer", "diary_extract"])
+def test_language_instructions_limit_short_reply_context_to_owner_conversation(name):
+    instruction = load_prompt(name)
+    assert "short or ambiguous" in instruction
+    assert "relevant prior owner conversation" in instruction
+    assert "stored records" in instruction
+
+
+def test_explicit_response_language_is_preserved_through_diary_interpretation(db):
+    text = "Po obede som bol unavený. Please respond in English."
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            assert json.loads(prompt)["text"] == text
+            return schema(
+                intent="clarify",
+                confidence=0.9,
+                response_language="en",
+                clarification="What time was that?",
+            )
+
+    result = interpret(
+        db, Provider(), text, Settings(locale="ru"), datetime(2026, 10, 21, 12, tzinfo=UTC)
+    )
+    assert result.response_language == "en"
+    assert result.clarification == "What time was that?"

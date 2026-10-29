@@ -5,13 +5,15 @@ The instructions sent to the model are bundled as reviewable text files in
 transcription, extension capability checks and MCP routes load them through one fixed catalog. User messages,
 saved records and tool results cannot select another instruction file.
 
-The instructions use English as a neutral control language. They require the
-model to identify the language of the **current owner message**, set
-`response_language` from that message when the response schema supports it,
-and write clarifications or answers in the same language. The configured UI
-locale remains a fallback when the model does not identify the language; it is
-not a restriction on the message language. Voice transcription preserves the
-spoken language rather than translating it.
+The instructions use English as a neutral control language. They ask the model
+to use an explicitly requested response language, or the current owner message's
+language when there is no such request. For a short, ambiguous continuation it
+may use relevant owner conversation context, but not the language of stored
+records or tool output. When the response schema supports it, the model returns
+the choice in `response_language`. The configured UI locale remains a fallback
+when the model cannot determine a language. Voice transcription preserves the
+spoken language rather than translating it. These instructions do not themselves
+prove that a particular model handles multilingual requests correctly.
 
 Settings, response language tags, generated tracker labels and action/form locale
 parameters use the same well-formed BCP 47 syntax and conventional casing. They
