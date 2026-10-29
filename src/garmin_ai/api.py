@@ -75,6 +75,14 @@ from garmin_ai.share_policy import (
     list_tracker_shares,
     revoke_tracker_share,
 )
+from garmin_ai.source_metric_mapping import (
+    SourceMetricMappingConfirmation,
+    SourceMetricMappingDraft,
+    confirm_source_metric_mapping,
+    delete_source_metric_mapping,
+    list_source_metric_mappings,
+    preview_source_metric_mapping,
+)
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -630,6 +638,26 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/tracker-setups/preview", dependencies=[Depends(require("manage:definitions"))])
     def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db)):
         return preview_tracker(session, body)
+
+    @app.post("/source-metric-mappings/preview", dependencies=[Depends(require("admin"))])
+    def preview_source_mapping(body: SourceMetricMappingDraft, session=Depends(db)):
+        return preview_source_metric_mapping(session, settings, body)
+
+    @app.post("/source-metric-mappings", dependencies=[Depends(require("admin"))])
+    def confirm_source_mapping(body: SourceMetricMappingConfirmation, session=Depends(db)):
+        return confirm_source_metric_mapping(session, settings, body)
+
+    @app.get("/source-metric-mappings", dependencies=[Depends(require("admin"))])
+    def source_mappings(
+        limit: int = Query(default=100, ge=1, le=100),
+        after_id: str | None = Query(default=None, pattern=r"^[0-9a-f]{64}$"),
+        session=Depends(db),
+    ):
+        return list_source_metric_mappings(session, limit=limit, after_id=after_id)
+
+    @app.delete("/source-metric-mappings/{mapping_id}", dependencies=[Depends(require("admin"))])
+    def delete_source_mapping(mapping_id: str, session=Depends(db)):
+        return delete_source_metric_mapping(session, mapping_id)
 
     @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
     def create_tracker(
