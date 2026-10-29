@@ -60,6 +60,25 @@ def body(content=None, reason="end_turn"):
     }
 
 
+def interpretation_response(value):
+    from garmin_ai.anthropic_schema import AnthropicSchemaCompiler
+
+    schema = AnthropicSchemaCompiler().compile(type(value))
+    result = value.model_dump(mode="json")
+
+    def omit_optional_nulls(obj, definition):
+        for key in definition["properties"]:
+            if key not in definition["required"] and obj.get(key) is None:
+                obj.pop(key, None)
+
+    omit_optional_nulls(result, schema)
+    for event in result["events"]:
+        omit_optional_nulls(event, schema["$defs"]["EventInput"])
+        if event["payload"]["type"] == "caffeine":
+            omit_optional_nulls(event["payload"], schema["$defs"]["Caffeine"])
+    return result
+
+
 @pytest.fixture
 def transport(monkeypatch):
     requests, responses = [], []
@@ -222,8 +241,13 @@ def test_original_domain_limits_are_enforced_after_anthropic_schema_projection(t
     from garmin_ai.agent import Interpretation
 
     requests, responses = transport
-    invalid = Interpretation(intent="question", confidence=0.5).model_dump(mode="json")
+    invalid = interpretation_response(Interpretation(intent="question", confidence=0.5))
     invalid["confidence"] = 2.0
+    from jsonschema import Draft202012Validator
+
+    from garmin_ai.anthropic_schema import AnthropicSchemaCompiler
+
+    Draft202012Validator(AnthropicSchemaCompiler().compile(Interpretation)).validate(invalid)
     responses.append(
         httpx.Response(200, json=body([{"type": "text", "text": json.dumps(invalid)}]))
     )
@@ -249,7 +273,9 @@ def test_web_chat_uses_anthropic_through_actual_http_ingress(transport, db, db_e
         intent="clarify", confidence=0.8, response_language="en", clarification="What time?"
     )
     responses.append(
-        httpx.Response(200, json=body([{"type": "text", "text": command.model_dump_json()}]))
+        httpx.Response(
+            200, json=body([{"type": "text", "text": json.dumps(interpretation_response(command))}])
+        )
     )
     settings = settings_for()
     key = "synthetic-web-anthropic-" + "x" * 32
@@ -264,6 +290,31 @@ def test_web_chat_uses_anthropic_through_actual_http_ingress(transport, db, db_e
     assert response.status_code == 200
     assert "What time?" in response.json()["reply"]["text"]
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+    assert len(requests) == 1
+
+
+def test_diary_interpretation_with_omitted_unknowns_round_trips(transport):
+    from garmin_ai.agent import Interpretation
+
+    requests, responses = transport
+    command = Interpretation(
+        intent="log",
+        confidence=0.9,
+        events=[
+            {"start": "2026-01-01T10:00:00Z", "payload": {"type": "caffeine", "beverage": "coffee"}}
+        ],
+    )
+    response = interpretation_response(command)
+    assert "target_event_id" not in response
+    assert "end" not in response["events"][0]
+    responses.append(
+        httpx.Response(200, json=body([{"type": "text", "text": json.dumps(response)}]))
+    )
+    provider = create_model_provider(settings_for())
+    try:
+        assert provider.structured("Synthetic", "Synthetic coffee", Interpretation) == command
+    finally:
+        provider.close()
     assert len(requests) == 1
 
 
