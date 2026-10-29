@@ -1541,7 +1541,7 @@ def aggregate_metric(
             **source_revisions,
             **{
                 measurement_revision_reference(row): measurement_revision_token(row)
-                for row in revision_measurements
+                for row in measurement_snapshot
             },
         },
         "projection_generation": max(

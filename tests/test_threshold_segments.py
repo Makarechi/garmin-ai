@@ -221,6 +221,17 @@ def test_later_invalid_revision_does_not_restore_or_bridge_old_values(db, change
         ),
     )
     assert aggregate["observations"] == 2
+    assert not evidence_is_stale(db, aggregate)
+    db.add(
+        MeasurementRevision(
+            **{**values, "value": 85},
+            metric_definition_version_id=current.metric_definition_version_id,
+            quality="observed",
+            ingested_at=START + timedelta(hours=4),
+        )
+    )
+    db.flush()
+    assert evidence_is_stale(db, aggregate)
 
 
 @pytest.mark.parametrize(
@@ -284,7 +295,9 @@ def test_existing_analysis_spec_keeps_its_pre_threshold_hash():
         end=START + timedelta(minutes=15),
         knowledge_cutoff=START + timedelta(days=1),
     )
-    original = existing.model_dump(mode="json", exclude={"threshold", "threshold_operator"})
+    original = existing.model_dump(
+        mode="json", exclude={"threshold", "threshold_operator", "timezone"}
+    )
     expected = hashlib.sha256(
         json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

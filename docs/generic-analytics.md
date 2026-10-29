@@ -23,6 +23,14 @@ matching duration, not zero. Multiple sources require an explicit selection.
 Event-derived, sparse, increment, and unsupported interval data are rejected;
 this operation does not infer physiology or a psychological cause.
 
+`threshold_by_local_hour` uses the same input, threshold and source rules, and
+requires an IANA timezone. It reports scheduled, covered and matching seconds for
+each local clock hour. Matching share divides by covered time; unobserved hours
+have no matching share rather than zero. A repeated hour at the end of daylight
+saving includes both occurrences in its elapsed-time denominator; a skipped hour
+has no scheduled time. Date boundaries and offset changes are applied to the
+actual elapsed instants, rather than assuming every local day is 24 hours.
+
 Measurement history selects the latest revision known at the cutoff before
 checking its quality and metric version. A deletion, invalid revision, or revision
 under a different contract cannot revive an older value; invalid revisions also
