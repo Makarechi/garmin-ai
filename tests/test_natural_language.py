@@ -282,6 +282,7 @@ def test_negation_in_a_previous_sentence_does_not_hide_a_separate_value():
     ("text", "value"),
     [
         ('He said "difficulty 3"', 3),
+        ('"difficulty 3"', 3),
         ("Он сказал «сложность 3»", 3),
         ("He said “difficulty 3”", 3),
         ('He said "difficulty 3', 3),
@@ -747,6 +748,7 @@ def test_valid_unit_attached_to_number_can_be_saved(db):
         "Today from 19:00 to 19:15 he stretched, difficulty 3",
         "Сегодня с 19:00 до 19:15 она растягивалась, сложность 3",
         'He said: "Today from 19:00 to 19:15 I stretched, difficulty 3"',
+        '"Today from 19:00 to 19:15 I stretched, difficulty 3"',
         "Он сказал: «Сегодня с 19:00 до 19:15 растягивался, сложность 3»",
     ],
 )
