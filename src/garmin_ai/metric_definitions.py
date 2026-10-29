@@ -841,6 +841,7 @@ def measurement_rows_as_of(
     source=None,
     limit=10001,
     descending=False,
+    include_invalid=False,
 ):
     """Return the last revision known at the cutoff for each measurement identity."""
 
@@ -862,7 +863,6 @@ def measurement_rows_as_of(
     )
     revision_filters = [
         MeasurementRevision.metric_definition_version_id == contract_id,
-        MeasurementRevision.quality == "observed",
         MeasurementRevision.ts < end,
         MeasurementRevision.ingested_at <= knowledge_cutoff,
     ]
@@ -870,9 +870,21 @@ def measurement_rows_as_of(
         revision_filters.append(MeasurementRevision.ts >= start)
     if source is not None:
         revision_filters.append(MeasurementRevision.source == source)
+    identities = (
+        select(MeasurementRevision.ts, MeasurementRevision.metric, MeasurementRevision.source)
+        .where(*revision_filters)
+        .distinct()
+        .subquery()
+    )
     ranked = (
         select(MeasurementRevision.id.label("revision_id"), rank)
-        .where(*revision_filters)
+        .join(
+            identities,
+            (MeasurementRevision.ts == identities.c.ts)
+            & (MeasurementRevision.metric == identities.c.metric)
+            & (MeasurementRevision.source == identities.c.source),
+        )
+        .where(MeasurementRevision.ingested_at <= knowledge_cutoff)
         .subquery()
     )
     revision_order = (
@@ -883,10 +895,16 @@ def measurement_rows_as_of(
     revisions_query = (
         select(MeasurementRevision)
         .join(ranked, ranked.c.revision_id == MeasurementRevision.id)
-        .where(ranked.c.snapshot_rank == 1, MeasurementRevision.deleted.is_(False))
+        .where(ranked.c.snapshot_rank == 1)
         .order_by(*revision_order)
         .execution_options(populate_existing=True)
     )
+    if not include_invalid:
+        revisions_query = revisions_query.where(
+            MeasurementRevision.deleted.is_(False),
+            MeasurementRevision.quality == "observed",
+            MeasurementRevision.metric_definition_version_id == contract_id,
+        )
     if limit is not None:
         revisions_query = revisions_query.limit(limit)
     revisions = session.scalars(revisions_query).all()
@@ -901,11 +919,12 @@ def measurement_rows_as_of(
     )
     legacy_filters = [
         Measurement.metric_definition_version_id == contract_id,
-        Measurement.quality == "observed",
         Measurement.ts < end,
         Measurement.ingested_at <= knowledge_cutoff,
         ~has_revision,
     ]
+    if not include_invalid:
+        legacy_filters.append(Measurement.quality == "observed")
     if start is not None:
         legacy_filters.append(Measurement.ts >= start)
     if source is not None:
@@ -1132,7 +1151,7 @@ def aggregate_metric(
         if source is not None and source.startswith("measurement:")
         else None
     )
-    revision_measurements = (
+    measurement_snapshot = (
         measurement_rows_as_of(
             session,
             contract.id,
@@ -1141,11 +1160,21 @@ def aggregate_metric(
             knowledge_cutoff,
             source=measurement_revision_source,
             limit=10001,
+            include_invalid=True,
         )
         if measurement_source_filter is not False
         else []
     )
-    revision_by_key = {(row.ts, row.metric, row.source): row for row in revision_measurements}
+    if len(measurement_snapshot) > 10000:
+        raise ValueError("Metric query exceeds 10000 observations")
+    revision_by_key = {(row.ts, row.metric, row.source): row for row in measurement_snapshot}
+    revision_measurements = [
+        row
+        for row in measurement_snapshot
+        if not getattr(row, "deleted", False)
+        and row.quality == "observed"
+        and row.metric_definition_version_id == contract.id
+    ]
     # The current projection can reuse an older source payload after a newer
     # value was superseded. Its latest history boundary is then its activation.
     last_activation = (
