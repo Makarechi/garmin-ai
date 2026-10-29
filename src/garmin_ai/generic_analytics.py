@@ -765,7 +765,7 @@ def evidence_is_stale(session, evidence: dict) -> bool:
             ):
                 return True
             continue
-        event = session.get(Event, UUID(reference))
+        event = session.get(Event, UUID(reference), populate_existing=True)
         current_projection = session.scalar(
             select(func.max(MetricObservation.projection_version)).where(
                 MetricObservation.source_entry_id == UUID(reference),

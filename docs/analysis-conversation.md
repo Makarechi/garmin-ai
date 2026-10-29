@@ -39,3 +39,12 @@ Undelivered output is staged separately as one pending turn, bounded to 12,000 b
 Replies to known analytical answers are resolved before free-text intent classification. Their outbox marker survives snippet expiry, so unavailable analytic context asks for the original question. Replies to diary or proactive messages retain ordinary intent routing. Urgent safety screening also runs for queued replies and expired analytical context. A dedicated control worker processes forgetting while the ordinary analysis worker waits for the provider. Forgetting changes an epoch checked before each subsequent model request and after its result; final answer persistence is serialized with forgetting. A request already sent to the provider cannot be recalled, but its stale result is discarded.
 
 Forgetting also redacts cached analytical reply text. Each delivery part checks the captured conversation epoch before sending, including retries after Telegram rate limiting. A send already in flight cannot be recalled, but remaining parts and later retries are suppressed. Known analytical replies bypass active diary forms.
+
+Generic metric results with source revisions are rechecked before another model round
+and before a final answer. The recheck uses the selected metric, version, source,
+window and original cutoff; for a cutoff close to the request time it also checks
+newly available data. Explicitly historical cutoffs remain historical. Current
+model and channel permissions are checked again. If cited evidence changed, the
+answer is replaced with the existing data-changed notice; unrelated metrics do not
+invalidate it. This in-turn check does not yet extend the evidence proof through a
+queued delivery after the answer has been produced.
