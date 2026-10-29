@@ -159,8 +159,8 @@ def _projection(definition, version, tracker, locale):
     }
 
 
-def tracker_candidates(session, text, *, locale="en", limit=5):
-    """Return a bounded, relevance-ordered projection of selected active trackers."""
+def _ranked_tracker_candidates(session, text, *, locale="en", limit=5):
+    """Return a bounded projection and whether ranking excluded possible choices."""
     if not 1 <= limit <= 5:
         raise ValueError("Candidate limit must be between one and five")
     person = owner(session)
@@ -188,18 +188,32 @@ def tracker_candidates(session, text, *, locale="en", limit=5):
         )
         ranked.append((_score(text, values), definition.key, definition, version, tracker))
     ranked.sort(key=lambda row: (-row[0], row[1]))
-    return [
+    candidates = [
         _projection(definition, version, tracker, locale)
         for _, _, definition, version, tracker in ranked[:limit]
     ]
+    return candidates, len(ranked) > limit, ranked[0][0] if ranked else 0
+
+
+def tracker_candidates(session, text, *, locale="en", limit=5):
+    """Return a bounded, relevance-ordered projection of selected active trackers."""
+    return _ranked_tracker_candidates(session, text, locale=locale, limit=limit)[0]
 
 
 def _fallback(
-    session, candidates, *, locale, granted, selected_action=None, reason="provider_unavailable"
+    session,
+    candidates,
+    *,
+    locale,
+    granted,
+    selected_action=None,
+    reason="provider_unavailable",
+    select_from_all=False,
 ):
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
     forms = []
+    selection_has_more = False
     candidate_ids = {UUID(row["definition_version_id"]) for row in candidates}
     if permits(granted, {"read:diary"}):
         if selected_action is not None:
@@ -207,12 +221,48 @@ def _fallback(
                 form_for_action(session, selected_action.id, locale=locale).model_dump(mode="json")
             )
         else:
+            resumable_versions = None
+            if select_from_all:
+                resumable_versions = set(
+                    session.scalars(
+                        select(EventDefinitionVersion.id)
+                        .join(
+                            EventDefinition,
+                            EventDefinition.id == EventDefinitionVersion.definition_id,
+                        )
+                        .join(TrackerConfig, TrackerConfig.definition_id == EventDefinition.id)
+                        .where(
+                            EventDefinition.owner_id == owner(session).id,
+                            EventDefinition.namespace == "user",
+                            EventDefinition.status == "active",
+                            EventDefinitionVersion.version == EventDefinition.current_version,
+                        )
+                    ).all()
+                )
             for action in available_actions(session, locale=locale):
-                if action.definition_version_id in candidate_ids:
+                if select_from_all and action.definition_version_id not in resumable_versions:
+                    continue
+                if select_from_all and session.info.get("channel_destination_instance_id"):
+                    from garmin_ai.share_policy import track_channel_share, version_sharing_allowed
+
+                    if not version_sharing_allowed(
+                        session,
+                        action.definition_version_id,
+                        destination_kind="channel",
+                        destination_instance_id=session.info["channel_destination_instance_id"],
+                        categories={"schema"},
+                    ):
+                        continue
+                if select_from_all or action.definition_version_id in candidate_ids:
+                    if select_from_all and len(forms) >= 50:
+                        selection_has_more = True
+                        break
+                    if select_from_all and session.info.get("channel_destination_instance_id"):
+                        track_channel_share(session, action.definition_version_id, {"schema"})
                     forms.append(
                         form_for_action(session, action.id, locale=locale).model_dump(mode="json")
                     )
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "intent": "deterministic_form",
         "reason": reason,
@@ -220,6 +270,9 @@ def _fallback(
         "tracker_builder": permits(granted, {"manage:definitions"}),
         "written": False,
     }
+    if select_from_all:
+        result["selection_has_more"] = selection_has_more
+    return result
 
 
 def _verify_evidence(text, evidence):
@@ -793,7 +846,9 @@ def process_tracker_text(
         ):
             raise PermissionError("Diary write permission required")
         return receipt.value["result"]
-    candidates = tracker_candidates(session, request.text, locale=locale)
+    candidates, has_more_candidates, best_score = _ranked_tracker_candidates(
+        session, request.text, locale=locale
+    )
     if request.selected_definition_version_id is not None:
         version = session.get(EventDefinitionVersion, request.selected_definition_version_id)
         definition = session.get(EventDefinition, version.definition_id) if version else None
@@ -871,6 +926,21 @@ def process_tracker_text(
             )
         )
         session.flush()
+    if (
+        has_more_candidates
+        and best_score < 10
+        and request.selected_event_id is None
+        and request.selected_definition_version_id is None
+        and not PROPOSAL.search(request.text)
+    ):
+        return _fallback(
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            reason="tracker_selection_required",
+            select_from_all=True,
+        )
     if provider is None:
         return _fallback(
             session, candidates, locale=locale, granted=granted, selected_action=selected_action

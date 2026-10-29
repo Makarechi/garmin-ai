@@ -9,6 +9,14 @@ field IDs, and every extracted value or changed time points to an exact characte
 source message. The application verifies those ranges before passing the result through the same
 form service used by the dashboard.
 
+When more than five trackers exist and the message has no exact lexical match,
+the endpoint asks the owner to select a tracker instead of treating the first five
+as the only choices. It returns up to 50 deterministic forms, filtering external
+channel labels using their schema consent. If `selection_has_more` is true, the
+authenticated `/actions` endpoint provides the full local list. Continue with a
+new operation ID and the selected `selected_definition_version_id`. This fallback
+does not expand the supported write languages.
+
 Setup wishes and facts are separate operations. “I want to track stretching” can only return a
 tracker preview with the existing explicit confirmation token; it cannot create a stretching
 entry. Definition changes are also returned as proposals and are never activated by the model.
