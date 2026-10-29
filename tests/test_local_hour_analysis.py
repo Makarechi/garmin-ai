@@ -6,9 +6,9 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import ValidationError
 
-from garmin_ai.generic_analytics import AnalysisSpec, execute_analysis, spec_hash
+from garmin_ai.generic_analytics import AnalysisSpec, evidence_is_stale, execute_analysis, spec_hash
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
-from garmin_ai.models import Measurement
+from garmin_ai.models import Measurement, MeasurementRevision
 from garmin_ai.tools import call_tool
 
 
@@ -95,6 +95,39 @@ def test_half_hour_timezone_transition_splits_real_elapsed_time(db):
     assert rows[2]["scheduled_seconds"] == 1800
     assert rows[1]["matching_ratio"] is None
     assert sum(row["scheduled_seconds"] for row in rows) == 5400
+
+
+def test_invalid_revision_marks_a_gap_without_making_hourly_evidence_stale(db):
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    add(
+        db,
+        [
+            (start, 80),
+            (start + timedelta(minutes=1), 80),
+            (start + timedelta(minutes=2), 80),
+            (start + timedelta(minutes=3), 80),
+        ],
+    )
+    row = db.get(Measurement, (start + timedelta(minutes=1), "stress_score", "synthetic"))
+    db.add(
+        MeasurementRevision(
+            ts=row.ts,
+            metric=row.metric,
+            source=row.source,
+            local_date=row.local_date,
+            value=row.value,
+            unit=row.unit,
+            metric_definition_version_id=row.metric_definition_version_id,
+            quality="invalid",
+            details={},
+            source_ref=None,
+            ingested_at=start + timedelta(hours=1),
+        )
+    )
+    db.flush()
+    result = execute_analysis(db, plan(start, start + timedelta(minutes=3), "UTC"))
+    assert result["rows"][0]["covered_seconds"] == 60
+    assert not evidence_is_stale(db, result)
 
 
 @pytest.mark.parametrize("timezone", [None, "Not/A_Real_Zone", "../invalid"])
