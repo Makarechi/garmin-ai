@@ -17,6 +17,13 @@ content. Refusal and truncated responses have distinct error types. Adapters
 can use the common JSON Schema compiler; Gemini uses its own compiler. Domain
 validation always uses the original application schema.
 
+The runtime log preserves bounded model request metadata. For Gemini failures,
+it distinguishes connection errors, timeouts, upstream service errors and rate
+limits, and records an upstream HTTP status when available. These fields contain
+no provider response body, credentials, message text or health data. A service
+error or network failure still follows the existing cooldown policy; logging
+does not introduce another request or a provider fallback.
+
 Plugin calls have a bounded caller wait: `GA_MODEL_REQUEST_TIMEOUT_SECONDS`
 defaults to 60 seconds, and a model instance can override it with
 `request_timeout_seconds` between 0.05 and 300 seconds. A configured Gemini
