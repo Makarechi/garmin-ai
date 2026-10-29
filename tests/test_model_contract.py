@@ -2,7 +2,7 @@
 
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Event as ThreadEvent
 
 import pytest
@@ -74,6 +74,31 @@ class HttpFailure(Exception):
     def __init__(self, code):
         super().__init__("synthetic private payload")
         self.status_code = code
+
+
+@pytest.mark.parametrize("failure", [ProviderRefused, ProviderCapabilityUnsupported])
+def test_terminal_provider_failure_is_not_retried_by_background_job(db, failure):
+    from garmin_ai.jobs import claim, enqueue, finish
+
+    now = datetime.now(UTC)
+    identity = enqueue(db, "synthetic_model_job", {}, f"synthetic-job-{failure.__name__}", now)
+    job = claim(db, now=now, kinds=["synthetic_model_job"])
+    assert job.id == identity
+    plugin = Plugin(error=failure("synthetic refusal"))
+    with pytest.raises(failure) as caught:
+        model(plugin).structured("instruction", "synthetic input", Result)
+    finish(
+        db,
+        job.id,
+        job.lease_token,
+        error_type=type(caught.value).__name__,
+        terminal_error=isinstance(caught.value, ProviderRequestInvalid),
+    )
+    db.flush()
+    assert job.status == "failed" and job.attempts == 1
+    assert job.last_error == failure.__name__
+    assert claim(db, now=now + timedelta(hours=2), kinds=["synthetic_model_job"]) is None
+    assert plugin.calls == 1
 
 
 def model(

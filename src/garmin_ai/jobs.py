@@ -520,6 +520,7 @@ def finish(
     lease_token,
     *,
     error_type: str | None = None,
+    terminal_error=False,
     retryable_delivery=False,
     retry_at=None,
 ):
@@ -545,7 +546,9 @@ def finish(
         if retryable_delivery or error_type in {"DiaryDeferred", "ProviderCooldown"}:
             row.attempts = max(0, row.attempts - 1)
         row.status = (
-            "failed" if row.attempts >= 8 or error_type == "ProviderRequestInvalid" else "pending"
+            "failed"
+            if row.attempts >= 8 or terminal_error or error_type == "ProviderRequestInvalid"
+            else "pending"
         )
         row.last_error = error_type
         row.completed_at = now if row.status == "failed" else None
