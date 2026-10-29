@@ -45,10 +45,11 @@ returns a clarification without changing the diary. This check does not
 establish the subject, intent or general semantic meaning of a number;
 ambiguous cases still need the existing safeguards.
 
-For a proposed Boolean answer, the application also checks the surrounding
-source sentence for preceding English or Russian negation and rejects clipped
-word fragments. Such cases request clarification; this conservative check does
-not establish subject, tense, modality or multilingual semantic equivalence.
+For Boolean answers and equivalent literal choices or text such as `yes` and
+`no`, the application checks the surrounding source sentence for preceding
+English or Russian negation and rejects clipped word fragments. Such cases
+request clarification; this conservative check does not establish subject,
+tense, modality or multilingual semantic equivalence.
 
 Every changed timestamp needs an independently supported calendar day as well as
 a clock. Its exact source quote must contain an ISO date (`2026-10-22`), a

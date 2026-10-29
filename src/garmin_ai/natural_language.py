@@ -300,6 +300,17 @@ def _complete_number_in_source(source, start, end):
     return not (after and after in ".,٫٬" and end + 1 < len(source) and source[end + 1].isdigit())
 
 
+_BOOLEAN_LITERALS = {
+    "true": True,
+    "yes": True,
+    "да": True,
+    "есть": True,
+    "false": False,
+    "no": False,
+    "нет": False,
+}
+
+
 def _value_is_evidenced(
     value, quote, *, nominal=False, semantic=None, source_text=None, source_start=0, clock_values=()
 ):
@@ -341,6 +352,13 @@ def _value_is_evidenced(
             if not re.search(negation, clause, re.I):
                 return True
         return False
+    if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
+        return _value_is_evidenced(
+            _BOOLEAN_LITERALS[value.casefold()],
+            quote,
+            source_text=source_text,
+            source_start=source_start,
+        )
     if isinstance(value, (int, float)):
         try:
             expected = Decimal(str(value))
@@ -381,6 +399,8 @@ def _value_is_evidenced(
 def _categorical_value_is_evidenced(
     value, quote, *, source_text=None, source_start=0, clock_values=()
 ):
+    if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
+        return _value_is_evidenced(value, quote, source_text=source_text, source_start=source_start)
     if re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", str(value)):
         return _value_is_evidenced(
             str(value),

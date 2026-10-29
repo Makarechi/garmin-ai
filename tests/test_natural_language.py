@@ -527,9 +527,13 @@ def test_clipping_a_negative_sign_cannot_create_a_positive_tracker_value(db):
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
-def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db):
+@pytest.mark.parametrize(
+    ("kind", "value", "options"),
+    [("boolean", True, []), ("choice", "yes", ["yes", "no"]), ("text", "yes", [])],
+)
+def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db, kind, value, options):
     draft = stretch_draft(
-        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind="boolean")]
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind=kind, options=options)]
     )
     created = install(db, draft)
     version_id = created["action"]["definition_version_id"]
@@ -540,7 +544,7 @@ def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db):
         fields=[
             {
                 "field_id": "user.stretch.difficulty",
-                "value": True,
+                "value": value,
                 "evidence": evidence(text, "yes"),
             }
         ],
