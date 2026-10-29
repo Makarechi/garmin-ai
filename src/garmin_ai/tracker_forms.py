@@ -26,6 +26,7 @@ from garmin_ai.definitions import (
 )
 from garmin_ai.events import Conflict, StrictModel, lock_writes
 from garmin_ai.language_tags import LanguageTag
+from garmin_ai.language_tags import select_label as _label
 from garmin_ai.models import (
     AppState,
     Event,
@@ -360,15 +361,6 @@ def _draft_hash(draft):
         draft.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _label(labels, locale):
-    return (
-        labels.get(locale)
-        or labels.get(locale.split("-", 1)[0])
-        or labels.get("en")
-        or next(iter(labels.values()))
-    )
 
 
 def _shortest_integer_json_length(node, *, exact_integer=False, storage=False):

@@ -114,3 +114,17 @@ LanguageTag = Annotated[
     Field(min_length=2, max_length=255, pattern=r"^[A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8})*$"),
     AfterValidator(normalize_language_tag),
 ]
+
+
+def select_label(labels: dict[str, str], locale: str) -> str:
+    """Choose the most specific matching label before falling back to English."""
+    subtags = normalize_language_tag(locale).split("-")
+    while subtags:
+        label = labels.get("-".join(subtags))
+        if label:
+            return label
+        subtags.pop()
+        # Lookup must not leave an extension or private-use singleton behind.
+        if subtags and len(subtags[-1]) == 1:
+            subtags.pop()
+    return labels.get("en") or next(iter(labels.values()))
