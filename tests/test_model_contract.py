@@ -380,7 +380,9 @@ def test_diary_only_model_request_does_not_require_health_consent(db, db_engine)
     assert plugin.calls == 1
 
 
-def test_gemini_uses_the_explicit_diary_category_without_a_live_call():
+def test_gemini_uses_the_explicit_diary_category_without_a_live_call(monkeypatch):
+    from types import SimpleNamespace
+
     consent = ProviderConsent(
         provider="gemini",
         provider_instance_id="model:gemini:primary",
@@ -390,12 +392,17 @@ def test_gemini_uses_the_explicit_diary_category_without_a_live_call():
         policy_revision=1,
     )
     settings = Settings(
-        _env_file=None, llm_enabled=True, gemini_model="synthetic-model", llm_consent=consent
+        _env_file=None,
+        llm_enabled=True,
+        gemini_model="synthetic-model",
+        gemini_api_key="synthetic-key",
+        llm_consent=consent,
     )
-    provider = GeminiProvider.__new__(GeminiProvider)
-    provider.settings = settings
-    provider.model = "synthetic-model"
-    provider.generation_config = {}
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    provider = GeminiProvider(settings)
     seen = []
 
     def create(**kwargs):
