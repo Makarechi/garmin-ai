@@ -31,9 +31,22 @@ class ClosedSchemaCompiler:
 
     def compile(self, schema: type[BaseModel]) -> dict:
         original = schema.model_json_schema()
-        if original.get("type") != "object" or "properties" not in original:
-            raise UnsupportedSchema("Structured output requires an object root")
         definitions = original.get("$defs", {})
+        root = original
+        seen_roots = set()
+        while "$ref" in root:
+            ref = root["$ref"]
+            if (
+                not isinstance(ref, str)
+                or not ref.startswith("#/$defs/")
+                or ref[8:] not in definitions
+                or ref in seen_roots
+            ):
+                raise UnsupportedSchema("Unsupported schema root reference")
+            seen_roots.add(ref)
+            root = definitions[ref[8:]]
+        if root.get("type") != "object" or "properties" not in root:
+            raise UnsupportedSchema("Structured output requires an object root")
 
         if not self._allow_recursive:
 
@@ -75,6 +88,10 @@ class ClosedSchemaCompiler:
                 key in node for key in ("allOf", "not", "if", "then", "else", "patternProperties")
             ):
                 raise UnsupportedSchema("Unsupported schema composition")
+            if "prefixItems" in node or (
+                node.get("type") == "array" and not isinstance(node.get("items"), dict)
+            ):
+                raise UnsupportedSchema("Positional or untyped arrays are not supported")
             result = {key: node[key] for key in self._scalar_keys if key in node}
             if "format" in node and node["format"] in self._formats:
                 result["format"] = node["format"]
@@ -106,7 +123,7 @@ class ClosedSchemaCompiler:
                 result["items"] = convert(node["items"])
             return result
 
-        result = convert(original)
+        result = convert(root)
         if definitions:
             result["$defs"] = {name: convert(value) for name, value in definitions.items()}
         return result

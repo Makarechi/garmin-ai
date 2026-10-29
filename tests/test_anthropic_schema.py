@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 from garmin_ai.agent import AgentStep, Interpretation, SafetyScreen
 from garmin_ai.anthropic_schema import AnthropicSchemaCompiler, UnsupportedSchema
 from garmin_ai.natural_language import TrackerExtraction
+from garmin_ai.openai_schema import OpenAISchemaCompiler
 
 
 @pytest.mark.parametrize("schema", [AgentStep, Interpretation, SafetyScreen, TrackerExtraction])
@@ -63,6 +64,32 @@ def test_recursive_schema_is_rejected():
 
     with pytest.raises(UnsupportedSchema, match="Recursive"):
         AnthropicSchemaCompiler().compile(Root)
+
+
+def test_direct_recursive_model_is_supported_only_by_openai():
+    class Node(BaseModel):
+        children: list["Node"]
+
+    compiled = OpenAISchemaCompiler().compile(Node)
+    assert compiled["type"] == "object"
+    Draft202012Validator(compiled).validate({"children": [{"children": []}]})
+    with pytest.raises(UnsupportedSchema, match="Recursive"):
+        AnthropicSchemaCompiler().compile(Node)
+
+
+@pytest.mark.parametrize("compiler", [OpenAISchemaCompiler, AnthropicSchemaCompiler])
+def test_fixed_tuple_with_open_mapping_is_rejected(compiler):
+    class Positional(BaseModel):
+        pair: tuple[dict[str, str], str]
+
+    with pytest.raises(UnsupportedSchema):
+        compiler().compile(Positional)
+
+    class FixedTypes(BaseModel):
+        pair: tuple[int, str]
+
+    with pytest.raises(UnsupportedSchema):
+        compiler().compile(FixedTypes)
 
 
 def test_open_and_untyped_values_are_rejected():
