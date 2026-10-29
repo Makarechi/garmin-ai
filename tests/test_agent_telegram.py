@@ -443,7 +443,49 @@ def test_unknown_command_cannot_enable_questions_and_voice_unavailable(db, db_en
     db.commit()
     assert "Неизвестная" in process_message(db_engine, None, settings, 1)
     assert db.get(AppState, "proactive:enabled") is None
-    assert "Gemini" in process_message(db_engine, None, settings, 2, "")
+    assert "Голосовые сообщения сейчас недоступны" in process_message(
+        db_engine, None, settings, 2, ""
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "expected"),
+    [("openai", "OpenAI"), ("anthropic", "Anthropic"), ("gemini", "Gemini")],
+)
+def test_help_identifies_the_selected_provider_without_claiming_other_services(
+    db, db_engine, provider_name, expected
+):
+    from types import SimpleNamespace
+
+    from garmin_ai.config import IntegrationInstance
+
+    settings = Settings(
+        telegram_user_id=42,
+        llm_enabled=True,
+        integrations=[
+            IntegrationInstance(
+                id=f"model:{provider_name}:primary", kind="model", provider=provider_name
+            )
+        ],
+    )
+    save_update(db, update("/help"), 42)
+    db.commit()
+    response = process_message(
+        db_engine, SimpleNamespace(instance_id=f"model:{provider_name}:primary"), settings, 1
+    )
+    assert expected in response
+    for other in {"OpenAI", "Anthropic", "Gemini"} - {expected}:
+        assert other not in response
+    assert "голос" in response.lower() and "соглас" in response.lower()
+
+
+def test_help_without_model_does_not_claim_data_was_sent_to_gemini(db, db_engine):
+    settings = Settings(telegram_user_id=42)
+    save_update(db, update("/help"), 42)
+    db.commit()
+    response = process_message(db_engine, None, settings, 1)
+    assert "модель сейчас недоступна" in response.lower()
+    assert "Gemini" not in response
 
 
 def test_multiple_clarifications_retain_all_answers(db):
