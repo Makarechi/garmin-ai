@@ -379,10 +379,10 @@ def _has_uncertain_fact_context(source, start, end):
     sentence = source[before:after]
     if _FUTURE_CONTEXT.search(sentence) or _OTHER_PERSON_CONTEXT.search(sentence):
         return True
-    pairs = {'"': '"', "«": "»", "“": "”", "„": "”", "「": "」", "『": "』"}
+    pairs = {'"': '"', "«": "»", "“": "”", "„": "“”", "「": "」", "『": "』"}
     stack = []
     for index, char in enumerate(source):
-        if stack and char == stack[-1][1]:
+        if stack and char in stack[-1][1]:
             begin, _ = stack.pop()
             if begin < end and index + 1 > start:
                 return True

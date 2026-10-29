@@ -306,6 +306,7 @@ def test_unconfirmed_context_is_not_value_evidence(text, value):
     "text",
     [
         'He said "difficulty 2". I recorded difficulty 3',
+        "Yesterday I tried „yoga“. I recorded difficulty 3",
         "I will stretch tomorrow. I recorded difficulty 3",
         "I recorded difficulty 3. I'll stretch tomorrow",
         "I recorded difficulty 3",
@@ -814,6 +815,35 @@ def test_unconfirmed_statement_with_no_fields_does_not_create_fact(db, text):
     )
     assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_closed_low_opening_quote_does_not_hide_later_entry(db):
+    created = install(db)
+    text = "Yesterday I tried „yoga“. Today from 19:00 to 19:15 I stretched, difficulty 3"
+    current = "Today from 19:00 to 19:15 I stretched, difficulty 3"
+    extraction = entry_result(
+        text,
+        created["action"]["definition_version_id"],
+        start_evidence=evidence(text, current),
+        end_evidence=evidence(text, current),
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "separate-low-opening-quote"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True, result
 
 
 @pytest.mark.parametrize(
