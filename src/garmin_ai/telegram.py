@@ -1285,10 +1285,26 @@ def _process_message(
                     sent_at=now,
                 )
         elif command_name == "/start" or command_name == "/help":
+            if provider is None:
+                model_notice = "ИИ-модель сейчас недоступна; дневник и формы доступны локально."
+            else:
+                provider_name = (
+                    {"gemini": "Gemini", "openai": "OpenAI", "anthropic": "Anthropic"}.get(
+                        model_instance.provider
+                    )
+                    if model_instance is not None
+                    and getattr(provider, "instance_id", None) == model_instance.id
+                    else None
+                )
+                destination = f"в {provider_name}" if provider_name else "внешней модели"
+                model_notice = (
+                    f"При разрешённом доступе запросы и необходимые данные могут передаваться {destination}. "
+                    "Голос обрабатывается только при поддержке и отдельном согласии."
+                )
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/newtracker — создать трекер\n/goals — личные цели\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
-                "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
+                f"{model_notice} Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
                 "\n/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках"
             )
@@ -1583,7 +1599,7 @@ def _process_message(
             and not (tracker_pending and message.get("caption"))
             and not (selection_response is not None and message.get("caption"))
         ):
-            response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
+            response = "Голосовые сообщения сейчас недоступны. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/") and not (
             tracker_pending and pending_form.value.get("chat_form")
         ):
