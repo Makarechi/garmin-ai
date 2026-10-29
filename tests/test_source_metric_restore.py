@@ -18,6 +18,7 @@ from garmin_ai.models import AppState, Base, MetricObservation, SourcePayload
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.source_contracts import SourceCapabilities, SourcePage
 from garmin_ai.source_runtime import poll_source_instance
+from garmin_ai.tools import call_tool
 
 
 def test_source_revisions_remain_idempotent_after_restore(db, db_engine, monkeypatch, tmp_path):
@@ -96,3 +97,43 @@ def test_source_page_error_rolls_back_earlier_projections(db, db_engine, monkeyp
     assert len(rows) == 1 and rows[0].value == 15 and rows[0].valid
     assert len(db.scalars(select(SourcePayload)).all()) == 1
     assert db.get(AppState, "source-plugin:cursor:source:sample:one").value == cursor_before
+
+
+def test_source_selection_prevents_aggregation_across_instances(db, db_engine, monkeypatch):
+    metric = install_metric(db)
+    configured = configure("source:sample:one", "source:sample:two")
+    for instance in ("source:sample:one", "source:sample:two"):
+        confirm_mapping(db, configured, instance, metric.id)
+    db.commit()
+    now = datetime.now(UTC)
+    contents = {
+        "fetched_at": now,
+        "source:sample:one": source_record(now, 15),
+        "source:sample:two": source_record(now, 25),
+    }
+    source_registry(monkeypatch, contents)
+    for instance in ("source:sample:one", "source:sample:two"):
+        poll_source_instance(db_engine, configured, instance, now=now)
+    db.expire_all()
+    start, end = now - timedelta(days=1), now + timedelta(seconds=1)
+    with pytest.raises(ValueError, match="Multiple metric sources"):
+        aggregate_metric(db, "user.walk.minutes", start, end)
+    result = call_tool(
+        db,
+        "generic_analysis",
+        {
+            "spec": {
+                "operation": "query_observations",
+                "metric_key": "user.walk.minutes",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "knowledge_cutoff": datetime.now(UTC).isoformat(),
+            }
+        },
+    )
+    for row in result["rows"]:
+        selected = aggregate_metric(
+            db, "user.walk.minutes", start, end, source=row["metric_source"]
+        )
+        assert selected["value"] == row["value"]
+    assert len(result["rows"]) == 2
