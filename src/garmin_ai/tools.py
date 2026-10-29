@@ -294,6 +294,40 @@ MODEL_PACK_TOOLS = {
 }
 
 
+def model_tool_descriptions(session):
+    """Expose only tools currently usable under onboarding and pack settings."""
+    from garmin_ai.access import TOOL_SCOPES
+    from garmin_ai.onboarding import selected_model_categories
+    from garmin_ai.scenario_packs import pack_enabled
+
+    selected = selected_model_categories(session)
+    packs = {}
+    result = []
+    for tool in TOOLS.values():
+        scopes = TOOL_SCOPES.get(tool.name)
+        if scopes is None:
+            continue
+        if selected is not None:
+            if tool.name in {"generic_analysis", "resource_catalog"}:
+                if not {"health", "diary"} & selected:
+                    continue
+            elif any(scope.removeprefix("read:") not in selected for scope in scopes):
+                continue
+        for key in MODEL_PACK_TOOLS.get(tool.name, set()):
+            if key not in packs:
+                packs[key] = pack_enabled(session, key, "llm")
+        if any(not packs[key] for key in MODEL_PACK_TOOLS.get(tool.name, set())):
+            continue
+        result.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "schema": tool.arguments.model_json_schema(),
+            }
+        )
+    return result
+
+
 def model_metric_packs(metric: str) -> set[str]:
     metric = metric.removeprefix("system.")
     if metric == "hydration_ml":

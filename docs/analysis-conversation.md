@@ -25,6 +25,13 @@ structured filter editing and provider-level follow-up quality evaluation are la
 Synthetic tests verify persistence, reply mapping, fresh tool calls, bounded retention,
 forget races and separation from diary mutation targets. No new live model call was made.
 
+For each planning round, tool descriptions are filtered by the model categories selected
+in onboarding and by the corresponding scenario packs. The catalog and generic analysis
+remain discoverable when either health or diary access is selected, and their concrete
+arguments are checked separately when called. The filtering is repeated for later rounds;
+execution still independently checks consent and pack settings, including revocations
+after a request was sent to the model.
+
 Only turns with a confirmed sent Telegram outbox part enter context. Pending or uncertain delivery stays hidden. The runtime scheduler purges expired context every thirty seconds while running; reads also prune it. Oversized escaped text is omitted if removing specifications cannot satisfy the full stored-value byte cap. Forgetting uses the control queue and bypasses older delayed analysis jobs.
 
 Undelivered output is staged separately as one pending turn, bounded to 12,000 bytes and seven days. It cannot evict the six delivered turns (whose independent 12,000-byte cap remains). Context reads and scheduler ticks promote it only after a sent outbox confirmation. A later undelivered answer replaces only the pending slot. Forget removes both stores and preserves the epoch fence.

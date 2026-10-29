@@ -40,7 +40,7 @@ from garmin_ai.models import AppState, Event, PendingQuestion
 from garmin_ai.normalize import upsert
 from garmin_ai.pending_state import pending_key
 from garmin_ai.prompts import load_prompt
-from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
+from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool, model_tool_descriptions
 
 
 def normalized_response_language(value):
@@ -1292,10 +1292,7 @@ def answer_question(
         for turn in conversation["turns"]
         if "question" in turn
     ]
-    descriptions = [
-        {"name": t.name, "description": t.description, "schema": t.arguments.model_json_schema()}
-        for t in TOOLS.values()
-    ]
+    descriptions = model_tool_descriptions(session)
     prompt = json.dumps(
         {
             "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
@@ -1533,7 +1530,9 @@ def answer_question(
                 for metric, channel in data_freshness(session, now=now)["channels"].items()
                 if all(pack_enabled(session, pack, "llm") for pack in model_metric_packs(metric))
             }
-        available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
+        available_tools = [
+            item for item in model_tool_descriptions(session) if not replaying or replay_safe(item)
+        ]
         if replaying:
             evidence = replay_evidence(evidence)
             conversation = {**conversation, "turns": []}
