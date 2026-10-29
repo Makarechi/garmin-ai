@@ -58,17 +58,28 @@ def timing_projection_current(session, snapshot, *, for_model=False):
 
 def timing_dependencies_current(session, projection, *, for_model=False):
     """Compound analyses retain ordinary replay guards as well as source proofs."""
-    if "sleep_timing_dependencies" not in projection:
-        return True
-    dependencies = projection["sleep_timing_dependencies"]
-    return (
-        isinstance(dependencies, list)
-        and 0 < len(dependencies) <= 12
-        and all(
-            timing_projection_current(session, snapshot, for_model=for_model)
-            for snapshot in dependencies
-        )
-    )
+    if "sleep_timing_dependencies" in projection:
+        dependencies = projection["sleep_timing_dependencies"]
+        if not (
+            isinstance(dependencies, list)
+            and 0 < len(dependencies) <= 12
+            and all(
+                timing_projection_current(session, snapshot, for_model=for_model)
+                for snapshot in dependencies
+            )
+        ):
+            return False
+    if "generic_metric_dependencies" in projection:
+        from garmin_ai.analysis_dependencies import metric_dependency_current
+
+        dependencies = projection["generic_metric_dependencies"]
+        if not (
+            isinstance(dependencies, list)
+            and 0 < len(dependencies) <= 12
+            and all(metric_dependency_current(session, snapshot) for snapshot in dependencies)
+        ):
+            return False
+    return True
 
 
 def main_sleep_timing(session, day, timezone):

@@ -39,5 +39,8 @@ window and original cutoff; for a cutoff close to the request time it also check
 newly available data. Explicitly historical cutoffs remain historical. Current
 model and channel permissions are checked again. If cited evidence changed, the
 answer is replaced with the existing data-changed notice; unrelated metrics do not
-invalidate it. This in-turn check does not yet extend the evidence proof through a
-queued delivery after the answer has been produced.
+invalidate it. The answer retains only the bounded query, source revisions and a
+result hash; it rechecks those dependencies before Telegram delivery and whenever
+the local web chat exposes or acknowledges the queued message. It does not copy the
+measurement values into that proof. Other read tools without revision evidence still
+use their existing replay and sharing checks.
