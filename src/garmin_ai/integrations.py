@@ -717,6 +717,7 @@ def _gemini_configuration(settings: Settings) -> str | None:
 
 
 def default_registry(settings: Settings | None = None) -> IntegrationRegistry:
+    from garmin_ai.anthropic_adapter import AnthropicConfig, create_anthropic_provider
     from garmin_ai.openai_adapter import OpenAIConfig, create_openai_provider
 
     registry = IntegrationRegistry()
@@ -758,6 +759,17 @@ def default_registry(settings: Settings | None = None) -> IntegrationRegistry:
             config_model=OpenAIConfig,
             capabilities=frozenset({"structured_output"}),
             implementation_version="openai-responses-v1",
+            required_secret_names=frozenset({"api_key"}),
+        )
+    )
+    registry.register(
+        IntegrationFactory(
+            kind="model",
+            provider="anthropic",
+            plugin_factory=create_anthropic_provider,
+            config_model=AnthropicConfig,
+            capabilities=frozenset({"structured_output"}),
+            implementation_version="anthropic-messages-v1",
             required_secret_names=frozenset({"api_key"}),
         )
     )

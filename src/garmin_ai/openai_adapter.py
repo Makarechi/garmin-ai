@@ -17,6 +17,7 @@ from garmin_ai.llm import (
     ProviderRefused,
     ProviderUnavailable,
 )
+from garmin_ai.model_schema_policy import trusted_model_schema
 from garmin_ai.openai_schema import OpenAISchemaCompiler, UnsupportedSchema
 
 _RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -31,16 +32,6 @@ class OpenAIConfig(BaseModel):
     max_output_tokens: int = Field(default=4096, ge=256, le=8192)
 
 
-def _trusted_schema(schema):
-    # Never send schema names, enum literals or patterns generated from a
-    # user's trackers. These are application-owned, fixed Python definitions.
-    from garmin_ai.agent import AgentStep, Interpretation, SafetyScreen
-    from garmin_ai.extension_tck import ModelProbe
-    from garmin_ai.natural_language import TrackerExtraction
-
-    return schema in {AgentStep, Interpretation, SafetyScreen, TrackerExtraction, ModelProbe}
-
-
 class OpenAIProvider:
     def __init__(self, config: OpenAIConfig, api_key: SecretStr):
         self.config = config
@@ -48,7 +39,7 @@ class OpenAIProvider:
         self.client = httpx.Client(timeout=config.timeout_seconds, follow_redirects=False)
 
     def structured(self, instruction, prompt, schema):
-        if not _trusted_schema(schema):
+        if not trusted_model_schema(schema):
             raise ProviderCapabilityUnsupported("This response schema is not approved for OpenAI")
         try:
             wire_schema = OpenAISchemaCompiler().compile(schema)

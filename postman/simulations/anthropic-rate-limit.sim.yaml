@@ -1,0 +1,11 @@
+simulation: anthropic-rate-limit
+routing: path
+mocks:
+  - name: anthropic-messages
+    routeKey: anthropic-messages
+    origin: [api.anthropic.com]
+    path: postman/mocks/anthropic-messages
+    scenarios:
+      - overrides:
+          conditions:
+            error: { status_code: 429 }

@@ -1,0 +1,11 @@
+simulation: anthropic-timeout
+routing: path
+mocks:
+  - name: anthropic-messages
+    routeKey: anthropic-messages
+    origin: [api.anthropic.com]
+    path: postman/mocks/anthropic-messages
+    scenarios:
+      - overrides:
+          conditions:
+            latency: { delay_ms: 2000 }

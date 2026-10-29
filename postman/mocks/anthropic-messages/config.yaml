@@ -1,0 +1,11 @@
+version: 1
+id: 46b1c33b-68a0-4a17-ab3e-bd0197a1ce86
+name: anthropic-messages
+slug: anthropic-messages
+protocol: http
+interceptRequests: true
+port: 4500
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true
