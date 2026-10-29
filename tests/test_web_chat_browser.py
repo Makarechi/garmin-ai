@@ -52,6 +52,9 @@ def test_browser_connect_note_history_and_disconnect(db, db_engine):
             assert page.locator("#messages .bubble").evaluate_all(
                 "nodes => nodes.map(node => node.classList.contains('owner') ? 'owner' : 'assistant')"
             ) == ["owner", "assistant", "owner", "assistant"]
+            # Rendering can finish before the preceding refresh has acknowledged
+            # its replies. Wait for that refresh before intercepting the next one.
+            expect(page.locator("#send")).to_be_enabled()
             held = []
 
             def hold_refresh(route):
@@ -62,7 +65,9 @@ def test_browser_connect_note_history_and_disconnect(db, db_engine):
 
             page.route("**/web-chat/messages", hold_refresh)
             page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
-            for _ in range(40):
+            # If the visibility event overlaps a scheduled refresh, the next
+            # periodic refresh is another valid in-flight request to interrupt.
+            for _ in range(120):
                 if held:
                     break
                 page.wait_for_timeout(50)
