@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
@@ -50,6 +51,7 @@ class AnalysisSpec(StrictModel):
         "aggregate_metric",
         "compare_periods",
         "query_completeness",
+        "threshold_segments",
     ]
     metric_key: str | None = Field(
         default=None, pattern=r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$"
@@ -67,6 +69,12 @@ class AnalysisSpec(StrictModel):
     limit: int = Field(default=500, ge=1, le=1000)
     knowledge_cutoff: AwareDatetime
     time_relation: Literal["starts_within", "overlap"] = "starts_within"
+    threshold: float | None = Field(
+        default=None, allow_inf_nan=False, description="Threshold in the selected metric's unit"
+    )
+    threshold_operator: Literal["gt", "gte", "lt", "lte"] | None = Field(
+        default=None, description="Comparison applied to the observed metric value"
+    )
 
     @model_validator(mode="after")
     def bounded(self):
@@ -74,6 +82,15 @@ class AnalysisSpec(StrictModel):
             raise ValueError("Analysis window must be positive and no wider than 366 days")
         if self.time_relation != "starts_within" and self.operation != "query_entries":
             raise ValueError("Time relation is only supported for entry queries")
+        if self.operation == "threshold_segments":
+            if self.threshold is None or self.threshold_operator is None:
+                raise ValueError("Threshold segments require a value and comparison")
+            if self.method is not None:
+                raise ValueError("Threshold segments do not accept an aggregation method")
+            if self.end - self.start > timedelta(days=31):
+                raise ValueError("Threshold segments are limited to 31 days")
+        elif self.threshold is not None or self.threshold_operator is not None:
+            raise ValueError("Threshold parameters require threshold_segments")
         if self.source is not None:
             if self.operation == "query_entries":
                 raise ValueError("Metric source is only supported for metric analysis")
@@ -519,7 +536,7 @@ def query_entries(session, spec: AnalysisSpec):
     }
 
 
-def query_observations(session, spec: AnalysisSpec):
+def query_observations(session, spec: AnalysisSpec, *, include_revision_refs=False):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
     observation_source_filter, measurement_source_filter = _source_filters(spec.source)
     observation_rows = session.scalars(
@@ -568,6 +585,7 @@ def query_observations(session, spec: AnalysisSpec):
             spec.knowledge_cutoff,
             source=spec.source.removeprefix("measurement:") if spec.source else None,
             limit=spec.limit + 1,
+            include_invalid=include_revision_refs,
         )
         if measurement_source_filter is not False
         else []
@@ -633,7 +651,7 @@ def query_observations(session, spec: AnalysisSpec):
     rows.sort(key=lambda row: (row["observed_at"], row["id"]))
     if len(rows) > spec.limit:
         raise ValueError("Observation query exceeds its explicit result limit")
-    return {
+    result = {
         "spec_hash": spec_hash(spec),
         "metric": spec.metric_key,
         "metric_version": contract.version,
@@ -650,6 +668,24 @@ def query_observations(session, spec: AnalysisSpec):
         ],
         "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
     }
+    if include_revision_refs:
+        result["input_revisions"] = {
+            measurement_revision_reference(row): measurement_revision_token(row)
+            for row in measurement_rows
+        }
+        result["measurement_units"] = {
+            f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}": row.unit
+            for row in measurement_rows
+        }
+        result["measurement_eligible"] = {
+            f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}": (
+                row.quality == "observed"
+                and not getattr(row, "deleted", False)
+                and row.metric_definition_version_id == contract.id
+            )
+            for row in measurement_rows
+        }
+    return result
 
 
 def run_aggregate(session, spec: AnalysisSpec):
@@ -717,6 +753,105 @@ def query_completeness(session, spec: AnalysisSpec):
     }
 
 
+def threshold_segments(session, spec: AnalysisSpec):
+    """Find threshold intervals only where adjacent measured samples support them."""
+    _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
+    policy = contract.coverage_policy
+    if contract.value_kind != "physical_number" or policy.get("kind") != "time_weighted":
+        raise ValueError("Threshold intervals require a time-weighted numeric metric")
+    if spec.source is not None and not spec.source.startswith("measurement:"):
+        raise ValueError("Threshold intervals currently require measurement samples")
+    gap = timedelta(seconds=policy["max_gap_seconds"])
+    snapshot = query_observations(
+        session,
+        spec.model_copy(update={"start": spec.start - gap, "end": spec.end + gap}),
+        include_revision_refs=True,
+    )
+    rows = snapshot["rows"]
+    sources = {row["metric_source"] for row in rows}
+    if len(sources) > 1:
+        raise ValueError("Multiple metric sources; select one source")
+    if any(not source.startswith("measurement:") for source in sources):
+        raise ValueError("Threshold intervals currently require measurement samples")
+    source = next(iter(sources), spec.source)
+
+    def valid(row):
+        value = row["value"]
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and snapshot["measurement_eligible"].get(row["id"], False)
+            and snapshot["measurement_units"].get(row["id"]) == contract.unit
+            and (contract.minimum is None or value >= contract.minimum)
+            and (contract.maximum is None or value <= contract.maximum)
+        )
+
+    compare = {
+        "gt": lambda x: x > spec.threshold,
+        "gte": lambda x: x >= spec.threshold,
+        "lt": lambda x: x < spec.threshold,
+        "lte": lambda x: x <= spec.threshold,
+    }[spec.threshold_operator]
+    covered = 0.0
+    matching = 0.0
+    segments = []
+    for first, second in zip(rows, rows[1:], strict=False):
+        first_at = datetime.fromisoformat(first["observed_at"])
+        second_at = datetime.fromisoformat(second["observed_at"])
+        if (
+            not valid(first)
+            or not valid(second)
+            or second_at > spec.knowledge_cutoff
+            or not timedelta(0) < second_at - first_at <= gap
+        ):
+            continue
+        left, right = max(spec.start, first_at), min(spec.end, second_at)
+        if left >= right:
+            continue
+        seconds = (right - left).total_seconds()
+        covered += seconds
+        if not compare(first["value"]):
+            continue
+        matching += seconds
+        if segments and segments[-1]["end"] == left:
+            segments[-1]["end"] = right
+            segments[-1]["peak"] = max(segments[-1]["peak"], first["value"])
+        else:
+            segments.append({"start": left, "end": right, "peak": first["value"]})
+    result_segments = [
+        {
+            "start": item["start"].isoformat(),
+            "end": item["end"].isoformat(),
+            "duration_seconds": (item["end"] - item["start"]).total_seconds(),
+            "peak": item["peak"],
+        }
+        for item in segments
+    ]
+    return {
+        "spec_hash": spec_hash(spec),
+        "metric": spec.metric_key,
+        "metric_version": contract.version,
+        "unit": contract.unit,
+        "scale_id": contract.scale_id,
+        "scale_version": contract.scale_version,
+        "source": source,
+        "threshold": spec.threshold,
+        "threshold_operator": spec.threshold_operator,
+        "covered_seconds": covered,
+        "coverage_ratio": covered / (spec.end - spec.start).total_seconds(),
+        "matching_seconds": matching if covered else None,
+        "segments": result_segments,
+        "input_revisions": snapshot["input_revisions"],
+        "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
+        "limitations": [
+            "Only intervals between consecutive valid measurements within the maximum gap are covered",
+            "Missing time is unknown, not below threshold",
+            "Measurements and sources are not combined",
+        ],
+    }
+
+
 def execute_analysis(session, spec: AnalysisSpec):
     if spec.operation == "query_entries":
         return query_entries(session, spec)
@@ -726,6 +861,8 @@ def execute_analysis(session, spec: AnalysisSpec):
         return run_aggregate(session, spec)
     if spec.operation == "compare_periods":
         return compare_periods(session, spec)
+    if spec.operation == "threshold_segments":
+        return threshold_segments(session, spec)
     return query_completeness(session, spec)
 
 

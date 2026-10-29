@@ -200,7 +200,7 @@ def resource_catalog(
 
 @read_tool
 def generic_analysis(session, spec: AnalysisSpec):
-    """Run one bounded version-aware entry or metric analysis plan with reproducible evidence."""
+    """Run a bounded version-aware entry or metric plan. threshold_segments finds periods above or below a chosen value for time-weighted measurement series, with separate sources and explicit coverage; at most 31 days and 1000 samples."""
     return execute_analysis(session, spec)
 
 
