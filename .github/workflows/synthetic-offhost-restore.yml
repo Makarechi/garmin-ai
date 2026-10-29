@@ -1,0 +1,73 @@
+name: Synthetic off-host restore
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  create-backup:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+        env:
+          POSTGRES_USER: garmin
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: garmin_offhost_test
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U garmin -d garmin_offhost_test" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GA_TEST_DATABASE_URL: postgresql+psycopg://garmin@localhost:5432/garmin_offhost_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - run: uv sync --locked
+      - name: Create encrypted synthetic backup
+        run: PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py create "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA"
+      # This artifact and its one-time key contain only data generated in this job.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-offhost-fixture
+          path: ${{ runner.temp }}/synthetic-offhost/synthetic-*
+          retention-days: 1
+          if-no-files-found: error
+
+  restore-backup:
+    needs: create-backup
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+        env:
+          POSTGRES_USER: garmin
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: garmin_offhost_test
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U garmin -d garmin_offhost_test" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GA_TEST_DATABASE_URL: postgresql+psycopg://garmin@localhost:5432/garmin_offhost_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: synthetic-offhost-fixture
+          path: ${{ runner.temp }}/synthetic-offhost
+      - name: Authenticate and restore on a separate host
+        run: PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py restore "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" --commit "$GITHUB_SHA"
