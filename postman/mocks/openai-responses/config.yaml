@@ -1,0 +1,11 @@
+version: 1
+id: dbd6baa4-ccab-438f-b0c7-60fe08322d2b
+name: openai-responses
+slug: openai-responses
+protocol: http
+interceptRequests: true
+port: 4500
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

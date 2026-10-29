@@ -1,0 +1,11 @@
+simulation: openai-rate-limit
+routing: path
+mocks:
+  - name: openai-responses
+    routeKey: openai-responses
+    origin: [api.openai.com]
+    path: postman/mocks/openai-responses
+    scenarios:
+      - overrides:
+          conditions:
+            error: { status_code: 429 }
