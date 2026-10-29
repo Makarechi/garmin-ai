@@ -12,9 +12,11 @@ from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import AppState, Audit, Event, EventDefinition, MetricObservation
 from garmin_ai.natural_language import (
+    ExtractedField,
     TrackerExtraction,
     _categorical_value_is_evidenced,
     _datetime_is_evidenced,
+    _dotted_quantity_spans,
     _unit_is_evidenced,
     _validated_submission,
     _value_is_evidenced,
@@ -1555,6 +1557,20 @@ def test_units_require_a_complete_unit_token(unit, quote):
 )
 def test_unit_boundaries_use_original_source(source, unit, quote):
     assert not _unit_is_evidenced(unit, quote, source_text=source, source_start=source.index(quote))
+
+
+def test_malformed_unit_offsets_do_not_crash_decimal_evidence_check():
+    field = ExtractedField.model_validate(
+        {
+            "field_id": "user.stretch.minutes",
+            "value": 7.3,
+            "unit": "minutes",
+            "evidence": {"start": 0, "end": 4, "quote": "7.30"},
+            "unit_evidence": {"start": 1000, "end": 1, "quote": "minutes"},
+        }
+    )
+    metadata = {"user.stretch.minutes": {"semantic": "quantity", "unit": "minutes"}}
+    assert not _dotted_quantity_spans("7.30 minutes", [field], metadata, set())
 
 
 def test_ambiguous_wall_time_requires_matching_explicit_offset():

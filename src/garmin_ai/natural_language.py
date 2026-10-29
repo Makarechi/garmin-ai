@@ -911,7 +911,10 @@ def _dotted_quantity_spans(text, fields, metadata, clock_values):
         expected_unit = contract.get("unit")
         unit_spans = (
             _unit_spans(expected_unit, unit.quote, source_text=text, source_start=unit.start)
-            if expected_unit and unit is not None and unit.end <= len(text)
+            if expected_unit
+            and unit is not None
+            and 0 <= unit.start < unit.end <= len(text)
+            and text[unit.start : unit.end] == unit.quote
             else []
         )
         if (
