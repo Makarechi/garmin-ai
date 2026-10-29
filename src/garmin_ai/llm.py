@@ -115,6 +115,19 @@ class ProviderRateLimited(ProviderUnavailable):
     retry_seconds = 120
 
 
+def _require_completed_interaction(response):
+    status = getattr(response, "status", None)
+    if status == "completed":
+        return
+    if not isinstance(status, str):
+        raise ProviderOutputInvalid("Model interaction has no completed result")
+    if status in {"incomplete", "budget_exceeded"}:
+        raise ProviderOutputTruncated("Model response was incomplete")
+    if status in {"failed", "cancelled"}:
+        raise ProviderUnavailable("Model interaction did not complete")
+    raise ProviderOutputInvalid("Model interaction has no completed result")
+
+
 def normalize_plugin_error(error):
     """Classify an adapter failure without exposing upstream payloads or credentials."""
     if isinstance(error, ProviderCooldown):
@@ -495,6 +508,7 @@ class GeminiProvider:
         self._authorize(categories)
 
         def parse(response):
+            _require_completed_interaction(response)
             try:
                 return schema.model_validate_json(response.output_text)
             except (ValidationError, AttributeError, TypeError):
@@ -526,6 +540,7 @@ class GeminiProvider:
             text: str
 
         def parse(response):
+            _require_completed_interaction(response)
             try:
                 return Transcript.model_validate_json(response.output_text).text
             except (ValidationError, AttributeError, TypeError):
