@@ -72,3 +72,15 @@ def test_canonical_label_collisions_are_rejected():
 def test_interface_fallback_is_independent_of_valid_requested_language():
     assert translate("agent.record_fallback", "zh-Hans") == translate("agent.record_fallback", "en")
     assert translate("agent.record_fallback", "RU-ru") == translate("agent.record_fallback", "ru")
+
+
+@pytest.mark.parametrize("module_name", ["garmin_ai.tracker_forms", "garmin_ai.natural_language"])
+def test_label_selection_tries_script_before_generic_language(module_name):
+    from importlib import import_module
+
+    select_label = import_module(module_name)._label
+    labels = {"zh-Hant": "繁體", "zh": "中文", "en": "Chinese"}
+    assert select_label(labels, "zh-Hant-TW") == "繁體"
+    assert select_label(labels, "zh-Hant-TW-u-ca-gregory") == "繁體"
+    assert select_label(labels, "zh-Hans-CN") == "中文"
+    assert select_label(labels, "fr") == "Chinese"

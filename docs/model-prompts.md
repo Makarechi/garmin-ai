@@ -20,6 +20,9 @@ accept scripts and numeric regions (for example, `zh-Hans`, `sr-Latn-RS`, and
 language is translated or supported end to end. Interface message catalogs remain
 English and Russian; other languages use the English catalog fallback. Onboarding
 still offers only those two interface languages.
+For user-defined tracker labels, lookup first tries the full tag, then progressively
+less-specific tags (for example, `zh-Hant-TW` can use `zh-Hant`), before using an
+English or existing label. This does not translate user-provided labels.
 
 The generated-tracker entry path currently validates English and Russian time
 and unit expressions. Its instruction asks for clarification when another

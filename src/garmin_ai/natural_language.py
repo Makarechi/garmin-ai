@@ -21,6 +21,7 @@ from garmin_ai.access import permits
 from garmin_ai.accounts import owner
 from garmin_ai.events import StrictModel
 from garmin_ai.i18n import translate
+from garmin_ai.language_tags import select_label as _label
 from garmin_ai.llm import (
     Provider,
     ProviderOutputInvalid,
@@ -111,15 +112,6 @@ class NaturalLanguageRequest(StrictModel):
 
 
 INSTRUCTION = load_prompt("tracker_extract")
-
-
-def _label(labels, locale):
-    return (
-        labels.get(locale)
-        or labels.get(locale.split("-", 1)[0])
-        or labels.get("en")
-        or next(iter(labels.values()))
-    )
 
 
 def _terms(value):

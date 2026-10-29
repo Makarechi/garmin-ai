@@ -689,4 +689,7 @@ def test_extended_language_tags_work_for_generated_actions_and_forms(db, db_engi
         form = client.get(f"/forms/{item['id']}?locale=zh-Hans", headers=headers)
         assert form.status_code == 200
         assert form.json()["title"] == "专注"
+        regional = client.get(f"/forms/{item['id']}?locale=zh-Hans-CN", headers=headers)
+        assert regional.status_code == 200
+        assert regional.json()["title"] == "专注"
         assert client.get("/actions?locale=en-a", headers=headers).status_code == 422
