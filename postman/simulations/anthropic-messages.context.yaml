@@ -1,0 +1,30 @@
+purpose:
+  stands_in_for: Anthropic Messages endpoint with synthetic inputs and outputs.
+  unblocks: Local HTTP transport and failure-path verification without an external model or account.
+assumptions:
+  - id: caller-outcome
+    status: supported
+    claim: The guarded adapter reports success for the modeled anthropic-messages scenario.
+    reason: The application ran against a local stand-in; this does not verify the real provider.
+    verification: 2026-10-29, Postman CLI 1.76.0, local one-port simulation and tests/evals/anthropic_simulation_probe.py; expected success observed. The success scenario emitted POST /v1/messages. Injected failures do not reach the mock log.
+    source: tests/evals/anthropic_simulation_probe.py; postman/simulations/anthropic-messages.sim.yaml; postman/mocks/anthropic-messages/default.js
+    updated_at: "2026-10-29"
+  - id: live-model-compatibility
+    status: unknown
+    claim: A particular Anthropic model accepts all application schemas and performs the intended workflows.
+    reason: The mock replays synthetic output and does not validate real model capabilities or semantics. No live calls were made.
+    verification: Official Structured Outputs documentation consulted; no provider-owned mock was searched because the Postman CLI was signed out.
+    source: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+    updated_at: "2026-10-29"
+  - id: tls-simulation
+    status: unknown
+    claim: This local simulation exercises the production TLS path.
+    reason: The run used one-port HTTP and a test-only URL override. A separate OpenAI proxy run failed Python 3.13 certificate validation for the Postman CA.
+    verification: 2026-10-29; no TLS verification was disabled and no live Anthropic request was sent.
+    source: tests/evals/anthropic_simulation_probe.py; postman/simulations/openai-responses.context.yaml
+    updated_at: "2026-10-29"
+fingerprints:
+  - id: local-development
+    date: "2026-10-29"
+    commit: 69302de8674c2b0fdd9fc955cb6e2944ea46d01e plus local integration merge and uncommitted adapter changes
+    cli: "1.76.0"
