@@ -1229,6 +1229,50 @@ def selected_timing_read(step):
     return arguments.start
 
 
+def metric_evidence_current(session, item, request_time):
+    """Recheck the actual generic metric evidence before another model round or answer."""
+    if item.get("tool") != "generic_analysis" or "error" in item.get("result", {}):
+        return True
+    result = item["result"]
+    if "input_revisions" in result:
+        snapshots = [result]
+    elif all(isinstance(result.get(key), dict) for key in ("first", "second")):
+        snapshots = [result["first"], result["second"]]
+        if not all("input_revisions" in snapshot for snapshot in snapshots):
+            return True
+    else:
+        return True
+
+    from garmin_ai.generic_analytics import evidence_is_stale
+
+    def comparable(value):
+        if isinstance(value, dict):
+            return {
+                key: comparable(child) if key in {"first", "second"} else child
+                for key, child in value.items()
+                if key not in {"spec_hash", "knowledge_cutoff"}
+            }
+        return value
+
+    try:
+        arguments = TOOLS["generic_analysis"].arguments.model_validate(item["arguments"])
+        spec = arguments.spec
+        current_question = spec.knowledge_cutoff >= request_time - timedelta(minutes=5)
+        if current_question:
+            spec = spec.model_copy(
+                update={"knowledge_cutoff": max(spec.knowledge_cutoff, datetime.now(UTC))}
+            )
+        refreshed = call_tool(
+            session, "generic_analysis", {"spec": spec.model_dump(mode="json")}, for_model=True
+        )
+        refreshed = json.loads(compact(refreshed))
+        if comparable(refreshed) != comparable(result):
+            return False
+        return not current_question or not any(evidence_is_stale(session, row) for row in snapshots)
+    except (KeyError, LookupError, PermissionError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def answer_question(
     session,
     provider: Provider,
@@ -1492,9 +1536,15 @@ def answer_question(
             ),
         }
 
-    def dependencies_current():
+    def dependencies_current(selected_ids=None):
         try:
-            return timing_dependencies_current(session, dependency_projection(), for_model=True)
+            return timing_dependencies_current(
+                session, dependency_projection(), for_model=True
+            ) and all(
+                metric_evidence_current(session, item, now)
+                for item in evidence
+                if selected_ids is None or item["id"] in selected_ids
+            )
         except PermissionError:
             return False
 
@@ -1600,7 +1650,12 @@ def answer_question(
             ),
         ):
             return translate("agent.conversation_deleted", language)
-        if not dependencies_current():
+        selected_ids = (
+            set(step.evidence_ids)
+            if (step.answer or step.numeric_claims or step.timestamp_claims) and not step.calls
+            else None
+        )
+        if not dependencies_current(selected_ids):
             session.info["analysis_projection"] = None
             return translate("agent.data_changed", language)
         if (step.answer or step.numeric_claims or step.timestamp_claims) and not step.calls:
