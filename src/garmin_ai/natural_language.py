@@ -277,18 +277,57 @@ def _verify_evidence(text, evidence):
 
 
 def _temporal_number_spans(text, clock_values=()):
-    """Find unambiguous numeric dates and clock expressions in the source."""
+    """Find contextual clocks even when they differ from proposed entry times.
+
+    ``clock_values`` is retained for callers, but must never limit recognition.
+    """
     patterns = (
         r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?!\d)",
         r"(?<![\d:])\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?![\d:])",
-        r"(?<!\w)(?:at|в)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d|[.:]\d)",
     )
     spans = [match.span() for pattern in patterns for match in re.finditer(pattern, text, re.I)]
-    if clock_values:
-        clocks, _ = _clock_tokens(text, interval_hyphens=True)
-        spans.extend(
-            (start, end) for start, end, hour, minute in clocks if (hour, minute) in clock_values
+    day = (
+        r"(?:(?<!\w)(?:today|yesterday|tomorrow|сегодня|вчера|завтра|now|сейчас)(?!\w)"
+        r"|(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4})(?!\d))"
+    )
+    separator = r"\s*[,:]?\s*"
+    before_clock = day + separator + r"(?:(?:T|at|from|between|в|с|между)" + separator + r")?"
+    direct_starts = {match.end() for match in re.finditer(before_clock, text, re.I)}
+    between_starts = {
+        match.end() for match in re.finditer(r"(?<!\w)(?:between|между)\s+", text, re.I)
+    }
+    after_clock = re.compile(
+        r"(?:" + CLOCK_OFFSET_PATTERN + r")?" + separator + r"(?:(?:on|в)\s+)?" + day,
+        re.I,
+    )
+    am_pm = re.compile(r"\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)", re.I)
+    spans.extend(
+        match.span()
+        for match in re.finditer(
+            r"(?<![\w.])(?:1[0-2]|0?[1-9])(?:[:.][0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)",
+            text,
+            re.I,
         )
+    )
+    clocks, _ = _clock_tokens(text, interval_hyphens=True)
+    contextual = [
+        start in direct_starts or bool(after_clock.match(text, end)) or bool(am_pm.match(text, end))
+        for start, end, _hour, _minute in clocks
+    ]
+    links = []
+    for previous, current in zip(clocks, clocks[1:], strict=False):
+        gap = re.sub(r"^" + CLOCK_OFFSET_PATTERN, "", text[previous[1] : current[0]], flags=re.I)
+        linked = bool(re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I))
+        if not linked and re.fullmatch(r"\s*(?:and|и)\s*", gap, re.I):
+            linked = previous[0] in between_starts
+        links.append(linked)
+    group_start = 0
+    for index in range(len(clocks)):
+        if index < len(links) and links[index]:
+            continue
+        if any(contextual[group_start : index + 1]):
+            spans.extend((clock[0], clock[1]) for clock in clocks[group_start : index + 1])
+        group_start = index + 1
     return spans
 
 
@@ -298,6 +337,42 @@ def _complete_number_in_source(source, start, end):
     if before.isalnum() or (before and before in "_.,+-−﹣－٫٬") or after.isalnum() or after == "_":
         return False
     return not (after and after in ".,٫٬" and end + 1 < len(source) and source[end + 1].isdigit())
+
+
+_BOOLEAN_LITERALS = {
+    "true": True,
+    "yes": True,
+    "да": True,
+    "есть": True,
+    "false": False,
+    "no": False,
+    "нет": False,
+}
+
+_CONTEXT_NEGATION = re.compile(
+    r"(?<!\w)(?:not|no|never|не|нет|ни|"
+    r"(?:did|do|does|have|has|had|was|were|is|are|can|could|would|should|will|must)n['’]t)(?!\w)",
+    re.I,
+)
+
+
+def _has_contextual_negation(source, start, end):
+    boundaries = list(re.finditer(r"[!?]|(?<!\d)\.(?!\d)|(?<=\d)\.(?=\s|$)", source))
+    before = max((match.end() for match in boundaries if match.end() <= start), default=0)
+    after = min(
+        (match.start() for match in boundaries if match.start() >= end), default=len(source)
+    )
+    return bool(_CONTEXT_NEGATION.search(source[before:start] + " " + source[end:after]))
+
+
+def _folded_matches(value, quote, *, word_boundary):
+    offsets = [index for index, char in enumerate(quote) for _ in char.casefold()]
+    folded = quote.casefold()
+    pattern = re.escape(value.casefold())
+    if word_boundary:
+        pattern = rf"(?<!\w){pattern}(?!\w)"
+    for match in re.finditer(pattern, folded):
+        yield offsets[match.start()], offsets[match.end() - 1] + 1
 
 
 def _value_is_evidenced(
@@ -315,10 +390,39 @@ def _value_is_evidenced(
             return False
         positive_found = bool(affirmative.intersection(words))
         negative_found = bool(negative.intersection(words)) or "не было" in normalized
-        return (
+        quote_supports_value = (
             positive_found and not negative_found
             if value
             else negative_found and not positive_found
+        )
+        if not quote_supports_value:
+            return False
+        source = source_text if source_text is not None else quote
+        offset = source_start if source_text is not None else 0
+        terms = r"true|yes|да|есть" if value else r"не\s+было|false|no|нет"
+        for match in re.finditer(rf"(?<!\w)(?:{terms})(?!\w)", quote, re.I):
+            start, end = offset + match.start(), offset + match.end()
+            before = source[start - 1] if start else ""
+            after = source[end] if end < len(source) else ""
+            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+                continue
+            if not _has_contextual_negation(source, start, end):
+                return True
+        return False
+    if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
+        source = source_text if source_text is not None else quote
+        offset = source_start if source_text is not None else 0
+        expected = _BOOLEAN_LITERALS[value.casefold()]
+        if not _value_is_evidenced(expected, quote, source_text=source, source_start=offset):
+            return False
+        return any(
+            _value_is_evidenced(
+                expected,
+                quote[start:end],
+                source_text=source,
+                source_start=offset + start,
+            )
+            for start, end in _folded_matches(value, quote, word_boundary=True)
         )
     if isinstance(value, (int, float)):
         try:
@@ -334,7 +438,9 @@ def _value_is_evidenced(
                 continue
             if not _complete_number_in_source(source, start, end):
                 continue
-            if Decimal(match.group().replace(",", ".")) == expected:
+            if Decimal(match.group().replace(",", ".")) != expected:
+                continue
+            if not _has_contextual_negation(source, start, end):
                 return True
         return False
     if isinstance(value, str) and re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", value):
@@ -343,23 +449,34 @@ def _value_is_evidenced(
         temporal_spans = _temporal_number_spans(source, clock_values)
         for match in re.finditer(re.escape(value), quote):
             start, end = offset + match.start(), offset + match.end()
-            if _complete_number_in_source(source, start, end) and not any(
-                start < stop and end > begin for begin, stop in temporal_spans
+            if (
+                _complete_number_in_source(source, start, end)
+                and not any(start < stop and end > begin for begin, stop in temporal_spans)
+                and not _has_contextual_negation(source, start, end)
             ):
                 return True
         return False
-    if semantic == "text":
-        return isinstance(value, str) and bool(value.strip()) and value.casefold() in normalized
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
-    )
+    if not isinstance(value, str) or not value.strip():
+        return False
+    source = source_text if source_text is not None else quote
+    offset = source_start if source_text is not None else 0
+    for start, end in _folded_matches(value, quote, word_boundary=semantic != "text"):
+        start, end = offset + start, offset + end
+        if semantic != "text":
+            before = source[start - 1] if start else ""
+            after = source[end] if end < len(source) else ""
+            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+                continue
+        if not _has_contextual_negation(source, start, end):
+            return True
+    return False
 
 
 def _categorical_value_is_evidenced(
     value, quote, *, source_text=None, source_start=0, clock_values=()
 ):
+    if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
+        return _value_is_evidenced(value, quote, source_text=source_text, source_start=source_start)
     if re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", str(value)):
         return _value_is_evidenced(
             str(value),
@@ -384,6 +501,8 @@ def _categorical_value_is_evidenced(
     for index in range(len(observed) - len(expected) + 1):
         matched = observed[index : index + len(expected)]
         if not expected or [token for token, _, _ in matched] != expected:
+            continue
+        if _has_contextual_negation(source, offset + matched[0][1], offset + matched[-1][2]):
             continue
         if any(
             token.isdecimal()
@@ -620,6 +739,7 @@ def _datetime_evidence(
     quote_start=None,
     interval_hyphens=False,
     interval_clocks=None,
+    non_temporal_clock_spans=(),
 ):
     """Prove the clock and calendar independently; an absent day stays unknown.
 
@@ -637,7 +757,10 @@ def _datetime_evidence(
         quoted, interval_hyphens=interval_hyphens, interval_clocks=interval_clocks
     )
     matching_clocks = [
-        clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
+        clock
+        for clock in clock_evidence
+        if (clock[2], clock[3]) == (local.hour, local.minute)
+        and (source_start + clock[0], source_start + clock[1]) not in non_temporal_clock_spans
     ]
     now_evidenced = re.search(r"(?<!\w)(?:сейчас|now|только что|just now)(?!\w)", quoted, re.I)
     if now_evidenced:
@@ -755,6 +878,42 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     return _datetime_evidence(value, quote, timezone, now).status == "supported"
 
 
+def _dotted_quantity_spans(text, fields, metadata, clock_values):
+    """Separate a plainly unit-qualified decimal from clock-like text."""
+    temporal_spans = _temporal_number_spans(text, clock_values)
+    result = set()
+    for field in fields:
+        contract = metadata.get(field.field_id, {})
+        number = field.evidence
+        unit = field.unit_evidence
+        expected_unit = contract.get("unit")
+        if (
+            contract.get("semantic") != "quantity"
+            or not expected_unit
+            or field.unit != expected_unit
+            or unit is None
+            or not isinstance(field.value, (int, float))
+            or isinstance(field.value, bool)
+            or not re.fullmatch(r"[-+]?\d+\.\d+", number.quote)
+            or number.end > len(text)
+            or unit.end > len(text)
+            or text[number.start : number.end] != number.quote
+            or text[unit.start : unit.end] != unit.quote
+            or unit.start < number.end
+            or text[number.end : unit.start].strip()
+            or not _unit_is_evidenced(expected_unit, unit.quote)
+            or not _complete_number_in_source(text, number.start, number.end)
+            or any(number.start < stop and number.end > begin for begin, stop in temporal_spans)
+        ):
+            continue
+        try:
+            if Decimal(number.quote) == Decimal(str(field.value)):
+                result.add((number.start, number.end))
+        except InvalidOperation:
+            continue
+    return result
+
+
 def _candidate(candidates, version_id):
     return next(
         (row for row in candidates if row["definition_version_id"] == str(version_id)),
@@ -779,6 +938,18 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         )
     if start is None:
         raise ValueError("Entry time is unavailable")
+    metadata = {field["field_id"]: field for field in candidate["fields"]}
+    names = {field["field_id"]: field["name"] for field in candidate["fields"]}
+    zone = ZoneInfo(evidence_timezone)
+    clock_values = {
+        (local.hour, local.minute)
+        for value in (start, end)
+        if value is not None
+        for local in (value.astimezone(zone),)
+    }
+    non_temporal_clock_spans = _dotted_quantity_spans(
+        text, extraction.fields, metadata, clock_values
+    )
     if extraction.start is not None:
         if extraction.start_evidence is None:
             raise ValueError("Changed start requires evidence")
@@ -792,6 +963,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             quote_start=extraction.start_evidence.start,
             interval_hyphens=interval_clocks is not None,
             interval_clocks=interval_clocks,
+            non_temporal_clock_spans=non_temporal_clock_spans,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("start", result)
@@ -810,18 +982,10 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             quote_start=extraction.end_evidence.start,
             interval_hyphens=interval_clocks is not None,
             interval_clocks=interval_clocks,
+            non_temporal_clock_spans=non_temporal_clock_spans,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("end", result)
-    metadata = {field["field_id"]: field for field in candidate["fields"]}
-    names = {field["field_id"]: field["name"] for field in candidate["fields"]}
-    zone = ZoneInfo(evidence_timezone)
-    clock_values = {
-        (local.hour, local.minute)
-        for value in (start, end)
-        if value is not None
-        for local in (value.astimezone(zone),)
-    }
     values = dict(form.initial_values)
     units = dict(form.initial_units)
     seen = set()

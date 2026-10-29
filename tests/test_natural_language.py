@@ -115,6 +115,73 @@ def test_numeric_evidence_can_use_a_separate_value_near_a_clock():
     assert _value_is_evidenced("3", "3", source_text=text, source_start=text.rindex("3"))
 
 
+def test_a_decimal_matching_the_clock_can_be_a_separate_value():
+    text = "Today at 07:30, glucose 7.30 mmol/L"
+    quote = "7.30"
+    assert _value_is_evidenced(
+        7.3, quote, source_text=text, source_start=text.index(quote), clock_values={(7, 30)}
+    )
+
+
+def test_measurement_preposition_does_not_make_a_value_a_clock():
+    text = "Today at 19:00 I stretched with difficulty at 3"
+    assert _value_is_evidenced(
+        3, "3", source_text=text, source_start=text.rindex("3"), clock_values={(19, 0)}
+    )
+    text = "Today at 3 I measured difficulty at 3"
+    assert _value_is_evidenced(
+        3, "3", source_text=text, source_start=text.rindex("3"), clock_values={(3, 0)}
+    )
+    assert not _value_is_evidenced(
+        3, "3", source_text=text, source_start=text.index("3"), clock_values={(3, 0)}
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "quote", "value"),
+    [
+        ("Today at 3 I planned stretching. Today from 19:00 to 19:15 I stretched", "3", 3),
+        ("Today at 7.30 I planned stretching. Today from 19:00 to 19:15 I stretched", "7.30", 7.3),
+        ("Сегодня в 3 я планировал растяжку. Сегодня с 19:00 до 19:15 растягивался", "3", 3),
+    ],
+)
+def test_other_contextual_clock_cannot_be_a_field_value(text, quote, value):
+    assert not _value_is_evidenced(
+        value,
+        quote,
+        source_text=text,
+        source_start=text.index(quote),
+        clock_values={(19, 0), (19, 15)},
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "quote", "value"),
+    [
+        ("Today I planned stretching at 3 pm. Today from 19:00 to 19:15 I stretched", "3", 3),
+        ("I stretched from 7.00 to 7.15 today", "7.00", 7),
+        ("I stretched from 7.30 to 8.30 today for several minutes", "7.30", 7.3),
+        ("I stretched at 3 UTC today", "3", 3),
+        ("I stretched at 3.00 UTC today", "3.00", 3),
+        ("I stretched at 3.00, today", "3.00", 3),
+        ("At 7.30 +02:00 today I stretched for 15 minutes", "7.30", 7.3),
+        ("I stretched between 7.30 and 7.45 today", "7.30", 7.3),
+    ],
+)
+def test_clock_context_cannot_become_field_value(text, quote, value):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+def test_dotted_clock_and_identical_decimal_have_distinct_contexts():
+    text = "Today at 7.30, glucose 7.30 mmol/L"
+    assert not _value_is_evidenced(
+        7.3, "7.30", source_text=text, source_start=text.index("7.30"), clock_values={(7, 30)}
+    )
+    assert _value_is_evidenced(
+        7.3, "7.30", source_text=text, source_start=text.rindex("7.30"), clock_values={(7, 30)}
+    )
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -137,6 +204,76 @@ def test_numeric_evidence_cannot_clip_part_of_a_larger_source_number(text):
 def test_boolean_evidence_rejects_negated_tokens(quote):
     assert not _value_is_evidenced(True, quote)
     assert not _value_is_evidenced(False, quote)
+
+
+@pytest.mark.parametrize(
+    ("text", "quote", "value"),
+    [
+        ("I did not say yes", "yes", True),
+        ("The answer is not false", "false", False),
+        ("I didn't say yes", "yes", True),
+        ("Я не сказал да", "да", True),
+    ],
+)
+def test_boolean_evidence_cannot_clip_preceding_negation(text, quote, value):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+def test_boolean_evidence_still_accepts_direct_answers():
+    text = "Today at 19:03 I answered yes"
+    assert _value_is_evidenced(True, "yes", source_text=text, source_start=text.index("yes"))
+    text = "It was not warm. I answered yes"
+    assert _value_is_evidenced(True, "yes", source_text=text, source_start=text.index("yes"))
+
+
+@pytest.mark.parametrize(
+    ("text", "quote", "value"), [("yesterday", "yes", True), ("none", "no", False)]
+)
+def test_boolean_evidence_cannot_clip_part_of_a_word(text, quote, value):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+@pytest.mark.parametrize(
+    ("value", "text", "quote"),
+    [
+        (3, "not 3", "3"),
+        (3, "not\n3", "3"),
+        (3, "not; 3", "3"),
+        (3, "3 was not recorded", "3"),
+        (True, "yes was not my answer", "yes"),
+        ("high", "high was never recorded", "high"),
+        ("run", "not run", "run"),
+        ("3", "не 3", "3"),
+    ],
+)
+def test_field_evidence_cannot_clip_preceding_negation(value, text, quote):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+def test_categorical_evidence_cannot_clip_preceding_negation():
+    text = "not high"
+    assert not _categorical_value_is_evidenced(
+        "high", "high", source_text=text, source_start=text.index("high")
+    )
+
+
+def test_folded_text_keeps_original_source_positions():
+    text = "Not warm. Straße"
+    assert _value_is_evidenced(
+        "STRASSE", "Straße", source_text=text, source_start=text.index("Straße")
+    )
+    text = "Not Straße"
+    assert not _value_is_evidenced(
+        "STRASSE", "Straße", source_text=text, source_start=text.index("Straße")
+    )
+
+
+def test_negation_in_a_previous_sentence_does_not_hide_a_separate_value():
+    text = "I did not sleep. I recorded 3"
+    assert _value_is_evidenced(3, "3", source_text=text, source_start=text.index("3"))
+    assert _categorical_value_is_evidenced("not applicable", "not applicable")
+    text = "I recorded 3. I did not sleep"
+    assert _value_is_evidenced(3, "3", source_text=text, source_start=text.index("3"))
 
 
 def test_minute_clock_evidence_cannot_add_or_hide_seconds():
@@ -184,6 +321,9 @@ def test_categorical_evidence_requires_exact_tokens():
     assert _categorical_value_is_evidenced("very good", "felt very-good today")
     assert not _categorical_value_is_evidenced("no", "answer: none")
     assert not _categorical_value_is_evidenced("no", "answer: not applicable")
+    assert not _categorical_value_is_evidenced("yes", "да")
+    assert not _categorical_value_is_evidenced("нет", "не было")
+    assert not _value_is_evidenced("yes", "true")
     assert _categorical_value_is_evidenced("İ", "İ")
 
 
@@ -309,6 +449,59 @@ def test_setup_language_creates_preview_not_definition_or_fact(db):
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
+def test_other_clock_cannot_become_tracker_value(db):
+    created = install(db)
+    text = "Today at 3 I planned stretching. Today from 19:00 to 19:15 I stretched"
+    extraction = entry_result(text, created["action"]["definition_version_id"])
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unrelated-clock-value"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_interval_start_cannot_become_a_duration(db):
+    created = install(db)
+    text = "From 7.30 to 7.45 today I stretched 15 minutes, difficulty 3"
+    extraction = entry_result(
+        text,
+        created["action"]["definition_version_id"],
+        start="2026-09-20T07:30:00+02:00",
+        end="2026-09-20T07:45:00+02:00",
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 7.3,
+                "unit": "minutes",
+                "evidence": evidence(text, "7.30"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "interval-start-value"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
 @pytest.mark.parametrize("quote_whole", [False, True])
 def test_separate_tracker_value_remains_valid_next_to_identical_clock_digits(db, quote_whole):
     created = install(db)
@@ -340,6 +533,99 @@ def test_separate_tracker_value_remains_valid_next_to_identical_clock_digits(db,
     assert result["written"] is True
     row = db.get(Event, UUID(result["event_id"]))
     assert row.payload["difficulty"] == 3
+
+
+def test_measurement_at_a_number_can_be_saved(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I stretched with difficulty at 3"
+    extraction = entry_result(text, version_id)
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "measurement-at-number"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
+
+
+@pytest.mark.parametrize("separator", [":", "."])
+def test_decimal_value_equal_to_clock_can_be_saved(db, separator):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = f"Today from 07{separator}30 to 07{separator}45 I stretched, 7.30 minutes, difficulty 3"
+    decimal_start = text.rindex("7.30")
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T07:30:00+02:00",
+        end="2026-09-20T07:45:00+02:00",
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 7.3,
+                "unit": "minutes",
+                "evidence": {"start": decimal_start, "end": decimal_start + 4, "quote": "7.30"},
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "decimal-equals-clock"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True, result
+
+
+def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db):
+    created = install(db, stretch_draft(topology="point"))
+    version_id = created["action"]["definition_version_id"]
+    text = "Today at 07.30 minutes, difficulty 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T07:30:00+02:00",
+        end=None,
+        end_evidence=None,
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 7.3,
+                "unit": "minutes",
+                "evidence": evidence(text, "07.30"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clock-with-unit"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 @pytest.mark.parametrize(
@@ -498,6 +784,177 @@ def test_clipping_a_negative_sign_cannot_create_a_positive_tracker_value(db):
     )
     assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "options"),
+    [("boolean", True, []), ("choice", "yes", ["yes", "no"]), ("text", "yes", [])],
+)
+def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db, kind, value, options):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind=kind, options=options)]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I did not say yes"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": value,
+                "evidence": evidence(text, "yes"),
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clipped-negation"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "quote", "options"),
+    [
+        ("scale", 3, "3", []),
+        ("choice", "high", "high", ["high", "low"]),
+        ("text", "run", "run", []),
+    ],
+)
+@pytest.mark.parametrize("negative_after", [False, True])
+def test_clipping_negation_cannot_create_any_tracker_value(
+    db, kind, value, quote, options, negative_after
+):
+    fields = {"key": "difficulty", "label": "Result", "kind": kind, "options": options}
+    if kind == "scale":
+        fields.update(minimum=1, maximum=5)
+    created = install(db, stretch_draft(fields=[TrackerFieldDraft(**fields)]))
+    version_id = created["action"]["definition_version_id"]
+    text = (
+        f"Today from 19:00 to 19:15 I reported {quote}, but this was not my result"
+        if negative_after
+        else f"Today from 19:00 to 19:15 I did not report {quote}"
+    )
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": value,
+                "evidence": evidence(text, quote),
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clipped-field-negation"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_http_clipped_negation_does_not_save_a_boolean(db, db_engine, monkeypatch):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind="boolean")]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I did not say yes"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": True,
+                "evidence": evidence(text, "yes"),
+            }
+        ],
+    )
+    before_audits = db.scalar(select(func.count()).select_from(Audit))
+    before_metrics = db.scalar(select(func.count()).select_from(MetricObservation))
+    db.commit()
+
+    class ApiClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz or UTC)
+
+    class HttpProvider(FixedProvider):
+        def close(self):
+            pass
+
+    monkeypatch.setattr("garmin_ai.api.datetime", ApiClock)
+    monkeypatch.setattr("garmin_ai.onboarding.model_category_selected", lambda *_args: True)
+    monkeypatch.setattr(
+        "garmin_ai.integrations.create_model_provider", lambda *_args: HttpProvider(extraction)
+    )
+    token = "synthetic-ma05-boolean-" + "x" * 32
+    settings = Settings(
+        _env_file=None,
+        llm_enabled=True,
+        gemini_model="synthetic",
+        integrations=[
+            IntegrationInstance(id="model:gemini:synthetic", kind="model", provider="gemini")
+        ],
+        api_tokens=[ApiToken(key=token, scopes={"read:diary", "write:diary"})],
+    )
+    response = TestClient(create_app(settings, db_engine)).post(
+        "/natural-language/trackers",
+        headers={"Authorization": "Bearer " + token},
+        json={"text": text, "operation_id": "clipped-negation-http"},
+    )
+    assert response.status_code == 200
+    assert response.json()["intent"] == "clarify" and response.json()["written"] is False
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+    assert db.scalar(select(func.count()).select_from(Audit)) == before_audits
+    assert db.scalar(select(func.count()).select_from(MetricObservation)) == before_metrics
+
+
+def test_explicit_boolean_answer_can_be_saved(db):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind="boolean")]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I said yes"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": True,
+                "evidence": evidence(text, "yes"),
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "explicit-yes"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
+    assert db.get(Event, UUID(result["event_id"])).payload["difficulty"] is True
 
 
 def test_setup_wish_misclassified_as_fact_is_never_written(db):
