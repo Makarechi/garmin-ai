@@ -33,6 +33,11 @@ literal unit evidence, interval endpoints need literal clock evidence, and the g
 performs the final bounds and required-field checks. Stored entries retain the original text and
 only source offsets as evidence references.
 
+Unit evidence is checked against the boundaries of the original message, even
+when a proposed quote contains only part of a word or compound unit. A number
+and its unit may be written together when both are independently supported by
+the source.
+
 ## Calendar evidence (MA-01)
 
 For numeric and numeric-choice values, digits inside a recognized date or clock

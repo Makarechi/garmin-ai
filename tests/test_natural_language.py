@@ -12,9 +12,11 @@ from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import AppState, Audit, Event, EventDefinition, MetricObservation
 from garmin_ai.natural_language import (
+    ExtractedField,
     TrackerExtraction,
     _categorical_value_is_evidenced,
     _datetime_is_evidenced,
+    _dotted_quantity_spans,
     _unit_is_evidenced,
     _validated_submission,
     _value_is_evidenced,
@@ -553,10 +555,11 @@ def test_measurement_at_a_number_can_be_saved(db):
 
 
 @pytest.mark.parametrize("separator", [":", "."])
-def test_decimal_value_equal_to_clock_can_be_saved(db, separator):
+@pytest.mark.parametrize("space", [" ", ""])
+def test_decimal_value_equal_to_clock_can_be_saved(db, separator, space):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
-    text = f"Today from 07{separator}30 to 07{separator}45 I stretched, 7.30 minutes, difficulty 3"
+    text = f"Today from 07{separator}30 to 07{separator}45 I stretched, 7.30{space}minutes, difficulty 3"
     decimal_start = text.rindex("7.30")
     extraction = entry_result(
         text,
@@ -590,10 +593,11 @@ def test_decimal_value_equal_to_clock_can_be_saved(db, separator):
     assert result["written"] is True, result
 
 
-def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db):
+@pytest.mark.parametrize("space", [" ", ""])
+def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db, space):
     created = install(db, stretch_draft(topology="point"))
     version_id = created["action"]["definition_version_id"]
-    text = "Today at 07.30 minutes, difficulty 3"
+    text = f"Today at 07.30{space}minutes, difficulty 3"
     extraction = entry_result(
         text,
         version_id,
@@ -626,6 +630,76 @@ def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db):
     )
     assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(("unit_text", "written"), [("minutesXYZ", False), ("minutes", True)])
+def test_unit_evidence_uses_full_source_boundaries(db, unit_text, written):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = f"Today from 19:00 to 19:15 I stretched 20 {unit_text}, difficulty 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 20,
+                "unit": "minutes",
+                "evidence": evidence(text, "20"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unit-source-boundary"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is written
+    assert db.scalar(select(func.count()).select_from(Event)) == int(written)
+
+
+def test_valid_unit_attached_to_number_can_be_saved(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I stretched 20minutes, difficulty 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 20,
+                "unit": "minutes",
+                "evidence": evidence(text, "20"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unit-attached-to-number"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
 
 
 @pytest.mark.parametrize(
@@ -1470,6 +1544,58 @@ def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
 )
 def test_units_require_a_complete_unit_token(unit, quote):
     assert not _unit_is_evidenced(unit, quote)
+
+
+@pytest.mark.parametrize(
+    ("source", "unit", "quote"),
+    [
+        ("20 minutesXYZ", "minutes", "minutes"),
+        ("20 fake_minutes", "minutes", "minutes"),
+        ("20 km/hour", "km/h", "km/h"),
+        ("20 m/s/extra", "m/s", "m/s"),
+        ("fake20minutes", "minutes", "minutes"),
+        ("fake\u030120minutes", "minutes", "minutes"),
+        ("fake20%", "%", "%"),
+        ("07:30minutes", "minutes", "minutes"),
+        ("fake\u0301minutes", "minutes", "minutes"),
+        ("minutes\u0301suffix", "minutes", "minutes"),
+    ],
+)
+def test_unit_boundaries_use_original_source(source, unit, quote):
+    assert not _unit_is_evidenced(unit, quote, source_text=source, source_start=source.index(quote))
+
+
+@pytest.mark.parametrize("source", ["20minutes", "7.30minutes", "-7.30minutes"])
+def test_unit_attached_to_complete_number_is_valid(source):
+    assert _unit_is_evidenced(
+        "minutes", "minutes", source_text=source, source_start=source.index("minutes")
+    )
+
+
+def test_unit_must_match_a_complete_casefolded_character():
+    assert not _unit_is_evidenced("seconds", "ß")
+    assert _unit_is_evidenced("ss", "ß")
+    assert not _value_is_evidenced("s", "ß", semantic="text")
+    assert _value_is_evidenced("ss", "ß", semantic="text")
+
+
+@pytest.mark.parametrize("unit", [None, ""])
+def test_absent_unit_is_not_evidence(unit):
+    assert not _unit_is_evidenced(unit, "anything")
+
+
+def test_malformed_unit_offsets_do_not_crash_decimal_evidence_check():
+    field = ExtractedField.model_validate(
+        {
+            "field_id": "user.stretch.minutes",
+            "value": 7.3,
+            "unit": "minutes",
+            "evidence": {"start": 0, "end": 4, "quote": "7.30"},
+            "unit_evidence": {"start": 1000, "end": 1, "quote": "minutes"},
+        }
+    )
+    metadata = {"user.stretch.minutes": {"semantic": "quantity", "unit": "minutes"}}
+    assert not _dotted_quantity_spans("7.30 minutes", [field], metadata, set())
 
 
 def test_ambiguous_wall_time_requires_matching_explicit_offset():
