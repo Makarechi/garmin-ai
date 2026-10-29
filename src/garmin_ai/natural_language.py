@@ -310,6 +310,29 @@ _BOOLEAN_LITERALS = {
     "нет": False,
 }
 
+_PRECEDING_NEGATION = re.compile(
+    r"(?<!\w)(?:not|no|never|не|нет|ни|"
+    r"(?:did|do|does|have|has|had|was|were|is|are|can|could|would|should|will|must)n['’]t)(?!\w)",
+    re.I,
+)
+
+
+def _has_preceding_negation(source, start):
+    preceding = source[:start]
+    boundaries = list(re.finditer(r"[!?;\n]|(?<!\d)\.(?!\d)", preceding))
+    clause = preceding[boundaries[-1].end() :] if boundaries else preceding
+    return bool(_PRECEDING_NEGATION.search(clause))
+
+
+def _folded_matches(value, quote, *, word_boundary):
+    offsets = [index for index, char in enumerate(quote) for _ in char.casefold()]
+    folded = quote.casefold()
+    pattern = re.escape(value.casefold())
+    if word_boundary:
+        pattern = rf"(?<!\w){pattern}(?!\w)"
+    for match in re.finditer(pattern, folded):
+        yield offsets[match.start()], offsets[match.end() - 1] + 1
+
 
 def _value_is_evidenced(
     value, quote, *, nominal=False, semantic=None, source_text=None, source_start=0, clock_values=()
@@ -336,28 +359,29 @@ def _value_is_evidenced(
         source = source_text if source_text is not None else quote
         offset = source_start if source_text is not None else 0
         terms = r"true|yes|да|есть" if value else r"не\s+было|false|no|нет"
-        negation = (
-            r"(?<!\w)(?:not|no|never|не|нет|ни|"
-            r"(?:did|do|does|have|has|had|was|were|is|are|can|could|would|should|will|must)n['’]t)(?!\w)"
-        )
         for match in re.finditer(rf"(?<!\w)(?:{terms})(?!\w)", quote, re.I):
             start, end = offset + match.start(), offset + match.end()
             before = source[start - 1] if start else ""
             after = source[end] if end < len(source) else ""
             if before.isalnum() or before == "_" or after.isalnum() or after == "_":
                 continue
-            preceding = source[:start]
-            boundaries = list(re.finditer(r"[!?;\n]|(?<!\d)\.(?!\d)", preceding))
-            clause = preceding[boundaries[-1].end() :] if boundaries else preceding
-            if not re.search(negation, clause, re.I):
+            if not _has_preceding_negation(source, start):
                 return True
         return False
     if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
-        return _value_is_evidenced(
-            _BOOLEAN_LITERALS[value.casefold()],
-            quote,
-            source_text=source_text,
-            source_start=source_start,
+        source = source_text if source_text is not None else quote
+        offset = source_start if source_text is not None else 0
+        expected = _BOOLEAN_LITERALS[value.casefold()]
+        if not _value_is_evidenced(expected, quote, source_text=source, source_start=offset):
+            return False
+        return any(
+            _value_is_evidenced(
+                expected,
+                quote[start:end],
+                source_text=source,
+                source_start=offset + start,
+            )
+            for start, end in _folded_matches(value, quote, word_boundary=True)
         )
     if isinstance(value, (int, float)):
         try:
@@ -373,6 +397,8 @@ def _value_is_evidenced(
                 continue
             if not _complete_number_in_source(source, start, end):
                 continue
+            if _has_preceding_negation(source, start):
+                continue
             if Decimal(match.group().replace(",", ".")) == expected:
                 return True
         return False
@@ -382,18 +408,27 @@ def _value_is_evidenced(
         temporal_spans = _temporal_number_spans(source, clock_values)
         for match in re.finditer(re.escape(value), quote):
             start, end = offset + match.start(), offset + match.end()
-            if _complete_number_in_source(source, start, end) and not any(
-                start < stop and end > begin for begin, stop in temporal_spans
+            if (
+                _complete_number_in_source(source, start, end)
+                and not any(start < stop and end > begin for begin, stop in temporal_spans)
+                and not _has_preceding_negation(source, start)
             ):
                 return True
         return False
-    if semantic == "text":
-        return isinstance(value, str) and bool(value.strip()) and value.casefold() in normalized
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
-    )
+    if not isinstance(value, str) or not value.strip():
+        return False
+    source = source_text if source_text is not None else quote
+    offset = source_start if source_text is not None else 0
+    for start, end in _folded_matches(value, quote, word_boundary=semantic != "text"):
+        start, end = offset + start, offset + end
+        if semantic != "text":
+            before = source[start - 1] if start else ""
+            after = source[end] if end < len(source) else ""
+            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+                continue
+        if not _has_preceding_negation(source, start):
+            return True
+    return False
 
 
 def _categorical_value_is_evidenced(
@@ -425,6 +460,8 @@ def _categorical_value_is_evidenced(
     for index in range(len(observed) - len(expected) + 1):
         matched = observed[index : index + len(expected)]
         if not expected or [token for token, _, _ in matched] != expected:
+            continue
+        if _has_preceding_negation(source, offset + matched[0][1]):
             continue
         if any(
             token.isdecimal()

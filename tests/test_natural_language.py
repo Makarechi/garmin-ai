@@ -166,6 +166,37 @@ def test_boolean_evidence_cannot_clip_part_of_a_word(text, quote, value):
     assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
 
 
+@pytest.mark.parametrize(
+    ("value", "text", "quote"), [(3, "not 3", "3"), ("run", "not run", "run"), ("3", "не 3", "3")]
+)
+def test_field_evidence_cannot_clip_preceding_negation(value, text, quote):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+def test_categorical_evidence_cannot_clip_preceding_negation():
+    text = "not high"
+    assert not _categorical_value_is_evidenced(
+        "high", "high", source_text=text, source_start=text.index("high")
+    )
+
+
+def test_folded_text_keeps_original_source_positions():
+    text = "Not warm. Straße"
+    assert _value_is_evidenced(
+        "STRASSE", "Straße", source_text=text, source_start=text.index("Straße")
+    )
+    text = "Not Straße"
+    assert not _value_is_evidenced(
+        "STRASSE", "Straße", source_text=text, source_start=text.index("Straße")
+    )
+
+
+def test_negation_in_a_previous_sentence_does_not_hide_a_separate_value():
+    text = "I did not sleep. I recorded 3"
+    assert _value_is_evidenced(3, "3", source_text=text, source_start=text.index("3"))
+    assert _categorical_value_is_evidenced("not applicable", "not applicable")
+
+
 def test_minute_clock_evidence_cannot_add_or_hide_seconds():
     minute = datetime.fromisoformat("2026-10-01T19:00:00+02:00")
     second = minute + timedelta(seconds=59)
@@ -211,6 +242,9 @@ def test_categorical_evidence_requires_exact_tokens():
     assert _categorical_value_is_evidenced("very good", "felt very-good today")
     assert not _categorical_value_is_evidenced("no", "answer: none")
     assert not _categorical_value_is_evidenced("no", "answer: not applicable")
+    assert not _categorical_value_is_evidenced("yes", "да")
+    assert not _categorical_value_is_evidenced("нет", "не было")
+    assert not _value_is_evidenced("yes", "true")
     assert _categorical_value_is_evidenced("İ", "İ")
 
 
@@ -553,6 +587,45 @@ def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db, kind, 
         db,
         FixedProvider(extraction),
         {"text": text, "operation_id": "clipped-negation"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "value", "quote", "options"),
+    [
+        ("scale", 3, "3", []),
+        ("choice", "high", "high", ["high", "low"]),
+        ("text", "run", "run", []),
+    ],
+)
+def test_clipping_negation_cannot_create_any_tracker_value(db, kind, value, quote, options):
+    fields = {"key": "difficulty", "label": "Result", "kind": kind, "options": options}
+    if kind == "scale":
+        fields.update(minimum=1, maximum=5)
+    created = install(db, stretch_draft(fields=[TrackerFieldDraft(**fields)]))
+    version_id = created["action"]["definition_version_id"]
+    text = f"Today from 19:00 to 19:15 I did not report {quote}"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": value,
+                "evidence": evidence(text, quote),
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clipped-field-negation"},
         granted={"read:diary", "write:diary"},
         actor="owner",
         now=NOW,
