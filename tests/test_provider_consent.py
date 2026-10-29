@@ -9,6 +9,8 @@ from garmin_ai.llm import (
     GeminiProvider,
     ProviderConsentRequired,
     ProviderModelUnavailable,
+    ProviderOutputInvalid,
+    ProviderOutputTruncated,
     ProviderUnavailable,
 )
 
@@ -33,6 +35,106 @@ def settings(categories=("health", "diary"), **overrides):
     )
     values.update(overrides)
     return Settings(**values)
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        ("incomplete", ProviderOutputTruncated),
+        ("failed", ProviderUnavailable),
+        ("cancelled", ProviderUnavailable),
+        ("requires_action", ProviderOutputInvalid),
+        ("in_progress", ProviderOutputInvalid),
+        (None, ProviderOutputInvalid),
+        ([], ProviderOutputInvalid),
+    ],
+)
+def test_gemini_never_accepts_a_valid_fragment_from_an_unfinished_interaction(
+    monkeypatch, status, error
+):
+    class Result(BaseModel):
+        value: bool
+
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    provider = GeminiProvider(settings())
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda **kwargs: SimpleNamespace(status=status, output_text='{"value":true}'),
+    )
+    with pytest.raises(error):
+        provider.structured("synthetic", "synthetic", Result)
+
+
+def test_gemini_transcription_rejects_incomplete_interaction(monkeypatch):
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    provider = GeminiProvider(settings(categories=("audio",)))
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda **kwargs: SimpleNamespace(status="incomplete", output_text='{"text":"synthetic"}'),
+    )
+    with pytest.raises(ProviderOutputTruncated):
+        provider.transcribe(b"synthetic", "audio/ogg")
+
+
+def test_incomplete_gemini_fragment_cannot_create_diary_event(db, db_engine, monkeypatch):
+    from sqlalchemy import func, select
+
+    from garmin_ai.agent import Interpretation
+    from garmin_ai.events import EventInput
+    from garmin_ai.models import Audit, Event
+    from garmin_ai.telegram import process_message, save_update
+
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    config = settings(telegram_user_id=42, timezone="UTC")
+    provider = GeminiProvider(config)
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start=datetime.now(UTC),
+                timezone="UTC",
+                payload={"type": "note", "description": "synthetic"},
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda **kwargs: SimpleNamespace(
+            status="incomplete", output_text=command.model_dump_json()
+        ),
+    )
+    save_update(
+        db,
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "synthetic note now",
+            },
+        },
+        42,
+    )
+    db.commit()
+    with pytest.raises(ProviderOutputTruncated):
+        process_message(db_engine, provider, config, 1)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+    assert db.scalar(select(func.count()).select_from(Audit)) == 0
 
 
 @pytest.mark.parametrize("change", ["missing", "model", "future", "disabled"])
@@ -78,7 +180,8 @@ def test_audio_is_separate_and_revocation_applies_to_existing_client(monkeypatch
         provider,
         "_create",
         lambda **kwargs: (
-            transmitted.append(kwargs) or SimpleNamespace(output_text='{"text":"synthetic"}')
+            transmitted.append(kwargs)
+            or SimpleNamespace(status="completed", output_text='{"text":"synthetic"}')
         ),
     )
     with pytest.raises(ProviderUnavailable, match="consent"):
@@ -107,7 +210,10 @@ def test_approved_model_can_answer_but_configuration_change_cannot_reuse_consent
     monkeypatch.setattr(
         provider,
         "_create",
-        lambda **kwargs: sent.append(kwargs) or SimpleNamespace(output_text='{"text":"synthetic"}'),
+        lambda **kwargs: (
+            sent.append(kwargs)
+            or SimpleNamespace(status="completed", output_text='{"text":"synthetic"}')
+        ),
     )
     assert provider.structured("instruction", "context", Result).text == "synthetic"
     assert "llm_consent" not in str(sent)
@@ -262,7 +368,9 @@ def test_actual_sdk_prepares_cold_adapter_before_question_budget(monkeypatch):
         assert clock[0] == agent.ANALYSIS_SECONDS + 1
         assert requests == []
         monkeypatch.setattr(
-            adapter, "create", lambda **kwargs: SimpleNamespace(output_text='{"value":true}')
+            adapter,
+            "create",
+            lambda **kwargs: SimpleNamespace(status="completed", output_text='{"value":true}'),
         )
         budget = agent.AnalysisBudget()
         assert budget.consume("Synthetic instruction", "Synthetic input", Parsed)

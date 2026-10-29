@@ -449,7 +449,7 @@ def test_configured_gemini_deadline_and_diary_only_consent_are_honored(monkeypat
 
     def request(**kwargs):
         seen.append(kwargs["timeout"])
-        return SimpleNamespace(output_text='{"score":3}')
+        return SimpleNamespace(status="completed", output_text='{"score":3}')
 
     monkeypatch.setattr(provider, "_request", request)
     assert (

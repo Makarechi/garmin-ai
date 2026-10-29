@@ -2254,7 +2254,7 @@ def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, fail
 
     def create(**kwargs):
         if failure == "malformed":
-            return SimpleNamespace(output_text="not json")
+            return SimpleNamespace(status="completed", output_text="not json")
         raise (ConnectionError if failure == "transport" else RuntimeError)("synthetic failure")
 
     settings = Settings(
