@@ -187,3 +187,45 @@ def test_selection_excludes_definitions_without_tracker_configuration(db):
             now=datetime(2026, 10, 22, 14, tzinfo=UTC),
         )
         assert continued["intent"] == "deterministic_form"
+        assert len(continued["forms"]) == 1
+        assert (
+            continued["forms"][0]["action"]["definition_version_id"]
+            == form["action"]["definition_version_id"]
+        )
+
+
+@pytest.mark.parametrize("offline", ["no-provider", "provider-error"])
+@pytest.mark.parametrize("channel", [None, "telegram:primary"])
+def test_unavailable_model_offers_trackers_beyond_ranked_candidates(db, offline, channel):
+    from garmin_ai.llm import ProviderUnavailable
+
+    class OfflineProvider:
+        def structured(self, *_args):
+            raise ProviderUnavailable("synthetic outage")
+
+    for key, label in [
+        ("a_water", "Water"),
+        ("b_food", "Food"),
+        ("c_sleep", "Sleep"),
+        ("d_walk", "Walk"),
+        ("e_run", "Run"),
+        ("z_focus", "Focus"),
+    ]:
+        install_tracker(db, key, label)
+    install_tracker(db, "f_sensitive", "Synthetic sensitive record", privacy="sensitive")
+    if channel:
+        db.info["channel_destination_instance_id"] = channel
+    result = process_tracker_text(
+        db,
+        None if offline == "no-provider" else OfflineProvider(),
+        {"text": "Water then Sústredenie", "operation_id": "synthetic-offline-discovery"},
+        granted={"read:diary"},
+        actor="test",
+        now=datetime(2026, 10, 22, 14, tzinfo=UTC),
+    )
+    keys = {form["action"]["definition_key"] for form in result["forms"]}
+    assert result["reason"] == "provider_unavailable"
+    assert "user.z_focus" in keys
+    assert result["selection_has_more"] is False
+    assert ("user.f_sensitive" in keys) is (channel is None)
+    assert result["written"] is False
