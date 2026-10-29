@@ -2247,7 +2247,7 @@ def test_end_button_ignores_unconfirmed_episodes(db, status, confirmed):
 
 
 @pytest.mark.parametrize("failure", ["transport", "server", "malformed"])
-def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, failure):
+def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, failure, monkeypatch):
     from types import SimpleNamespace
 
     from garmin_ai.llm import GeminiProvider
@@ -2257,12 +2257,11 @@ def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, fail
             return SimpleNamespace(output_text="not json")
         raise (ConnectionError if failure == "transport" else RuntimeError)("synthetic failure")
 
-    provider = object.__new__(GeminiProvider)
-    provider.model = "synthetic"
-    provider.settings = Settings(
+    settings = Settings(
         _env_file=None,
         llm_enabled=True,
         gemini_model="synthetic",
+        gemini_api_key="synthetic-key",
         llm_consent={
             "provider": "gemini",
             "model": "synthetic",
@@ -2271,8 +2270,11 @@ def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, fail
             "policy_revision": 1,
         },
     )
-    provider.generation_config = {}
-    provider.client = SimpleNamespace(interactions=SimpleNamespace(create=create))
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace(create=create)),
+    )
+    provider = GeminiProvider(settings)
     voice = update("")
     voice["message"]["voice"] = {"file_id": "synthetic"}
     save_update(db, voice, 42)
