@@ -1,5 +1,7 @@
 """Threshold analysis uses bounded, synthetic measurement histories."""
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -8,7 +10,7 @@ from pydantic import ValidationError
 
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
-from garmin_ai.generic_analytics import AnalysisSpec, evidence_is_stale, execute_analysis
+from garmin_ai.generic_analytics import AnalysisSpec, evidence_is_stale, execute_analysis, spec_hash
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import Measurement, MeasurementRevision
 from garmin_ai.tools import call_tool
@@ -237,3 +239,19 @@ def test_non_time_weighted_metrics_do_not_fabricate_intervals(db):
     ensure_system_metric_definitions(db)
     with pytest.raises(ValueError, match="time-weighted"):
         execute_analysis(db, plan(metric_key="system.steps_bucket"))
+
+
+def test_existing_analysis_spec_keeps_its_pre_threshold_hash():
+    existing = AnalysisSpec(
+        operation="query_observations",
+        metric_key="system.stress_score",
+        start=START,
+        end=START + timedelta(minutes=15),
+        knowledge_cutoff=START + timedelta(days=1),
+    )
+    original = existing.model_dump(mode="json", exclude={"threshold", "threshold_operator"})
+    expected = hashlib.sha256(
+        json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert spec_hash(existing) == expected
+    assert spec_hash(plan(threshold=50)) != spec_hash(plan(threshold=51))

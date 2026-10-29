@@ -349,8 +349,12 @@ def register_definition_metrics(session, spec, event_version):
 
 
 def spec_hash(spec: AnalysisSpec) -> str:
+    data = spec.model_dump(mode="json")
+    for field in ("threshold", "threshold_operator"):
+        if data[field] is None:
+            del data[field]
     return hashlib.sha256(
-        json.dumps(spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
