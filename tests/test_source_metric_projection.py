@@ -197,6 +197,24 @@ def test_identical_source_record_ids_are_isolated_between_instances(db, db_engin
     assert len({row.account for row in rows}) == 2
 
 
+def test_partial_page_omission_does_not_delete_earlier_observations(db, db_engine, monkeypatch):
+    metric = install_metric(db)
+    configured = configure("source:sample:one")
+    confirm_mapping(db, configured, "source:sample:one", metric.id)
+    db.commit()
+    now = datetime.now(UTC)
+    contents = {"fetched_at": now, "source:sample:one": source_record(now, 15)}
+    source_registry(monkeypatch, contents)
+    poll_source_instance(db_engine, configured, "source:sample:one", now=now)
+    contents["source:sample:one"] = source_record(now, 25).model_copy(
+        update={"source_record_id": "another-synthetic-record"}
+    )
+    poll_source_instance(db_engine, configured, "source:sample:one", now=now)
+    db.expire_all()
+    rows = db.scalars(select(MetricObservation).where(MetricObservation.valid.is_(True))).all()
+    assert {row.value for row in rows} == {15, 25}
+
+
 @pytest.mark.parametrize("bad_value", [True, "15", -1, 241, 2**53 + 1, None])
 def test_invalid_source_values_do_not_create_a_metric(db, db_engine, monkeypatch, bad_value):
     metric = install_metric(db)
