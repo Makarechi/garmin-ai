@@ -155,6 +155,23 @@ def test_other_contextual_clock_cannot_be_a_field_value(text, quote, value):
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "quote", "value"),
+    [
+        ("Today I planned stretching at 3 pm. Today from 19:00 to 19:15 I stretched", "3", 3),
+        ("I stretched from 7.00 to 7.15 today", "7.00", 7),
+        ("I stretched from 7.30 to 8.30 today for several minutes", "7.30", 7.3),
+        ("I stretched at 3 UTC today", "3", 3),
+        ("I stretched at 3.00 UTC today", "3.00", 3),
+        ("I stretched at 3.00, today", "3.00", 3),
+        ("At 7.30 +02:00 today I stretched for 15 minutes", "7.30", 7.3),
+        ("I stretched between 7.30 and 7.45 today", "7.30", 7.3),
+    ],
+)
+def test_clock_context_cannot_become_field_value(text, quote, value):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
 def test_dotted_clock_and_identical_decimal_have_distinct_contexts():
     text = "Today at 7.30, glucose 7.30 mmol/L"
     assert not _value_is_evidenced(
@@ -440,6 +457,42 @@ def test_other_clock_cannot_become_tracker_value(db):
         db,
         FixedProvider(extraction),
         {"text": text, "operation_id": "unrelated-clock-value"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_interval_start_cannot_become_a_duration(db):
+    created = install(db)
+    text = "From 7.30 to 7.45 today I stretched 15 minutes, difficulty 3"
+    extraction = entry_result(
+        text,
+        created["action"]["definition_version_id"],
+        start="2026-09-20T07:30:00+02:00",
+        end="2026-09-20T07:45:00+02:00",
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 7.3,
+                "unit": "minutes",
+                "evidence": evidence(text, "7.30"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "interval-start-value"},
         granted={"read:diary", "write:diary"},
         actor="owner",
         now=NOW,

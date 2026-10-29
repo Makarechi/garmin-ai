@@ -292,26 +292,42 @@ def _temporal_number_spans(text, clock_values=()):
     )
     separator = r"\s*[,:]?\s*"
     before_clock = day + separator + r"(?:(?:T|at|from|between|в|с|между)" + separator + r")?"
-    between_clock = day + separator + r"(?:between|между)" + separator
     direct_starts = {match.end() for match in re.finditer(before_clock, text, re.I)}
-    between_starts = {match.end() for match in re.finditer(between_clock, text, re.I)}
-    after_clock = re.compile(r"\s*(?:(?:on|в)\s+)?" + day, re.I)
+    between_starts = {
+        match.end() for match in re.finditer(r"(?<!\w)(?:between|между)\s+", text, re.I)
+    }
+    after_clock = re.compile(
+        r"(?:" + CLOCK_OFFSET_PATTERN + r")?" + separator + r"(?:(?:on|в)\s+)?" + day,
+        re.I,
+    )
+    am_pm = re.compile(r"\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)", re.I)
+    spans.extend(
+        match.span()
+        for match in re.finditer(
+            r"(?<![\w.])(?:1[0-2]|0?[1-9])(?:[:.][0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)",
+            text,
+            re.I,
+        )
+    )
     clocks, _ = _clock_tokens(text, interval_hyphens=True)
-    previous = None
-    previous_contextual = False
-    for start, end, _hour, _minute in clocks:
-        direct = start in direct_starts or bool(after_clock.match(text, end))
-        linked = False
-        if previous is not None and previous_contextual:
-            gap = re.sub(r"^" + CLOCK_OFFSET_PATTERN, "", text[previous[1] : start], flags=re.I)
-            linked = bool(re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I))
-            if not linked and re.fullmatch(r"\s*(?:and|и)\s*", gap, re.I):
-                linked = previous[0] in between_starts
-        contextual = direct or linked
-        if contextual:
-            spans.append((start, end))
-        previous = (start, end)
-        previous_contextual = contextual
+    contextual = [
+        start in direct_starts or bool(after_clock.match(text, end)) or bool(am_pm.match(text, end))
+        for start, end, _hour, _minute in clocks
+    ]
+    links = []
+    for previous, current in zip(clocks, clocks[1:], strict=False):
+        gap = re.sub(r"^" + CLOCK_OFFSET_PATTERN, "", text[previous[1] : current[0]], flags=re.I)
+        linked = bool(re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I))
+        if not linked and re.fullmatch(r"\s*(?:and|и)\s*", gap, re.I):
+            linked = previous[0] in between_starts
+        links.append(linked)
+    group_start = 0
+    for index in range(len(clocks)):
+        if index < len(links) and links[index]:
+            continue
+        if any(contextual[group_start : index + 1]):
+            spans.extend((clock[0], clock[1]) for clock in clocks[group_start : index + 1])
+        group_start = index + 1
     return spans
 
 
