@@ -40,8 +40,8 @@ Replies to known analytical answers are resolved before free-text intent classif
 
 Forgetting also redacts cached analytical reply text. Each delivery part checks the captured conversation epoch before sending, including retries after Telegram rate limiting. A send already in flight cannot be recalled, but remaining parts and later retries are suppressed. Known analytical replies bypass active diary forms.
 
-Generic metric results with source revisions are rechecked before another model round
-and before a final answer. The recheck uses the selected metric, version, source,
+Generic metric and entry results are rechecked before another model round
+and before a final answer. The recheck uses the selected definition or metric, version, source,
 window and original cutoff; for a cutoff close to the request time it also checks
 newly available data. Explicitly historical cutoffs remain historical. Current
 model and channel permissions are checked again. If cited evidence changed, the
@@ -49,5 +49,5 @@ answer is replaced with the existing data-changed notice; unrelated metrics do n
 invalidate it. The answer retains only the bounded query, source revisions and a
 result hash; it rechecks those dependencies before Telegram delivery and whenever
 the local web chat exposes or acknowledges the queued message. It does not copy the
-measurement values into that proof. Other read tools without revision evidence still
-use their existing replay and sharing checks.
+measurement or entry values into that proof. Other read tools still use their existing
+replay and sharing checks.
