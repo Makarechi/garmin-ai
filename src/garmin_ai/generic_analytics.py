@@ -981,6 +981,7 @@ def evidence_is_stale(session, evidence: dict) -> bool:
                 timestamp + timedelta(microseconds=1),
                 datetime.now(timestamp.tzinfo),
                 limit=None,
+                include_invalid=True,
             )
             matching = next(
                 (

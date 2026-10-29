@@ -1159,6 +1159,8 @@ def aggregate_metric(
         if measurement_source_filter is not False
         else []
     )
+    if len(measurement_snapshot) > 10000:
+        raise ValueError("Metric query exceeds 10000 observations")
     revision_by_key = {(row.ts, row.metric, row.source): row for row in measurement_snapshot}
     revision_measurements = [
         row
