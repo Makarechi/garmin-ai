@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from pydantic import Field, StrictFloat, StrictInt, StrictStr
 
 from garmin_ai.events import StrictModel
+from garmin_ai.i18n import translate
 
 PathKey = (
     Annotated[StrictStr, Field(min_length=1, max_length=120)]
@@ -87,12 +88,7 @@ def verified_timestamps(claims, evidence, selected_ids, timezone, *, locale="ru"
             and claim.path[2] == "main_interval"
             and claim.path[3] in {"start", "end"}
         ):
-            if locale.split("-")[0] == "ru":
-                label = (
-                    "Начало сна по Garmin" if claim.path[3] == "start" else "Пробуждение по Garmin"
-                )
-            else:
-                label = "Garmin sleep onset" if claim.path[3] == "start" else "Garmin wake time"
+            label = translate(f"evidence.sleep.{claim.path[3]}", locale)
         clock = (
             f"{local:%d.%m.%Y в %H:%M:%S}"
             if locale.split("-")[0] == "ru"

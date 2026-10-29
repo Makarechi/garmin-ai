@@ -129,6 +129,9 @@ A missing night does not implicitly finish a compound question; the model may re
 other tools. Only a completed point answer receives the trusted unavailable template.
 Response language tags accept script and numeric-region subtags, and model-detected
 safety responses retain the detected language through Telegram and web rendering.
+Verified sleep start and wake labels and the short Garmin source note also have
+Slovak translations. Other untranslated messages still use the English fallback;
+this partial catalog does not claim full Slovak UI or conversational support.
 
 Gemini transport retries are disabled so the application's provider gate controls
 fallback, cooldown and deadlines. The pinned Interactions adapter maps the public

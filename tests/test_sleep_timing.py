@@ -1805,3 +1805,28 @@ def test_typed_point_answer_renders_only_verified_source_fields(db, tmp_path, la
     assert "999" not in response and "Synthetic" not in response
     assert ("Начало сна по Garmin" if language == "ru" else "Garmin sleep onset") in response
     assert "sleep_timing" in db.info["analysis_projection"]
+
+
+@pytest.mark.parametrize("field,expected", [("start", "Začiatok spánku"), ("end", "Prebudenie")])
+def test_slovak_point_answer_uses_translated_evidence_and_source(db, tmp_path, field, expected):
+    stored_night(db, tmp_path)
+    response = agent.answer_question(
+        db,
+        PointPlanner(field=field, language="sk"),
+        "Kedy som spal?",
+        Settings(locale="en"),
+        NOW,
+    )
+    assert expected in response
+    assert "Podľa uložených údajov Garminu" in response
+    assert "Garmin sleep onset" not in response
+    assert "Garmin wake time" not in response
+
+
+def test_slovak_point_answer_keeps_unknown_sleep_time_unknown(db):
+    response = agent.answer_question(
+        db, PointPlanner(language="sk"), "Kedy som spal?", Settings(locale="en"), NOW
+    )
+    assert "zatiaľ nie je" in response
+    assert "2026-10-16" in response
+    assert "Garmin sleep onset" not in response

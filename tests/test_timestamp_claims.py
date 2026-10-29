@@ -176,3 +176,14 @@ def test_fabricated_sleep_time_is_not_sent_or_remembered(db, monkeypatch):
     )
     assert "Не удалось подтвердить" in result
     assert db.get(AppState, "analysis:conversation:pending") is None
+
+
+def test_sleep_timestamps_use_requested_language_and_preserve_exact_evidence():
+    assert verified_timestamps([claim()], EVIDENCE, {1}, ZONE, locale="sk-SK") == [
+        "Začiatok spánku podľa Garminu: 2026-10-15 23:42:37 (Europe/Bratislava, +0200)."
+    ]
+    assert verified_timestamps([claim(END, END_PATH)], EVIDENCE, {1}, ZONE, locale="sk") == [
+        "Prebudenie podľa Garminu: 2026-10-16 07:30:12 (Europe/Bratislava, +0200)."
+    ]
+    with pytest.raises(ValueError):
+        verified_timestamps([claim(END)], EVIDENCE, {1}, ZONE, locale="sk")
