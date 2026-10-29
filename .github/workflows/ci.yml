@@ -48,7 +48,7 @@ jobs:
         run: |
           uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-model
           uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-adapters
-          .venv/bin/pytest -q -ra --junitxml=test-results/installed-extensions.xml tests/test_synthetic_plugin.py tests/test_extension_tck.py tests/test_source_runtime.py
+          .venv/bin/pytest -q -ra --junitxml=test-results/installed-extensions.xml tests/test_synthetic_plugin.py tests/test_extension_tck.py tests/test_source_runtime.py tests/test_source_metric_plugin.py
       - name: Preserve test outcomes and skip reasons
         if: always()
         uses: actions/upload-artifact@v4
