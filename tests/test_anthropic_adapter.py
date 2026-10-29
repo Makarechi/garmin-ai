@@ -265,3 +265,42 @@ def test_web_chat_uses_anthropic_through_actual_http_ingress(transport, db, db_e
     assert "What time?" in response.json()["reply"]["text"]
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert len(requests) == 1
+
+
+def test_structured_planner_accepts_zero_or_multiple_bounded_calls(transport):
+    from garmin_ai.agent import AgentStep, ReadCall
+
+    requests, responses = transport
+    plans = [
+        AgentStep(answer="Synthetic answer", evidence_ids=[1]),
+        AgentStep(
+            calls=[
+                ReadCall(name="health_snapshot", arguments_json='{"day":"2026-10-01"}'),
+                ReadCall(name="health_snapshot", arguments_json='{"day":"2026-10-02"}'),
+            ]
+        ),
+    ]
+    for plan in plans:
+        responses.append(
+            httpx.Response(200, json=body([{"type": "text", "text": plan.model_dump_json()}]))
+        )
+    provider = create_model_provider(settings_for())
+    try:
+        for plan in plans:
+            assert provider.structured("Synthetic", "Synthetic", AgentStep) == plan
+    finally:
+        provider.close()
+    assert len(requests) == 2
+
+
+def test_logs_do_not_include_credentials_or_message_contents(transport, caplog):
+    _, responses = transport
+    responses.append(httpx.Response(200, json=body()))
+    provider = create_model_provider(settings_for())
+    with caplog.at_level("INFO", logger="garmin_ai"):
+        provider.structured(
+            "Synthetic private instruction", "Synthetic private message", SafetyScreen
+        )
+    assert "synthetic-key" not in caplog.text
+    assert "Synthetic private" not in caplog.text
+    provider.close()
