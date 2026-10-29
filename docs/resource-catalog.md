@@ -19,5 +19,7 @@ establish complete coverage. Canonical observations and measurements are counted
 separately; an empty current-version count does not exclude legacy data under other
 versions. Source labels are generic and do not expose account or device identifiers.
 Event resources advertise read operations only. Raw plugin records are represented
-by a generic `source.raw_only` resource with no query operations: they are not yet
-normalized into the agent's canonical data.
+by a generic `source.raw_only` resource with no query operations. A separately
+confirmed source mapping can project supported records into a tracker metric,
+where availability and sharing consent are checked through that metric's normal
+rules; the raw source itself remains non-queryable.

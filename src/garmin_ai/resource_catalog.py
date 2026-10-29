@@ -99,8 +99,11 @@ def _metric_availability(session, version):
 
 
 def _metrics(session, kind, after_key, resource_key, limit, detail):
+    from garmin_ai.access import permits
+    from garmin_ai.onboarding import model_category_selected
     from garmin_ai.scenario_packs import pack_enabled
     from garmin_ai.share_policy import track_channel_share
+    from garmin_ai.source_metric_projection import has_source_observations
     from garmin_ai.tools import model_metric_packs
 
     namespace = "system" if kind == "system_metrics" else "user"
@@ -155,6 +158,16 @@ def _metrics(session, kind, after_key, resource_key, limit, detail):
                 or namespace == "system"
                 or _version_allowed(session, identities, {"facts"})
             )
+            scopes = session.info.get("caller_scopes")
+            health_allowed = (scopes is None or permits(scopes, {"read:health"})) and (
+                not model or model_category_selected(session, "health")
+            )
+            if (
+                namespace == "user"
+                and not health_allowed
+                and has_source_observations(session, definition.key)
+            ):
+                facts_allowed = False
             row = {
                 "id": definition.key,
                 "version": version.version,
