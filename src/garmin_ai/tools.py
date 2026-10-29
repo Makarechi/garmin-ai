@@ -482,6 +482,10 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
                 raise ReplayUnavailable(REPLAY_NOTICE)
     if validated is None:
         validated = tool.arguments.model_validate(arguments)
+    if name == "resource_catalog" and validated.kind == "tracker_metrics":
+        from sqlalchemy import func, select
+
+        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
     from garmin_ai.access import required_tool_scopes
 
     required_scopes = required_tool_scopes(name, validated)
@@ -509,6 +513,14 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         packs = set(MODEL_PACK_TOOLS.get(name, set()))
         if name == "generic_analysis":
             analysis = validated.spec
+            from garmin_ai.source_metric_projection import has_source_observations
+
+            if (
+                analysis.metric_key
+                and has_source_observations(session, analysis.metric_key)
+                and not model_category_selected(session, "health")
+            ):
+                raise PermissionError("The health model category is disabled")
             _require_generic_analysis_consent(session, analysis)
             if analysis.definition_key and analysis.definition_key.startswith("system."):
                 pack = event_pack(analysis.definition_key.removeprefix("system."))

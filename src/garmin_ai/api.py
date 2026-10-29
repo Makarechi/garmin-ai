@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.access import permits, permits_tool
@@ -810,7 +810,22 @@ def create_app(settings: Settings | None = None, engine=None):
                 raise HTTPException(422, detail=exc.errors(include_url=False)) from None
         if not permits_tool(granted, name, validated):
             raise HTTPException(403, "Insufficient scope")
-        return call_tool(session, name, body.arguments)
+        if name in {"generic_analysis", "resource_catalog"}:
+            # Serialize authorization with source writes so a new source fact
+            # cannot appear between the permission check and the read.
+            session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
+        if name == "generic_analysis" and not permits(granted, {"read:health"}):
+            from garmin_ai.source_metric_projection import has_source_observations
+
+            if validated.spec.metric_key and has_source_observations(
+                session, validated.spec.metric_key
+            ):
+                raise HTTPException(403, "Insufficient scope")
+        session.info["caller_scopes"] = granted
+        try:
+            return call_tool(session, name, body.arguments)
+        finally:
+            session.info.pop("caller_scopes", None)
 
     @app.get("/preferences/goals", dependencies=[Depends(require("read:diary"))])
     def get_goals(session=Depends(db)):

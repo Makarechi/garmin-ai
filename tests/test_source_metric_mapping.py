@@ -50,11 +50,12 @@ def settings(**kwargs):
     )
 
 
-def install_metric(db):
+def install_metric(db, *, privacy="private"):
     draft = TrackerSetupDraft(
         key="walk",
         name="Walk",
         locale="en",
+        privacy=privacy,
         topology="point",
         fields=[
             TrackerFieldDraft(
@@ -119,17 +120,9 @@ def test_confirmation_binds_the_reviewed_mapping_without_importing(db):
         )
 
 
-def test_confirmed_mapping_keeps_polled_data_raw_until_normalization(db, db_engine, monkeypatch):
+def test_unconfirmed_mapping_keeps_polled_data_raw(db, db_engine, monkeypatch):
     metric = install_metric(db)
-    draft = mapping(metric.id)
-    preview = preview_source_metric_mapping(db, settings(), draft)
-    confirm_source_metric_mapping(
-        db,
-        settings(),
-        SourceMetricMappingConfirmation(
-            draft=draft, confirmation_token=preview["confirmation_token"]
-        ),
-    )
+    preview_source_metric_mapping(db, settings(), mapping(metric.id))
     db.commit()
     now = datetime(2026, 1, 2, tzinfo=UTC)
 

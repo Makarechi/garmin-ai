@@ -18,10 +18,22 @@ mapping is bound to one source instance and metric version.
 `GET /source-metric-mappings` lists confirmed mappings, with `limit` and
 `after_id` for pagination. `DELETE /source-metric-mappings/{id}` removes a
 confirmed mapping only while it has no normalized data. Confirming a different
-mapping for the same source and metric requires removing the old one first;
-changes to source configuration likewise require a fresh preview.
+mapping for the same source and metric requires removing the old one first.
 
-This step records the owner's selection only. It does not import, normalize, or
-make source records queryable. Unmapped and confirmed source records remain
-private raw data until normalization and its correction, deletion, and consent
-rules are implemented separately.
+On the next source poll, a confirmed mapping can project point-in-time numeric
+records whose configured fields exist and whose unit matches exactly. The raw
+record and its revision remain available; repeated pages do not add a second
+observation. A correction invalidates the previous projection, and an explicit
+deletion invalidates its current projection. Unsupported times, missing fields,
+incorrect units, nonnumeric or out-of-range values stay in private raw storage
+without a current metric value. This does not infer missing fields or units.
+Reading a tracker metric that contains source observations requires both diary
+and health access, including for historical reads. The model also needs both
+categories enabled, in addition to any tracker-specific sharing consent.
+
+Only records returned by a subsequent poll are processed. Previously stored raw
+records are not automatically replayed, and source windows remain bounded by the
+existing polling policy. Calendar-day and interval sources are not normalized by
+this mapping. If the source configuration or metric contract changes, no
+additional records are projected using the old confirmation. Confirmed
+mappings that already have projections cannot yet be replaced through this API.

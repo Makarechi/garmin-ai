@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.db import transaction
@@ -147,6 +148,7 @@ def poll_source_instance(
                 stored = session.get(AppState, cursor_key, populate_existing=True)
                 if (dict(stored.value) if stored is not None else None) != snapshot:
                     return {"status": "stale", "records": records, "pages": pages}
+                projection_changed = False
                 for record in page.records:
                     value = record.model_dump(mode="json")
                     if (
@@ -220,6 +222,32 @@ def poll_source_instance(
                             session.add(AppState(key=record_key, value=latest))
                         else:
                             prior.value = latest
+                    else:
+                        revision = int(prior_value["revision"])
+                    from garmin_ai.source_metric_projection import project_source_record
+
+                    raw_id = session.scalar(
+                        select(SourcePayload.id).where(
+                            SourcePayload.source == f"plugin:{instance.id}",
+                            SourcePayload.endpoint == ENDPOINT,
+                            SourcePayload.source_key == record.source_record_id,
+                            SourcePayload.payload_hash == digest,
+                        )
+                    )
+                    projection_changed |= project_source_record(
+                        session,
+                        settings,
+                        instance.id,
+                        record,
+                        raw_id,
+                        revision,
+                        page.fetched_at,
+                        capabilities.time_semantics,
+                    )
+                if projection_changed:
+                    from garmin_ai.replay import invalidate_outputs
+
+                    invalidate_outputs(session)
                 snapshot = {
                     "window_start": start.isoformat(),
                     "window_end": end.isoformat(),
