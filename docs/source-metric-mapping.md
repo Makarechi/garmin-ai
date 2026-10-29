@@ -44,3 +44,8 @@ an unrelated source. The preview expires after 15 minutes and becomes invalid
 if another confirmation changes the mapping first. The previous confirmation
 is retained in private history. A changed metric contract or mapping fields
 that already have projections cannot yet be replaced through this API.
+
+The synthetic restore test exports a disposable database and restores it into
+an empty migrated database on the same host. It checks that a repeated record
+does not duplicate its observation and that subsequent corrections and
+deletions still apply. This is not independent-host restore acceptance.
