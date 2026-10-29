@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import insert
 
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
@@ -196,6 +197,7 @@ def test_later_invalid_revision_does_not_restore_or_bridge_old_values(db, change
     )
     assert old["matching_seconds"] == 180
     assert new["matching_seconds"] == 60
+    assert not evidence_is_stale(db, new)
     assert new["segments"][0]["start"] == (START + timedelta(minutes=2)).isoformat()
     rows = execute_analysis(
         db,
@@ -239,6 +241,37 @@ def test_non_time_weighted_metrics_do_not_fabricate_intervals(db):
     ensure_system_metric_definitions(db)
     with pytest.raises(ValueError, match="time-weighted"):
         execute_analysis(db, plan(metric_key="system.steps_bucket"))
+
+
+def test_aggregate_rejects_saturated_snapshot_before_filtering_tombstones(db):
+    version = ensure_system_metric_definitions(db)["stress_score"]
+    common = {
+        "metric": "stress_score",
+        "source": "synthetic",
+        "value": 70,
+        "unit": "score",
+        "metric_definition_version_id": version.id,
+        "quality": "observed",
+        "details": {},
+        "ingested_at": START + timedelta(hours=4),
+        "source_ref": None,
+    }
+    rows = []
+    for index in range(10002):
+        at = START + timedelta(seconds=index)
+        rows.append({**common, "ts": at, "local_date": at.date(), "deleted": index < 10001})
+    db.execute(insert(MeasurementRevision), rows)
+    db.flush()
+    spec = AnalysisSpec(
+        operation="aggregate_metric",
+        metric_key="system.stress_score",
+        method="max",
+        start=START,
+        end=START + timedelta(hours=3),
+        knowledge_cutoff=START + timedelta(days=1),
+    )
+    with pytest.raises(ValueError, match="exceeds 10000 observations"):
+        execute_analysis(db, spec)
 
 
 def test_existing_analysis_spec_keeps_its_pre_threshold_hash():
