@@ -708,3 +708,22 @@ def test_known_analytical_reply_is_not_consumed_by_an_active_note_form(db, db_en
     assert "Synthetic answer" in process_message(
         db_engine, Provider(), Settings(telegram_user_id=42), 70
     )
+
+
+def test_ambiguous_continuation_receives_relevant_owner_context(db, monkeypatch):
+    remember(db, 1, question="Ako som spal minulý týždeň?")
+    monkeypatch.setattr(agent, "call_tool", lambda *args: {"mean": 78})
+
+    class ProviderWithContext(Provider):
+        def structured(self, instruction, prompt, schema):
+            step = super().structured(instruction, prompt, schema)
+            step.response_language = "sk"
+            return step
+
+    provider = ProviderWithContext()
+    agent.answer_question(
+        db, provider, "A predtým?", Settings(locale="en"), NOW + timedelta(minutes=1)
+    )
+    context = provider.prompts[0]["conversation"]["turns"]
+    assert [turn["question"] for turn in context] == ["Ako som spal minulý týždeň?"]
+    assert "answer" not in context[0]
