@@ -1,5 +1,6 @@
 {
   "tracker.value_clarification": "Upresnite hodnotu záznamu oddelene od dátumu a času. Nič sa neuložilo.",
+  "tracker.fact_context_clarification": "Upresnite, či sa to stalo vám, a uveďte podrobnosti. Nič sa neuložilo.",
   "evidence.sleep.start": "Začiatok spánku podľa Garminu",
   "evidence.sleep.end": "Prebudenie podľa Garminu",
   "agent.sleep_unavailable": "Čas spánku nie je pri zvolených nastaveniach prístupu dostupný.",

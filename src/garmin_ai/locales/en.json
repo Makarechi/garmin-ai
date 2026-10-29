@@ -5,6 +5,7 @@
   "tracker.values_prompt": "Describe the time and values for {tracker}.",
   "tracker.time_clarification": "Please specify the date and exact time, for example 2026-10-22 at 14:00. A clock time alone does not establish the day. You can also use today, yesterday, or now.",
   "tracker.value_clarification": "Please clarify the tracker value separately from the date and time. Nothing was saved.",
+  "tracker.fact_context_clarification": "Please clarify whether this happened to you and provide the details. Nothing was saved.",
   "tracker.reminder": "Reminder: {tracker}.",
   "agent.too_many_records": "Specify no more than 20 records at a time.",
   "agent.record_missing": "The specified record was not found or was deleted. Check its ID.",
