@@ -268,7 +268,11 @@ def _fallback(
 
 
 def _verify_evidence(text, evidence):
-    if evidence.end <= evidence.start or text[evidence.start : evidence.end] != evidence.quote:
+    if (
+        evidence.end <= evidence.start
+        or evidence.end > len(text)
+        or text[evidence.start : evidence.end] != evidence.quote
+    ):
         raise ValueError("Extraction evidence does not match the source text")
 
 
