@@ -249,7 +249,9 @@ def test_existing_analysis_spec_keeps_its_pre_threshold_hash():
         end=START + timedelta(minutes=15),
         knowledge_cutoff=START + timedelta(days=1),
     )
-    original = existing.model_dump(mode="json", exclude={"threshold", "threshold_operator"})
+    original = existing.model_dump(
+        mode="json", exclude={"threshold", "threshold_operator", "timezone"}
+    )
     expected = hashlib.sha256(
         json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

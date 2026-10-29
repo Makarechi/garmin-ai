@@ -6,9 +6,10 @@ import ast
 import hashlib
 import json
 import math
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import DateTime, cast, func, or_, select
@@ -52,6 +53,7 @@ class AnalysisSpec(StrictModel):
         "compare_periods",
         "query_completeness",
         "threshold_segments",
+        "threshold_by_local_hour",
     ]
     metric_key: str | None = Field(
         default=None, pattern=r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$"
@@ -75,22 +77,33 @@ class AnalysisSpec(StrictModel):
     threshold_operator: Literal["gt", "gte", "lt", "lte"] | None = Field(
         default=None, description="Comparison applied to the observed metric value"
     )
+    timezone: str | None = Field(default=None, min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def bounded(self):
-        if self.end <= self.start or self.end - self.start > timedelta(days=366):
+        duration = self.end.astimezone(UTC) - self.start.astimezone(UTC)
+        if duration <= timedelta(0) or duration > timedelta(days=366):
             raise ValueError("Analysis window must be positive and no wider than 366 days")
         if self.time_relation != "starts_within" and self.operation != "query_entries":
             raise ValueError("Time relation is only supported for entry queries")
-        if self.operation == "threshold_segments":
+        if self.operation in {"threshold_segments", "threshold_by_local_hour"}:
             if self.threshold is None or self.threshold_operator is None:
                 raise ValueError("Threshold segments require a value and comparison")
             if self.method is not None:
                 raise ValueError("Threshold segments do not accept an aggregation method")
-            if self.end - self.start > timedelta(days=31):
+            if duration > timedelta(days=31):
                 raise ValueError("Threshold segments are limited to 31 days")
         elif self.threshold is not None or self.threshold_operator is not None:
             raise ValueError("Threshold parameters require threshold_segments")
+        if self.operation == "threshold_by_local_hour":
+            if self.timezone is None:
+                raise ValueError("Local-hour grouping requires a timezone")
+            try:
+                ZoneInfo(self.timezone)
+            except (ValueError, ZoneInfoNotFoundError):
+                raise ValueError("Unknown timezone") from None
+        elif self.timezone is not None:
+            raise ValueError("Timezone is only used for local-hour grouping")
         if self.source is not None:
             if self.operation == "query_entries":
                 raise ValueError("Metric source is only supported for metric analysis")
@@ -350,7 +363,7 @@ def register_definition_metrics(session, spec, event_version):
 
 def spec_hash(spec: AnalysisSpec) -> str:
     data = spec.model_dump(mode="json")
-    for field in ("threshold", "threshold_operator"):
+    for field in ("threshold", "threshold_operator", "timezone"):
         if data[field] is None:
             del data[field]
     return hashlib.sha256(
@@ -757,8 +770,8 @@ def query_completeness(session, spec: AnalysisSpec):
     }
 
 
-def threshold_segments(session, spec: AnalysisSpec):
-    """Find threshold intervals only where adjacent measured samples support them."""
+def _threshold_intervals(session, spec: AnalysisSpec):
+    """Select bounded source-separated intervals between valid measurements."""
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
     policy = contract.coverage_policy
     if contract.value_kind != "physical_number" or policy.get("kind") != "time_weighted":
@@ -766,9 +779,10 @@ def threshold_segments(session, spec: AnalysisSpec):
     if spec.source is not None and not spec.source.startswith("measurement:"):
         raise ValueError("Threshold intervals currently require measurement samples")
     gap = timedelta(seconds=policy["max_gap_seconds"])
+    window_start, window_end = spec.start.astimezone(UTC), spec.end.astimezone(UTC)
     snapshot = query_observations(
         session,
-        spec.model_copy(update={"start": spec.start - gap, "end": spec.end + gap}),
+        spec.model_copy(update={"start": window_start - gap, "end": window_end + gap}),
         include_revision_refs=True,
     )
     rows = snapshot["rows"]
@@ -797,9 +811,7 @@ def threshold_segments(session, spec: AnalysisSpec):
         "lt": lambda x: x < spec.threshold,
         "lte": lambda x: x <= spec.threshold,
     }[spec.threshold_operator]
-    covered = 0.0
-    matching = 0.0
-    segments = []
+    intervals = []
     for first, second in zip(rows, rows[1:], strict=False):
         first_at = datetime.fromisoformat(first["observed_at"])
         second_at = datetime.fromisoformat(second["observed_at"])
@@ -810,19 +822,28 @@ def threshold_segments(session, spec: AnalysisSpec):
             or not timedelta(0) < second_at - first_at <= gap
         ):
             continue
-        left, right = max(spec.start, first_at), min(spec.end, second_at)
+        left, right = max(window_start, first_at), min(window_end, second_at)
         if left >= right:
             continue
-        seconds = (right - left).total_seconds()
-        covered += seconds
-        if not compare(first["value"]):
+        intervals.append((left, right, first["value"], compare(first["value"])))
+    return contract, snapshot, source, intervals
+
+
+def threshold_segments(session, spec: AnalysisSpec):
+    """Find threshold intervals only where adjacent measured samples support them."""
+    contract, snapshot, source, intervals = _threshold_intervals(session, spec)
+    covered = sum((right - left).total_seconds() for left, right, _value, _match in intervals)
+    matching = 0.0
+    segments = []
+    for left, right, value, matches in intervals:
+        if not matches:
             continue
-        matching += seconds
+        matching += (right - left).total_seconds()
         if segments and segments[-1]["end"] == left:
             segments[-1]["end"] = right
-            segments[-1]["peak"] = max(segments[-1]["peak"], first["value"])
+            segments[-1]["peak"] = max(segments[-1]["peak"], value)
         else:
-            segments.append({"start": left, "end": right, "peak": first["value"]})
+            segments.append({"start": left, "end": right, "peak": value})
     result_segments = [
         {
             "start": item["start"].isoformat(),
@@ -843,7 +864,8 @@ def threshold_segments(session, spec: AnalysisSpec):
         "threshold": spec.threshold,
         "threshold_operator": spec.threshold_operator,
         "covered_seconds": covered,
-        "coverage_ratio": covered / (spec.end - spec.start).total_seconds(),
+        "coverage_ratio": covered
+        / (spec.end.astimezone(UTC) - spec.start.astimezone(UTC)).total_seconds(),
         "matching_seconds": matching if covered else None,
         "segments": result_segments,
         "input_revisions": snapshot["input_revisions"],
@@ -851,6 +873,73 @@ def threshold_segments(session, spec: AnalysisSpec):
         "limitations": [
             "Only intervals between consecutive valid measurements within the maximum gap are covered",
             "Missing time is unknown, not below threshold",
+            "Measurements and sources are not combined",
+        ],
+    }
+
+
+def _local_hour_slices(start, end, zone):
+    """Split elapsed UTC time at local hour and timezone-offset transitions."""
+    left, end = start.astimezone(UTC), end.astimezone(UTC)
+    while left < end:
+        local = left.astimezone(zone)
+        seconds = 3600 - (local.minute * 60 + local.second + local.microsecond / 1_000_000)
+        stop = min(end, left + timedelta(seconds=seconds))
+        if (stop - timedelta(microseconds=1)).astimezone(zone).utcoffset() != local.utcoffset():
+            low, high = left, stop
+            while high - low > timedelta(microseconds=1):
+                middle = low + (high - low) / 2
+                if middle.astimezone(zone).utcoffset() == local.utcoffset():
+                    low = middle
+                else:
+                    high = middle
+            stop = high
+        yield local.hour, local.date(), (stop - left).total_seconds()
+        left = stop
+
+
+def threshold_by_local_hour(session, spec: AnalysisSpec):
+    """Group threshold time by local clock hour with observed-time denominators."""
+    contract, snapshot, source, intervals = _threshold_intervals(session, spec)
+    zone = ZoneInfo(spec.timezone)
+    scheduled, covered, matching = [0.0] * 24, [0.0] * 24, [0.0] * 24
+    observed_days = [set() for _ in range(24)]
+    for hour, _day, seconds in _local_hour_slices(spec.start, spec.end, zone):
+        scheduled[hour] += seconds
+    for left, right, _value, matches in intervals:
+        for hour, day, seconds in _local_hour_slices(left, right, zone):
+            covered[hour] += seconds
+            observed_days[hour].add(day)
+            if matches:
+                matching[hour] += seconds
+    return {
+        "spec_hash": spec_hash(spec),
+        "metric": spec.metric_key,
+        "metric_version": contract.version,
+        "unit": contract.unit,
+        "scale_id": contract.scale_id,
+        "scale_version": contract.scale_version,
+        "source": source,
+        "threshold": spec.threshold,
+        "threshold_operator": spec.threshold_operator,
+        "timezone": spec.timezone,
+        "rows": [
+            {
+                "hour": hour,
+                "scheduled_seconds": scheduled[hour],
+                "covered_seconds": covered[hour],
+                "matching_seconds": matching[hour] if covered[hour] else None,
+                "matching_ratio": matching[hour] / covered[hour] if covered[hour] else None,
+                "coverage_ratio": covered[hour] / scheduled[hour] if scheduled[hour] else None,
+                "observed_days": len(observed_days[hour]),
+            }
+            for hour in range(24)
+        ],
+        "input_revisions": snapshot["input_revisions"],
+        "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
+        "limitations": [
+            "Only intervals between consecutive valid measurements within the maximum gap are covered",
+            "Matching share uses observed time, not sample count or unobserved time",
             "Measurements and sources are not combined",
         ],
     }
@@ -867,6 +956,8 @@ def execute_analysis(session, spec: AnalysisSpec):
         return compare_periods(session, spec)
     if spec.operation == "threshold_segments":
         return threshold_segments(session, spec)
+    if spec.operation == "threshold_by_local_hour":
+        return threshold_by_local_hour(session, spec)
     return query_completeness(session, spec)
 
 
