@@ -34,7 +34,11 @@ says schemas can be cached separately from message content. Accordingly the
 adapter sends only trusted application-owned schemas and never generates schema
 property names, enum values, constants or patterns from private tracker data.
 It omits unsupported schema constraints and validates the result against the
-original application model. Consult the provider's data-retention terms for
+original application model. To stay within the provider's schema complexity
+limits, some nullable fields with a null default are represented as optional;
+the original model restores their defaults and checks the complete response.
+Schemas that cannot be represented within those limits are rejected locally.
+Consult the provider's data-retention terms for
 the selected account and model; no blanket retention guarantee is implied.
 
 `tests/test_anthropic_live.py` is a synthetic smoke check. It runs only with
