@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Local-first Garmin health timeline and personal analytics"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.13,<3.15"
+requires-python = ">=3.15.2,<3.16"
 dependencies = [
     "alembic>=1.16,<2",
     "anyio>=4,<5",
@@ -17,6 +17,7 @@ dependencies = [
     "mcp>=1.12,<2",
     "numpy>=2,<3",
     "psycopg[binary]>=3.2,<4",
+    "pydantic>=2.14.1,<3",
     "pydantic-settings>=2.10,<3",
     "scipy>=1.16,<2",
     "sqlalchemy>=2.0,<3",
@@ -55,6 +56,7 @@ testpaths = ["tests"]
 markers = ["regression(id): supplied review regression case identifier"]
 
 [tool.ruff]
+# Keep existing source formatting; runtime support is defined by requires-python.
 target-version = "py313"
 line-length = 100
 

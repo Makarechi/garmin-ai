@@ -1,6 +1,6 @@
 # Interactive synthetic demo
 
-Run from the repository root with Python 3.13 or newer:
+Run from the repository root with Python 3.15.2:
 
 ```sh
 python3 scripts/serve_demo.py

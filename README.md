@@ -55,7 +55,7 @@ It has local smoke evidence but is not yet a supported public release.
 
 ### Setup from source
 
-Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
+Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.15.2 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
 
 ```sh
 uv sync --locked

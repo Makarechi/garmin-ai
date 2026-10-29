@@ -27,7 +27,11 @@ jobs:
           fetch-depth: 2
       - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.13.5"
           enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
       - run: uv sync --locked --extra full
       - run: uv run playwright install --with-deps chromium
       - run: mkdir -p test-results
@@ -78,7 +82,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.13.5"
           enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
       - run: uv sync --locked
       - run: mkdir -p test-results
       - run: uv run python scripts/release_metadata.py --profile core-only > test-results/core-release-metadata.json
@@ -106,7 +114,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.13.5"
           enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
       - run: uv sync --locked --no-dev
       - name: Build and exercise a digest-pinned bundle on the native host
         run: bash scripts/smoke_release_install.sh

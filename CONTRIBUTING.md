@@ -7,7 +7,7 @@ dependencies and container images retain their own licenses.
 
 ## First local check
 
-Install Python 3.13 and [uv](https://docs.astral.sh/uv/), then run:
+Install Python 3.15.2 and [uv](https://docs.astral.sh/uv/), then run:
 
 ```sh
 uv sync --locked
@@ -21,6 +21,20 @@ database whose name ends in `_test`, set `GA_TEST_DATABASE_URL`, and run
 `uv run pytest -q tests/test_core_only_flow.py`. The test suite refuses a database
 without that suffix. No provider SDK or real account is needed. Do not put a real
 credential in a test command or fixture.
+
+## Python runtime
+
+The supported runtime is CPython 3.15.2 through 3.15.x; Python 3.13 and 3.14
+are no longer declared supported. `.python-version`, package metadata, extension
+examples and the container use the same runtime. CI installs it explicitly before
+running `uv sync --locked`.
+
+If `uv` reports that no 3.15.2 download is available, install Python 3.15.2 from
+[python.org](https://www.python.org/downloads/release/python-3152/) and select it
+with `uv sync --locked --python /absolute/path/to/python3.15`. Do not fall back to
+3.15.1: it predates the 3.15.2 security fixes. Pydantic 2.14.1 or newer supplies
+Python 3.15 wheels; the lockfile pins the verified dependency set. Ruff keeps the
+existing source syntax/formatting target independently of runtime support.
 
 ## Where to work
 
