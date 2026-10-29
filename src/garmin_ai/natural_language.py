@@ -277,7 +277,10 @@ def _verify_evidence(text, evidence):
 
 
 def _temporal_number_spans(text, clock_values=()):
-    """Find unambiguous numeric dates and clock expressions in the source."""
+    """Find contextual clocks even when they differ from proposed entry times.
+
+    ``clock_values`` is retained for callers, but must never limit recognition.
+    """
     patterns = (
         r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?!\d)",
         r"(?<![\d:])\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?![\d:])",
@@ -296,7 +299,7 @@ def _temporal_number_spans(text, clock_values=()):
     clocks, _ = _clock_tokens(text, interval_hyphens=True)
     previous = None
     previous_contextual = False
-    for start, end, hour, minute in clocks:
+    for start, end, _hour, _minute in clocks:
         direct = start in direct_starts or bool(after_clock.match(text, end))
         linked = False
         if previous is not None and previous_contextual:
@@ -305,7 +308,7 @@ def _temporal_number_spans(text, clock_values=()):
             if not linked and re.fullmatch(r"\s*(?:and|и)\s*", gap, re.I):
                 linked = previous[0] in between_starts
         contextual = direct or linked
-        if contextual and (not clock_values or (hour, minute) in clock_values):
+        if contextual:
             spans.append((start, end))
         previous = (start, end)
         previous_contextual = contextual

@@ -137,6 +137,24 @@ def test_measurement_preposition_does_not_make_a_value_a_clock():
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "quote", "value"),
+    [
+        ("Today at 3 I planned stretching. Today from 19:00 to 19:15 I stretched", "3", 3),
+        ("Today at 7.30 I planned stretching. Today from 19:00 to 19:15 I stretched", "7.30", 7.3),
+        ("Сегодня в 3 я планировал растяжку. Сегодня с 19:00 до 19:15 растягивался", "3", 3),
+    ],
+)
+def test_other_contextual_clock_cannot_be_a_field_value(text, quote, value):
+    assert not _value_is_evidenced(
+        value,
+        quote,
+        source_text=text,
+        source_start=text.index(quote),
+        clock_values={(19, 0), (19, 15)},
+    )
+
+
 def test_dotted_clock_and_identical_decimal_have_distinct_contexts():
     text = "Today at 7.30, glucose 7.30 mmol/L"
     assert not _value_is_evidenced(
@@ -411,6 +429,23 @@ def test_setup_language_creates_preview_not_definition_or_fact(db):
     assert result["intent"] == "tracker_proposal"
     assert result["preview"]["definition"]["key"] == "user.stretch"
     assert db.scalar(select(func.count()).select_from(EventDefinition)) == 0
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_other_clock_cannot_become_tracker_value(db):
+    created = install(db)
+    text = "Today at 3 I planned stretching. Today from 19:00 to 19:15 I stretched"
+    extraction = entry_result(text, created["action"]["definition_version_id"])
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unrelated-clock-value"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
