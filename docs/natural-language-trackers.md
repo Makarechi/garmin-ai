@@ -60,6 +60,13 @@ for English or Russian negation. It also rejects clipped word
 fragments. Such cases request clarification; this conservative check does not
 establish subject, tense, modality or multilingual semantic equivalence.
 
+Common English and Russian future markers and several paired quotation marks
+also cause clarification instead of a write when they overlap the proposed
+evidence. Broad evidence quotes may therefore require clarification even when
+only part of the quoted message is uncertain. These checks are conservative
+and do not establish full intent, quotation, subject, or future-tense coverage
+across languages.
+
 Every changed timestamp needs an independently supported calendar day as well as
 a clock. Its exact source quote must contain an ISO date (`2026-10-22`), a
 day/month/year date (`22.10.2026` or `22/10/2026`), or a supported English/Russian

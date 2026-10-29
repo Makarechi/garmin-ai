@@ -278,6 +278,40 @@ def test_negation_in_a_previous_sentence_does_not_hide_a_separate_value():
     assert _value_is_evidenced(3, "3", source_text=text, source_start=text.index("3"))
 
 
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ('He said "difficulty 3"', 3),
+        ("Он сказал «сложность 3»", 3),
+        ("He said “difficulty 3”", 3),
+        ('He said "difficulty 3', 3),
+        ("I will record difficulty 3", 3),
+        ("Difficulty 3 will be recorded", 3),
+        ("I'll record difficulty 3", 3),
+        ("Буду записывать сложность 3", 3),
+    ],
+)
+def test_unconfirmed_context_is_not_value_evidence(text, value):
+    quote = str(value)
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+    assert not _categorical_value_is_evidenced(
+        quote, quote, source_text=text, source_start=text.index(quote)
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'He said "difficulty 2". I recorded difficulty 3',
+        "I will stretch tomorrow. I recorded difficulty 3",
+        "I recorded difficulty 3. I'll stretch tomorrow",
+        "I recorded difficulty 3",
+    ],
+)
+def test_separate_statement_does_not_hide_valid_value(text):
+    assert _value_is_evidenced(3, "3", source_text=text, source_start=text.rindex("3"))
+
+
 def test_minute_clock_evidence_cannot_add_or_hide_seconds():
     minute = datetime.fromisoformat("2026-10-01T19:00:00+02:00")
     second = minute + timedelta(seconds=59)
@@ -705,6 +739,78 @@ def test_valid_unit_attached_to_number_can_be_saved(db):
 @pytest.mark.parametrize(
     "text",
     [
+        "Today from 19:00 to 19:15 I will stretch, difficulty 3",
+        "Today from 19:00 to 19:15 I'll stretch, difficulty 3",
+        "Сегодня с 19:00 до 19:15 буду растягиваться, сложность 3",
+        'He said: "Today from 19:00 to 19:15 I stretched, difficulty 3"',
+        "Он сказал: «Сегодня с 19:00 до 19:15 растягивался, сложность 3»",
+    ],
+)
+def test_future_or_quoted_statement_does_not_create_fact(db, text):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": text.rindex("3") + 1, "quote": "3"},
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unconfirmed-context"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Today from 19:00 to 19:15 I will stretch",
+        'He said: "Today from 19:00 to 19:15 I stretched"',
+    ],
+)
+def test_future_or_quoted_statement_with_no_fields_does_not_create_fact(db, text):
+    draft = stretch_draft(
+        fields=[
+            TrackerFieldDraft(
+                key="difficulty",
+                label="Difficulty",
+                kind="scale",
+                minimum=1,
+                maximum=5,
+                required=False,
+            )
+        ]
+    )
+    created = install(db, draft)
+    extraction = entry_result(text, created["action"]["definition_version_id"], fields=[])
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unconfirmed-empty"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "Сегодня с 19:00 до 19:15 растягивался, сложность 3",
         "Today from 19:00 to 19:15 I stretched, difficulty 3",
     ],
@@ -998,6 +1104,65 @@ def test_http_clipped_negation_does_not_save_a_boolean(db, db_engine, monkeypatc
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert db.scalar(select(func.count()).select_from(Audit)) == before_audits
     assert db.scalar(select(func.count()).select_from(MetricObservation)) == before_metrics
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Today from 19:00 to 19:15 I will stretch, difficulty 3",
+        'He said: "Today from 19:00 to 19:15 I stretched, difficulty 3"',
+    ],
+)
+def test_http_unconfirmed_context_does_not_save(db, db_engine, monkeypatch, text):
+    created = install(db)
+    extraction = entry_result(
+        text,
+        created["action"]["definition_version_id"],
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": text.rindex("3") + 1, "quote": "3"},
+            }
+        ],
+    )
+    db.commit()
+
+    class ApiClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz or UTC)
+
+    class HttpProvider(FixedProvider):
+        def close(self):
+            pass
+
+    monkeypatch.setattr("garmin_ai.api.datetime", ApiClock)
+    monkeypatch.setattr("garmin_ai.onboarding.model_category_selected", lambda *_args: True)
+    monkeypatch.setattr(
+        "garmin_ai.integrations.create_model_provider", lambda *_args: HttpProvider(extraction)
+    )
+    token = "synthetic-ma05-context-" + "x" * 32
+    settings = Settings(
+        _env_file=None,
+        locale="en",
+        llm_enabled=True,
+        gemini_model="synthetic",
+        integrations=[
+            IntegrationInstance(id="model:gemini:synthetic", kind="model", provider="gemini")
+        ],
+        api_tokens=[ApiToken(key=token, scopes={"read:diary", "write:diary"})],
+    )
+    response = TestClient(create_app(settings, db_engine)).post(
+        "/natural-language/trackers",
+        headers={"Authorization": "Bearer " + token},
+        json={"text": text, "operation_id": "unconfirmed-context-http"},
+    )
+    assert response.status_code == 200
+    assert response.json()["intent"] == "clarify" and response.json()["written"] is False
+    assert "Nothing was saved" in response.json()["clarification"]
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 def test_explicit_boolean_answer_can_be_saved(db):

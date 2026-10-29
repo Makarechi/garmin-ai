@@ -362,6 +362,32 @@ _CONTEXT_NEGATION = re.compile(
     re.I,
 )
 
+_FUTURE_CONTEXT = re.compile(
+    r"(?<!\w)(?:will|shall|gonna|буду|будешь|будет|будем|будете|будут)(?!\w)"
+    r"|(?<!\w)(?:i|you|he|she|it|we|they)['’]ll(?!\w)",
+    re.I,
+)
+
+
+def _has_uncertain_fact_context(source, start, end):
+    boundaries = list(re.finditer(r"[!?]|(?<!\d)\.(?!\d)|(?<=\d)\.(?=\s|$)", source))
+    before = max((match.end() for match in boundaries if match.end() <= start), default=0)
+    after = min(
+        (match.start() for match in boundaries if match.start() >= end), default=len(source)
+    )
+    if _FUTURE_CONTEXT.search(source[before:after]):
+        return True
+    pairs = {'"': '"', "«": "»", "“": "”", "„": "”", "「": "」", "『": "』"}
+    stack = []
+    for index, char in enumerate(source):
+        if stack and char == stack[-1][1]:
+            begin, _ = stack.pop()
+            if begin < end and index + 1 > start:
+                return True
+        elif char in pairs:
+            stack.append((index, pairs[char]))
+    return any(begin < end for begin, _ in stack)
+
 
 def _has_contextual_negation(source, start, end):
     boundaries = list(re.finditer(r"[!?]|(?<!\d)\.(?!\d)|(?<=\d)\.(?=\s|$)", source))
@@ -423,7 +449,9 @@ def _value_is_evidenced(
             after = source[end] if end < len(source) else ""
             if before.isalnum() or before == "_" or after.isalnum() or after == "_":
                 continue
-            if not _has_contextual_negation(source, start, end):
+            if not _has_contextual_negation(source, start, end) and not _has_uncertain_fact_context(
+                source, start, end
+            ):
                 return True
         return False
     if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
@@ -457,7 +485,9 @@ def _value_is_evidenced(
                 continue
             if Decimal(match.group().replace(",", ".")) != expected:
                 continue
-            if not _has_contextual_negation(source, start, end):
+            if not _has_contextual_negation(source, start, end) and not _has_uncertain_fact_context(
+                source, start, end
+            ):
                 return True
         return False
     if isinstance(value, str) and re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", value):
@@ -470,6 +500,7 @@ def _value_is_evidenced(
                 _complete_number_in_source(source, start, end, attached_unit_starts)
                 and not any(start < stop and end > begin for begin, stop in temporal_spans)
                 and not _has_contextual_negation(source, start, end)
+                and not _has_uncertain_fact_context(source, start, end)
             ):
                 return True
         return False
@@ -484,7 +515,9 @@ def _value_is_evidenced(
             after = source[end] if end < len(source) else ""
             if before.isalnum() or before == "_" or after.isalnum() or after == "_":
                 continue
-        if not _has_contextual_negation(source, start, end):
+        if not _has_contextual_negation(source, start, end) and not _has_uncertain_fact_context(
+            source, start, end
+        ):
             return True
     return False
 
@@ -520,6 +553,8 @@ def _categorical_value_is_evidenced(
         if not expected or [token for token, _, _ in matched] != expected:
             continue
         if _has_contextual_negation(source, offset + matched[0][1], offset + matched[-1][2]):
+            continue
+        if _has_uncertain_fact_context(source, offset + matched[0][1], offset + matched[-1][2]):
             continue
         if any(
             token.isdecimal()
@@ -617,6 +652,10 @@ class TemporalEvidenceError(ValueError):
 
 class FieldEvidenceError(ValueError):
     """A proposed value could not be verified against its source."""
+
+
+class FactContextError(ValueError):
+    """The source context does not establish an actual personal event."""
 
 
 def _approximate_temporal_span(text, start, end):
@@ -1007,6 +1046,10 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if extraction.start_evidence is None:
             raise ValueError("Changed start requires evidence")
         _verify_evidence(text, extraction.start_evidence)
+        if _has_uncertain_fact_context(
+            text, extraction.start_evidence.start, extraction.start_evidence.end
+        ):
+            raise FactContextError("Start context does not establish a recorded fact")
         result = _datetime_evidence(
             extraction.start,
             extraction.start_evidence.quote,
@@ -1026,6 +1069,10 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if extraction.end_evidence is None:
             raise ValueError("Changed end requires evidence")
         _verify_evidence(text, extraction.end_evidence)
+        if _has_uncertain_fact_context(
+            text, extraction.end_evidence.start, extraction.end_evidence.end
+        ):
+            raise FactContextError("End context does not establish a recorded fact")
         result = _datetime_evidence(
             end,
             extraction.end_evidence.quote,
@@ -1049,6 +1096,8 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         seen.add(field.field_id)
         contract = metadata[field.field_id]
         _verify_evidence(text, field.evidence)
+        if _has_uncertain_fact_context(text, field.evidence.start, field.evidence.end):
+            raise FactContextError("Value context does not establish a recorded fact")
         expected_unit = contract.get("unit")
         attached_unit_starts = set()
         if contract["semantic"] == "quantity":
@@ -1435,6 +1484,13 @@ def process_tracker_text(
                 locale,
             ),
             "temporal_evidence": {"field": exc.field, **exc.evidence.model_dump()},
+            "written": False,
+        }
+    except FactContextError:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "intent": "clarify",
+            "clarification": translate("tracker.fact_context_clarification", locale),
             "written": False,
         }
     except FieldEvidenceError:
