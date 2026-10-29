@@ -933,9 +933,19 @@ def process_tracker_text(
             reason="tracker_selection_required",
             select_from_all=True,
         )
+    expand_offline_selection = (
+        has_more_candidates
+        and request.selected_event_id is None
+        and request.selected_definition_version_id is None
+    )
     if provider is None:
         return _fallback(
-            session, candidates, locale=locale, granted=granted, selected_action=selected_action
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            selected_action=selected_action,
+            select_from_all=expand_offline_selection,
         )
     from garmin_ai.share_policy import sharing_allowed, version_sharing_allowed
 
@@ -1008,7 +1018,14 @@ def process_tracker_text(
             provider, INSTRUCTION, prompt, TrackerExtraction, {"diary"}
         )
     except (ProviderUnavailable, ProviderOutputInvalid, ProviderRequestInvalid):
-        return _fallback(session, candidates, locale=locale, granted=granted)
+        return _fallback(
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            selected_action=selected_action,
+            select_from_all=expand_offline_selection,
+        )
     extraction = TrackerExtraction.model_validate(extraction)
     if extraction.confidence < 0.85:
         return {

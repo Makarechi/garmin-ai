@@ -16,6 +16,10 @@ channel labels using their schema consent. If `selection_has_more` is true, the
 authenticated `/actions` endpoint provides the full local list. Continue with a
 new operation ID and the selected `selected_definition_version_id`. This fallback
 does not expand the supported write languages.
+If the model is unavailable, the same bounded selection is offered whenever
+ranking omitted trackers, even when the message matched one of the first five.
+An explicitly selected tracker or entry remains selected instead of expanding
+the list.
 
 Setup wishes and facts are separate operations. “I want to track stretching” can only return a
 tracker preview with the existing explicit confirmation token; it cannot create a stretching
