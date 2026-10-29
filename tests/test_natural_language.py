@@ -167,7 +167,14 @@ def test_boolean_evidence_cannot_clip_part_of_a_word(text, quote, value):
 
 
 @pytest.mark.parametrize(
-    ("value", "text", "quote"), [(3, "not 3", "3"), ("run", "not run", "run"), ("3", "не 3", "3")]
+    ("value", "text", "quote"),
+    [
+        (3, "not 3", "3"),
+        (3, "not\n3", "3"),
+        (3, "not; 3", "3"),
+        ("run", "not run", "run"),
+        ("3", "не 3", "3"),
+    ],
 )
 def test_field_evidence_cannot_clip_preceding_negation(value, text, quote):
     assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))

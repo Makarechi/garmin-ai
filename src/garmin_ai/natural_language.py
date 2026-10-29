@@ -319,7 +319,7 @@ _PRECEDING_NEGATION = re.compile(
 
 def _has_preceding_negation(source, start):
     preceding = source[:start]
-    boundaries = list(re.finditer(r"[!?;\n]|(?<!\d)\.(?!\d)", preceding))
+    boundaries = list(re.finditer(r"[!?]|(?<!\d)\.(?!\d)", preceding))
     clause = preceding[boundaries[-1].end() :] if boundaries else preceding
     return bool(_PRECEDING_NEGATION.search(clause))
 
