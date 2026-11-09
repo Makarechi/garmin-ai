@@ -4,11 +4,17 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select, text
 
-from garmin_ai.models import AppState, HealthDay, SourcePayload, TimelineInterval
+from garmin_ai.models import Activity, AppState, HealthDay, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.replay import canonical_source, projection_mismatch
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
+
+
+def plan_nodes(node):
+    yield node
+    for child in node.get("Plans", []):
+        yield from plan_nodes(child)
 
 
 def revisions(db, count=1):
@@ -184,6 +190,31 @@ def test_owner_sets_compose_in_repeated_predicates(db):
         )
 
 
+def test_owner_sets_read_fresh_references_for_each_query(db):
+    old = revisions(db)[0]
+    state = AppState(key="sample-owner:changing", value={})
+    db.add(state)
+    for reference, expected in (
+        (None, False),
+        (str(old.id), True),
+        (str(uuid4()), False),
+        (None, False),
+    ):
+        state.value = {"source_ref": reference}
+        db.flush()
+        assert (
+            bool(
+                db.scalar(
+                    select(SourcePayload.id).where(
+                        SourcePayload.id == old.id,
+                        canonical_source(),
+                    )
+                )
+            )
+            == expected
+        )
+
+
 def test_owner_journals_are_not_rescanned_for_every_historical_revision(db):
     revisions(db, count=250)
     for i in range(1000):
@@ -206,14 +237,9 @@ def test_owner_journals_are_not_rescanned_for_every_historical_revision(db):
     sql = str(statement.compile(db.bind, compile_kwargs={"literal_binds": True}))
     plan = db.scalar(text("EXPLAIN (ANALYZE, FORMAT JSON) " + sql))[0]["Plan"]
 
-    def nodes(node):
-        yield node
-        for child in node.get("Plans", []):
-            yield from nodes(child)
-
     journal_scans = [
         node
-        for node in nodes(plan)
+        for node in plan_nodes(plan)
         if (
             node.get("Relation Name") == "app_state"
             and any(
@@ -226,3 +252,86 @@ def test_owner_journals_are_not_rescanned_for_every_historical_revision(db):
     ]
     assert journal_scans
     assert all(node["Actual Loops"] <= 1 for node in journal_scans)
+
+
+def test_failed_fit_siblings_are_checked_once_per_stream(db):
+    count = 60
+    current = SourcePayload(
+        endpoint="activity_fit",
+        source_key="synthetic",
+        payload_hash="current-fit",
+        payload=None,
+        archive_key="synthetic/current-fit",
+        fetched_at=NOW,
+        parser_version=PARSER_VERSION,
+        status="normalized",
+    )
+    db.add(current)
+    db.add(
+        Activity(
+            id="synthetic",
+            kind="synthetic",
+            start=NOW,
+            end=NOW + timedelta(seconds=1),
+            timezone="UTC",
+            fit_key=current.archive_key,
+            details={"fit_status": "normalized", "parsed_fit_key": current.archive_key},
+        )
+    )
+    db.flush()
+    db.add(
+        AppState(
+            key="fit-version:synthetic",
+            value={
+                "source_ref": str(current.id),
+                "requested_at": NOW.isoformat(),
+            },
+        )
+    )
+    for index in range(count):
+        failed = SourcePayload(
+            endpoint="activity_fit",
+            source_key="synthetic",
+            payload_hash=f"failed-fit-{index}",
+            payload=None,
+            archive_key=f"synthetic/failed-fit-{index}",
+            fetched_at=NOW + timedelta(seconds=index + 1),
+            parser_version=PARSER_VERSION - 1,
+            status="error",
+        )
+        db.add(failed)
+        db.flush()
+        db.add(
+            AppState(
+                key=f"ingest-meta:{failed.id}",
+                value={
+                    "failed_parser_version": PARSER_VERSION,
+                },
+            )
+        )
+    db.flush()
+    db.execute(text("ANALYZE source_payloads"))
+    db.execute(text("ANALYZE app_state"))
+    db.execute(text("SET LOCAL jit = off"))
+    db.execute(text("SET LOCAL work_mem = '2MB'"))
+    statement = select(SourcePayload.id).where(projection_mismatch())
+    assert list(db.scalars(statement)) == []
+    sql = str(statement.compile(db.bind, compile_kwargs={"literal_binds": True}))
+    plan = db.scalar(text("EXPLAIN (ANALYZE, FORMAT JSON) " + sql))[0]["Plan"]
+    failure_metadata = [
+        node
+        for node in plan_nodes(plan)
+        if node.get("Relation Name") == "app_state"
+        and (
+            "ingest-meta:" in str(node.get("Index Cond", ""))
+            or "failed_parser_version" in str(node.get("Filter", ""))
+        )
+    ]
+    assert failure_metadata
+    assert sum(node["Actual Loops"] for node in failure_metadata) <= count * 2
+    sibling_visits = sum(
+        (node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"]
+        for node in plan_nodes(plan)
+        if node.get("Relation Name") == "source_payloads"
+    )
+    assert sibling_visits <= count * 4

@@ -3,9 +3,23 @@
 import hashlib
 import json
 from datetime import UTC, datetime
+from functools import lru_cache
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, String, Uuid, case, cast, delete, func, or_, select, true, update
+from sqlalchemy import (
+    DateTime,
+    String,
+    Uuid,
+    case,
+    cast,
+    delete,
+    func,
+    or_,
+    select,
+    true,
+    union_all,
+    update,
+)
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH, aggregate_order_by
 from sqlalchemy.orm import aliased
 
@@ -98,18 +112,7 @@ def invalidate_outputs(session):
     upsert(session, AppState, {"key": "replay:generation", "value": {"id": str(uuid4())}}, ["key"])
 
 
-def canonical_source():
-    def owns_reference(name, references):
-        # Build an uncorrelated reference set once, rather than scanning every
-        # projection journal separately for every historical raw revision.
-        owners = (
-            references.distinct()
-            .correlate(None)
-            .cte("replay_" + name, nesting=True)
-            .prefix_with("MATERIALIZED")
-        )
-        return func.coalesce(cast(SourcePayload.id, String).in_(select(owners.c[0])), False)
-
+def _projection_owners():
     activity_refs = (
         func.jsonb_array_elements_text(
             func.jsonb_path_query_array(
@@ -130,20 +133,76 @@ def canonical_source():
         .table_valued("key", "value")
         .render_derived()
     )
-    # Older ingest versions retained a newer failed raw revision without moving
-    # their success watermark. Give the newest such attempt a chance to replay.
-    watermark = aliased(AppState)
-    failed = aliased(SourcePayload)
-    attempted = aliased(AppState)
-    state_key = func.concat(
-        "ingest:", SourcePayload.source, ":", SourcePayload.endpoint, ":", SourcePayload.source_key
-    )
-    latest_failed = (
-        select(failed.id)
+    references = union_all(
+        select(AppState.value["source_ref"].astext.label("source_ref")).where(
+            or_(
+                AppState.key.startswith("sample-owner:"),
+                AppState.key.startswith("interval-owner:"),
+                AppState.key.startswith("observation-owner:"),
+                AppState.key.startswith("activity-parts-owner:"),
+            )
+        ),
+        select(activity_refs.c.value)
+        .select_from(AppState)
+        .join(activity_refs, true())
+        .where(AppState.key.startswith("activity-version:")),
+        select(cast(Measurement.source_ref, String)),
+        select(cast(MetricObservation.source_ref, String)),
+        select(TimelineInterval.evidence["source_ref"].astext),
+        select(health_refs.c.value)
+        .select_from(HealthDay)
+        .join(health_refs, true())
         .where(
-            failed.source == SourcePayload.source,
-            failed.endpoint == SourcePayload.endpoint,
-            failed.source_key == SourcePayload.source_key,
+            health_refs.c.key.in_(
+                [
+                    f"field:{column}"
+                    for column in HealthDay.__table__.columns.keys()
+                    if column not in {"day", "sources", "updated_at"}
+                ]
+            )
+        ),
+    ).subquery()
+    return (
+        select(references.c.source_ref)
+        .where(references.c.source_ref.is_not(None))
+        .distinct()
+        .correlate(None)
+        .cte("replay_projection_owners")
+        .prefix_with("MATERIALIZED")
+    )
+
+
+# Share one statement-level materialization, including when canonical_source is
+# used more than once in the same query. This stores SQL structure, never data.
+_PROJECTION_OWNERS = _projection_owners()
+
+
+@lru_cache(maxsize=8)
+def _failed_candidates(parser_version):
+    # A failed sibling has the same eligibility watermark for every raw in its
+    # stream. Rank eligible failures once instead of probing them for each raw.
+    failed = aliased(SourcePayload)
+    watermark = aliased(AppState)
+    attempted = aliased(AppState)
+    state_key = case(
+        (failed.endpoint == "activity_fit", func.concat("fit-version:", failed.source_key)),
+        else_=func.concat("ingest:", failed.source, ":", failed.endpoint, ":", failed.source_key),
+    )
+    ranked = (
+        select(
+            failed.id,
+            failed.source,
+            failed.endpoint,
+            failed.source_key,
+            func.row_number()
+            .over(
+                partition_by=(failed.source, failed.endpoint, failed.source_key),
+                order_by=(failed.fetched_at.desc(), failed.id.desc()),
+            )
+            .label("position"),
+        )
+        .outerjoin(watermark, watermark.key == state_key)
+        .where(
             failed.status == "error",
             or_(
                 cast(failed.id, String) == watermark.value["latest_attempt"]["source_ref"].astext,
@@ -168,14 +227,38 @@ def canonical_source():
             ~select(attempted.key)
             .where(
                 attempted.key == func.concat("ingest-meta:", cast(failed.id, String)),
-                attempted.value["failed_parser_version"].as_integer() == PARSER_VERSION,
+                attempted.value["failed_parser_version"].as_integer() == parser_version,
             )
             .correlate(failed)
             .exists(),
         )
-        .order_by(failed.fetched_at.desc(), failed.id.desc())
-        .limit(1)
-        .correlate(SourcePayload, watermark)
+        .correlate(None)
+        .subquery()
+    )
+    return (
+        select(ranked.c.id, ranked.c.source, ranked.c.endpoint, ranked.c.source_key)
+        .where(ranked.c.position == 1)
+        .cte(f"replay_failed_candidates_v{parser_version}")
+        .prefix_with("MATERIALIZED")
+    )
+
+
+def canonical_source():
+    # Older ingest versions retained a newer failed raw revision without moving
+    # their success watermark. Give the newest such attempt a chance to replay.
+    watermark = aliased(AppState)
+    state_key = func.concat(
+        "ingest:", SourcePayload.source, ":", SourcePayload.endpoint, ":", SourcePayload.source_key
+    )
+    candidates = _failed_candidates(PARSER_VERSION)
+    latest_failed = (
+        select(candidates.c.id)
+        .where(
+            candidates.c.source == SourcePayload.source,
+            candidates.c.endpoint == SourcePayload.endpoint,
+            candidates.c.source_key == SourcePayload.source_key,
+        )
+        .correlate(SourcePayload)
         .scalar_subquery()
     )
     # Partial and empty responses can both retain older source-owned projections.
@@ -211,6 +294,9 @@ def canonical_source():
         .scalar_subquery()
     )
     retained_owner = or_(
+        func.coalesce(
+            cast(SourcePayload.id, String).in_(select(_PROJECTION_OWNERS.c.source_ref)), False
+        ),
         (SourcePayload.endpoint.startswith("activity_"))
         & (SourcePayload.parser_version > 0)
         & ~select(AppState.key)
@@ -228,24 +314,6 @@ def canonical_source():
                 (func.jsonb_typeof(SourcePayload.payload) == "array", SourcePayload.payload),
                 else_=func.jsonb_build_array(SourcePayload.payload),
             )
-        ),
-        owns_reference(
-            "journal_owners",
-            select(AppState.value["source_ref"].astext).where(
-                or_(
-                    AppState.key.startswith("sample-owner:"),
-                    AppState.key.startswith("interval-owner:"),
-                    AppState.key.startswith("observation-owner:"),
-                    AppState.key.startswith("activity-parts-owner:"),
-                )
-            ),
-        ),
-        owns_reference(
-            "activity_owners",
-            select(activity_refs.c.value)
-            .select_from(AppState)
-            .join(activity_refs, true())
-            .where(AppState.key.startswith("activity-version:")),
         ),
         SourcePayload.status.in_(["normalized", "partial", "error"])
         & (SourcePayload.parser_version > 0)
@@ -265,24 +333,6 @@ def canonical_source():
             )
             .correlate(SourcePayload)
             .exists(),
-        ),
-        owns_reference("sample_owners", select(cast(Measurement.source_ref, String))),
-        owns_reference("observation_owners", select(cast(MetricObservation.source_ref, String))),
-        owns_reference("interval_owners", select(TimelineInterval.evidence["source_ref"].astext)),
-        owns_reference(
-            "health_owners",
-            select(health_refs.c.value)
-            .select_from(HealthDay)
-            .join(health_refs, true())
-            .where(
-                health_refs.c.key.in_(
-                    [
-                        f"field:{column}"
-                        for column in HealthDay.__table__.columns.keys()
-                        if column not in {"day", "sources", "updated_at"}
-                    ]
-                )
-            ),
         ),
     )
     superseded_json = (
