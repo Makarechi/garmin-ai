@@ -875,11 +875,15 @@ async def _run(settings):
             try:
                 await asyncio.wait_for(finished.wait(), timeout=45)
             except TimeoutError:
-                with transaction(engine) as session:
-                    if not renew(session, job_id, token):
-                        logger.error("lease_lost", extra={"job_id": str(job_id)})
-                        stop.set()
-                        return
+
+                def renew_lease():
+                    with transaction(engine) as session:
+                        return renew(session, job_id, token)
+
+                if not await run_blocking(renew_lease):
+                    logger.error("lease_lost", extra={"job_id": str(job_id)})
+                    stop.set()
+                    return
 
     def garmin_job(kind, payload):
         nonlocal reader
@@ -920,23 +924,29 @@ async def _run(settings):
             for destination, instance in tuple(retry_channel_plugins.items()):
                 if not initialize_channel_plugin(instance):
                     retry_channel_plugins.pop(destination)
-            with transaction(engine) as session:
-                from garmin_ai.accounts import effective_owner_settings
 
-                if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
-                    raise DiaryDeferred("Channel check-ins await diary changes")
-                if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104621)")):
-                    raise DiaryDeferred("Channel check-ins await settings changes")
-                if (
-                    bot is not None
-                    and session.scalar(
-                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
-                    )
-                    is not None
-                ):
-                    raise DiaryDeferred("Telegram inbox has pending updates")
-                owner_settings = effective_owner_settings(session, settings)
-                queue_due_tracker_checkins(session, owner_settings, datetime.now(UTC))
+            def prepare_checkins():
+                with transaction(engine) as session:
+                    from garmin_ai.accounts import effective_owner_settings
+
+                    if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                        raise DiaryDeferred("Channel check-ins await diary changes")
+                    if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104621)")):
+                        raise DiaryDeferred("Channel check-ins await settings changes")
+                    if (
+                        bot is not None
+                        and session.scalar(
+                            select(TelegramUpdate.id)
+                            .where(TelegramUpdate.status == "pending")
+                            .limit(1)
+                        )
+                        is not None
+                    ):
+                        raise DiaryDeferred("Telegram inbox has pending updates")
+                    owner_settings = effective_owner_settings(session, settings)
+                    queue_due_tracker_checkins(session, owner_settings, datetime.now(UTC))
+
+            await run_blocking(prepare_checkins)
             ready_adapters = (
                 channel_adapters
                 if notifications_ready.is_set()
@@ -1466,31 +1476,37 @@ async def _run(settings):
                 ACTIVE_JOB.reset(operation_token)
                 done.set()
                 await lease_task
-            with transaction(engine) as session:
-                finish(
-                    session,
-                    job.id,
-                    job.lease_token,
-                    error_type=error,
-                    terminal_error=terminal_error,
-                    retryable_delivery=error in {"RetryAfter", "InactivePrimaryChannel"},
-                    retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
-                    if provider_failure and retry_seconds is not None
-                    else None,
-                )
-                if retry_seconds is not None and not provider_failure:
-                    row = session.get(Job, job.id)
-                    row.run_at = max(
-                        row.run_at, datetime.now(UTC) + timedelta(seconds=retry_seconds)
-                    )
-                if error == "DeliveryUncertain":
-                    row = session.get(Job, job.id)
-                    row.status = "failed"
-                    row.last_error = "DeliveryUncertain"
-                if error and error != "InactivePrimaryChannel" and bot:
-                    from garmin_ai.debug import queue_error_notice
 
-                    queue_error_notice(session, job.kind, error)
+            def finish_job(job, error, retry_seconds, provider_failure, terminal_error):
+                with transaction(engine) as session:
+                    finish(
+                        session,
+                        job.id,
+                        job.lease_token,
+                        error_type=error,
+                        terminal_error=terminal_error,
+                        retryable_delivery=error in {"RetryAfter", "InactivePrimaryChannel"},
+                        retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
+                        if provider_failure and retry_seconds is not None
+                        else None,
+                    )
+                    if retry_seconds is not None and not provider_failure:
+                        row = session.get(Job, job.id)
+                        row.run_at = max(
+                            row.run_at, datetime.now(UTC) + timedelta(seconds=retry_seconds)
+                        )
+                    if error == "DeliveryUncertain":
+                        row = session.get(Job, job.id)
+                        row.status = "failed"
+                        row.last_error = "DeliveryUncertain"
+                    if error and error != "InactivePrimaryChannel" and bot:
+                        from garmin_ai.debug import queue_error_notice
+
+                        queue_error_notice(session, job.kind, error)
+
+            await run_blocking(
+                finish_job, job, error, retry_seconds, provider_failure, terminal_error
+            )
 
     def plan_replay(queue_threshold):
         from garmin_ai.normalize import PARSER_VERSION

@@ -2209,6 +2209,103 @@ def test_slow_insight_generation_keeps_event_loop_and_heartbeat_running(
     assert finished.is_set() and job.last_error == "DiaryDeferred" and job.attempts == 0
 
 
+@pytest.mark.parametrize("slow_step", ["checkins", "renew", "finish"])
+def test_slow_job_coordination_keeps_heartbeat_running(
+    db, db_engine, tmp_path, monkeypatch, slow_step
+):
+    from garmin_ai import initiative_rules, replay, runtime
+    from garmin_ai.jobs import enqueue
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    claimed = threading.Event()
+    kind = "channel_initiatives" if slow_step == "checkins" else "agent_insights"
+    identity = enqueue(db, kind, {}, f"synthetic-slow-{slow_step}", datetime.now(UTC))
+    db.commit()
+    real_claim = runtime.claim_ready_job
+    real_renew, real_finish = runtime.renew, runtime.finish
+    real_wait_for = asyncio.wait_for
+
+    def slow_operation(*args, **kwargs):
+        entered.set()
+        release.wait(3)
+        finished.set()
+        if slow_step == "checkins":
+            raise runtime.DiaryDeferred("synthetic deferred check-in")
+        return (real_renew if slow_step == "renew" else real_finish)(*args, **kwargs)
+
+    def generate(*_args):
+        if slow_step == "renew":
+            release.wait(6)
+        raise runtime.DiaryDeferred("synthetic deferred insight")
+
+    def claim_once(engine, kinds, *args):
+        if claimed.is_set() or kind not in kinds:
+            return None
+        job = real_claim(engine, [kind], *args)
+        if job is not None:
+            claimed.set()
+        return job
+
+    async def quick_lease_wait(awaitable, timeout):
+        return await real_wait_for(awaitable, 0.05 if timeout == 45 else timeout)
+
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "claim_ready_job", claim_once)
+    monkeypatch.setattr(runtime, "generate_insights", generate)
+    monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(replay, "schedule_replay", lambda *_args: 0)
+    if slow_step == "checkins":
+        monkeypatch.setattr(initiative_rules, "queue_due_tracker_checkins", slow_operation)
+    else:
+        monkeypatch.setattr(runtime, slow_step, slow_operation)
+    if slow_step == "renew":
+        monkeypatch.setattr(asyncio, "wait_for", quick_lease_wait)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        llm_enabled=False,
+    )
+
+    async def check():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
+            assert not finished.is_set()
+            first = None
+            for _ in range(40):
+                await asyncio.sleep(0.025)
+                row = db.get(AppState, "runtime:heartbeat", populate_existing=True)
+                if row is None:
+                    continue
+                latest = datetime.fromisoformat(row.value["at"])
+                if first is None:
+                    first = latest
+                elif latest > first:
+                    break
+            assert first is not None and latest > first
+            assert not finished.is_set() and not task.done()
+        finally:
+            release.set()
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(check())
+    db.expire_all()
+    job = db.get(Job, identity)
+    assert finished.is_set() and job.last_error == "DiaryDeferred" and job.attempts == 0
+
+
 def test_replay_planning_retries_after_lock_is_released(db, db_engine, tmp_path, monkeypatch):
     from garmin_ai import replay, runtime
 
