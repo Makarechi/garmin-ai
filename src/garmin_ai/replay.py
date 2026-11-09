@@ -31,6 +31,7 @@ from garmin_ai.reconciliation import Replacement
 
 GARMIN_RAW_SOURCE = "garmin_connect"
 REPAIR_SCAN_BATCH = 128
+REPAIR_VERSION = 1
 REPAIR_CURSOR_KEY = "replay:repair_scan_cursor"
 SOURCE_CURSOR_KEY = "replay:source_scan_cursor"
 
@@ -368,6 +369,7 @@ def schedule_replay(session, now):
             Job.id.in_(candidate_ids),
             or_(
                 Job.status == "done",
+                Job.payload["repair_version"].as_integer().is_distinct_from(REPAIR_VERSION),
                 select(SourcePayload.id)
                 .where(
                     SourcePayload.id == _source_id_reference(Job),
@@ -407,7 +409,11 @@ def schedule_replay(session, now):
         )
     for job in repaired:
         raw = session.get(SourcePayload, UUID(job.payload["raw_ref"]))
-        job.payload = {**job.payload, "repair_parser_version": raw.parser_version if raw else None}
+        job.payload = {
+            **job.payload,
+            "repair_parser_version": raw.parser_version if raw else None,
+            "repair_version": REPAIR_VERSION,
+        }
         job.status, job.attempts, job.run_at = "pending", 0, now
         job.completed_at = job.lease_until = job.lease_token = job.last_error = None
     budget -= len(repaired)

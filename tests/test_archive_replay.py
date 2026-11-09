@@ -163,6 +163,25 @@ def test_legacy_failed_replay_recovers_from_current_raw_without_inventing_histor
     assert history[1]["raw_ref"] == str(current.id)
 
 
+def test_repair_update_retries_exhausted_legacy_jobs_once(db, tmp_path):
+    from garmin_ai.replay import REPAIR_VERSION
+
+    bind_account(db, ACCOUNT)
+    row = raw(db, LocalArchive(tmp_path), NOW)
+    assert schedule_replay(db, NOW) == 1
+    job = db.scalar(select(Job).where(Job.kind == "raw_replay"))
+    job.status = "failed"
+    job.payload = {**job.payload, "repair_parser_version": row.parser_version}
+    db.flush()
+
+    assert schedule_replay(db, NOW) == 1
+    assert job.status == "pending" and job.payload["repair_version"] == REPAIR_VERSION
+    job.status = "failed"
+    db.flush()
+    assert schedule_replay(db, NOW) == 0
+    assert job.status == "failed"
+
+
 def test_replay_planner_is_bounded_and_account_guard_is_enforced(db, db_engine, tmp_path):
     bind_account(db, ACCOUNT)
     archive = LocalArchive(tmp_path)

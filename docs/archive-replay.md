@@ -41,6 +41,9 @@ The check runs after normalization inside the same savepoint. If any unresolved
 identity is missing, the entire rebuild rolls back and analysis remains gated.
 Successful rebuilds retain the unknown-history boundary instead of inventing the
 order of earlier responses.
+After this recovery update, exhausted canonical jobs receive one fresh bounded
+retry cycle. The planner records its repair version so persistent failures do not
+loop indefinitely; the existing queue and scan limits still apply.
 
 Canonical revisions are scheduled before obsolete raw history, and superseded sources are rejected before archive reads. A reapplied raw revision records its current interpretation timezone; an unchanged response preserves the existing timezone.
 
