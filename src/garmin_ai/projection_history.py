@@ -14,6 +14,9 @@ from garmin_ai.normalize import normalize, numeric, timestamp, upsert
 from garmin_ai.reconciliation import ENDPOINT_METRICS, Replacement
 
 LIMIT = 1000
+UNKNOWN_HISTORY = (
+    "Legacy partial application order is unavailable; rebuild requires verified history"
+)
 
 
 def history_key(raw):
@@ -138,7 +141,7 @@ def record_application(session, raw, history, timezone, at, replacement, *, repl
     )
 
 
-def previous_observations(session, archive, raw, history):
+def previous_observations(session, archive, raw, history, *, unresolved_targets=None):
     if raw.endpoint not in ENDPOINT_METRICS:
         return []
     targets = set(
@@ -212,9 +215,25 @@ def previous_observations(session, archive, raw, history):
             session.info.clear()
             session.info.update(info)
     if unknown_targets:
-        raise ValueError(
-            "Legacy partial application order is unavailable; rebuild requires verified history"
-        )
+        if unresolved_targets is None:
+            raise ValueError(UNKNOWN_HISTORY)
+        # The current raw may regenerate these identities without requiring an
+        # older fallback. Its caller must verify that before committing a rebuild.
+        unresolved_targets.update(unknown_targets)
     # The fallback belongs to the effective current projection. Its original
     # provenance remains in the application journal for the next parser rebuild.
     return [{**value, "source_ref": raw.id} for value in restored.values()]
+
+
+def verify_rebuilt_targets(session, raw, unresolved_targets):
+    if not unresolved_targets:
+        return
+    rebuilt = set(
+        session.execute(
+            select(Measurement.ts, Measurement.metric, Measurement.source).where(
+                Measurement.source_ref == raw.id
+            )
+        ).all()
+    )
+    if unresolved_targets - rebuilt:
+        raise ValueError(UNKNOWN_HISTORY)
