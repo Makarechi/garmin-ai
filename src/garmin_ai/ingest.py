@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
+from itertools import batched
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
@@ -30,44 +31,63 @@ def _journal_rebuilt_measurements(session, previous_rows, fetched_at):
     if not previous_rows:
         return
     current_rows = {}
-    for previous in previous_rows:
-        key = (previous["ts"], previous["metric"], previous["source"])
-        current_rows[key] = session.scalar(
-            select(Measurement).where(
-                Measurement.ts == previous["ts"],
-                Measurement.metric == previous["metric"],
-                Measurement.source == previous["source"],
-            )
-        )
+    for batch in batched(previous_rows, 500, strict=False):
+        keys = [(row["ts"], row["metric"], row["source"]) for row in batch]
+        for row in session.scalars(
+            select(Measurement)
+            .where(tuple_(Measurement.ts, Measurement.metric, Measurement.source).in_(keys))
+            .execution_options(populate_existing=True)
+        ):
+            current_rows[(row.ts, row.metric, row.source)] = row
     known_times = [fetched_at, datetime.now(UTC)]
     known_times.extend(previous["ingested_at"] for previous in previous_rows)
-    known_times.extend(row.ingested_at for row in current_rows.values() if row is not None)
+    known_times.extend(row.ingested_at for row in current_rows.values())
     rebuilt_at = max(known_times) + timedelta(microseconds=1)
-    for previous in previous_rows:
-        key = (previous["ts"], previous["metric"], previous["source"])
-        current = current_rows[key]
-        values = (
-            {
-                column.name: getattr(current, column.name)
-                for column in Measurement.__table__.columns
-                if column.name != "id"
-            }
-            if current is not None
-            else previous
+    for batch in batched(previous_rows, 500, strict=False):
+        keys = [(row["ts"], row["metric"], row["source"]) for row in batch]
+        existing = set(
+            session.execute(
+                select(
+                    MeasurementRevision.ts,
+                    MeasurementRevision.metric,
+                    MeasurementRevision.source,
+                    MeasurementRevision.source_ref,
+                    MeasurementRevision.deleted,
+                ).where(
+                    MeasurementRevision.ingested_at == rebuilt_at,
+                    tuple_(
+                        MeasurementRevision.ts,
+                        MeasurementRevision.metric,
+                        MeasurementRevision.source,
+                    ).in_(keys),
+                )
+            ).all()
         )
-        values = {**values, "ingested_at": rebuilt_at, "deleted": current is None}
-        exists = session.scalar(
-            select(MeasurementRevision.id).where(
-                MeasurementRevision.ts == values["ts"],
-                MeasurementRevision.metric == values["metric"],
-                MeasurementRevision.source == values["source"],
-                MeasurementRevision.source_ref.is_not_distinct_from(values["source_ref"]),
-                MeasurementRevision.ingested_at == rebuilt_at,
-                MeasurementRevision.deleted.is_(values["deleted"]),
+        revisions = []
+        for previous in batch:
+            key = (previous["ts"], previous["metric"], previous["source"])
+            current = current_rows.get(key)
+            values = (
+                {
+                    column.name: getattr(current, column.name)
+                    for column in Measurement.__table__.columns
+                    if column.name != "id"
+                }
+                if current is not None
+                else previous
             )
-        )
-        if exists is None:
-            session.add(MeasurementRevision(**values))
+            values = {**values, "ingested_at": rebuilt_at, "deleted": current is None}
+            identity = (
+                values["ts"],
+                values["metric"],
+                values["source"],
+                values["source_ref"],
+                values["deleted"],
+            )
+            if identity not in existing:
+                revisions.append(MeasurementRevision(**values))
+                existing.add(identity)
+        session.add_all(revisions)
     session.flush()
 
 

@@ -46,6 +46,9 @@ retry cycle. The planner records its repair version so persistent failures do no
 loop indefinitely; the existing queue and scan limits still apply.
 FIT profile clock fields retain their original numeric seconds and store their
 decoded value as an ISO local time, without inventing a date or timezone.
+Rebuilt measurement revisions are read and inserted in batches of at most 500
+identities. One rebuild timestamp, deletion markers, source references (including
+unknown references), and retry deduplication are preserved for the entire source.
 
 Canonical revisions are scheduled before obsolete raw history, and superseded sources are rejected before archive reads. A reapplied raw revision records its current interpretation timezone; an unchanged response preserves the existing timezone.
 
