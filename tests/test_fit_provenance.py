@@ -2,6 +2,7 @@ import json
 import struct
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fitdecode.types import (
     BASE_TYPES,
     DevField,
@@ -226,3 +227,88 @@ def test_default_details_preserve_events_workouts_and_strength_sets(db):
     assert "fit_jump" in {
         part["kind"] for part in activity_details(db, "structured", include_samples=True)["parts"]
     }
+
+
+@pytest.mark.parametrize("record_count", [0, 1, 500, 501, 1261])
+def test_fit_replacement_batches_writes_and_preserves_order(
+    db, tmp_path, monkeypatch, record_count
+):
+    from garmin_ai import fit
+
+    db.add(Activity(id="batch-fit", kind="running", start=NOW, end=NOW, timezone="UTC"))
+    db.flush()
+    db.add_all(
+        [
+            ActivityPart(activity_id="batch-fit", kind="fit_old", sequence=0, payload={}),
+            ActivityPart(activity_id="batch-fit", kind="lap", sequence=0, payload={"keep": True}),
+        ]
+    )
+    db.flush()
+    records = [
+        ("record" if i % 2 else "event", {"synthetic_index": i}) for i in range(record_count)
+    ]
+    monkeypatch.setattr(fit, "parse_fit", lambda _data: records)
+    inserts = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("INSERT INTO activity_parts"):
+            inserts.append(statement)
+
+    event.listen(db.connection(), "before_cursor_execute", capture)
+    try:
+        result = store_fit(db, LocalArchive(tmp_path), "batch-fit", fit_bytes(1), fetched_at=NOW)
+    finally:
+        event.remove(db.connection(), "before_cursor_execute", capture)
+    assert result["status"] == "normalized" and result["rows"] == record_count
+    assert len(inserts) == (record_count + 499) // 500
+    parts = list(
+        db.scalars(
+            select(ActivityPart)
+            .where(ActivityPart.activity_id == "batch-fit", ActivityPart.kind.startswith("fit_"))
+            .order_by(ActivityPart.sequence)
+        )
+    )
+    assert [(part.kind, part.sequence, part.payload) for part in parts] == [
+        (f"fit_{kind}", i, payload) for i, (kind, payload) in enumerate(records)
+    ]
+    assert db.scalar(select(ActivityPart).where(ActivityPart.kind == "lap")).payload == {
+        "keep": True
+    }
+    assert bool(db.info.get("projection_changed")) is bool(record_count)
+
+
+def test_fit_later_batch_failure_restores_previous_projection(db, tmp_path, monkeypatch):
+    from garmin_ai import fit
+
+    db.add(Activity(id="rollback-fit", kind="running", start=NOW, end=NOW, timezone="UTC"))
+    db.flush()
+    archive = LocalArchive(tmp_path)
+    first = store_fit(db, archive, "rollback-fit", fit_bytes(1), fetched_at=NOW)
+    assert first["status"] == "normalized"
+    previous = db.get(Activity, "rollback-fit").fit_key
+    monkeypatch.setattr(
+        fit, "parse_fit", lambda _data: [("record", {"index": i}) for i in range(1001)]
+    )
+    inserts = []
+
+    def fail_second(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("INSERT INTO activity_parts"):
+            inserts.append(statement)
+            if len(inserts) == 2:
+                raise RuntimeError("synthetic failed second FIT batch")
+
+    event.listen(db.connection(), "before_cursor_execute", fail_second)
+    try:
+        result = store_fit(
+            db, archive, "rollback-fit", fit_bytes(2), fetched_at=NOW + timedelta(seconds=1)
+        )
+    finally:
+        event.remove(db.connection(), "before_cursor_execute", fail_second)
+    assert result["status"] == "error" and result["error_type"] == "RuntimeError"
+    assert len(inserts) == 2
+    parts = list(db.scalars(select(ActivityPart).where(ActivityPart.activity_id == "rollback-fit")))
+    assert len(parts) == 1 and parts[0].payload["device_index"] == 1
+    activity = db.get(Activity, "rollback-fit", populate_existing=True)
+    assert activity.fit_key == previous and activity.details["fit_status"] == "error"
+    source = db.get(SourcePayload, result["source_ref"])
+    assert source.status == "error"
