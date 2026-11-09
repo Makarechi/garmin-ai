@@ -574,7 +574,11 @@ def test_missing_previous_archive_aborts_rebuild_without_losing_measurements(db,
     assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == [80, 70]
 
 
-def test_legacy_repeated_application_order_is_not_invented(db, tmp_path):
+@pytest.mark.parametrize("reject_current", [False, True])
+def test_legacy_repeated_application_order_is_not_invented(
+    db, tmp_path, monkeypatch, reject_current
+):
+    from importlib import import_module
     from uuid import UUID
 
     from sqlalchemy import delete
@@ -597,6 +601,14 @@ def test_legacy_repeated_application_order_is_not_invented(db, tmp_path):
     current = db.get(SourcePayload, UUID(latest["source_ref"]))
     db.execute(delete(AppState).where(AppState.key == history_key(current)))
     current.parser_version = PARSER_VERSION - 1
+    module = import_module("garmin_ai.normalize")
+    original_numeric = module.numeric
+    if reject_current:
+        monkeypatch.setattr(
+            module,
+            "numeric",
+            lambda value, **kwargs: None if value == 90 else original_numeric(value, **kwargs),
+        )
     result = ingest(
         db,
         archive,
@@ -607,7 +619,7 @@ def test_legacy_repeated_application_order_is_not_invented(db, tmp_path):
         fetched_at=START + timedelta(minutes=3),
         rebuild_projection=True,
     )
-    assert result["status"] == "error"
+    assert result["status"] == ("error" if reject_current else "normalized")
     assert list(db.scalars(select(Measurement.value))) == [90]
     # New source observations remain usable, but retain the unknown legacy boundary.
     result = ingest(

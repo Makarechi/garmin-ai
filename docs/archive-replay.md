@@ -35,6 +35,13 @@ Replay preserves per-source interpretation timezone recorded at ingestion. Legac
 
 All shared Garmin-backed read tools are gated during mixed parser projections using the read:health scope classification. Diary-only reads and data_freshness (including replay status) remain available.
 
+Legacy partial sources without an application journal can still be rebuilt when
+the current raw regenerates every measurement whose older fallback is unknown.
+The check runs after normalization inside the same savepoint. If any unresolved
+identity is missing, the entire rebuild rolls back and analysis remains gated.
+Successful rebuilds retain the unknown-history boundary instead of inventing the
+order of earlier responses.
+
 Canonical revisions are scheduled before obsolete raw history, and superseded sources are rejected before archive reads. A reapplied raw revision records its current interpretation timezone; an unchanged response preserves the existing timezone.
 
 A failed fetch/normalization attempt is recorded separately from the last successful source watermark. Failures already attempted by the current parser do not gate otherwise current projections; they become candidates after a parser change. If that new attempt still fails, the last successful projection must itself be rebuilt before readiness returns. Request ordering uses the latest attempt timestamp, so older responses cannot overwrite the retained state. Interactive answers retain the data_freshness status tool during replay.

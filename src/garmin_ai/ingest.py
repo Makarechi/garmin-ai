@@ -15,7 +15,12 @@ from garmin_ai.models import (
 )
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
 from garmin_ai.projection_changes import execute_projection
-from garmin_ai.projection_history import load_history, previous_observations, record_application
+from garmin_ai.projection_history import (
+    load_history,
+    previous_observations,
+    record_application,
+    verify_rebuilt_targets,
+)
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
 
@@ -262,6 +267,7 @@ def ingest(
                         ),
                     )
                 history = load_history(session, raw) if not unchanged else []
+                unresolved_targets = set()
                 if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
                     rebuilt_measurements = [
                         {
@@ -273,7 +279,9 @@ def ingest(
                             select(Measurement).where(Measurement.source_ref == raw.id)
                         )
                     ]
-                    restored = previous_observations(session, archive, raw, history)
+                    restored = previous_observations(
+                        session, archive, raw, history, unresolved_targets=unresolved_targets
+                    )
                     execute_projection(
                         session, delete(Measurement).where(Measurement.source_ref == raw.id)
                     )
@@ -322,6 +330,7 @@ def ingest(
                             if "raw_ref" in entry
                         }
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
+                    verify_rebuilt_targets(session, raw, unresolved_targets)
                     _journal_rebuilt_measurements(session, rebuilt_measurements, fetched_at)
                 finally:
                     session.info.pop("replay_owned_samples", None)

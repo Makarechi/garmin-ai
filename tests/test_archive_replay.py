@@ -122,6 +122,47 @@ def test_hash_failure_keeps_raw_and_records_only_technical_error(db, db_engine, 
     assert db.scalar(select(HealthDay)) is None
 
 
+def test_legacy_failed_replay_recovers_from_current_raw_without_inventing_history(db, tmp_path):
+    from sqlalchemy import delete
+
+    from garmin_ai.models import Measurement
+    from garmin_ai.projection_history import history_key
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    for index, value in enumerate((30, 40)):
+        result = ingest(
+            db,
+            archive,
+            "stress",
+            str(NOW.date()),
+            {"stressValuesArray": [[int(NOW.timestamp() * 1000), value]]},
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=index),
+        )
+    current = db.get(SourcePayload, UUID(result["source_ref"]))
+    db.execute(delete(AppState).where(AppState.key == history_key(current)))
+    current.parser_version, current.status = PARSER_VERSION - 1, "error"
+    metadata = db.get(AppState, f"ingest-meta:{current.id}")
+    metadata.value = {**metadata.value, "failed_parser_version": PARSER_VERSION}
+    db.flush()
+    assert not replay_status(db)["ready"]
+
+    result = replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": str(current.id), "target_version": PARSER_VERSION},
+    )
+
+    assert result["status"] == "normalized"
+    assert replay_status(db)["ready"]
+    assert list(db.scalars(select(Measurement.value))) == [40]
+    history = db.get(AppState, history_key(current), populate_existing=True).value["applications"]
+    assert history[0] == {"legacy_order_unknown": True}
+    assert history[1]["raw_ref"] == str(current.id)
+
+
 def test_replay_planner_is_bounded_and_account_guard_is_enforced(db, db_engine, tmp_path):
     bind_account(db, ACCOUNT)
     archive = LocalArchive(tmp_path)
