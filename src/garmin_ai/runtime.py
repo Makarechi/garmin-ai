@@ -1356,20 +1356,30 @@ async def _run(settings):
         elif job.kind == "agent_insights":
             from garmin_ai.replay import replay_pending_condition
 
-            with transaction(engine) as session:
-                from garmin_ai.accounts import effective_owner_settings
-                from garmin_ai.integration import paused
+            def prepare_insights():
+                with transaction(engine) as session:
+                    from garmin_ai.accounts import effective_owner_settings
+                    from garmin_ai.integration import paused
 
-                if job.payload.get("garmin_paused") or paused(session, datetime.now(UTC)):
-                    # Consume this scheduled cycle without a claim from stale
-                    # Garmin evidence; a later cycle resumes after recovery.
-                    return
-                session.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
-                if session.scalar(select(replay_pending_condition())):
-                    raise DiaryDeferred("Insights await complete archive replay")
-                owner_settings = effective_owner_settings(session, settings)
-                generate_insights(session, datetime.now(UTC), owner_settings.timezone)
-                accepted = pending_insight_notices(session, datetime.now(UTC))
+                    if job.payload.get("garmin_paused") or paused(session, datetime.now(UTC)):
+                        # Consume this scheduled cycle without a claim from stale
+                        # Garmin evidence; a later cycle resumes after recovery.
+                        return None
+                    session.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+                    if session.scalar(select(replay_pending_condition())):
+                        raise DiaryDeferred("Insights await complete archive replay")
+                    owner_settings = effective_owner_settings(session, settings)
+                    generate_insights(session, datetime.now(UTC), owner_settings.timezone)
+                    return [
+                        insight.id
+                        for insight in pending_insight_notices(session, datetime.now(UTC))
+                    ]
+
+            # Ingestion can own this lock for minutes on a small host. Keep
+            # Telegram polling, lease renewal and the heartbeat running meanwhile.
+            accepted = await run_blocking(prepare_insights)
+            if accepted is None:
+                return
             with transaction(engine) as session:
                 session.info["channel_destination_instance_id"] = (
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
@@ -1380,12 +1390,12 @@ async def _run(settings):
                     session, telegram_channel_instance
                 ) and can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
-                for insight in accepted:
+                for insight_id in accepted:
                     await deliver_current_insight(
                         bot,
                         engine,
                         settings,
-                        insight.id,
+                        insight_id,
                         channel_instance=telegram_channel_instance,
                     )
 

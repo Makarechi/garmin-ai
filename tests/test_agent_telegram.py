@@ -1,11 +1,12 @@
 import asyncio
 import threading
+import time
 from datetime import UTC, datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy import text as sql_text
 
 from garmin_ai.agent import Interpretation, apply_command, interpret
@@ -2095,6 +2096,117 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(
             await asyncio.wait_for(task, 5)
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("waiting_for_ingestion", [False, True])
+def test_slow_insight_generation_keeps_event_loop_and_heartbeat_running(
+    db, db_engine, tmp_path, monkeypatch, waiting_for_ingestion
+):
+    from garmin_ai import replay, runtime
+    from garmin_ai.jobs import enqueue
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    claimed = threading.Event()
+    waiting = threading.Event()
+    waiting_at = []
+    identity = enqueue(db, "agent_insights", {}, "synthetic-slow-insights", datetime.now(UTC))
+    db.commit()
+
+    def generate(*_args):
+        from garmin_ai.provider_gate import ACTIVE_JOB
+
+        assert ACTIVE_JOB.get() == identity
+        entered.set()
+        release.wait(3)
+        finished.set()
+        raise runtime.DiaryDeferred("synthetic deferred generation")
+
+    real_claim = runtime.claim_ready_job
+
+    def bound_lock_wait(_connection, cursor, statement, _parameters, _context, _many):
+        if (
+            waiting_for_ingestion
+            and claimed.is_set()
+            and not waiting.is_set()
+            and statement == "SELECT pg_advisory_xact_lock(72104619)"
+        ):
+            # Bound a regressed synchronous wait so the test itself cannot hang.
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            waiting_at.append(time.monotonic())
+            waiting.set()
+
+    def claim_insights(engine, kinds, *args):
+        if claimed.is_set() or "agent_insights" not in kinds:
+            return None
+        job = real_claim(engine, ["agent_insights"], *args)
+        if job is not None:
+            claimed.set()
+        return job
+
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "claim_ready_job", claim_insights)
+    monkeypatch.setattr(runtime, "generate_insights", generate)
+    monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(replay, "schedule_replay", lambda *_args: 0)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        llm_enabled=False,
+    )
+
+    async def check():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        guard = None
+        try:
+            if waiting_for_ingestion:
+                guard = db_engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                guard.execute(sql_text("SELECT pg_advisory_lock(72104619)"))
+                assert await asyncio.wait_for(asyncio.to_thread(waiting.wait, 3), 4)
+                assert time.monotonic() - waiting_at[0] < 2
+                assert not entered.is_set()
+            else:
+                assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
+            assert not finished.is_set()
+            first = None
+            for _ in range(40):
+                await asyncio.sleep(0.025)
+                row = db.get(AppState, "runtime:heartbeat", populate_existing=True)
+                if row is None:
+                    continue
+                latest = datetime.fromisoformat(row.value["at"])
+                if first is None:
+                    first = latest
+                elif latest > first:
+                    break
+            assert first is not None and latest > first
+            assert not finished.is_set() and not task.done()
+        finally:
+            if guard is not None:
+                guard.execute(sql_text("SELECT pg_advisory_unlock(72104619)"))
+                guard.close()
+            release.set()
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, 5)
+
+    event.listen(db_engine, "before_cursor_execute", bound_lock_wait)
+    try:
+        asyncio.run(check())
+    finally:
+        event.remove(db_engine, "before_cursor_execute", bound_lock_wait)
+    db.expire_all()
+    job = db.get(Job, identity)
+    assert finished.is_set() and job.last_error == "DiaryDeferred" and job.attempts == 0
 
 
 def test_replay_planning_retries_after_lock_is_released(db, db_engine, tmp_path, monkeypatch):
