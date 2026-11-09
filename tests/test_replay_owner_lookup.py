@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select, text
 
-from garmin_ai.models import AppState, SourcePayload, TimelineInterval
+from garmin_ai.models import AppState, HealthDay, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.replay import canonical_source, projection_mismatch
 
@@ -116,6 +116,9 @@ def test_activity_ownership_preserves_existing_json_path_rules(db, shape):
         "timeline",
         "unrelated",
         "missing",
+        "health_field",
+        "health_time",
+        "health_unknown",
     ],
 )
 def test_retained_journals_ignore_unrelated_and_null_references(db, kind):
@@ -132,7 +135,14 @@ def test_retained_journals_ignore_unrelated_and_null_references(db, kind):
             evidence={"source_ref": None},
         )
     )
-    if kind == "timeline":
+    if kind.startswith("health_"):
+        key = {
+            "health_field": "field:steps",
+            "health_time": "time:steps",
+            "health_unknown": "field:synthetic_unknown",
+        }[kind]
+        db.add(HealthDay(day=NOW.date(), sources={key: str(old.id), "field:resting_hr": None}))
+    elif kind == "timeline":
         db.add(
             TimelineInterval(
                 id="owned",
@@ -154,7 +164,24 @@ def test_retained_journals_ignore_unrelated_and_null_references(db, kind):
                 canonical_source(),
             )
         )
-    ) == (kind not in {"unrelated", "missing"})
+    ) == (kind not in {"unrelated", "missing", "health_time", "health_unknown"})
+
+
+def test_owner_sets_compose_in_repeated_predicates(db):
+    revisions(db)
+    for _ in range(3):
+        assert (
+            len(
+                list(
+                    db.scalars(
+                        select(SourcePayload.id).where(
+                            canonical_source() | ~canonical_source(),
+                        )
+                    )
+                )
+            )
+            == 2
+        )
 
 
 def test_owner_journals_are_not_rescanned_for_every_historical_revision(db):
@@ -173,6 +200,7 @@ def test_owner_journals_are_not_rescanned_for_every_historical_revision(db):
     db.execute(text("ANALYZE source_payloads"))
     db.execute(text("ANALYZE app_state"))
     db.execute(text("SET LOCAL jit = off"))
+    db.execute(text("SET LOCAL work_mem = '2MB'"))
     statement = select(SourcePayload.id).where(projection_mismatch())
     assert list(db.scalars(statement)) == []
     sql = str(statement.compile(db.bind, compile_kwargs={"literal_binds": True}))
@@ -186,14 +214,15 @@ def test_owner_journals_are_not_rescanned_for_every_historical_revision(db):
     journal_scans = [
         node
         for node in nodes(plan)
-        if node.get("Relation Name") == "app_state"
-        and any(
-            prefix in str(node.get("Filter", ""))
-            for prefix in (
-                "sample-owner:",
-                "activity-version:",
+        if (
+            node.get("Relation Name") == "app_state"
+            and any(
+                prefix in str(node.get("Filter", ""))
+                for prefix in ("sample-owner:", "activity-version:")
             )
         )
+        or node.get("Relation Name")
+        in {"measurements", "metric_observations", "timeline_intervals", "health_days"}
     ]
     assert journal_scans
     assert all(node["Actual Loops"] <= 1 for node in journal_scans)

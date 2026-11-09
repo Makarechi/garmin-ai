@@ -99,12 +99,16 @@ def invalidate_outputs(session):
 
 
 def canonical_source():
-    def owns_reference(references):
+    def owns_reference(name, references):
         # Build an uncorrelated reference set once, rather than scanning every
         # projection journal separately for every historical raw revision.
-        return func.coalesce(
-            cast(SourcePayload.id, String).in_(references.distinct().correlate(None)), False
+        owners = (
+            references.distinct()
+            .correlate(None)
+            .cte("replay_" + name, nesting=True)
+            .prefix_with("MATERIALIZED")
         )
+        return func.coalesce(cast(SourcePayload.id, String).in_(select(owners.c[0])), False)
 
     activity_refs = (
         func.jsonb_array_elements_text(
@@ -114,6 +118,16 @@ def canonical_source():
             )
         )
         .table_valued("value")
+        .render_derived()
+    )
+    health_refs = (
+        func.jsonb_each_text(
+            case(
+                (func.jsonb_typeof(HealthDay.sources) == "object", HealthDay.sources),
+                else_=func.jsonb_build_object(),
+            )
+        )
+        .table_valued("key", "value")
         .render_derived()
     )
     # Older ingest versions retained a newer failed raw revision without moving
@@ -216,6 +230,7 @@ def canonical_source():
             )
         ),
         owns_reference(
+            "journal_owners",
             select(AppState.value["source_ref"].astext).where(
                 or_(
                     AppState.key.startswith("sample-owner:"),
@@ -223,13 +238,14 @@ def canonical_source():
                     AppState.key.startswith("observation-owner:"),
                     AppState.key.startswith("activity-parts-owner:"),
                 )
-            )
+            ),
         ),
         owns_reference(
+            "activity_owners",
             select(activity_refs.c.value)
             .select_from(AppState)
             .join(activity_refs, true())
-            .where(AppState.key.startswith("activity-version:"))
+            .where(AppState.key.startswith("activity-version:")),
         ),
         SourcePayload.status.in_(["normalized", "partial", "error"])
         & (SourcePayload.parser_version > 0)
@@ -250,27 +266,24 @@ def canonical_source():
             .correlate(SourcePayload)
             .exists(),
         ),
-        select(Measurement.source_ref)
-        .where(Measurement.source_ref == SourcePayload.id)
-        .correlate(SourcePayload)
-        .exists(),
-        select(MetricObservation.source_ref)
-        .where(MetricObservation.source_ref == SourcePayload.id)
-        .correlate(SourcePayload)
-        .exists(),
-        owns_reference(select(TimelineInterval.evidence["source_ref"].astext)),
-        select(HealthDay.day)
-        .where(
-            or_(
-                *(
-                    HealthDay.sources[f"field:{column}"].astext == cast(SourcePayload.id, String)
-                    for column in HealthDay.__table__.columns.keys()
-                    if column not in {"day", "sources", "updated_at"}
+        owns_reference("sample_owners", select(cast(Measurement.source_ref, String))),
+        owns_reference("observation_owners", select(cast(MetricObservation.source_ref, String))),
+        owns_reference("interval_owners", select(TimelineInterval.evidence["source_ref"].astext)),
+        owns_reference(
+            "health_owners",
+            select(health_refs.c.value)
+            .select_from(HealthDay)
+            .join(health_refs, true())
+            .where(
+                health_refs.c.key.in_(
+                    [
+                        f"field:{column}"
+                        for column in HealthDay.__table__.columns.keys()
+                        if column not in {"day", "sources", "updated_at"}
+                    ]
                 )
-            )
-        )
-        .correlate(SourcePayload)
-        .exists(),
+            ),
+        ),
     )
     superseded_json = (
         select(watermark.key)
