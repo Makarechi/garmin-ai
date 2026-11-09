@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, String, Uuid, case, cast, delete, func, or_, select, update
+from sqlalchemy import DateTime, String, Uuid, case, cast, delete, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH, aggregate_order_by
 from sqlalchemy.orm import aliased
 
@@ -99,6 +99,23 @@ def invalidate_outputs(session):
 
 
 def canonical_source():
+    def owns_reference(references):
+        # Build an uncorrelated reference set once, rather than scanning every
+        # projection journal separately for every historical raw revision.
+        return func.coalesce(
+            cast(SourcePayload.id, String).in_(references.distinct().correlate(None)), False
+        )
+
+    activity_refs = (
+        func.jsonb_array_elements_text(
+            func.jsonb_path_query_array(
+                AppState.value["owners"],
+                cast('lax $.*[*] ? (@.type() == "string")', JSONPATH),
+            )
+        )
+        .table_valued("value")
+        .render_derived()
+    )
     # Older ingest versions retained a newer failed raw revision without moving
     # their success watermark. Give the newest such attempt a chance to replay.
     watermark = aliased(AppState)
@@ -198,29 +215,22 @@ def canonical_source():
                 else_=func.jsonb_build_array(SourcePayload.payload),
             )
         ),
-        select(AppState.key)
-        .where(
-            or_(
-                AppState.key.startswith("sample-owner:"),
-                AppState.key.startswith("interval-owner:"),
-                AppState.key.startswith("observation-owner:"),
-                AppState.key.startswith("activity-parts-owner:"),
-            ),
-            AppState.value["source_ref"].astext == cast(SourcePayload.id, String),
-        )
-        .correlate(SourcePayload)
-        .exists(),
-        select(AppState.key)
-        .where(
-            AppState.key.startswith("activity-version:"),
-            func.jsonb_path_exists(
-                AppState.value["owners"],
-                cast("$.* ? (@ == $ref)", JSONPATH),
-                func.jsonb_build_object("ref", cast(SourcePayload.id, String)),
-            ),
-        )
-        .correlate(SourcePayload)
-        .exists(),
+        owns_reference(
+            select(AppState.value["source_ref"].astext).where(
+                or_(
+                    AppState.key.startswith("sample-owner:"),
+                    AppState.key.startswith("interval-owner:"),
+                    AppState.key.startswith("observation-owner:"),
+                    AppState.key.startswith("activity-parts-owner:"),
+                )
+            )
+        ),
+        owns_reference(
+            select(activity_refs.c.value)
+            .select_from(AppState)
+            .join(activity_refs, true())
+            .where(AppState.key.startswith("activity-version:"))
+        ),
         SourcePayload.status.in_(["normalized", "partial", "error"])
         & (SourcePayload.parser_version > 0)
         & or_(
@@ -248,10 +258,7 @@ def canonical_source():
         .where(MetricObservation.source_ref == SourcePayload.id)
         .correlate(SourcePayload)
         .exists(),
-        select(TimelineInterval.id)
-        .where(TimelineInterval.evidence["source_ref"].astext == cast(SourcePayload.id, String))
-        .correlate(SourcePayload)
-        .exists(),
+        owns_reference(select(TimelineInterval.evidence["source_ref"].astext)),
         select(HealthDay.day)
         .where(
             or_(
