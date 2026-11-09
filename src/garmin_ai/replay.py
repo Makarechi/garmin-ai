@@ -31,7 +31,7 @@ from garmin_ai.reconciliation import Replacement
 
 GARMIN_RAW_SOURCE = "garmin_connect"
 REPAIR_SCAN_BATCH = 128
-REPAIR_VERSION = 1
+REPAIR_VERSION = 2
 REPAIR_CURSOR_KEY = "replay:repair_scan_cursor"
 SOURCE_CURSOR_KEY = "replay:source_scan_cursor"
 

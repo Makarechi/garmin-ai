@@ -1,3 +1,4 @@
+import json
 import struct
 from datetime import UTC, datetime, timedelta
 
@@ -75,6 +76,37 @@ def test_real_synthetic_fit_keeps_previously_filtered_device_messages():
     assert values["device_index"] == 1
     assert values["_fit"]["global_message_number"] == 23
     assert values["_fit"]["fields"][0]["field_number"] == 0
+
+
+def local_time_fit_bytes(seconds):
+    # user_profile.wake_time is a uint32 localtime_into_day field.
+    body = struct.pack("<BBBHB", 0x40, 0, 0, 3, 1) + bytes([28, 4, 0x86, 0])
+    body += struct.pack("<I", seconds)
+    header = struct.pack("<BBHI4s", 14, 0x10, 2100, len(body), b".FIT")
+    header += struct.pack("<H", compute_crc(header))
+    return header + body + struct.pack("<H", compute_crc(header + body))
+
+
+def test_fit_local_clock_keeps_raw_seconds_and_serializes_to_json(db, tmp_path):
+    data = local_time_fit_bytes(7 * 3600 + 15 * 60)
+    kind, values = parse_fit(data)[0]
+    assert kind == "user_profile" and values["wake_time"] == "07:15:00"
+    assert values["_fit"]["fields"][0]["raw_value"] == 7 * 3600 + 15 * 60
+    assert json.loads(json.dumps(values))["wake_time"] == "07:15:00"
+    db.add(
+        Activity(
+            id="local-clock",
+            kind="running",
+            start=NOW,
+            end=NOW + timedelta(minutes=30),
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    result = store_fit(db, LocalArchive(tmp_path), "local-clock", data, fetched_at=NOW)
+    assert result["status"] == "normalized"
+    part = db.scalar(select(ActivityPart).where(ActivityPart.activity_id == "local-clock"))
+    assert part.payload["wake_time"] == "07:15:00"
 
 
 def test_native_and_developer_names_do_not_overwrite_each_other():

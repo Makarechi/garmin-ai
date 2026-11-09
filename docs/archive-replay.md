@@ -44,6 +44,8 @@ order of earlier responses.
 After this recovery update, exhausted canonical jobs receive one fresh bounded
 retry cycle. The planner records its repair version so persistent failures do not
 loop indefinitely; the existing queue and scan limits still apply.
+FIT profile clock fields retain their original numeric seconds and store their
+decoded value as an ISO local time, without inventing a date or timezone.
 
 Canonical revisions are scheduled before obsolete raw history, and superseded sources are rejected before archive reads. A reapplied raw revision records its current interpretation timezone; an unchanged response preserves the existing timezone.
 

@@ -163,7 +163,8 @@ def test_legacy_failed_replay_recovers_from_current_raw_without_inventing_histor
     assert history[1]["raw_ref"] == str(current.id)
 
 
-def test_repair_update_retries_exhausted_legacy_jobs_once(db, tmp_path):
+@pytest.mark.parametrize("previous_repair", [False, True])
+def test_repair_update_retries_exhausted_legacy_jobs_once(db, tmp_path, previous_repair):
     from garmin_ai.replay import REPAIR_VERSION
 
     bind_account(db, ACCOUNT)
@@ -172,6 +173,8 @@ def test_repair_update_retries_exhausted_legacy_jobs_once(db, tmp_path):
     job = db.scalar(select(Job).where(Job.kind == "raw_replay"))
     job.status = "failed"
     job.payload = {**job.payload, "repair_parser_version": row.parser_version}
+    if previous_repair:
+        job.payload = {**job.payload, "repair_version": REPAIR_VERSION - 1}
     db.flush()
 
     assert schedule_replay(db, NOW) == 1
