@@ -1,7 +1,7 @@
 import io
 import math
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 
 import fitdecode
 from sqlalchemy import delete, func, select
@@ -43,7 +43,7 @@ def parse_fit(data: bytes):
 
 
 def json_value(value):
-    if isinstance(value, datetime):
+    if isinstance(value, (datetime, time)):
         return value.isoformat()
     if isinstance(value, bytes):
         return value.hex()
