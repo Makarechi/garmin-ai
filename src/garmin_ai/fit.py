@@ -9,8 +9,10 @@ from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Activity, ActivityPart, AppState, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, upsert
+from garmin_ai.projection_changes import execute_projection
 
 MAX_FIT_BYTES = 100 * 1024 * 1024
+FIT_RECORD_BATCH_SIZE = 500
 
 
 def extract_fit(raw: bytes) -> list[bytes]:
@@ -187,13 +189,17 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
                     ActivityPart.activity_id == activity_id, ActivityPart.kind.startswith("fit_")
                 )
             )
-            for i, (kind, payload) in enumerate(parsed):
-                upsert(
-                    session,
-                    ActivityPart,
-                    dict(activity_id=activity_id, kind=f"fit_{kind}", sequence=i, payload=payload),
-                    ["activity_id", "kind", "sequence"],
-                )
+            # The archive lock and deletion above reserve all FIT sequences for
+            # this replacement. Bound each insert instead of round-tripping once
+            # per message while keeping the whole replacement in the savepoint.
+            for offset in range(0, len(parsed), FIT_RECORD_BATCH_SIZE):
+                rows = [
+                    dict(activity_id=activity_id, kind=f"fit_{kind}", sequence=i, payload=payload)
+                    for i, (kind, payload) in enumerate(
+                        parsed[offset : offset + FIT_RECORD_BATCH_SIZE], start=offset
+                    )
+                ]
+                execute_projection(session, insert(ActivityPart).values(rows))
             activity.fit_key = archive_key
             source.status = "normalized"
             source.parser_version = PARSER_VERSION
