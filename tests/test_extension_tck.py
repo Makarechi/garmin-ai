@@ -21,6 +21,18 @@ def installed_fixture():
     pytest.importorskip("synthetic_adapters")
 
 
+def restrict_runtime_jobs(monkeypatch, allowed):
+    from garmin_ai import runtime
+
+    original_claim = runtime.claim_ready_job
+
+    def claim_selected(engine, kinds, *args):
+        selected = [kind for kind in kinds if kind in allowed]
+        return original_claim(engine, selected, *args) if selected else None
+
+    monkeypatch.setattr(runtime, "claim_ready_job", claim_selected)
+
+
 def selected_settings():
     return Settings(
         integrations=[
@@ -262,6 +274,7 @@ def test_channel_plugin_retries_transient_start_failure(db, db_engine, tmp_path,
     monkeypatch.setattr(registry, "create", fail_first_start)
     monkeypatch.setattr(runtime, "default_registry", lambda _settings: registry)
     monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    restrict_runtime_jobs(monkeypatch, {"channel_initiatives"})
     before = len(SampleChannel.instances)
 
     async def scenario():
@@ -827,6 +840,17 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
     )
     monkeypatch.setattr(runtime, "can_notify", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(runtime, "deliver_current_insight", fake_deliver)
+
+    restrict_runtime_jobs(
+        monkeypatch,
+        {
+            "agent_insights",
+            "agent_proactive",
+            "telegram_connection_notice",
+            "telegram_storage_notice",
+            "telegram_provider_notice",
+        },
+    )
 
     async def scenario():
         callbacks = []
