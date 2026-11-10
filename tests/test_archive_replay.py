@@ -488,6 +488,16 @@ def test_runtime_disables_context_generation_while_replay_is_pending(
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
     monkeypatch.setattr(runtime, "GeminiProvider", lambda _: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr("garmin_ai.replay.schedule_replay", lambda *args: None)
+    original_ready_claim = runtime.claim_ready_job
+
+    def claim_proactive_only(engine, kinds, *args):
+        # This case checks replay context, not contention with check-in workers.
+        # Their nonblocking archive reservation can correctly defer this job.
+        if "agent_proactive" not in kinds:
+            return None
+        return original_ready_claim(engine, ["agent_proactive"], *args)
+
+    monkeypatch.setattr(runtime, "claim_ready_job", claim_proactive_only)
     seen = []
 
     async def scenario():
