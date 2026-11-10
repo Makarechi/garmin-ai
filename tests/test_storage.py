@@ -292,3 +292,74 @@ def test_replay_and_claim_refresh_cached_rows(db, db_engine):
     again = claim(db, now=now + timedelta(seconds=4), lease_seconds=1)
     assert again is held and again.attempts == 3
     assert db.get(Job, job_id).attempts == 3
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "channel_initiatives",
+        "source_plugin_poll",
+        "backup",
+        "garmin_endpoint",
+        "raw_replay",
+        "telegram_ack",
+    ],
+)
+def test_unrelated_job_lanes_do_not_build_archive_readiness(db, monkeypatch, kind):
+    from garmin_ai import replay
+    from garmin_ai.normalize import PARSER_VERSION
+
+    now = datetime.now(UTC)
+    identity = enqueue(
+        db,
+        kind,
+        {"target_version": PARSER_VERSION, "endpoint": "sleep", "key": now.date().isoformat()},
+        f"synthetic-cheap-claim:{kind}",
+        now,
+    )
+
+    def unexpected_archive_scan():
+        raise AssertionError("Unrelated job lane constructed archive readiness")
+
+    monkeypatch.setattr(replay, "replay_pending_condition", unexpected_archive_scan)
+    assert claim(db, kinds=[kind], now=now).id == identity
+
+
+@pytest.mark.parametrize("kinds", [None, ["agent_insights"], ["agent_proactive", "agent_insights"]])
+def test_insight_capable_lanes_keep_archive_readiness_guard(db, monkeypatch, kinds):
+    from sqlalchemy import literal
+
+    from garmin_ai import replay
+
+    calls = []
+    now = datetime.now(UTC)
+    enqueue(db, "agent_insights", {}, "synthetic-blocked-insight", now)
+
+    def pending():
+        calls.append(1)
+        return literal(True)
+
+    monkeypatch.setattr(replay, "replay_pending_condition", pending)
+    assert claim(db, kinds=kinds, now=now) is None
+    assert calls == [1]
+
+
+def test_proactive_readiness_is_checked_only_after_a_job_is_selected(db, monkeypatch):
+    from sqlalchemy import literal
+
+    from garmin_ai import replay
+
+    calls = []
+    now = datetime.now(UTC)
+
+    def pending():
+        calls.append(1)
+        return literal(True)
+
+    monkeypatch.setattr(replay, "replay_pending_condition", pending)
+    assert claim(db, kinds=["agent_proactive"], now=now) is None
+    assert calls == []
+    identity = enqueue(db, "agent_proactive", {}, "synthetic-proactive-readiness", now)
+    job = claim(db, kinds=["agent_proactive"], now=now)
+    assert job.id == identity and job.payload["replay_pending"] is True
+    assert calls == [1]

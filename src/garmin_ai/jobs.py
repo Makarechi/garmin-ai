@@ -413,6 +413,14 @@ def claim(
     else:
         freshness_priority = literal(5)
         history_day_order = literal("")
+    # Other lanes cannot select an insight job. Avoid constructing and compiling
+    # the archive-wide readiness expression for each of their polling attempts.
+    insight_gate = True
+    if not garmin_paused and (kinds is None or "agent_insights" in kinds):
+        insight_gate = or_(
+            Job.kind != "agent_insights",
+            and_(~unfinished_sync, ~replay_pending_condition()),
+        )
     row = session.scalar(
         select(Job)
         .where(
@@ -433,11 +441,7 @@ def claim(
                 Job.kind != "raw_replay",
                 Job.payload["target_version"].as_integer() == PARSER_VERSION,
             ),
-            or_(
-                Job.kind != "agent_insights",
-                garmin_paused,
-                and_(~unfinished_sync, ~replay_pending_condition()),
-            ),
+            insight_gate,
             or_(Job.kind != "backup", ~backup_sync_pending),
             or_(Job.kind != "agent_proactive", garmin_paused, ~activity_pending),
             or_(

@@ -8,14 +8,17 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.accounts import account_transaction, ensure_account
 from garmin_ai.fit import store_fit
 from garmin_ai.garmin_contract import ENDPOINTS
 from garmin_ai.ingest import ingest
 from garmin_ai.jobs import compact_pending_periodic_fetches, enqueue
-from garmin_ai.models import AppState, Measurement, TimelineInterval
+from garmin_ai.models import AppState, Job, Measurement, TimelineInterval
 from garmin_ai.normalize import timestamp, upsert
+
+SCHEDULE_BATCH_SIZE = 500
 
 FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps"}
 
@@ -49,15 +52,31 @@ def schedule_sync(session, settings, now: datetime):
         return
     schedule_history(session, settings, now)
     requested = set()
+    pending = []
+    collection_enabled = {}
+
+    def enabled(endpoint):
+        if endpoint not in collection_enabled:
+            collection_enabled[endpoint] = garmin_collection_enabled(session, endpoint)
+        return collection_enabled[endpoint]
 
     def schedule_endpoint(payload, dedup_key, run_at):
-        if not garmin_collection_enabled(session, payload["endpoint"]):
+        if not enabled(payload["endpoint"]):
             return
         identity = (payload["endpoint"], payload["key"])
         if identity in requested:
             return
         requested.add(identity)
-        enqueue(session, "garmin_endpoint", payload, dedup_key, run_at)
+        if run_at.tzinfo is None or run_at.utcoffset() is None:
+            raise ValueError("Job schedule must include a timezone")
+        pending.append(
+            dict(
+                kind="garmin_endpoint",
+                payload=payload,
+                dedup_key=dedup_key,
+                run_at=run_at.astimezone(UTC),
+            )
+        )
 
     local = now.astimezone(ZoneInfo(settings.timezone))
     slot = int(now.timestamp()) // 900
@@ -68,9 +87,7 @@ def schedule_sync(session, settings, now: datetime):
                 f"frequent:{endpoint.name}:{slot}",
                 now + timedelta(seconds=random.uniform(0, 60)),
             )
-    if garmin_collection_enabled(session, "activities") and not schedule_scans(
-        session, settings, now
-    ):
+    if enabled("activities") and not schedule_scans(session, settings, now):
         enqueue(
             session,
             "garmin_activities",
@@ -119,6 +136,14 @@ def schedule_sync(session, settings, now: datetime):
                 f"daily:{endpoint.name}:{local.date()}",
                 now + timedelta(seconds=random.uniform(0, 120)),
             )
+    # Keep the same transaction and conflict policy while bounding round trips
+    # for the nightly calendar reconciliation. Dispatch rechecks collection policy.
+    for offset in range(0, len(pending), SCHEDULE_BATCH_SIZE):
+        session.execute(
+            insert(Job)
+            .values(pending[offset : offset + SCHEDULE_BATCH_SIZE])
+            .on_conflict_do_nothing(index_elements=[Job.dedup_key])
+        )
     compact_pending_periodic_fetches(session, now)
 
 
