@@ -50,7 +50,7 @@ services:
     healthcheck:
       test: [CMD, python, /opt/garmin-ai-healthcheck.py]
       start_period: 300s
-      timeout: 30s
+      timeout: 90s
     memswap_limit: 1024m
     environment: *numeric_threads
     logging: *bounded_logs
