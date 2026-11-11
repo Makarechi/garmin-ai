@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import logging
+import re
 import signal
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -402,18 +403,39 @@ def _voice_failure_notice(engine, settings, *, oversized: bool, unsupported: boo
 
 class SafeFormatter(logging.Formatter):
     def format(self, record):
-        return json.dumps(
-            {
-                "time": datetime.now(UTC).isoformat(),
-                "level": record.levelname,
-                "event": record.getMessage(),
-                **{
-                    k: getattr(record, k)
-                    for k in ("job_id", "kind", "error_type")
-                    if hasattr(record, k)
-                },
-            }
-        )
+        event = record.getMessage()
+        data = {
+            "time": datetime.now(UTC).isoformat(),
+            "level": record.levelname,
+            "event": event,
+            **{
+                k: getattr(record, k)
+                for k in ("job_id", "kind", "error_type")
+                if hasattr(record, k)
+            },
+        }
+        if event in {"model_provider_request", "model_plugin_request"}:
+            from garmin_ai.llm import MODEL_FAILURE_KINDS
+
+            instance = getattr(record, "provider_instance_id", None)
+            if isinstance(instance, str) and re.fullmatch(r"[a-z][a-z0-9_.:-]{0,199}", instance):
+                data["provider_instance_id"] = instance
+            for key, allowed in (
+                ("operation", {"request", "structured", "transcribe"}),
+                ("outcome", {"success", "error"}),
+                ("failure_kind", MODEL_FAILURE_KINDS),
+            ):
+                value = getattr(record, key, None)
+                if isinstance(value, str) and value in allowed:
+                    data[key] = value
+            for key in ("latency_ms", "input_tokens", "output_tokens"):
+                value = getattr(record, key, None)
+                if type(value) is int and 0 <= value <= 1_000_000_000:
+                    data[key] = value
+            status = getattr(record, "upstream_status", None)
+            if type(status) is int and 400 <= status <= 599:
+                data["upstream_status"] = status
+        return json.dumps(data)
 
 
 def setup_logging():

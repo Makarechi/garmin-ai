@@ -115,6 +115,63 @@ class ProviderRateLimited(ProviderUnavailable):
     retry_seconds = 120
 
 
+MODEL_FAILURE_KINDS = frozenset(
+    {
+        "network",
+        "timeout",
+        "upstream_unavailable",
+        "rate_limited",
+        "authorization",
+        "model_unavailable",
+        "invalid_output",
+        "invalid_request",
+        "unavailable",
+        "other",
+    }
+)
+
+
+def _gemini_failure_diagnostics(error):
+    """Classify errors without copying upstream messages into logs."""
+    try:
+        cause = error.__context__
+        status = getattr(cause, "status_code", None) or getattr(cause, "code", None)
+        status = status if type(status) is int and 400 <= status <= 599 else None
+        if isinstance(error, ProviderRateLimited):
+            kind = "rate_limited"
+        elif isinstance(error, ProviderAuthError):
+            kind = "authorization"
+        elif isinstance(error, ProviderModelUnavailable):
+            kind = "model_unavailable"
+        elif isinstance(error, ProviderOutputInvalid):
+            kind = "invalid_output"
+        elif isinstance(error, ProviderRequestInvalid):
+            kind = "invalid_request"
+        elif isinstance(error, ProviderUnavailable):
+            if status == 408:
+                kind = "timeout"
+            elif status is not None and status >= 500:
+                kind = "upstream_unavailable"
+            elif (
+                isinstance(cause, (httpx.TimeoutException, TimeoutError))
+                or type(cause).__name__ == "APITimeoutError"
+            ):
+                kind = "timeout"
+            elif (
+                isinstance(cause, (httpx.TransportError, ConnectionError))
+                or type(cause).__name__ == "APIConnectionError"
+            ):
+                kind = "network"
+            else:
+                kind = "unavailable"
+        else:
+            kind = "other"
+        return kind, status
+    except Exception:
+        # Diagnostics must never alter the outcome of the request.
+        return "other", None
+
+
 def _require_completed_interaction(response):
     status = getattr(response, "status", None)
     if status == "completed":
@@ -391,11 +448,15 @@ class GeminiProvider:
             started = time.monotonic()
             response = None
             outcome = "error"
+            failure_kind, upstream_status = None, None
             try:
                 response = self._request(**attempt_kwargs)
                 result = _response_parser(response) if _response_parser else response
                 outcome = "success"
                 return result
+            except Exception as exc:
+                failure_kind, upstream_status = _gemini_failure_diagnostics(exc)
+                raise
             finally:
                 try:
                     fields = {
@@ -406,6 +467,10 @@ class GeminiProvider:
                         "outcome": outcome,
                         "latency_ms": round((time.monotonic() - started) * 1000),
                     }
+                    if failure_kind is not None:
+                        fields["failure_kind"] = failure_kind
+                    if upstream_status is not None:
+                        fields["upstream_status"] = upstream_status
                     usage = getattr(response, "usage", None)
                     for source, target in (
                         ("total_input_tokens", "input_tokens"),
