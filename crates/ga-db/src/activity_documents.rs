@@ -28,6 +28,17 @@ pub enum ActivityDocument {
 }
 
 impl ActivityDocument {
+    pub(crate) fn for_endpoint(endpoint: &str) -> Option<Self> {
+        match endpoint {
+            "activity_details" => Some(Self::Details),
+            "activity_splits" => Some(Self::Splits),
+            "activity_typed_splits" => Some(Self::TypedSplits),
+            "activity_zones" => Some(Self::Zones),
+            "activity_weather" => Some(Self::Weather),
+            _ => None,
+        }
+    }
+
     pub const fn endpoint(self) -> &'static str {
         match self {
             Self::Details => "activity_details",
@@ -449,11 +460,12 @@ pub(crate) async fn raw_status(
     Ok(())
 }
 
-async fn apply_document(
+pub(crate) async fn apply_document(
     txn: &mut Transaction<'_, Postgres>,
     request: &ApplyActivity<'_>,
     endpoint: &str,
-) -> Result<(), sqlx::Error> {
+    verified_replay: Option<&Value>,
+) -> Result<(), DocumentError> {
     let activity: Option<String> =
         sqlx::query_scalar("SELECT id FROM activities WHERE id = $1 FOR UPDATE")
             .bind(request.source_key)
@@ -472,19 +484,25 @@ async fn apply_document(
             .bind(endpoint)
             .execute(&mut **txn)
             .await?;
+        let replay = verified_replay
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| DocumentError::InvalidRecordedState)?;
         sqlx::query(
             "INSERT INTO activity_parts (activity_id, kind, sequence, payload)
                  SELECT $1, $2, (element.ordinality - 1)::int, element.value
                  FROM source_payloads AS source
+                 CROSS JOIN LATERAL (SELECT COALESCE($4::jsonb, source.payload) AS payload) AS chosen
                  CROSS JOIN LATERAL jsonb_array_elements(
-                     CASE WHEN jsonb_typeof(source.payload) = 'array' THEN source.payload
-                          ELSE jsonb_build_array(source.payload) END
+                     CASE WHEN jsonb_typeof(chosen.payload) = 'array' THEN chosen.payload
+                          ELSE jsonb_build_array(chosen.payload) END
                  ) WITH ORDINALITY AS element(value, ordinality)
                  WHERE source.id = $3",
         )
         .bind(request.source_key)
         .bind(endpoint)
         .bind(request.source_id)
+        .bind(replay)
         .execute(&mut **txn)
         .await?;
         supersede_insights(txn).await?;
@@ -506,7 +524,7 @@ async fn apply_effects(
     } else {
         match request.projection {
             Projection::Document(document) => {
-                apply_document(txn, request, document.endpoint()).await?;
+                apply_document(txn, request, document.endpoint(), None).await?;
                 DocumentStatus::Archived
             }
             Projection::Summary(kind) => {

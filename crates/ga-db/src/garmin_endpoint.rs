@@ -164,16 +164,13 @@ impl Endpoint {
     }
 
     fn projection<'a>(&'a self, replacement: Option<&'a HealthReplacement>) -> Projection<'a> {
-        let document = match self.name.as_str() {
-            "activity_details" => ActivityDocument::Details,
-            "activity_splits" => ActivityDocument::Splits,
-            "activity_typed_splits" => ActivityDocument::TypedSplits,
-            "activity_zones" => ActivityDocument::Zones,
-            "activity_weather" => ActivityDocument::Weather,
-            "activity" => return Projection::Summary(ActivitySummaryKind::Single),
-            _ => return Projection::Health(&self.name, replacement),
-        };
-        Projection::Document(document)
+        if let Some(document) = ActivityDocument::for_endpoint(&self.name) {
+            Projection::Document(document)
+        } else if self.name == "activity" {
+            Projection::Summary(ActivitySummaryKind::Single)
+        } else {
+            Projection::Health(&self.name, replacement)
+        }
     }
 }
 
