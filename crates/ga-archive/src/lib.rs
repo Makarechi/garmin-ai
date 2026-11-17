@@ -3,6 +3,7 @@ mod key;
 mod staging;
 mod token_file;
 
+pub mod backup_bundle;
 pub mod backup_envelope;
 
 use std::{
@@ -290,7 +291,8 @@ fn ensure_directory(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, ArchiveEr
     Ok(directory)
 }
 
-fn open_regular(directory: &OwnedFd, name: &str) -> Result<File, ArchiveError> {
+fn open_regular(directory: &OwnedFd, name: impl AsRef<OsStr>) -> Result<File, ArchiveError> {
+    let name = name.as_ref();
     let metadata = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
     if !FileType::from_raw_mode(metadata.st_mode).is_file() {
         return Err(ArchiveError::InvalidObject);
