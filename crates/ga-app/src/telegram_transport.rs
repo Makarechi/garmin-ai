@@ -1,5 +1,7 @@
 mod poller;
+mod send;
 pub use poller::{PollBatch, PollProgress, TelegramLoopError};
+pub use send::TelegramSendOutcome;
 
 use std::{error::Error, fmt, time::Duration};
 
@@ -13,6 +15,7 @@ const TELEGRAM_API: &str = "https://api.telegram.org";
 const POLL_SECONDS: u64 = 15;
 const POLL_DEADLINE: Duration = Duration::from_secs(POLL_SECONDS + 10);
 const ACK_DEADLINE: Duration = Duration::from_secs(5);
+const SEND_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ACK_BYTES: usize = 64 * 1024;
 const MAX_UPDATES: usize = 100;
@@ -54,11 +57,12 @@ pub struct TelegramUpdate {
     pub body: Value,
 }
 
-/// The long poll and callback acknowledgements have independent connection pools.
+/// Polling, confirmations, delivery and downloads use independent connection pools.
 pub struct TelegramTransport {
     base: String,
     polling: Client,
     acknowledgements: Client,
+    delivery: Client,
     downloads: Client,
     file_base: String,
 }
@@ -111,6 +115,7 @@ impl TelegramTransport {
             base: format!("{origin}/bot{token}"),
             polling: build(POLL_DEADLINE)?,
             acknowledgements: build(ACK_DEADLINE)?,
+            delivery: build(SEND_DEADLINE)?,
             downloads: build(VOICE_DEADLINE)?,
             file_base: format!("{origin}/file/bot{token}"),
         })
