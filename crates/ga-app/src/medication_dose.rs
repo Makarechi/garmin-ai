@@ -5,11 +5,11 @@ use std::{borrow::Cow, error::Error, fmt, sync::OnceLock};
 use fancy_regex::{Captures, Regex, Replacer};
 use ga_domain::metric_contract::decimal_value;
 
-const MAX_TEXT_BYTES: usize = 64_000;
-const VERB: &str = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|проглотил[аи]?|took|taken|swallowed|съел[аи]?(?=\s+(?:(?:одну|две|\d+)\s+)?(?:таблетк\w*|капсул\w*|лекарств\w*)\b))\b";
-const QUANTITY: &str = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|one|two|three|four|five|six|seven|eight|nine|ten|an|a)";
-const DOSE: &str = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b";
-const NUMBER_WORDS: &[(&str, u8)] = &[
+pub(crate) const MAX_TEXT_BYTES: usize = 64_000;
+pub(crate) const VERB: &str = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|проглотил[аи]?|took|taken|swallowed|съел[аи]?(?=\s+(?:(?:одну|две|\d+)\s+)?(?:таблетк\w*|капсул\w*|лекарств\w*)\b))\b";
+pub(crate) const QUANTITY: &str = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|one|two|three|four|five|six|seven|eight|nine|ten|an|a)";
+pub(crate) const DOSE: &str = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b";
+pub(crate) const NUMBER_WORDS: &[(&str, u8)] = &[
     ("один", 1),
     ("одну", 1),
     ("два", 2),
@@ -257,7 +257,7 @@ pub fn parse_literal_dose(source: &str) -> Result<MedicationDose, DoseTextError>
     })
 }
 
-fn replace(
+pub(crate) fn replace(
     text: &mut String,
     pattern: &Regex,
     replacement: impl Replacer,
