@@ -1,6 +1,7 @@
 pub mod event_input;
 pub mod event_payload;
 pub mod event_provenance;
+pub mod event_replay;
 mod event_time;
 pub mod identity;
 pub mod legacy_json;
