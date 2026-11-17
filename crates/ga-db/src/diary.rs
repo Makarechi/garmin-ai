@@ -3,7 +3,7 @@ mod metrics;
 use std::{error::Error, fmt};
 
 use ga_domain::{
-    event_input::EventInput,
+    event_input::{EventInput, InvalidEvent},
     event_provenance::InvalidClockUncertainty,
     event_replay::{ReplayConflict, check_idempotency_key},
     timestamp::StoredInstant,
@@ -40,6 +40,7 @@ pub struct StoredSystemEvent {
 pub enum DiaryWriteError {
     Storage(ReadinessError),
     UnknownOwner,
+    Input(InvalidEvent),
     TrackingDisabled,
     InvalidRelation,
     InvalidMetricMapping,
@@ -56,6 +57,7 @@ impl fmt::Display for DiaryWriteError {
         formatter.write_str(match self {
             Self::Storage(_) => "Diary storage is unavailable",
             Self::UnknownOwner => "Diary owner could not be verified",
+            Self::Input(error) => return error.fmt(formatter),
             Self::TrackingDisabled => "The scenario pack is disabled",
             Self::InvalidRelation => "Diary report references an unavailable or incompatible entry",
             Self::InvalidMetricMapping => "Diary metric is outside its recorded contract",
@@ -83,6 +85,10 @@ impl Database {
         &self,
         request: CreateSystemEvent<'_>,
     ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        request
+            .report
+            .validate_for_write()
+            .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
         if let Some(key) = request.idempotency_key {
             check_idempotency_key(key).map_err(DiaryWriteError::Replay)?;

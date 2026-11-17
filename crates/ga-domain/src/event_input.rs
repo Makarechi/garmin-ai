@@ -182,14 +182,24 @@ impl EventInput {
         if self.end.is_some_and(|end| end < self.start) {
             return Err(InvalidEvent::ReversedInterval);
         }
-        if strict_point
-            && (machine_source || self.status == EventStatus::Inferred)
-            && mode != ValidationMode::AuditedSnapshot
-        {
-            return Err(InvalidEvent::ExplicitReportRequired);
+        if mode == ValidationMode::NewReport {
+            self.validate_for_write()?;
         }
         if self.source == EventSource::Inferred && self.status == EventStatus::Confirmed {
             return Err(InvalidEvent::InferredCannotBeConfirmed);
+        }
+        Ok(())
+    }
+
+    /// Recheck rules reserved for newly submitted reports after loading an audit.
+    pub fn validate_for_write(&self) -> Result<(), InvalidEvent> {
+        if matches!(
+            self.payload.kind(),
+            "wellbeing_observation" | "activity_effort"
+        ) && (matches!(self.source, EventSource::Inferred | EventSource::Wearable)
+            || self.status == EventStatus::Inferred)
+        {
+            return Err(InvalidEvent::ExplicitReportRequired);
         }
         Ok(())
     }

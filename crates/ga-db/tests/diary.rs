@@ -5,7 +5,7 @@ use ga_db::{
     diary::{CreateSystemEvent, DiaryWriteError},
 };
 use ga_domain::{
-    event_input::{EventInput, ValidationMode},
+    event_input::{EventInput, InvalidEvent, ValidationMode},
     event_replay::ReplayConflict,
 };
 use serde_json::{Value, json};
@@ -53,6 +53,16 @@ async fn creates_diary_event_audit_and_metric_together_and_replays_the_original(
     assert!(matches!(
         db.create_system_event(unknown).await,
         Err(DiaryWriteError::UnknownOwner)
+    ));
+    let historical = EventInput::from_json(
+        br#"{"start":"2026-10-25T10:00:00Z","source":"inferred","status":"inferred","payload":{"type":"wellbeing_observation","energy":5}}"#,
+        4096, ValidationMode::AuditedSnapshot,
+    )?;
+    let mut restored = request("synthetic-audited-observation");
+    restored.report = &historical;
+    assert!(matches!(
+        db.create_system_event(restored).await,
+        Err(DiaryWriteError::Input(InvalidEvent::ExplicitReportRequired))
     ));
 
     let legacy = db
