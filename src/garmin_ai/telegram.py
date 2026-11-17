@@ -35,6 +35,7 @@ from garmin_ai.models import (
     EventDefinition,
     EventDefinitionVersion,
     HealthDay,
+    InboundMessage,
     Job,
     TelegramUpdate,
 )
@@ -172,11 +173,28 @@ def save_update(
 ):
     if owned_message(update, owner_id) is None:
         return False
+    session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
+    # The native job is the ownership record for this exact transport delivery.
+    native_owner = session.scalar(
+        select(Job.id)
+        .join(
+            InboundMessage,
+            Job.dedup_key == func.concat("telegram:inbound:native:", InboundMessage.id),
+        )
+        .where(
+            Job.kind == "telegram_native_inbound",
+            InboundMessage.channel == channel_instance.channel,
+            InboundMessage.channel_instance_id == channel_instance.instance_id,
+            InboundMessage.external_event_id == str(update["update_id"]),
+        )
+        .limit(1)
+    )
+    if native_owner is not None:
+        return True
     # The legacy dispatcher cannot reconcile edits, but neutral shadow ingress
     # retains them as revisions without enqueueing a duplicate diary mutation.
     if update.get("edited_message") is not None and dispatcher_version != "neutral-shadow-v1":
         return False
-    session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
     ordering_key = _ingress_state_key("telegram:ordering", channel_instance)
     ordering = session.get(AppState, ordering_key, populate_existing=True)

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{
     ChannelCallback, InboundReceipt, IngressError, callback::resolve_and_ingest, ingest,
-    lock_mutations,
+    lock_mutations, native_telegram,
 };
 use crate::{
     Database, check_readiness,
@@ -45,6 +45,7 @@ pub struct TelegramPollInput<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TelegramPollReceipt {
     pub selected: bool,
+    pub owned_by_legacy: bool,
     pub inbound: Option<InboundReceipt>,
     pub new_ordering_epoch: Option<i64>,
     pub acknowledgement_queued: bool,
@@ -59,6 +60,7 @@ pub enum TelegramPollError {
     Ingress(IngressError),
     Cursor(TelegramCursorError),
     Acknowledgement(JobStoreError),
+    Processing(JobStoreError),
     Database,
 }
 
@@ -73,7 +75,7 @@ impl fmt::Display for TelegramPollError {
             Self::Busy => f.write_str("Telegram channel selection is changing"),
             Self::Ingress(error) => error.fmt(f),
             Self::Cursor(error) => error.fmt(f),
-            Self::Acknowledgement(error) => error.fmt(f),
+            Self::Acknowledgement(error) | Self::Processing(error) => error.fmt(f),
             Self::Database => f.write_str("Telegram poll update could not be committed"),
         }
     }
@@ -173,38 +175,47 @@ async fn persist(
         return Err(TelegramPollError::ChannelDisabled);
     }
     lock_ingress(&mut txn).await?;
+    let owned_by_legacy = selected
+        && !matches!(input.event, TelegramPollEvent::Ignore)
+        && native_telegram::legacy_owns(&mut txn, input.instance_id, input.update_id).await?;
     // Edits replace a revision without advancing the last new message timestamp.
     let advances_ordering = !matches!(
         &input.event, TelegramPollEvent::Message(envelope) if envelope.kind() == InboundKind::Edit
     );
-    let inbound = if selected {
+    let inbound = if selected && !owned_by_legacy {
         save_event(&mut txn, input.event, normalize_callback).await?
     } else {
         None
     };
+    if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
+        native_telegram::enqueue(&mut txn, receipt.message_id, input.received_at)
+            .await
+            .map_err(TelegramPollError::Processing)?;
+    }
     let new_ordering_epoch = if advances_ordering && inbound.is_some_and(|receipt| receipt.created)
     {
         Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
     } else {
         None
     };
-    let acknowledgement_queued = if let Some(callback_id) = input.callback_id.filter(|_| selected) {
-        let target = TelegramAckTarget {
-            owner_id: input.owner_id,
-            instance_id: input.instance_id,
+    let acknowledgement_queued =
+        if let Some(callback_id) = input.callback_id.filter(|_| selected && !owned_by_legacy) {
+            let target = TelegramAckTarget {
+                owner_id: input.owner_id,
+                instance_id: input.instance_id,
+            };
+            enqueue_telegram_ack(
+                &mut txn,
+                target,
+                input.update_id,
+                callback_id,
+                input.received_at,
+            )
+            .await
+            .map_err(TelegramPollError::Acknowledgement)?
+        } else {
+            false
         };
-        enqueue_telegram_ack(
-            &mut txn,
-            target,
-            input.update_id,
-            callback_id,
-            input.received_at,
-        )
-        .await
-        .map_err(TelegramPollError::Acknowledgement)?
-    } else {
-        false
-    };
     if mode == DeliveryMode::Polling {
         advance_telegram_poll_cursor(
             &mut txn,
@@ -217,6 +228,7 @@ async fn persist(
     txn.commit().await?;
     Ok(TelegramPollReceipt {
         selected,
+        owned_by_legacy,
         inbound,
         new_ordering_epoch,
         acknowledgement_queued,

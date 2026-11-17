@@ -94,7 +94,7 @@ impl<'binding> TelegramBinding<'binding> {
                 update.normalize_callback(action, false)
             })
             .await?;
-        Ok(receipt.inbound.is_some())
+        Ok(receipt.owned_by_legacy || receipt.inbound.is_some())
     }
 
     pub fn authenticate<'wire>(
