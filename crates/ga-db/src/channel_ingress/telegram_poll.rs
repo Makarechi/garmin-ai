@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-const CHANNEL_SELECTION_LOCK: i64 = 72_104_621;
+pub(crate) const CHANNEL_SELECTION_LOCK: i64 = 72_104_621;
 
 pub enum TelegramPollEvent<'a> {
     Ignore,
