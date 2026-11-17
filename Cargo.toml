@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ga-app", "crates/ga-db", "crates/ga-domain"]
+members = ["crates/ga-app", "crates/ga-archive", "crates/ga-db", "crates/ga-domain"]
 resolver = "3"
 
 [workspace.package]
