@@ -1,5 +1,8 @@
 //! Scoped analytic context for neutral conversations.
 
+mod confirmed;
+pub use confirmed::ConfirmedAnalysis;
+
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
@@ -34,6 +37,7 @@ pub struct MemorySnapshot {
 #[derive(Debug)]
 pub enum MemoryError {
     NotFound,
+    Unconfirmed,
     Storage(ReadinessError),
     Busy,
     InvalidState,
@@ -44,6 +48,7 @@ impl fmt::Display for MemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NotFound => "Conversation is unavailable to this owner",
+            Self::Unconfirmed => "Analysis requires its confirmed question and answer",
             Self::Storage(_) => "Conversation storage is unavailable",
             Self::Busy => "Conversation context is being updated",
             Self::InvalidState => "Stored conversation context is invalid",
@@ -158,16 +163,7 @@ async fn snapshot(
     binding: ConversationBinding,
     now: StoredInstant,
 ) -> Result<MemorySnapshot, MemoryError> {
-    let target: ConversationRow = sqlx::query_as(
-        "SELECT id,memory_epoch,share_owner_memory,(state->'analysis_turns')::text
-         FROM conversations WHERE id=$1 AND owner_id=$2",
-    )
-    .bind(binding.conversation_id)
-    .bind(binding.owner_id)
-    .fetch_optional(&mut **txn)
-    .await?
-    .ok_or(MemoryError::NotFound)?;
-    let target = parse_row(target)?;
+    let target = conversation(txn, binding).await?;
     let mut sources = vec![target];
     if sources[0].shared {
         let shared: Vec<ConversationRow> = sqlx::query_as(
@@ -192,35 +188,23 @@ async fn snapshot(
     for source in sources {
         let recent = recent_turns(&source.turns, source.shared, &shared_epochs, now)?;
         if recent.len() != source.turns.len() {
-            sqlx::query(
-                "UPDATE conversations SET state=jsonb_set(state,'{analysis_turns}',$3::jsonb),updated_at=now()
-                 WHERE id=$1 AND owner_id=$2",
-            ).bind(source.id).bind(binding.owner_id).bind(json!(recent).to_string()).execute(&mut **txn).await?;
+            persist_turns(
+                txn,
+                ConversationBinding {
+                    conversation_id: source.id,
+                    ..binding
+                },
+                &recent,
+            )
+            .await?;
         }
         for turn in recent {
             let mut turn = turn.clone();
             turn["conversation_id"] = json!(source.id.to_string());
-            let time = asked_at(&turn)?;
-            turns.push((time, turn));
+            turns.push(turn);
         }
     }
-    turns.sort_by(|(left_time, left), (right_time, right)| {
-        left_time.cmp(right_time).then_with(|| {
-            left["operation_id"]
-                .as_str()
-                .cmp(&right["operation_id"].as_str())
-        })
-    });
-    let mut turns: Vec<_> = turns
-        .into_iter()
-        .rev()
-        .take(TURN_LIMIT)
-        .map(|(_, turn)| turn)
-        .collect();
-    turns.reverse();
-    while python_json_bytes(&turns)? > BYTE_LIMIT {
-        turns.remove(0);
-    }
+    let turns = bounded_turns(turns)?;
     let mut source_epochs = shared_epochs;
     source_epochs.remove(&binding.conversation_id);
     Ok(MemorySnapshot {
@@ -230,6 +214,59 @@ async fn snapshot(
         },
         turns,
     })
+}
+
+async fn conversation(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+) -> Result<Conversation, MemoryError> {
+    let target: ConversationRow = sqlx::query_as(
+        "SELECT id,memory_epoch,share_owner_memory,(state->'analysis_turns')::text
+         FROM conversations WHERE id=$1 AND owner_id=$2",
+    )
+    .bind(binding.conversation_id)
+    .bind(binding.owner_id)
+    .fetch_optional(&mut **txn)
+    .await?
+    .ok_or(MemoryError::NotFound)?;
+    parse_row(target)
+}
+
+async fn persist_turns(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    turns: impl serde::Serialize,
+) -> Result<(), MemoryError> {
+    let turns = serde_json::to_string(&turns).map_err(|_| MemoryError::InvalidState)?;
+    sqlx::query(
+        "UPDATE conversations SET state=jsonb_set(state,'{analysis_turns}',$3::jsonb),updated_at=now()
+         WHERE id=$1 AND owner_id=$2",
+    ).bind(binding.conversation_id).bind(binding.owner_id).bind(turns).execute(&mut **txn).await?;
+    Ok(())
+}
+
+fn bounded_turns(turns: Vec<Value>) -> Result<Vec<Value>, MemoryError> {
+    let mut dated = turns
+        .into_iter()
+        .map(|turn| Ok((asked_at(&turn)?, turn)))
+        .collect::<Result<Vec<_>, MemoryError>>()?;
+    dated.sort_by(|(left_time, left), (right_time, right)| {
+        left_time.cmp(right_time).then_with(|| {
+            left["operation_id"]
+                .as_str()
+                .cmp(&right["operation_id"].as_str())
+        })
+    });
+    let first = dated.len().saturating_sub(TURN_LIMIT);
+    let mut turns: Vec<_> = dated
+        .into_iter()
+        .skip(first)
+        .map(|(_, turn)| turn)
+        .collect();
+    while python_json_bytes(&turns)? > BYTE_LIMIT {
+        turns.remove(0);
+    }
+    Ok(turns)
 }
 
 fn parse_row((id, epoch, shared, state): ConversationRow) -> Result<Conversation, MemoryError> {
