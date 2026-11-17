@@ -454,28 +454,70 @@ impl Database {
         now: StoredInstant,
         outcome: JobOutcome,
     ) -> Result<RecordedJobStatus, JobStoreError> {
-        let (error, retry, refund, terminal) = match outcome {
-            JobOutcome::Completed => (None, None, 0, false),
-            JobOutcome::Failed { reason, retry_at } => (
-                Some(reason.label()),
-                retry_at.map(OffsetDateTime::from),
-                reason.refund(),
-                matches!(reason, FailureReason::ProviderRequestInvalid),
-            ),
-        };
         let mut txn = begin(&self.control).await?;
-        let status = sqlx::query_scalar::<_, String>(
-            "WITH owned AS (
-                 SELECT id,
+        let status =
+            finish_in_transaction(&mut txn, id, token, kind, Some(now.into()), outcome).await?;
+        txn.commit().await?;
+        Ok(status)
+    }
+}
+
+impl GarminJobLease {
+    pub(crate) async fn check_live(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), JobStoreError> {
+        let found = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2
+               AND status = 'running' AND lease_until > clock_timestamp() AND kind = $3
+             FOR UPDATE NOWAIT",
+        )
+        .bind(self.id)
+        .bind(self.token)
+        .bind(self.kind.label())
+        .fetch_optional(&mut **txn)
+        .await?;
+        found.map(|_| ()).ok_or(JobStoreError::LeaseLost)
+    }
+
+    pub(crate) async fn finish_in(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        outcome: JobOutcome,
+    ) -> Result<RecordedJobStatus, JobStoreError> {
+        finish_in_transaction(txn, self.id, self.token, self.kind.label(), None, outcome).await
+    }
+}
+
+async fn finish_in_transaction(
+    txn: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    token: Uuid,
+    kind: &str,
+    now: Option<OffsetDateTime>,
+    outcome: JobOutcome,
+) -> Result<RecordedJobStatus, JobStoreError> {
+    let (error, retry, refund, terminal) = match outcome {
+        JobOutcome::Completed => (None, None, 0, false),
+        JobOutcome::Failed { reason, retry_at } => (
+            Some(reason.label()),
+            retry_at.map(OffsetDateTime::from),
+            reason.refund(),
+            matches!(reason, FailureReason::ProviderRequestInvalid),
+        ),
+    };
+    let status = sqlx::query_scalar::<_, String>(
+            "WITH instant AS MATERIALIZED (SELECT coalesce($3, clock_timestamp()) AS at), owned AS (
+                 SELECT id, instant.at,
                     GREATEST(0, attempts - $6) AS effective_attempts,
                     CASE
                        WHEN $5::text IS NULL THEN 'done'
                        WHEN $9 OR attempts - $6 >= $7 THEN 'failed'
                        ELSE 'pending'
                     END AS final_status
-                 FROM jobs
+                 FROM jobs CROSS JOIN instant
                  WHERE id = $1 AND lease_token = $2 AND status = 'running'
-                   AND lease_until > $3 AND kind = $8
+                   AND lease_until > instant.at AND kind = $8
                  FOR UPDATE
              )
              UPDATE jobs SET
@@ -486,35 +528,33 @@ impl Database {
                  lease_token = NULL,
                  run_at = CASE owned.final_status
                               WHEN 'pending' THEN CASE
-                                  WHEN $4::timestamptz IS NOT NULL THEN GREATEST($3, $4)
-                                  ELSE $3 + (LEAST(3600, 15 * (2 ^ owned.effective_attempts))
+                                  WHEN $4::timestamptz IS NOT NULL THEN GREATEST(owned.at, $4)
+                                  ELSE owned.at + (LEAST(3600, 15 * (2 ^ owned.effective_attempts))
                                              + 10 * random()) * INTERVAL '1 second'
                               END
-                              WHEN 'failed' THEN $3
+                              WHEN 'failed' THEN owned.at
                               ELSE jobs.run_at
                           END,
-                 completed_at = CASE WHEN owned.final_status != 'pending' THEN $3 ELSE NULL END
+                 completed_at = CASE WHEN owned.final_status != 'pending' THEN owned.at ELSE NULL END
              FROM owned WHERE jobs.id = owned.id RETURNING jobs.status",
         )
         .bind(id)
         .bind(token)
-        .bind(OffsetDateTime::from(now))
+        .bind(now)
         .bind(retry)
         .bind(error)
         .bind(refund)
         .bind(ATTEMPT_LIMIT)
         .bind(kind)
         .bind(terminal)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut **txn)
         .await?;
-        txn.commit().await?;
-        match status.as_deref() {
-            Some("done") => Ok(RecordedJobStatus::Completed),
-            Some("pending") => Ok(RecordedJobStatus::Deferred),
-            Some("failed") => Ok(RecordedJobStatus::Failed),
-            None => Err(JobStoreError::LeaseLost),
-            Some(_) => Err(JobStoreError::Database),
-        }
+    match status.as_deref() {
+        Some("done") => Ok(RecordedJobStatus::Completed),
+        Some("pending") => Ok(RecordedJobStatus::Deferred),
+        Some("failed") => Ok(RecordedJobStatus::Failed),
+        None => Err(JobStoreError::LeaseLost),
+        Some(_) => Err(JobStoreError::Database),
     }
 }
 
