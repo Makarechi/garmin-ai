@@ -3,7 +3,18 @@
 import json
 import sys
 
-DOMAIN_DEPENDENCIES = {"jiff", "jiter", "serde_json", "sha2", "speedate", "time", "uuid", "zmij"}
+DOMAIN_DEPENDENCIES = {
+    "jiff",
+    "jiter",
+    "jsonschema",
+    "serde_json",
+    "sha2",
+    "speedate",
+    "time",
+    "uuid",
+    "zmij",
+}
+SCHEMA_RESOLVERS = {"resolve-async", "resolve-http", "resolve-file", "pyo3"}
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 
 
@@ -40,6 +51,10 @@ def check(metadata):
         node = nodes[package_id]
         if package["name"] == "jiter" and "python" in node["features"]:
             raise ValueError("The domain JSON parser must build without Python integration")
+        if package["name"] == "jsonschema" and SCHEMA_RESOLVERS.intersection(node["features"]):
+            raise ValueError(
+                "The domain schema validator must build with in-memory resolution only"
+            )
         pending.extend(production_dependencies(node))
     print("The Rust domain dependency graph meets the boundary rules.")
 
