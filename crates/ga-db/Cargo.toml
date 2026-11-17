@@ -7,12 +7,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["async-await"] }
 ga-archive = { path = "../ga-archive" }
 ga-domain = { path = "../ga-domain" }
 ga-fit = { path = "../ga-fit" }
+getrandom = "0.4.3"
+hmac = { version = "0.13.0", default-features = false, features = ["zeroize"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
+sha2 = { version = "0.11.1", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false, features = [
     "postgres",
     "runtime-tokio",
@@ -20,8 +24,9 @@ sqlx = { version = "=0.9.0", default-features = false, features = [
 ] }
 sqlx-postgres = { version = "=0.9.0", default-features = false, features = ["time", "uuid"] }
 time = { version = "0.3.55", default-features = false }
-tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "rt", "sync", "time"] }
 uuid = { version = "1.29.3", features = ["v4"] }
+zeroize = "1.9.1"
 
 [lints]
 workspace = true
