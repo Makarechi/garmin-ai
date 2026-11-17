@@ -109,7 +109,7 @@ the named pipeline timings separately from the peak counters.
 | [Weekly reconciliation](evidence/python-reconcile-30-linux-arm64.json.gz) | Two thirty-day scans processed 601 jobs each. The second scan reused 461 existing raw objects. |
 | [Offline replay](evidence/python-replay-linux-arm64.json.gz) | Replayed 599 of 600 archive objects across thirty synthetic days. One corrupted object was refused twice and kept a single error outcome. The observed daily and intraday projection digest stayed equal. |
 | [Voice and fallback](evidence/python-voice-linux-arm64.json) | Twice accepted a 20 MiB synthetic clip, simulated a primary model timeout and returned the authorized fallback result. A clip one byte larger was rejected before its download. |
-| [FIT developer fields and control overlap](evidence/python-fit-overlap-linux-arm64.json) | Committed 50,000 records and six metadata messages across two ZIP members. Kept the developer name, units, raw value and unknown field. Completed 22 lease renewals while the store ran. |
+| [FIT developer fields and control overlap](evidence/python-fit-overlap-linux-arm64.json) | Committed 50,000 records and six metadata messages across two ZIP members. Kept the developer name, units and raw value, and kept the raw respiration field. Completed 22 lease renewals while the store ran. |
 | [FIT admission ceiling](evidence/python-fit-ceiling-linux-arm64.json.gz) | Rejected the input one byte above 100 MiB. The 100 MiB case entered the decoder, hit the 384 MiB cgroup limit and was killed. The workload exited 137 with one recorded out-of-memory kill. |
 
 The pause request, operations read and webhook started together during the synthetic FIT
