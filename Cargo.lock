@@ -734,6 +734,7 @@ dependencies = [
  "ga-archive",
  "ga-db",
  "ga-domain",
+ "ga-fit",
  "ga-garmin",
  "serde_json",
  "sha2 0.11.1",

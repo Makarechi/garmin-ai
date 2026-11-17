@@ -5,8 +5,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    ATTEMPT_LIMIT, JobOutcome, JobStoreError, RecordedJobStatus, STORAGE_QUEUE_LOCK, begin,
-    finish_in_transaction,
+    ATTEMPT_LIMIT, FailureReason, JobOutcome, JobStoreError, RecordedJobStatus, STORAGE_QUEUE_LOCK,
+    begin, finish_in_transaction,
 };
 use crate::{
     Database,
@@ -163,6 +163,25 @@ impl Database {
     ) -> Result<bool, JobStoreError> {
         self.renew_job(lease.id, lease.token, lease.seconds, KIND, now)
             .await
+    }
+
+    /// Release a failed attempt using the same lease and backoff as atomic replay publication.
+    pub async fn fail_replay_job(
+        &self,
+        lease: &ReplayJobLease,
+    ) -> Result<RecordedJobStatus, JobStoreError> {
+        let mut txn = begin(&self.work).await?;
+        let result = lease
+            .finish_in(
+                &mut txn,
+                JobOutcome::Failed {
+                    reason: FailureReason::RuntimeError,
+                    retry_at: None,
+                },
+            )
+            .await?;
+        txn.commit().await?;
+        Ok(result)
     }
 }
 

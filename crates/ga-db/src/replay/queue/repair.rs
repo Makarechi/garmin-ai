@@ -43,7 +43,7 @@ pub(super) async fn repair_jobs(
     if wrapped && incomplete {
         incomplete = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM jobs
-                WHERE kind='raw_replay' AND status IN ('done','failed') AND (payload->>'target_version')::int=$1
+                WHERE kind='raw_replay' AND status IN ('done','failed') AND payload->>'target_version'=$1::int::text
                   AND id > $2)",
         )
         .bind(target).bind(last_scanned).fetch_one(&mut **txn).await?;
@@ -122,11 +122,13 @@ async fn scan(
         "WITH candidates AS MATERIALIZED (
             SELECT id, status, payload FROM jobs
             WHERE kind='raw_replay' AND status IN ('done','failed')
-              AND (payload->>'target_version')::int=$1 AND ($2::uuid IS NULL OR id > $2)
+              AND payload->>'target_version'=$1::int::text AND ($2::uuid IS NULL OR id > $2)
             ORDER BY id LIMIT $3
          )
-         SELECT job.id, job.payload->>'raw_ref', job.status, (job.payload->>'repair_version')::int,
-                (job.payload->>'repair_parser_version')::int, raw.parser_version,
+         SELECT job.id, job.payload->>'raw_ref', job.status, CASE WHEN pg_input_is_valid(job.payload->>'repair_version','integer')
+                     THEN (job.payload->>'repair_version')::int END,
+                CASE WHEN pg_input_is_valid(job.payload->>'repair_parser_version','integer')
+                     THEN (job.payload->>'repair_parser_version')::int END, raw.parser_version,
                 coalesce(marker.value->>'status'='obsolete_target', false)
          FROM candidates AS job
          LEFT JOIN source_payloads AS raw ON raw.id = CASE

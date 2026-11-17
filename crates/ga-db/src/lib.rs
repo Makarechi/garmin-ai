@@ -14,6 +14,7 @@ pub mod jobs;
 pub mod model_gate;
 pub mod raw_capture;
 pub mod replay;
+pub mod runtime_lease;
 pub mod scenario_packs;
 pub mod share_policy;
 pub mod source_pages;
