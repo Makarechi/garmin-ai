@@ -6,6 +6,8 @@ use jiter::JsonValue;
 pub enum Utf8Layout {
     /// The archive contract uses the default Python separator spacing.
     Archive,
+    /// Application prompts keep insertion order and Python's default spacing.
+    Ordered,
     /// Source record and file import confirmation hashes use compact JSON.
     Compact,
 }
@@ -13,7 +15,7 @@ pub enum Utf8Layout {
 impl Utf8Layout {
     fn separator(self, out: &mut Vec<u8>, separator: u8) {
         out.push(separator);
-        if self == Self::Archive {
+        if self != Self::Compact {
             out.push(b' ');
         }
     }
@@ -38,7 +40,7 @@ impl fmt::Display for JsonError {
 
 impl Error for JsonError {}
 
-/// Produce the sorted UTF-8 representation used by the Python digest contracts.
+/// Produce the UTF-8 representation used by the selected Python contract.
 /// The caller supplies the size limit of the operation that owns the input.
 pub fn encode(input: &[u8], layout: Utf8Layout, max_bytes: usize) -> Result<Vec<u8>, JsonError> {
     if input.len() > max_bytes {
@@ -95,24 +97,41 @@ pub(crate) fn write_value(
             out.push(b']');
         }
         JsonValue::Object(values) => {
-            // Collecting in input order keeps the last copy of a repeated key,
-            // as Python's JSON parser does. UTF-8 order is Unicode scalar order.
-            let sorted: BTreeMap<_, _> = values
-                .iter()
-                .map(|(key, value)| (key.as_ref(), value))
-                .collect();
-            out.push(b'{');
-            for (index, (key, item)) in sorted.into_iter().enumerate() {
-                if index != 0 {
-                    layout.separator(out, b',');
-                }
-                write_string(out, key)?;
-                layout.separator(out, b':');
-                write_value(out, item, layout)?;
+            if layout == Utf8Layout::Ordered {
+                write_object(
+                    out,
+                    values.iter().map(|(key, value)| (key.as_ref(), value)),
+                    layout,
+                )?;
+            } else {
+                // Collecting in input order keeps the last copy of a repeated key,
+                // as Python's JSON parser does. UTF-8 order is Unicode scalar order.
+                let sorted: BTreeMap<_, _> = values
+                    .iter()
+                    .map(|(key, value)| (key.as_ref(), value))
+                    .collect();
+                write_object(out, sorted.into_iter(), layout)?;
             }
-            out.push(b'}');
         }
     }
+    Ok(())
+}
+
+fn write_object<'a>(
+    out: &mut Vec<u8>,
+    members: impl Iterator<Item = (&'a str, &'a JsonValue<'a>)>,
+    layout: Utf8Layout,
+) -> Result<(), JsonError> {
+    out.push(b'{');
+    for (index, (key, item)) in members.enumerate() {
+        if index != 0 {
+            layout.separator(out, b',');
+        }
+        write_string(out, key)?;
+        layout.separator(out, b':');
+        write_value(out, item, layout)?;
+    }
+    out.push(b'}');
     Ok(())
 }
 

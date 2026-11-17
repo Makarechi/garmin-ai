@@ -1,5 +1,10 @@
+mod analysis;
 mod safety;
 
+pub use analysis::{
+    AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult, AnalysisToolRead,
+    OfferedReadTool,
+};
 pub use safety::{ReplySafety, ReplySafetyIntent, SafetyScreenError};
 
 mod runtime;
