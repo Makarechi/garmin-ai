@@ -1,8 +1,11 @@
 mod export;
+mod wire;
 
 pub use export::{
     ActivityExport, ExportFrame, ExportInventory, ExportLimits, verify_activity_export,
 };
+
+pub use wire::{ByteOrder, FitWireMessage, WireField, WireInventory, visit_fit_wire};
 
 use std::{
     error::Error,
@@ -43,6 +46,9 @@ pub enum FitError {
     TooManyZipMembers,
     NoFitMembers,
     InvalidHeader,
+    InvalidDefinition,
+    InvalidRecord,
+    MissingDefinition,
     HeaderChecksum,
     Truncated,
     FileChecksum,
@@ -63,6 +69,9 @@ impl fmt::Display for FitError {
             Self::NoFitMembers => "Activity ZIP contains no FIT files",
             Self::LimitExceeded => "FIT input exceeds the byte limit",
             Self::InvalidHeader => "FIT input has an invalid header",
+            Self::InvalidDefinition => "FIT input has an invalid message definition",
+            Self::InvalidRecord => "FIT record does not fit its message definition or frame",
+            Self::MissingDefinition => "FIT data record has no local definition",
             Self::HeaderChecksum => "FIT header checksum mismatched",
             Self::Truncated => "FIT input ended unexpectedly",
             Self::FileChecksum => "FIT file checksum mismatched",
@@ -96,30 +105,12 @@ pub fn verify_frames(
     let mut buffer = [0; READ_BUFFER_BYTES];
     loop {
         check_cancelled(&mut cancelled)?;
-        let mut header = [0; 14];
-        if read_start(&mut source, &mut header[..1])? == 0 {
+        let Some((frame, header)) = read_frame_header(&mut source, inventory, limit)? else {
             return Ok(inventory);
-        }
-        let length = usize::from(header[0]);
-        if length != 12 && length != 14 {
-            return Err(FitError::InvalidHeader);
-        }
-        source.read_exact(&mut header[1..length])?;
-        if &header[8..12] != b".FIT" {
-            return Err(FitError::InvalidHeader);
-        }
-        let data_bytes = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-        let next = inventory.bytes + length as u64 + u64::from(data_bytes) + 2;
-        if next > limit {
-            return Err(FitError::LimitExceeded);
-        }
-        let header_checksum = u16::from_le_bytes([header[12], header[13]]);
-        if header_checksum != 0 && FIT_CRC.checksum(&header[..12]) != header_checksum {
-            return Err(FitError::HeaderChecksum);
-        }
+        };
         let mut checksum = FIT_CRC.digest();
-        checksum.update(&header[..length]);
-        let mut remaining = data_bytes as usize;
+        checksum.update(&header[..usize::from(frame.header_bytes)]);
+        let mut remaining = frame.data_bytes as usize;
         while remaining != 0 {
             check_cancelled(&mut cancelled)?;
             let size = remaining.min(buffer.len());
@@ -129,22 +120,59 @@ pub fn verify_frames(
             remaining -= size;
         }
         check_cancelled(&mut cancelled)?;
-        let mut footer = [0; 2];
-        source.read_exact(&mut footer)?;
-        if checksum.finalize() != u16::from_le_bytes(footer) {
-            return Err(FitError::FileChecksum);
-        }
-        on_frame(FitFrame {
-            index: inventory.frames,
-            offset: inventory.bytes,
-            header_bytes: header[0],
-            data_bytes,
-            protocol: header[1],
-            profile: u16::from_le_bytes([header[2], header[3]]),
-        });
+        verify_checksum(&mut source, checksum.finalize())?;
+        on_frame(frame);
         inventory.frames += 1;
-        inventory.bytes = next;
+        inventory.bytes = frame_end(frame);
     }
+}
+
+fn read_frame_header(
+    source: &mut impl Read,
+    inventory: FitInventory,
+    limit: u64,
+) -> Result<Option<(FitFrame, [u8; 14])>, FitError> {
+    let mut header = [0; 14];
+    if read_start(source, &mut header[..1])? == 0 {
+        return Ok(None);
+    }
+    let length = usize::from(header[0]);
+    if length != 12 && length != 14 {
+        return Err(FitError::InvalidHeader);
+    }
+    source.read_exact(&mut header[1..length])?;
+    if &header[8..12] != b".FIT" {
+        return Err(FitError::InvalidHeader);
+    }
+    let frame = FitFrame {
+        index: inventory.frames,
+        offset: inventory.bytes,
+        header_bytes: header[0],
+        data_bytes: u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
+        protocol: header[1],
+        profile: u16::from_le_bytes([header[2], header[3]]),
+    };
+    if frame_end(frame) > limit {
+        return Err(FitError::LimitExceeded);
+    }
+    let header_checksum = u16::from_le_bytes([header[12], header[13]]);
+    if header_checksum != 0 && FIT_CRC.checksum(&header[..12]) != header_checksum {
+        return Err(FitError::HeaderChecksum);
+    }
+    Ok(Some((frame, header)))
+}
+
+fn frame_end(frame: FitFrame) -> u64 {
+    frame.offset + u64::from(frame.header_bytes) + u64::from(frame.data_bytes) + 2
+}
+
+fn verify_checksum(source: &mut impl Read, expected: u16) -> Result<(), FitError> {
+    let mut footer = [0; 2];
+    source.read_exact(&mut footer)?;
+    if expected != u16::from_le_bytes(footer) {
+        return Err(FitError::FileChecksum);
+    }
+    Ok(())
 }
 
 fn check_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), FitError> {
