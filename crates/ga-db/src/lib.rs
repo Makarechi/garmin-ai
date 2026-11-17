@@ -10,6 +10,7 @@ pub mod health_analysis;
 mod health_projection;
 pub mod history_windows;
 pub mod jobs;
+pub mod model_gate;
 pub mod raw_capture;
 pub mod replay;
 pub mod scenario_packs;
