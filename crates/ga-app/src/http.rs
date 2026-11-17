@@ -1,6 +1,6 @@
 mod tools;
 
-use std::{env, io};
+use std::{env, io, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -20,6 +20,7 @@ use crate::authorization::Authorization;
 struct AppState {
     database: Option<Database>,
     authorization: Authorization,
+    configured_timezone: Arc<str>,
 }
 
 fn router(state: AppState) -> Router {
@@ -147,12 +148,24 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
     let database = env::var("GA_DATABASE_URL")
         .ok()
         .and_then(|url| Database::connect_lazy(&url).ok());
+    let configured_timezone = env::var("GA_TIMEZONE")
+        .ok()
+        .or_else(|| {
+            dotenvy::from_path_iter(".env")
+                .ok()?
+                .filter_map(Result::ok)
+                .filter(|(name, _)| name.eq_ignore_ascii_case("GA_TIMEZONE"))
+                .map(|(_, value)| value)
+                .last()
+        })
+        .unwrap_or_else(|| "Europe/Bratislava".into());
     println!("Listening on http://{}", listener.local_addr()?);
     axum::serve(
         listener,
         router(AppState {
             database,
             authorization,
+            configured_timezone: configured_timezone.into(),
         }),
     )
     .with_graceful_shutdown(shutdown)

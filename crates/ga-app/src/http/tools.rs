@@ -7,7 +7,9 @@ use axum::{
 };
 use ga_db::{
     diary::DiaryReadError,
-    health_analysis::{ActivityReadError, HealthAnalysisError, HealthPeriod, TimelineError},
+    health_analysis::{
+        ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod, TimelineError,
+    },
 };
 use ga_domain::{
     access::{ReadToolInput, Scopes},
@@ -15,7 +17,7 @@ use ga_domain::{
 };
 use serde_json::{Map, Value, json};
 use speedate::{DateTime, DateTimeConfig, MicrosecondsPrecisionOverflowBehavior, TimeConfig};
-use time::{Date, Month};
+use time::{Date, Month, OffsetDateTime};
 
 use super::{AppState, method_not_allowed, private_cache};
 
@@ -30,16 +32,20 @@ enum ReadTool {
     ActivityDetails,
     Events,
     Timeline,
+    DeviceHistory,
+    Freshness,
 }
 
 impl ReadTool {
-    const IMPLEMENTED: [Self; 6] = [
+    const IMPLEMENTED: [Self; 8] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
         Self::ActivityDetails,
         Self::Events,
         Self::Timeline,
+        Self::Freshness,
+        Self::DeviceHistory,
     ];
 
     fn name(self) -> &'static str {
@@ -50,6 +56,8 @@ impl ReadTool {
             Self::ActivityDetails => "activity_details",
             Self::Events => "events",
             Self::Timeline => "timeline",
+            Self::DeviceHistory => "device_history",
+            Self::Freshness => "data_freshness",
         }
     }
 
@@ -105,14 +113,33 @@ impl ReadTool {
                 json!({"start": datetime("Start"), "end": datetime("End")}),
                 &["start", "end"][..],
             ),
+            Self::DeviceHistory => (
+                "Bounded activity-scoped FIT device and historical zone evidence; no serial numbers or inferred sensor attribution.",
+                "device_historyArgs",
+                json!({
+                    "start": datetime("Start"), "end": datetime("End"),
+                    "limit": {"default":100,"title":"Limit","type":"integer"},
+                }),
+                &["start", "end"][..],
+            ),
+            Self::Freshness => (
+                "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
+                "data_freshnessArgs",
+                json!({}),
+                &[][..],
+            ),
         };
+        let mut input_schema = json!({
+            "title": title, "type": "object", "additionalProperties": false,
+            "properties": properties,
+        });
+        if !required.is_empty() {
+            input_schema["required"] = json!(required);
+        }
         json!({
             "name": self.name(),
             "description": description,
-            "input_schema": {
-                "title": title, "type": "object", "additionalProperties": false,
-                "properties": properties, "required": required,
-            },
+            "input_schema": input_schema,
         })
     }
 
@@ -195,6 +222,27 @@ async fn execute_read_tool(
             Err(error) => diary_failure(error),
         };
     }
+    if matches!(tool, ReadTool::Freshness) {
+        if !arguments.is_empty() {
+            return invalid_arguments();
+        }
+        let micros = OffsetDateTime::now_utc()
+            .unix_timestamp_nanos()
+            .div_euclid(1000);
+        let Ok(micros) = i64::try_from(micros) else {
+            return storage_unavailable();
+        };
+        let Ok(at) = StoredInstant::from_unix_microseconds(micros) else {
+            return storage_unavailable();
+        };
+        return match database
+            .owner_data_freshness(at, &state.configured_timezone)
+            .await
+        {
+            Ok(document) => Json(document).into_response(),
+            Err(error) => health_failure(error),
+        };
+    }
     let reader = match database.verified_health_reader().await {
         Ok(reader) => reader,
         Err(error) => return health_failure(error),
@@ -269,12 +317,37 @@ async fn execute_read_tool(
                 Err(_) => invalid_arguments(),
             };
         }
+        ReadTool::DeviceHistory => {
+            let Some((start, end, limit)) = device_arguments(&arguments) else {
+                return invalid_arguments();
+            };
+            return match reader.device_history(start, end, limit).await {
+                Ok(document) => Json(document).into_response(),
+                Err(DeviceHistoryError::Analysis(error)) => health_failure(error),
+                Err(_) => invalid_arguments(),
+            };
+        }
         _ => return invalid_arguments(),
     };
     match outcome {
         Ok(document) => Json(document).into_response(),
         Err(error) => health_failure(error),
     }
+}
+
+fn device_arguments(arguments: &Map<String, Value>) -> Option<(StoredInstant, StoredInstant, u16)> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "start" | "end" | "limit"))
+    {
+        return None;
+    }
+    let limit = arguments.get("limit").map_or(Some(100), integer_input)?;
+    Some((
+        StoredInstant::from_legacy_input(arguments.get("start")?)?,
+        StoredInstant::from_legacy_input(arguments.get("end")?)?,
+        u16::try_from(limit).ok()?,
+    ))
 }
 
 fn range_with_kind(
