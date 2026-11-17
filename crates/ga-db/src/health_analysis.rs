@@ -112,12 +112,11 @@ impl Database {
         metric: &str,
         period: HealthPeriod,
     ) -> Result<Value, HealthAnalysisError> {
-        let (metric, query) = daily_metric(metric)?;
-        let mut txn = begin_verified_analysis(&self.work).await?;
-        let values = observed_values(&mut txn, query, period).await?;
-        txn.commit().await?;
-        let description = describe(values.iter().map(|(_, value)| Some(*value)));
-        Ok(period_document(metric, period, &values, description))
+        daily_metric(metric)?;
+        self.verified_health_reader()
+            .await?
+            .personal_baseline(metric, period)
+            .await
     }
 
     pub async fn compare_health_periods(
@@ -129,11 +128,40 @@ impl Database {
         if first.start.max(second.start) <= first.end.min(second.end) {
             return Err(HealthAnalysisError::Overlap);
         }
+        daily_metric(metric)?;
+        self.verified_health_reader()
+            .await?
+            .compare_periods(metric, first, second)
+            .await
+    }
+}
+
+impl DailyHealthReader {
+    pub async fn personal_baseline(
+        mut self,
+        metric: &str,
+        period: HealthPeriod,
+    ) -> Result<Value, HealthAnalysisError> {
         let (metric, query) = daily_metric(metric)?;
-        let mut txn = begin_verified_analysis(&self.work).await?;
-        let first_values = observed_values(&mut txn, query, first).await?;
-        let second_values = observed_values(&mut txn, query, second).await?;
-        txn.commit().await?;
+        let values = observed_values(&mut self.0, query, period).await?;
+        self.0.commit().await?;
+        let description = describe(values.iter().map(|(_, value)| Some(*value)));
+        Ok(period_document(metric, period, &values, description))
+    }
+
+    pub async fn compare_periods(
+        mut self,
+        metric: &str,
+        first: HealthPeriod,
+        second: HealthPeriod,
+    ) -> Result<Value, HealthAnalysisError> {
+        if first.start.max(second.start) <= first.end.min(second.end) {
+            return Err(HealthAnalysisError::Overlap);
+        }
+        let (metric, query) = daily_metric(metric)?;
+        let first_values = observed_values(&mut self.0, query, first).await?;
+        let second_values = observed_values(&mut self.0, query, second).await?;
+        self.0.commit().await?;
         let first_description = describe(first_values.iter().map(|(_, value)| Some(*value)));
         let second_description = describe(second_values.iter().map(|(_, value)| Some(*value)));
         let first_samples: Vec<_> = first_values.iter().map(|(_, value)| *value).collect();
