@@ -7,10 +7,9 @@ use time::{Date, OffsetDateTime};
 
 use crate::{
     activity_documents::{ApplyActivity, DocumentError},
+    health_analysis::PRE_EVENT_FEATURE_VERSION,
     system_metrics::SystemMetricVersion,
 };
-
-const FEATURE_VERSION: &str = "pre-event-v1";
 
 pub(super) async fn publish_observations(
     txn: &mut Transaction<'_, Postgres>,
@@ -45,7 +44,7 @@ pub(super) async fn publish_observations(
                 .get(&(
                     observation.metric.to_owned(),
                     ordinal,
-                    FEATURE_VERSION.to_owned(),
+                    PRE_EVENT_FEATURE_VERSION.to_owned(),
                 ))
                 .copied()
                 .or_else(|| application.clocks.values().copied().min())
@@ -75,7 +74,7 @@ pub(super) async fn publish_observations(
             .bind(day).bind(request.source_id).bind(OffsetDateTime::from(application.fetched))
             .bind(ingestion).bind(&application.zone).bind(ordinal).bind(observed)
             .bind(bounds.map(|(start,_)| start)).bind(bounds.map(|(_,end)| end))
-            .bind(request.account_fingerprint).bind(quality).bind(FEATURE_VERSION)
+            .bind(request.account_fingerprint).bind(quality).bind(PRE_EVENT_FEATURE_VERSION)
             .fetch_one(&mut **txn).await?;
             changed |= altered;
         }
