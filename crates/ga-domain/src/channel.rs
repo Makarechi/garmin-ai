@@ -1,3 +1,6 @@
+mod outbound;
+pub use outbound::{OutboundError, OutboundIntent};
+
 use std::{error::Error, fmt};
 
 use serde_json::{Map, Value, json};
@@ -321,7 +324,19 @@ fn integer(value: &Value) -> Option<i64> {
     }
     match value {
         Value::Bool(value) => Some(i64::from(*value)),
-        Value::String(value) => value.trim().parse().ok(),
+        Value::String(value) => {
+            let value = value.trim();
+            let integer = match value.split_once('.') {
+                Some((integer, fraction))
+                    if !fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0') =>
+                {
+                    integer
+                }
+                Some(_) => return None,
+                None => value,
+            };
+            integer.parse().ok()
+        }
         Value::Number(_) => {
             let number = value.as_f64()?;
             (number.fract() == 0.0
