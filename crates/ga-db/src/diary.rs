@@ -1,3 +1,6 @@
+mod clarification;
+pub use clarification::{ClarificationClock, ClarificationError, ClarificationReply};
+
 mod agent_batch;
 pub use agent_batch::CreateAgentLogBatch;
 
