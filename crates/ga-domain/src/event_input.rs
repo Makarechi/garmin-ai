@@ -311,3 +311,19 @@ pub fn source_calendar_date(start: StoredInstant, timezone: &str) -> Option<time
     )
     .ok()
 }
+
+/// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
+pub fn local_midnight(day: time::Date, timezone: &str) -> Option<StoredInstant> {
+    let zone = jiff::tz::db().get(timezone).ok()?;
+    let day = jiff::civil::Date::new(
+        i16::try_from(day.year()).ok()?,
+        u8::from(day.month()) as i8,
+        day.day() as i8,
+    )
+    .ok()?;
+    let midnight = zone
+        .to_ambiguous_timestamp(day.at(0, 0, 0, 0))
+        .compatible()
+        .ok()?;
+    StoredInstant::from_unix_microseconds(midnight.as_microsecond()).ok()
+}
