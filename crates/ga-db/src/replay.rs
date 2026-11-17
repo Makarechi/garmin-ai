@@ -4,7 +4,9 @@ mod intraday;
 mod queue;
 mod status;
 
-pub use calendar::{CalendarReplayError, CalendarReplayOutcome};
+pub use calendar::{
+    CalendarReplayError, CalendarReplayOutcome, HealthReplayJobResult, RunHealthReplay,
+};
 pub use input::{
     GARMIN_PARSER_VERSION, PreparedReplay, ReadReplayInput, ReplayContent, ReplayInput,
     ReplayInputError, ReplayReplacement, ReplaySkip,

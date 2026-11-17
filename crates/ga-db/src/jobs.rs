@@ -1,3 +1,7 @@
+mod replay;
+
+pub use replay::ReplayJobLease;
+
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
