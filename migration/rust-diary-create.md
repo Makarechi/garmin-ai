@@ -28,3 +28,17 @@ uv run python migration/check_diary_creation.py /path/to/the/diary-test-binary
 
 Corrections, delete and undo use separate lifecycle steps. The native web and
 channel handlers will call the same diary store.
+
+## Correcting a stored event
+
+Corrections require the expected revision. The write retains the original
+creation audit and appends a before-and-after audit for the new revision. It
+preserves related entries, rejects a change that would put a symptom outside
+its migraine episode, and updates the associated question when the episode
+closes or reopens. The prior metric observations receive an invalidation time.
+New observations use the next generation.
+
+The native Linux arm64 test covered a stale revision, two generations of a
+caffeine metric, audit snapshots, changes to a linked migraine episode, and
+reopening a sent question after expiry. Python replay still found the event
+through its original creation audit.

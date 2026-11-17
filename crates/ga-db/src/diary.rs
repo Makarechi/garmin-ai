@@ -1,4 +1,7 @@
 mod metrics;
+mod revisions;
+
+pub use revisions::UpdateSystemEvent;
 
 use std::{error::Error, fmt};
 
@@ -42,6 +45,12 @@ pub enum DiaryWriteError {
     UnknownOwner,
     Input(InvalidEvent),
     TrackingDisabled,
+    EventMissing,
+    RevisionChanged,
+    CustomEntry,
+    SelfReference(&'static str),
+    LinkedObservations,
+    SymptomBounds,
     InvalidRelation,
     InvalidMetricMapping,
     InvalidRecordedState,
@@ -59,6 +68,14 @@ impl fmt::Display for DiaryWriteError {
             Self::UnknownOwner => "Diary owner could not be verified",
             Self::Input(error) => return error.fmt(formatter),
             Self::TrackingDisabled => "The scenario pack is disabled",
+            Self::EventMissing => "Event not found",
+            Self::RevisionChanged => "Event changed; reload before editing",
+            Self::CustomEntry => "Custom entries must use the custom correction endpoint",
+            Self::SelfReference(message) => message,
+            Self::LinkedObservations => {
+                "Detach linked medication or symptom observations before changing this migraine"
+            }
+            Self::SymptomBounds => "Episode bounds would strand linked symptom observations",
             Self::InvalidRelation => "Diary report references an unavailable or incompatible entry",
             Self::InvalidMetricMapping => "Diary metric is outside its recorded contract",
             Self::InvalidRecordedState => "Recorded diary entry could not be interpreted",
@@ -110,7 +127,7 @@ impl Database {
         let version = ensure_system_definition_in(&mut txn, kind)
             .await
             .map_err(DiaryWriteError::Definition)?;
-        validation_relation(&mut txn, report).await?;
+        validate_relation(&mut txn, report).await?;
         let now: OffsetDateTime = sqlx::query_scalar("SELECT now()")
             .fetch_one(&mut *txn)
             .await?;
@@ -162,18 +179,20 @@ impl Database {
         .await?;
         let written = load_event(&mut txn, id, false).await?;
         invalidate_migraine_insights(&mut txn, kind).await?;
-        sqlx::query(
-            "INSERT INTO audit_log (event_id, action, before, after, actor, operation_id, created_at)
-             VALUES ($1, 'create', NULL, $2::jsonb, $3, $4, $5)",
+        append_audit(
+            &mut txn,
+            AuditEntry {
+                id,
+                action: "create",
+                before: None,
+                after: &written.snapshot,
+                actor: request.authenticated_actor,
+                operation: request.operation_id,
+                at: now,
+            },
         )
-        .bind(id)
-        .bind(written.snapshot.to_string())
-        .bind(request.authenticated_actor)
-        .bind(request.operation_id)
-        .bind(now)
-        .execute(&mut *txn)
         .await?;
-        metrics::project_creation(&mut txn, id, version.id, report, now).await?;
+        metrics::project_event(&mut txn, id, version.id, report, now, now).await?;
         txn.commit().await?;
         Ok(written)
     }
@@ -206,6 +225,36 @@ impl Database {
         }
         Ok(txn)
     }
+}
+
+struct AuditEntry<'a> {
+    id: Uuid,
+    action: &'static str,
+    before: Option<&'a Value>,
+    after: &'a Value,
+    actor: &'a str,
+    operation: Option<Uuid>,
+    at: OffsetDateTime,
+}
+
+async fn append_audit(
+    txn: &mut Transaction<'_, Postgres>,
+    audit: AuditEntry<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO audit_log (event_id, action, before, after, actor, operation_id, created_at)
+         VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)",
+    )
+    .bind(audit.id)
+    .bind(audit.action)
+    .bind(audit.before.map(Value::to_string))
+    .bind(audit.after.to_string())
+    .bind(audit.actor)
+    .bind(audit.operation)
+    .bind(audit.at)
+    .execute(&mut **txn)
+    .await?;
+    Ok(())
 }
 
 async fn existing_replay(
@@ -266,7 +315,7 @@ async fn check_pack(
     Ok(())
 }
 
-async fn validation_relation(
+async fn validate_relation(
     txn: &mut Transaction<'_, Postgres>,
     report: &EventInput,
 ) -> Result<(), DiaryWriteError> {

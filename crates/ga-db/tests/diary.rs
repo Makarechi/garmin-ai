@@ -2,7 +2,7 @@ use std::{env, error::Error, io, str::FromStr};
 
 use ga_db::{
     Database,
-    diary::{CreateSystemEvent, DiaryWriteError},
+    diary::{CreateSystemEvent, DiaryWriteError, UpdateSystemEvent},
 };
 use ga_domain::{
     event_input::{EventInput, InvalidEvent, ValidationMode},
@@ -109,10 +109,44 @@ async fn creates_diary_event_audit_and_metric_together_and_replays_the_original(
         ),]
     );
 
-    sqlx::query(
-        "UPDATE events SET revision = 2, payload = payload || '{\"beverage\":\"Synthetic edit\"}'::jsonb WHERE id = $1",
+    let edited = EventInput::from_json(AFTER_EDIT.as_bytes(), 4096, ValidationMode::NewReport)?;
+    let correction = || UpdateSystemEvent {
+        owner_id: person,
+        authenticated_actor: "telegram:synthetic",
+        event_id: entry.id,
+        expected_revision: 1,
+        report: &edited,
+        operation_id: Some(operation),
+    };
+    let corrected = db.update_system_event(correction()).await?;
+    assert_eq!(corrected.revision, 2);
+    assert_eq!(corrected.snapshot["transport"], "telegram");
+    assert!(matches!(
+        db.update_system_event(correction()).await,
+        Err(DiaryWriteError::RevisionChanged)
+    ));
+    let update_audit: (String, String) = sqlx::query_as(
+        "SELECT before::text, after::text FROM audit_log WHERE event_id = $1 AND action = 'update'",
     )
-    .bind(entry.id).execute(&inspect).await?;
+    .bind(entry.id)
+    .fetch_one(&inspect)
+    .await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&update_audit.0)?,
+        entry.snapshot
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&update_audit.1)?,
+        corrected.snapshot
+    );
+    let generations: Vec<(i32, bool, bool)> = sqlx::query_as(
+        "SELECT projection_version, valid, invalidated_at IS NOT NULL
+         FROM metric_observations WHERE source_entry_id = $1 ORDER BY projection_version",
+    )
+    .bind(entry.id)
+    .fetch_all(&inspect)
+    .await?;
+    assert_eq!(generations, [(1, false, true), (2, true, false)]);
     let retried = db
         .create_system_event(request("synthetic-rust-event"))
         .await?;
@@ -120,7 +154,6 @@ async fn creates_diary_event_audit_and_metric_together_and_replays_the_original(
     assert_eq!(retried.revision, 2);
     assert!(retried.reused);
     assert_eq!(retried.snapshot["payload"]["beverage"], "Synthetic edit");
-    let edited = EventInput::from_json(AFTER_EDIT.as_bytes(), 4096, ValidationMode::NewReport)?;
     let mut conflict = request("synthetic-rust-event");
     conflict.report = &edited;
     assert!(matches!(
@@ -169,6 +202,8 @@ async fn creates_diary_event_audit_and_metric_together_and_replays_the_original(
         Err(DiaryWriteError::InvalidRelation)
     ));
 
+    verify_episode_corrections(&db, &inspect, person).await?;
+
     sqlx::query(
         "INSERT INTO module_configs (id, owner_id, pack_key, tracking_enabled, collection_enabled,
             reminders_enabled, visible, llm_enabled, settings, revision)
@@ -199,4 +234,103 @@ async fn counts(db: &PgPool) -> Result<(i64, i64, i64), sqlx::Error> {
     )
     .fetch_one(db)
     .await
+}
+
+async fn verify_episode_corrections(
+    db: &Database,
+    inspect: &PgPool,
+    person: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let start = "2026-10-25T10:00:00Z";
+    let report =
+        |payload: Value, end: Option<&str>, status: &str| -> Result<EventInput, Box<dyn Error>> {
+            let input = json!({"start": start, "end": end, "status": status, "payload": payload});
+            Ok(EventInput::from_json(
+                &serde_json::to_vec(&input)?,
+                4096,
+                ValidationMode::NewReport,
+            )?)
+        };
+    let migraine = json!({"type":"migraine","severity":4});
+    let open = report(migraine.clone(), None, "confirmed")?;
+    let create = |event| CreateSystemEvent {
+        owner_id: person,
+        authenticated_actor: "api",
+        report: event,
+        idempotency_key: None,
+        operation_id: None,
+        clock_uncertainty_seconds: None,
+    };
+    let episode = db.create_system_event(create(&open)).await?;
+    let symptom = EventInput::from_json(
+        &serde_json::to_vec(
+            &json!({"start":"2026-10-25T10:45:00Z","payload":{"type":"symptom_observation","severity":3,"episode_id":episode.id.to_string()}}),
+        )?,
+        4096,
+        ValidationMode::NewReport,
+    )?;
+    db.create_system_event(create(&symptom)).await?;
+    let request = |event, revision| UpdateSystemEvent {
+        owner_id: person,
+        authenticated_actor: "api",
+        event_id: episode.id,
+        expected_revision: revision,
+        report: event,
+        operation_id: None,
+    };
+
+    let too_short = report(migraine.clone(), Some("2026-10-25T10:30:00Z"), "confirmed")?;
+    assert!(matches!(
+        db.update_system_event(request(&too_short, 1)).await,
+        Err(DiaryWriteError::SymptomBounds)
+    ));
+    let converted = report(
+        json!({"type":"note","description":"Synthetic"}),
+        None,
+        "confirmed",
+    )?;
+    assert!(matches!(
+        db.update_system_event(request(&converted, 1)).await,
+        Err(DiaryWriteError::LinkedObservations)
+    ));
+    let pending = report(migraine.clone(), None, "inferred")?;
+    assert!(matches!(
+        db.update_system_event(request(&pending, 1)).await,
+        Err(DiaryWriteError::LinkedObservations)
+    ));
+
+    let question = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO pending_questions (id, kind, event_id, text, evidence, priority,
+             earliest_send_at, expires_at, sent_at, status, dedup_key, attempts)
+         VALUES ($1, 'migraine', $2, 'Synthetic migraine question', '{}'::jsonb, 1,
+             now() - interval '3 days', now() - interval '1 day', now() - interval '2 days',
+             'sent', 'diary:synthetic-migraine', 1)",
+    )
+    .bind(question)
+    .bind(episode.id)
+    .execute(inspect)
+    .await?;
+    let close = report(migraine, Some("2026-10-25T11:00:00Z"), "confirmed")?;
+    assert_eq!(
+        db.update_system_event(request(&close, 1)).await?.revision,
+        2
+    );
+    let answered: (String, String) = sqlx::query_as(
+        "SELECT status, evidence->>'answer_event_id' FROM pending_questions WHERE id = $1",
+    )
+    .bind(question)
+    .fetch_one(inspect)
+    .await?;
+    assert_eq!(answered, ("answered".to_owned(), episode.id.to_string()));
+    assert_eq!(db.update_system_event(request(&open, 2)).await?.revision, 3);
+    let reopened: (String, bool, bool) = sqlx::query_as(
+        "SELECT status, evidence ? 'answer_event_id', expires_at > now()
+         FROM pending_questions WHERE id = $1",
+    )
+    .bind(question)
+    .fetch_one(inspect)
+    .await?;
+    assert_eq!(reopened, ("sent".to_owned(), false, true));
+    Ok(())
 }
