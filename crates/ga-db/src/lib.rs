@@ -97,3 +97,5 @@ async fn check_readiness(txn: &mut Transaction<'_, Postgres>) -> Result<(), Read
         _ => Err(ReadinessError::MigrationRequired),
     }
 }
+
+pub mod garmin_integration;

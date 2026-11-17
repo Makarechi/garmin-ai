@@ -9,7 +9,7 @@ use crate::{Database, ReadinessError, check_readiness};
 
 const ATTEMPT_LIMIT: i32 = 8;
 const KIND: &str = "channel_initiatives";
-const STORAGE_QUEUE_LOCK: i64 = 72104624;
+pub(crate) const STORAGE_QUEUE_LOCK: i64 = 72104624;
 const GARMIN_KINDS: &[&str] = &["garmin_endpoint", "garmin_activities", "garmin_fit"];
 
 #[derive(Debug)]
