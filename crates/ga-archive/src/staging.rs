@@ -61,13 +61,21 @@ pub(crate) struct Stage<'a> {
 
 impl<'a> Stage<'a> {
     pub(crate) fn create(directory: &'a OwnedFd) -> Result<Self, ArchiveError> {
+        Self::create_with_access(directory, OFlags::WRONLY)
+    }
+
+    pub(crate) fn create_readable(directory: &'a OwnedFd) -> Result<Self, ArchiveError> {
+        Self::create_with_access(directory, OFlags::RDWR)
+    }
+
+    fn create_with_access(directory: &'a OwnedFd, access: OFlags) -> Result<Self, ArchiveError> {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).map_err(|_| ArchiveError::StagingEntropy)?;
         let name = format!("{STAGE_PREFIX}{}", hex::encode(nonce));
         let file = fs::openat(
             directory,
             name.as_str(),
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            access | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             FILE_MODE,
         )?;
         let stage = Self {
