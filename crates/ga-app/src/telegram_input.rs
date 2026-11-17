@@ -1,5 +1,9 @@
 use std::{error::Error, fmt};
 
+use ga_db::{
+    Database,
+    channel_ingress::{ChannelCallback, InboundReceipt, IngressError},
+};
 use ga_domain::{channel::InboundEnvelope, timestamp::StoredInstant};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -105,6 +109,49 @@ impl AuthenticatedTelegramUpdate<'_, '_> {
         }
     }
 
+    /// Resolve a stored button and persist this Telegram callback exactly once.
+    pub async fn persist_callback(
+        &self,
+        database: &Database,
+        received_at: StoredInstant,
+        time_known: bool,
+    ) -> Result<InboundReceipt, IngressError> {
+        let token = self
+            .callback_data()
+            .ok_or(IngressError::ActionUnavailable)?;
+        let event_id = self.update_id.to_string();
+        database
+            .ingest_channel_callback(
+                ChannelCallback {
+                    owner_id: self.binding.owner_id,
+                    conversation_id: self.conversation_id(),
+                    channel: "telegram",
+                    instance_id: self.binding.instance_id,
+                    event_id: &event_id,
+                    token,
+                    received_at,
+                },
+                |action| {
+                    self.normalize(
+                        received_at,
+                        CallbackResolution::Verified { action, time_known },
+                    )
+                    .ok()
+                },
+            )
+            .await
+    }
+
+    fn conversation_id(&self) -> Uuid {
+        let owner = self.binding.owner_id;
+        let instance = self.binding.instance_id;
+        let chat = self.binding.external_owner_id;
+        Uuid::new_v5(
+            &TELEGRAM_NAMESPACE,
+            format!("{owner}:telegram:{instance}:{chat}").as_bytes(),
+        )
+    }
+
     /// Keep callback timing evidence separate from the provider-controlled JSON.
     pub fn normalize(
         &self,
@@ -114,10 +161,7 @@ impl AuthenticatedTelegramUpdate<'_, '_> {
         let instance = self.binding.instance_id;
         let owner_id = self.binding.owner_id;
         let external_owner = self.binding.external_owner_id;
-        let conversation = Uuid::new_v5(
-            &TELEGRAM_NAMESPACE,
-            format!("{owner_id}:telegram:{instance}:{external_owner}").as_bytes(),
-        );
+        let conversation = self.conversation_id();
         let channel = json!({"channel":"telegram", "instance_id":instance});
         let external_message = optional_id(&self.message["message_id"])?;
         let reply_to = optional_id(&self.message["reply_to_message"]["message_id"])?
