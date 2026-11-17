@@ -2,11 +2,11 @@ use std::{error::Error, fmt};
 
 use ga_db::{
     Database,
-    channel_ingress::{ChannelCallback, InboundReceipt, IngressError},
-};
-use ga_db::{
-    channel_ingress::telegram_poll::{
-        TelegramPollError, TelegramPollEvent, TelegramPollInput, TelegramPollReceipt,
+    channel_ingress::{
+        ChannelCallback, InboundReceipt, IngressError,
+        telegram_poll::{
+            TelegramPollError, TelegramPollEvent, TelegramPollInput, TelegramPollReceipt,
+        },
     },
     runtime_lease::RuntimeLease,
 };
@@ -73,62 +73,28 @@ impl<'binding> TelegramBinding<'binding> {
         received_at: StoredInstant,
         callback_time_known: bool,
     ) -> Result<TelegramPollReceipt, TelegramPollError> {
-        let update_id = wire["update_id"]
-            .as_i64()
-            .filter(|id| (1..i64::MAX).contains(id))
-            .ok_or(TelegramPollError::InvalidBinding)?;
-        let authorized = self.authenticate(wire).ok();
-        let event_id = update_id.to_string();
-        let normalized = authorized
-            .as_ref()
-            .filter(|update| !matches!(update.kind, InputKind::Callback(_)))
-            .and_then(|update| {
-                update
-                    .normalize(received_at, CallbackResolution::Unavailable)
-                    .ok()
-            });
-        let event = if let Some(callback) = authorized
-            .as_ref()
-            .and_then(|update| update.callback_context(&event_id, received_at))
-        {
-            TelegramPollEvent::Callback(callback)
-        } else if let Some(envelope) = &normalized {
-            TelegramPollEvent::Message(envelope)
-        } else {
-            TelegramPollEvent::Ignore
-        };
-        let callback_id = authorized
-            .as_ref()
-            .and_then(|update| match update.kind {
-                InputKind::Callback(callback) => callback["id"].as_str(),
-                _ => None,
-            })
-            .filter(|id| (1..=1000).contains(&id.len()) && !id.contains('\0'));
+        let update = PreparedUpdate::new(self, wire, received_at)?;
         lease
-            .persist_telegram_poll_event(
-                TelegramPollInput {
-                    owner_id: self.owner_id,
-                    instance_id: self.instance_id,
-                    update_id,
-                    received_at,
-                    event,
-                    callback_id,
-                },
-                |action| {
-                    authorized.as_ref().and_then(|update| {
-                        update
-                            .normalize(
-                                received_at,
-                                CallbackResolution::Verified {
-                                    action,
-                                    time_known: callback_time_known,
-                                },
-                            )
-                            .ok()
-                    })
-                },
-            )
+            .persist_telegram_poll_event(update.input(), |action| {
+                update.normalize_callback(action, callback_time_known)
+            })
             .await
+    }
+
+    pub(crate) async fn accept_webhook_update(
+        self,
+        database: &Database,
+        wire: &Value,
+        received_at: StoredInstant,
+    ) -> Result<bool, TelegramPollError> {
+        let update = PreparedUpdate::new(self, wire, received_at)?;
+        let receipt = database
+            .persist_telegram_webhook_event(update.input(), |action| {
+                // A webhook receipt does not establish when the button was pressed.
+                update.normalize_callback(action, false)
+            })
+            .await?;
+        Ok(receipt.inbound.is_some())
     }
 
     pub fn authenticate<'wire>(
@@ -167,6 +133,85 @@ impl<'binding> TelegramBinding<'binding> {
             message,
             kind,
         })
+    }
+}
+
+struct PreparedUpdate<'wire, 'binding> {
+    binding: TelegramBinding<'binding>,
+    update_id: i64,
+    event_id: String,
+    received_at: StoredInstant,
+    owner_update: Option<AuthenticatedTelegramUpdate<'wire, 'binding>>,
+    normalized_message: Option<InboundEnvelope>,
+}
+
+impl<'wire, 'binding> PreparedUpdate<'wire, 'binding> {
+    fn new(
+        binding: TelegramBinding<'binding>,
+        wire: &'wire Value,
+        received_at: StoredInstant,
+    ) -> Result<Self, TelegramPollError> {
+        let update_id = wire["update_id"]
+            .as_i64()
+            .filter(|id| (1..i64::MAX).contains(id))
+            .ok_or(TelegramPollError::InvalidBinding)?;
+        let owner_update = binding.authenticate(wire).ok();
+        let normalized_message = owner_update
+            .as_ref()
+            .filter(|update| !matches!(update.kind, InputKind::Callback(_)))
+            .and_then(|update| {
+                update
+                    .normalize(received_at, CallbackResolution::Unavailable)
+                    .ok()
+            });
+        Ok(Self {
+            binding,
+            update_id,
+            event_id: update_id.to_string(),
+            received_at,
+            owner_update,
+            normalized_message,
+        })
+    }
+
+    fn input(&self) -> TelegramPollInput<'_> {
+        let event = if let Some(callback) = self
+            .owner_update
+            .as_ref()
+            .and_then(|update| update.callback_context(&self.event_id, self.received_at))
+        {
+            TelegramPollEvent::Callback(callback)
+        } else if let Some(envelope) = &self.normalized_message {
+            TelegramPollEvent::Message(envelope)
+        } else {
+            TelegramPollEvent::Ignore
+        };
+        let callback_id = self
+            .owner_update
+            .as_ref()
+            .and_then(|update| match update.kind {
+                InputKind::Callback(callback) => callback["id"].as_str(),
+                _ => None,
+            })
+            .filter(|id| (1..=1000).contains(&id.len()) && !id.contains('\0'));
+        TelegramPollInput {
+            owner_id: self.binding.owner_id,
+            instance_id: self.binding.instance_id,
+            update_id: self.update_id,
+            received_at: self.received_at,
+            event,
+            callback_id,
+        }
+    }
+
+    fn normalize_callback(&self, action: &Value, time_known: bool) -> Option<InboundEnvelope> {
+        self.owner_update
+            .as_ref()?
+            .normalize(
+                self.received_at,
+                CallbackResolution::Verified { action, time_known },
+            )
+            .ok()
     }
 }
 

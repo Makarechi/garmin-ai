@@ -14,7 +14,7 @@ use super::{
     lock_mutations,
 };
 use crate::{
-    check_readiness,
+    Database, check_readiness,
     jobs::{
         JobStoreError,
         telegram_ack::{TelegramAckTarget, enqueue_telegram_ack},
@@ -54,6 +54,7 @@ pub struct TelegramPollReceipt {
 pub enum TelegramPollError {
     InvalidBinding,
     InvalidSelection,
+    ChannelDisabled,
     Busy,
     Ingress(IngressError),
     Cursor(TelegramCursorError),
@@ -68,6 +69,7 @@ impl fmt::Display for TelegramPollError {
                 f.write_str("Telegram update does not match the polling binding")
             }
             Self::InvalidSelection => f.write_str("Saved Telegram channel selection is invalid"),
+            Self::ChannelDisabled => f.write_str("Telegram channel is disabled by onboarding"),
             Self::Busy => f.write_str("Telegram channel selection is changing"),
             Self::Ingress(error) => error.fmt(f),
             Self::Cursor(error) => error.fmt(f),
@@ -123,58 +125,102 @@ impl RuntimeLease {
     ) -> Result<TelegramPollReceipt, TelegramPollError> {
         validate_binding(&input)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = Connection::begin(&mut self.connection).await?;
-            sqlx::query("SET LOCAL statement_timeout = '750ms'")
-                .execute(&mut *txn)
-                .await?;
-            check_readiness(&mut txn)
-                .await
-                .map_err(IngressError::Storage)?;
-            let selected = selection(&mut txn, input.instance_id).await?;
-            lock_ingress(&mut txn).await?;
-            // Legacy Telegram records an accepted edit as a revision without
-            // advancing the timestamp of the last newly accepted message.
-            let advances_ordering = !matches!(
-                &input.event, TelegramPollEvent::Message(envelope) if envelope.kind() == InboundKind::Edit
-            );
-            let inbound = if selected {
-                save_event(&mut txn, input.event, normalize_callback).await?
-            } else {
-                None
-            };
-            let new_ordering_epoch = if advances_ordering && inbound.is_some_and(|receipt| receipt.created) {
-                Some(
-                    record_telegram_ordering(&mut txn, input.instance_id, input.received_at)
-                        .await?,
-                )
-            } else {
-                None
-            };
-            let acknowledgement_queued = if let Some(callback_id) = input.callback_id.filter(|_| selected) {
-                let target = TelegramAckTarget { owner_id: input.owner_id, instance_id: input.instance_id };
-                enqueue_telegram_ack(&mut txn, target, input.update_id, callback_id, input.received_at)
-                    .await.map_err(TelegramPollError::Acknowledgement)?
-            } else {
-                false
-            };
-            advance_telegram_poll_cursor(
-                &mut txn,
-                input.instance_id,
-                input.update_id,
-                input.received_at,
-            )
-            .await?;
-            txn.commit().await?;
-            Ok(TelegramPollReceipt {
-                selected,
-                inbound,
-                new_ordering_epoch,
-                acknowledgement_queued,
-            })
+            let txn = Connection::begin(&mut self.connection).await?;
+            persist(txn, input, normalize_callback, DeliveryMode::Polling).await
         })
         .await
         .map_err(|_| TelegramPollError::Database)?
     }
+}
+
+impl Database {
+    /// Accept a verified webhook delivery without writing the long-poll offset.
+    pub async fn persist_telegram_webhook_event(
+        &self,
+        input: TelegramPollInput<'_>,
+        normalize_callback: impl FnOnce(&Value) -> Option<InboundEnvelope>,
+    ) -> Result<TelegramPollReceipt, TelegramPollError> {
+        validate_binding(&input)?;
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let txn = self.work.begin().await?;
+            persist(txn, input, normalize_callback, DeliveryMode::Webhook).await
+        })
+        .await
+        .map_err(|_| TelegramPollError::Database)?
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeliveryMode {
+    Polling,
+    Webhook,
+}
+
+async fn persist(
+    mut txn: Transaction<'_, Postgres>,
+    input: TelegramPollInput<'_>,
+    normalize_callback: impl FnOnce(&Value) -> Option<InboundEnvelope>,
+    mode: DeliveryMode,
+) -> Result<TelegramPollReceipt, TelegramPollError> {
+    sqlx::query("SET LOCAL statement_timeout = '750ms'")
+        .execute(&mut *txn)
+        .await?;
+    check_readiness(&mut txn)
+        .await
+        .map_err(IngressError::Storage)?;
+    let selected = selection(&mut txn, input.instance_id).await?;
+    if !selected && mode == DeliveryMode::Webhook {
+        return Err(TelegramPollError::ChannelDisabled);
+    }
+    lock_ingress(&mut txn).await?;
+    // Edits replace a revision without advancing the last new message timestamp.
+    let advances_ordering = !matches!(
+        &input.event, TelegramPollEvent::Message(envelope) if envelope.kind() == InboundKind::Edit
+    );
+    let inbound = if selected {
+        save_event(&mut txn, input.event, normalize_callback).await?
+    } else {
+        None
+    };
+    let new_ordering_epoch = if advances_ordering && inbound.is_some_and(|receipt| receipt.created)
+    {
+        Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
+    } else {
+        None
+    };
+    let acknowledgement_queued = if let Some(callback_id) = input.callback_id.filter(|_| selected) {
+        let target = TelegramAckTarget {
+            owner_id: input.owner_id,
+            instance_id: input.instance_id,
+        };
+        enqueue_telegram_ack(
+            &mut txn,
+            target,
+            input.update_id,
+            callback_id,
+            input.received_at,
+        )
+        .await
+        .map_err(TelegramPollError::Acknowledgement)?
+    } else {
+        false
+    };
+    if mode == DeliveryMode::Polling {
+        advance_telegram_poll_cursor(
+            &mut txn,
+            input.instance_id,
+            input.update_id,
+            input.received_at,
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(TelegramPollReceipt {
+        selected,
+        inbound,
+        new_ordering_epoch,
+        acknowledgement_queued,
+    })
 }
 
 async fn selection(
@@ -216,8 +262,7 @@ async fn save_event(
         return Ok(None);
     }
     lock_mutations(txn).await?;
-    // A stale edit or rejected button should not leave earlier writes in this
-    // transaction. Its provider offset must still advance.
+    // Preserve the enclosing transport transaction when ignoring a stale edit or rejected button.
     let mut event_txn = txn.begin().await?;
     let result = match event {
         TelegramPollEvent::Ignore => Ok(None),
