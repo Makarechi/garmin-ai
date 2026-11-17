@@ -1,0 +1,35 @@
+[
+  {
+    "endpoint": "daily", "second": 1, "status": "normalized",
+    "payload": {"totalSteps": 6031, "restingHeartRate": 72, "activeKilocalories": 275.5}
+  },
+  {
+    "endpoint": "heart_rate", "second": 2, "status": "normalized",
+    "payload": {"heartRateValues": [[1792888200123, 70], [1792888200123, 71], [1792888260000, 73], [1792888320000, -1]], "restingHeartRate": 59}
+  },
+  {
+    "endpoint": "heart_rate", "second": 3, "status": "error", "force_failure": true,
+    "payload": {"heartRateValues": [[1792888200123, 75], [1792888320000, 88]], "restingHeartRate": 58}
+  },
+  {
+    "endpoint": "heart_rate", "second": 3, "status": "normalized",
+    "payload": {"heartRateValues": [[1792888200123, 75], [1792888320000, 88]], "restingHeartRate": 58}
+  },
+  {
+    "endpoint": "heart_rate", "second": 2, "status": "stale",
+    "payload": {"heartRateValues": [[1792888200123, 30]], "restingHeartRate": 22}
+  },
+  {
+    "endpoint": "heart_rate", "second": 4, "status": "unchanged",
+    "payload": {"heartRateValues": [[1792888200123, 75], [1792888320000, 88]], "restingHeartRate": 58}
+  },
+  {"endpoint": "heart_rate", "second": 5, "status": "empty", "payload": []},
+  {
+    "endpoint": "sleep", "second": 6, "status": "normalized",
+    "payload": {"dailySleepDTO": {"sleepTimeSeconds": 28000, "sleepScores": {"overall": {"value": 91}}, "sleepStartTimestampGMT": "2026-10-24T22:00:00.500000Z", "sleepEndTimestampGMT": "2026-10-25T05:45:00Z"}}
+  },
+  {
+    "endpoint": "readiness", "second": 7, "status": "normalized",
+    "payload": [{"score": 57, "recoveryTime": 25, "timestamp": "2026-10-25 02:30:00"}, {"score": 68, "recoveryTimeChangePhrase": "REACHED_ZERO", "timestamp": "2026-10-25T02:30:00+01:00"}]
+  }
+]
