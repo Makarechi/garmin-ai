@@ -6,9 +6,10 @@ import os
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
 
 from garmin_ai import anthropic_adapter, openai_adapter
 from garmin_ai.anthropic_schema import AnthropicSchemaCompiler
@@ -16,13 +17,20 @@ from garmin_ai.llm import ProviderOutputInvalid, ProviderRefused, ProviderUnavai
 from garmin_ai.openai_schema import OpenAISchemaCompiler
 
 LABEL = "synthetic-provider-private"
-PAYLOAD = {"choice": "Café ☕", "score": 97}
+PAYLOAD = {
+    "choice": "Café ☕",
+    "score": 97,
+    "reference": "00000000-0000-0000-0000-000000000042",
+    "observed_at": "2026-11-17T12:00:00Z",
+}
 
 
 class Reply(BaseModel):
     model_config = ConfigDict(extra="forbid")
     choice: str = Field(min_length=1, max_length=20)
     score: int = Field(ge=0, le=100)
+    reference: UUID
+    observed_at: AwareDatetime
 
 
 def envelope(provider, payload=None, *, encoded=None):
@@ -61,6 +69,16 @@ def variants(provider):
         yield "strict_usage", render({**standard, "usage": {"input_tokens": invalid}})
     yield "schema", render(envelope(provider, {**PAYLOAD, "score": 101}))
     yield "schema_extra", render(envelope(provider, {**PAYLOAD, "unexpected": LABEL}))
+    yield "invalid_reference", render(envelope(provider, {**PAYLOAD, "reference": "not-a-uuid"}))
+    yield "invalid_instant", render(envelope(provider, {**PAYLOAD, "observed_at": "not-a-date"}))
+    yield (
+        "naive_instant",
+        render(envelope(provider, {**PAYLOAD, "observed_at": "2026-11-17T12:00:00"})),
+    )
+    yield (
+        "impossible_instant",
+        render(envelope(provider, {**PAYLOAD, "observed_at": "2026-02-30T12:00:00Z"})),
+    )
     yield "schema_missing", render(envelope(provider, {"score": 1}))
     yield "payload_not_json", render(envelope(provider, encoded=f"{LABEL}: not a document"))
     yield "payload_array", render(envelope(provider, encoded="[]"))

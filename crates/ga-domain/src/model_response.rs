@@ -59,16 +59,19 @@ pub struct StructuredResponseSchema {
 
 impl StructuredResponseSchema {
     pub fn new(wire: &Value, application: &Value) -> Result<Self, ModelResponseError> {
-        let compile = |schema| {
-            jsonschema::draft202012::options()
-                .should_validate_formats(false)
-                .build(schema)
-                .map_err(|_| ModelResponseError::InvalidSchema)
-        };
-        Ok(Self {
-            wire: compile(wire)?,
-            application: compile(application)?,
-        })
+        let wire = jsonschema::draft202012::options()
+            .should_validate_formats(false)
+            .build(wire)
+            .map_err(|_| ModelResponseError::InvalidSchema)?;
+        let application = jsonschema::draft202012::options()
+            .should_validate_formats(true)
+            .with_format("uuid", |text| uuid::Uuid::parse_str(text).is_ok())
+            .with_format("date-time", |text| {
+                crate::event_time::parse_aware_datetime(&Value::String(text.to_owned())).is_some()
+            })
+            .build(application)
+            .map_err(|_| ModelResponseError::InvalidSchema)?;
+        Ok(Self { wire, application })
     }
 
     /// Decode a completed structured response without carrying provider errors or prompt text.
