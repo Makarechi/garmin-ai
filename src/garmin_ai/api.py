@@ -636,7 +636,7 @@ def create_app(settings: Settings | None = None, engine=None):
         }
 
     @app.post("/tracker-setups/preview", dependencies=[Depends(require("manage:definitions"))])
-    def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db)):
+    def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db, scope="function")):
         return preview_tracker(session, body)
 
     @app.post("/source-metric-mappings/preview", dependencies=[Depends(require("admin"))])
@@ -662,7 +662,7 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
     def create_tracker(
         body: TrackerConfirmation,
-        session=Depends(db),
+        session=Depends(db, scope="function"),
         granted=Depends(authorize),
     ):
         if (body.draft.reminder_enabled or body.draft.reminder_time is not None) and not permits(

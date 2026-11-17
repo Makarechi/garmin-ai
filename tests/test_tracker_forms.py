@@ -693,3 +693,50 @@ def test_extended_language_tags_work_for_generated_actions_and_forms(db, db_engi
         assert regional.status_code == 200
         assert regional.json()["title"] == "专注"
         assert client.get("/actions?locale=en-a", headers=headers).status_code == 422
+
+
+@pytest.mark.parametrize("phase", ["preview", "confirm"])
+def test_tracker_setup_reports_failed_commit_before_success(db, db_engine, monkeypatch, phase):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.orm import Session
+
+    from garmin_ai import api
+
+    key = "tracker-commit-test-" + "x" * 32
+    settings = Settings(api_tokens=[ApiToken(key=key, scopes={"admin"})])
+    client = TestClient(create_app(settings, db_engine), raise_server_exceptions=False)
+    headers = {"Authorization": "Bearer " + key}
+    draft = focus_draft().model_dump(mode="json")
+    path = "/tracker-setups/preview"
+    body = draft
+    target = "preview_tracker"
+    if phase == "confirm":
+        preview = client.post(path, json=body, headers=headers)
+        assert preview.status_code == 200
+        path = "/tracker-setups"
+        body = {"draft": draft, "confirmation_token": preview.json()["confirmation_token"]}
+        target = "confirm_tracker"
+
+    original = getattr(api, target)
+
+    def fail_after_operation(session, *args, **kwargs):
+        result = original(session, *args, **kwargs)
+        session.info["synthetic_tracker_commit_failure"] = True
+        return result
+
+    def fail_commit(session):
+        if session.info.get("synthetic_tracker_commit_failure"):
+            raise SQLAlchemyError("Synthetic tracker transaction commit failure")
+
+    monkeypatch.setattr(api, target, fail_after_operation)
+    event.listen(Session, "before_commit", fail_commit)
+    try:
+        response = client.post(path, json=body, headers=headers)
+    finally:
+        event.remove(Session, "before_commit", fail_commit)
+    assert response.status_code == 503
+    assert (
+        db.scalar(select(EventDefinition.id).where(EventDefinition.key == "user.focus_session"))
+        is None
+    )
