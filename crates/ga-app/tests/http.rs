@@ -1,6 +1,7 @@
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
+    path::Path,
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -12,11 +13,23 @@ struct Server {
 
 impl Server {
     fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut process = Command::new(env!("CARGO_BIN_EXE_garmin-ai-rust"))
+        Self::configured(&[], None)
+    }
+
+    fn configured(
+        environment: &[(&str, &str)],
+        directory: Option<&Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_garmin-ai-rust"));
+        command
             .env_clear()
+            .envs(environment.iter().copied())
             .args(["serve", "--port", "0"])
-            .stdout(Stdio::piped())
-            .spawn()?;
+            .stdout(Stdio::piped());
+        if let Some(directory) = directory {
+            command.current_dir(directory);
+        }
+        let mut process = command.spawn()?;
         let address = (|| -> Result<SocketAddr, Box<dyn std::error::Error>> {
             let stdout = process
                 .stdout
@@ -123,5 +136,161 @@ fn readiness_reports_unavailable_without_a_database() -> Result<(), Box<dyn std:
     assert!(headers.starts_with("HTTP/1.1 503 "));
     assert!(headers.contains("cache-control: no-store"));
     assert_eq!(body, r#"{"detail":"Database unavailable or not migrated"}"#);
+    Ok(())
+}
+
+#[test]
+fn scoped_credentials_and_dotenv_priority_are_applied() -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let default = "synthetic-default-token-xxyyzzxxyyzz";
+    let old = "synthetic-old-legacy-key-xxyyzzxxyyzz";
+    let new = "synthetic-new-legacy-key-xxyyzzxxyyzz";
+    std::fs::write(
+        root.path().join(".env"),
+        format!("GA_API_KEY={old}\nGA_API_TOKENS='[{{\"key\":\"{default}\"}}]'\n"),
+    )?;
+    let server = Server::configured(&[("GA_API_KEY", new)], Some(root.path()))?;
+    for (key, status, expected) in [
+        (
+            old,
+            401,
+            serde_json::json!({"detail":"Authentication required"}),
+        ),
+        (
+            default,
+            200,
+            serde_json::json!({"read_diary":false,"write_diary":false,"manage_definitions":false}),
+        ),
+        (
+            new,
+            200,
+            serde_json::json!({"read_diary":true,"write_diary":true,"manage_definitions":true}),
+        ),
+    ] {
+        let raw = server.request(
+            "GET",
+            "/capabilities",
+            &format!("Authorization: Bearer {key}\r\n"),
+        )?;
+        let (head, body) = parts(&raw)?;
+        assert!(head.starts_with(&format!("HTTP/1.1 {status} ")));
+        assert!(head.contains("cache-control: no-store"));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(body)?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn startup_rejects_bad_token_config_without_leaking_it() -> Result<(), Box<dyn std::error::Error>> {
+    let key = "synthetic-private-config-xxyyzzxxyyzz";
+    let bogus = [
+        serde_json::json!([{"key":key},{"key":key}]),
+        serde_json::json!([{"key":key,"scopes":["write:wearable","read:diary"]}]),
+        serde_json::json!([{"key":key,"scopes":["write:wearable"]}]),
+        serde_json::json!([{"key":key,"scopes":["does-not-exist"]}]),
+        serde_json::json!([{"key":"replace-with-a-long-synthetic-placeholder"}]),
+        serde_json::json!([{"key":key,"wearable_device_id":"11111111-1111-1111-1111-111111111111"}]),
+        serde_json::Value::Null,
+    ];
+    for config in bogus {
+        let output = Command::new(env!("CARGO_BIN_EXE_garmin-ai-rust"))
+            .env_clear()
+            .env("GA_API_TOKENS", config.to_string())
+            .args(["serve", "--port", "0"])
+            .output()?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr)?,
+            "Could not run the HTTP server.\n"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the synthetic scope matrix captured from pinned Python"]
+fn scope_matrix_matches_reference_at_http_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    use ga_domain::access::{ReadToolInput, Scope, Scopes};
+    use serde_json::{Value, from_str};
+
+    let document: Value =
+        serde_json::from_slice(&std::fs::read(std::env::var("GA_TEST_API_SCOPES")?)?)?;
+    let legacy = document["legacy"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("legacy fixture key"))?;
+    let scoped = document["scoped"].to_string();
+    let server = Server::configured(&[("GA_API_KEY", legacy), ("GA_API_TOKENS", &scoped)], None)?;
+    let cases = document["http"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("HTTP cases"))?;
+    for (index, case) in cases.iter().enumerate() {
+        let authorization = case["authorization"]
+            .as_str()
+            .map_or_else(String::new, |header| format!("Authorization: {header}\r\n"));
+        let method = case["method"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("HTTP method"))?;
+        let status = case["status"]
+            .as_u64()
+            .ok_or_else(|| io::Error::other("HTTP status"))?;
+        let raw = server.request(method, "/capabilities", &authorization)?;
+        let (head, body) = parts(&raw)?;
+        assert!(
+            head.starts_with(&format!("HTTP/1.1 {status} ")),
+            "HTTP status case {index}"
+        );
+        for header in ["cache-control", "allow"] {
+            let expected = case[header.replace('-', "_")].as_str();
+            let actual = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(": ")?;
+                name.eq_ignore_ascii_case(header).then_some(value)
+            });
+            assert_eq!(actual, expected, "{header} case {index}");
+        }
+        let expected = case["body"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("HTTP response"))?;
+        if expected.is_empty() {
+            assert!(body.is_empty(), "empty body case {index}");
+        } else {
+            assert_eq!(
+                from_str::<Value>(body)?,
+                from_str::<Value>(expected)?,
+                "body case {index}"
+            );
+        }
+    }
+    let tools = document["tools"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("tool cases"))?;
+    for (index, case) in tools.iter().enumerate() {
+        let scopes = case["scopes"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("scope list"))?;
+        let scopes: Scopes = scopes
+            .iter()
+            .map(|scope| Scope::from_name(scope.as_str()?))
+            .collect::<Option<Scopes>>()
+            .ok_or_else(|| io::Error::other("unknown scope"))?;
+        let name = case["name"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("tool"))?;
+        let input = if let Some(kind) = case["kind"].as_str() {
+            ReadToolInput::Catalog(kind)
+        } else if let Some(operation) = case["operation"].as_str() {
+            ReadToolInput::Analysis {
+                operation,
+                metric: case["metric"].as_str(),
+            }
+        } else {
+            ReadToolInput::Discovery
+        };
+        assert_eq!(
+            Some(scopes.permits_tool(name, input)),
+            case["permitted"].as_bool(),
+            "tool case {index} {name}"
+        );
+    }
     Ok(())
 }

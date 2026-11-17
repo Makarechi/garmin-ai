@@ -8,15 +8,25 @@ use axum::{
     routing::any,
 };
 use ga_db::{Database, ReadinessError};
+use ga_domain::access::Scope;
 use serde_json::json;
 use tokio::{net::TcpListener, signal};
 
-fn router(database: Option<Database>) -> Router {
+use crate::authorization::Authorization;
+
+#[derive(Clone)]
+struct AppState {
+    database: Option<Database>,
+    authorization: Authorization,
+}
+
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
+        .route("/capabilities", any(capabilities))
         .fallback(missing)
-        .with_state(database)
+        .with_state(state)
 }
 
 async fn liveness(method: Method, headers: HeaderMap) -> Response {
@@ -28,13 +38,9 @@ async fn liveness(method: Method, headers: HeaderMap) -> Response {
     private_cache(response, &headers)
 }
 
-async fn readiness(
-    method: Method,
-    headers: HeaderMap,
-    State(database): State<Option<Database>>,
-) -> Response {
+async fn readiness(method: Method, headers: HeaderMap, State(state): State<AppState>) -> Response {
     let response = if method == Method::GET {
-        let status = match database {
+        let status = match state.database {
             Some(database) => database.readiness().await,
             None => Err(ReadinessError::Unavailable),
         };
@@ -59,6 +65,33 @@ async fn readiness(
     private_cache(response, &headers)
 }
 
+async fn capabilities(
+    method: Method,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    let response = if method != Method::GET {
+        method_not_allowed()
+    } else if let Some(scopes) = state
+        .authorization
+        .authenticate(headers.get(header::AUTHORIZATION))
+    {
+        Json(json!({
+            "read_diary": scopes.permits(&[Scope::ReadDiary]),
+            "write_diary": scopes.permits(&[Scope::ReadDiary, Scope::WriteDiary]),
+            "manage_definitions": scopes.permits(&[Scope::ManageDefinitions]),
+        }))
+        .into_response()
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"detail":"Authentication required"})),
+        )
+            .into_response()
+    };
+    private_cache(response, &headers)
+}
+
 fn method_not_allowed() -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
@@ -74,7 +107,10 @@ async fn missing(headers: HeaderMap) -> Response {
 }
 
 fn private_cache(mut response: Response, request: &HeaderMap) -> Response {
-    if request.contains_key(header::AUTHORIZATION) {
+    if request
+        .get(header::AUTHORIZATION)
+        .is_some_and(|value| !value.is_empty())
+    {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -84,6 +120,7 @@ fn private_cache(mut response: Response, request: &HeaderMap) -> Response {
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn serve(host: &str, port: u16) -> io::Result<()> {
+    let authorization = Authorization::configured()?;
     let listener = TcpListener::bind((host, port)).await?;
 
     #[cfg(unix)]
@@ -107,7 +144,13 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
         .ok()
         .and_then(|url| Database::connect_lazy(&url).ok());
     println!("Listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, router(database))
-        .with_graceful_shutdown(shutdown)
-        .await
+    axum::serve(
+        listener,
+        router(AppState {
+            database,
+            authorization,
+        }),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }

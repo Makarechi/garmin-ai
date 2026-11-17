@@ -730,9 +730,15 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "dotenvy",
  "ga-db",
+ "ga-domain",
  "serde_json",
+ "sha2 0.11.1",
+ "subtle",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
