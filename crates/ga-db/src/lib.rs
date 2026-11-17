@@ -1,5 +1,6 @@
 pub mod activity_documents;
 pub mod diary;
+pub mod fit_ingest;
 pub mod fit_staging;
 pub mod garmin_owner;
 pub mod health_analysis;

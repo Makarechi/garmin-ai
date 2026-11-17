@@ -125,36 +125,45 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(CaptureError::Storage)?;
-        let owner = verify_owner_in_transaction(&mut txn, fingerprint)
-            .await
-            .map_err(CaptureError::Owner)?;
-        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(MUTATION_LOCK)
-            .fetch_one(&mut *txn)
-            .await?;
-        if !locked {
-            return Err(CaptureError::Busy);
-        }
-        let allowed: bool = sqlx::query_scalar(
-            "SELECT NOT EXISTS (SELECT 1 FROM module_configs WHERE owner_id = $1)
-                 OR NOT EXISTS (
-                    SELECT 1 FROM unnest($2::text[]) AS required(pack_key)
-                    WHERE NOT EXISTS (SELECT 1 FROM module_configs AS config
-                       WHERE config.owner_id = $1 AND config.pack_key = required.pack_key
-                         AND config.collection_enabled)
-                 )",
-        )
-        .bind(owner.owner_id())
-        .bind(packs)
-        .fetch_one(&mut *txn)
-        .await?;
-        if !allowed {
-            return Err(CaptureError::CollectionDisabled);
-        }
+        authorize_legacy_mutation(&mut txn, fingerprint, packs).await?;
         let scope = format!("{GARMIN_LEGACY_SOURCE}:{}:{}", endpoint, source_key);
         lock_legacy_scope(&mut txn, &scope).await?;
         Ok(txn)
     }
+}
+
+pub(crate) async fn authorize_legacy_mutation(
+    txn: &mut Transaction<'_, Postgres>,
+    fingerprint: &str,
+    packs: &[&str],
+) -> Result<(), CaptureError> {
+    let owner = verify_owner_in_transaction(txn, fingerprint)
+        .await
+        .map_err(CaptureError::Owner)?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(MUTATION_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !locked {
+        return Err(CaptureError::Busy);
+    }
+    let allowed: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM module_configs WHERE owner_id = $1)
+             OR NOT EXISTS (
+                SELECT 1 FROM unnest($2::text[]) AS required(pack_key)
+                WHERE NOT EXISTS (SELECT 1 FROM module_configs AS config
+                   WHERE config.owner_id = $1 AND config.pack_key = required.pack_key
+                     AND config.collection_enabled)
+             )",
+    )
+    .bind(owner.owner_id())
+    .bind(packs)
+    .fetch_one(&mut **txn)
+    .await?;
+    if !allowed {
+        return Err(CaptureError::CollectionDisabled);
+    }
+    Ok(())
 }
 
 pub(crate) async fn lock_legacy_scope(
