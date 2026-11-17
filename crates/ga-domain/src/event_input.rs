@@ -197,6 +197,18 @@ impl EventInput {
     pub fn start(&self) -> StoredInstant {
         self.start
     }
+
+    pub fn source_calendar_date(&self) -> Option<time::Date> {
+        let instant = jiff::Timestamp::from_microsecond(self.start.unix_microseconds()).ok()?;
+        let zone = jiff::tz::db().get(&self.timezone).ok()?;
+        let local = instant.to_zoned_datetime(zone).date();
+        time::Date::from_calendar_date(
+            i32::from(local.year()),
+            time::Month::try_from(u8::try_from(local.month()).ok()?).ok()?,
+            u8::try_from(local.day()).ok()?,
+        )
+        .ok()
+    }
     pub fn end(&self) -> Option<StoredInstant> {
         self.end
     }
