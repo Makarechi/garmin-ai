@@ -489,6 +489,29 @@ impl GarminJobLease {
         self.require_live(txn, true).await
     }
 
+    pub(crate) async fn reserve_publication(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        seconds: i32,
+    ) -> Result<(), JobStoreError> {
+        let refreshed = sqlx::query(
+            "WITH instant AS MATERIALIZED (SELECT clock_timestamp() AS at)
+             UPDATE jobs SET lease_until = GREATEST(lease_until, instant.at + $4 * INTERVAL '1 second')
+             FROM instant WHERE id = $1 AND lease_token = $2 AND kind = $3
+               AND status = 'running' AND lease_until > instant.at",
+        )
+        .bind(self.id)
+        .bind(self.token)
+        .bind(self.kind.label())
+        .bind(seconds)
+        .execute(&mut **txn)
+        .await?;
+        if refreshed.rows_affected() != 1 {
+            return Err(JobStoreError::LeaseLost);
+        }
+        Ok(())
+    }
+
     async fn require_live(
         &self,
         txn: &mut Transaction<'_, Postgres>,

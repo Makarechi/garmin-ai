@@ -160,6 +160,22 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
     };
     sqlx::query("INSERT INTO app_state(key,value) VALUES('account:garmin',jsonb_build_object('fingerprint',$1::text))")
         .bind(ACCOUNT).execute(&fixture.inspect).await?;
+    // Each statement fits the database's 750ms limit, but together they need more than the lease.
+    sqlx::raw_sql(
+        "CREATE FUNCTION slow_endpoint_publication() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM pg_sleep(0.55);
+             RETURN NEW;
+         END
+         $$;
+         CREATE TRIGGER slow_endpoint_measurement BEFORE INSERT ON measurements
+             FOR EACH ROW EXECUTE FUNCTION slow_endpoint_publication();
+         CREATE TRIGGER slow_endpoint_freshness BEFORE INSERT ON app_state
+             FOR EACH ROW WHEN (NEW.key LIKE 'freshness:heart_rate:%')
+             EXECUTE FUNCTION slow_endpoint_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     let first = fixture.queue(1).await?;
     let recent = fixture.start.unix_timestamp() * 1_000 - 60_000;
     let body = |value| {
@@ -174,6 +190,13 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
     );
     assert_eq!(fixture.job(&first).await?, ("done".into(), 1));
     assert_eq!(success.calls.load(Ordering::Relaxed), 1);
+    sqlx::raw_sql(
+        "DROP TRIGGER slow_endpoint_measurement ON measurements;
+         DROP TRIGGER slow_endpoint_freshness ON app_state;
+         DROP FUNCTION slow_endpoint_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     let rate = fixture.queue(10).await?;
     let preleased = fixture.queue(10).await?;
     let limited = Source::new(

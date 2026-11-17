@@ -181,7 +181,10 @@ impl Endpoint {
 enum LeaseRead {
     Observe,
     Lock,
+    Publication,
 }
+
+const PUBLICATION_SECONDS: i32 = 30;
 
 #[derive(Clone, Copy)]
 enum Eligibility {
@@ -277,7 +280,7 @@ impl Database {
                 request.authenticated_fingerprint,
                 request.lease,
                 request.requested_at,
-                LeaseRead::Lock,
+                LeaseRead::Publication,
             )
             .await?;
         let result = match eligibility {
@@ -332,6 +335,12 @@ impl Database {
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
             .await?;
+        if matches!(lease_read, LeaseRead::Publication) {
+            sqlx::query("SELECT set_config('transaction_timeout', $1, true)")
+                .bind(format!("{PUBLICATION_SECONDS}s"))
+                .execute(&mut *txn)
+                .await?;
+        }
         check_readiness(&mut txn)
             .await
             .map_err(EndpointError::Storage)?;
@@ -342,8 +351,14 @@ impl Database {
         };
         match lease_read {
             LeaseRead::Observe => lease.observe_live(&mut txn).await?,
-            LeaseRead::Lock => lease.check_live(&mut txn).await?,
+            LeaseRead::Lock | LeaseRead::Publication => lease.check_live(&mut txn).await?,
         };
+        if matches!(lease_read, LeaseRead::Publication) {
+            // The row stays locked through publication, and a rollback restores the prior lease.
+            lease
+                .reserve_publication(&mut txn, PUBLICATION_SECONDS + 1)
+                .await?;
+        }
         let eligibility = if history_window::superseded(&mut txn, endpoint, lease.id()).await? {
             Eligibility::Superseded
         } else if !enabled {
