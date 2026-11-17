@@ -1,5 +1,9 @@
 use std::{error::Error, fmt};
 
+mod gemini;
+
+pub use gemini::{GeminiModelRequest, MAX_GEMINI_AUDIO_BYTES};
+
 use serde_json::{Value, json};
 
 use crate::{
@@ -44,6 +48,7 @@ pub struct StructuredModelRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRequestError {
     InvalidConfiguration,
+    InputTooLarge,
     Schema(ModelSchemaError),
     ResponseSchema(ModelResponseError),
 }
@@ -52,6 +57,7 @@ impl fmt::Display for ModelRequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfiguration => f.write_str("Model configuration is invalid"),
+            Self::InputTooLarge => f.write_str("Model input exceeds the size limit"),
             Self::Schema(error) => error.fmt(f),
             Self::ResponseSchema(error) => error.fmt(f),
         }
