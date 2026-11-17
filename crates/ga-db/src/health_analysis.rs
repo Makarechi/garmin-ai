@@ -1,6 +1,8 @@
+mod activity_reads;
 mod read_daily;
 mod sleep_timing;
 
+pub use activity_reads::ActivityReadError;
 pub use read_daily::DailyHealthReader;
 pub use sleep_timing::sleep_timing_result_hash;
 
@@ -77,13 +79,7 @@ pub struct HealthPeriod {
 
 impl HealthPeriod {
     pub fn new(start: Date, end: Date) -> Result<Self, HealthAnalysisError> {
-        let earliest = Date::from_calendar_date(1, Month::March, 2)
-            .map_err(|_| HealthAnalysisError::DateRange)?;
-        let latest = Date::from_calendar_date(9999, Month::November, 1)
-            .map_err(|_| HealthAnalysisError::DateRange)?;
-        if start < earliest || end > latest {
-            return Err(HealthAnalysisError::CalendarBoundary);
-        }
+        check_calendar_bounds(start, end)?;
         if !(0..=MAX_RANGE_DAYS).contains(&(end - start).whole_days()) {
             return Err(HealthAnalysisError::DateRange);
         }
@@ -93,6 +89,17 @@ impl HealthPeriod {
     fn days(self) -> i64 {
         (self.end - self.start).whole_days() + 1
     }
+}
+
+fn check_calendar_bounds(start: Date, end: Date) -> Result<(), HealthAnalysisError> {
+    let earliest =
+        Date::from_calendar_date(1, Month::March, 2).map_err(|_| HealthAnalysisError::DateRange)?;
+    let latest = Date::from_calendar_date(9999, Month::November, 1)
+        .map_err(|_| HealthAnalysisError::DateRange)?;
+    if start < earliest || end > latest {
+        return Err(HealthAnalysisError::CalendarBoundary);
+    }
+    Ok(())
 }
 
 impl Database {
