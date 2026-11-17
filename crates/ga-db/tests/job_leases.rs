@@ -2,6 +2,7 @@ use std::{
     env,
     error::Error,
     io,
+    process::Stdio,
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -11,8 +12,13 @@ use ga_db::{
     jobs::{FailureReason, InitiativeOutcome, JobStoreError, RecordedJobStatus},
 };
 use ga_domain::timestamp::StoredInstant;
-use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
+use sqlx::{ConnectOptions, PgConnection, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+    time::timeout,
+};
 use uuid::Uuid;
 
 type JobState = (String, i32, Option<String>, Option<OffsetDateTime>);
@@ -64,6 +70,8 @@ async fn real_postgres_initiative_leases_survive_restart_and_reject_old_owners()
     assert_eq!(existing, 0, "Use an empty job fixture");
     let database = Database::connect_lazy(&url)
         .map_err(|_| io::Error::other("Database configuration failed"))?;
+    verify_process_death(&inspect, &database).await?;
+    verify_publication_expiry(&inspect, &database).await?;
     let now = at(0)?;
 
     let (one, two) = tokio::join!(
@@ -294,4 +302,166 @@ async fn real_postgres_initiative_leases_survive_restart_and_reject_old_owners()
     ));
     storage.rollback().await?;
     Ok(())
+}
+
+const PUBLICATION_KEY: &str = "synthetic:lease-guarded-publication";
+const CHILD_JOB_ENV: &str = "GA_TEST_JOB_PUBLICATION_CHILD_ID";
+const STAGED_MESSAGE: &str = "synthetic publication staged";
+
+fn real_now() -> Result<StoredInstant, Box<dyn Error>> {
+    let microseconds = OffsetDateTime::now_utc()
+        .unix_timestamp_nanos()
+        .div_euclid(1_000);
+    Ok(StoredInstant::from_unix_microseconds(i64::try_from(
+        microseconds,
+    )?)?)
+}
+
+async fn publish_marker(connection: &mut PgConnection) -> Result<(), JobStoreError> {
+    sqlx::query(
+        "INSERT INTO app_state (key, value) VALUES ($1, '{\"status\":\"synthetic\"}'::jsonb)",
+    )
+    .bind(PUBLICATION_KEY)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn marker_exists(inspect: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM app_state WHERE key = $1)")
+        .bind(PUBLICATION_KEY)
+        .fetch_one(inspect)
+        .await
+}
+
+async fn verify_process_death(inspect: &PgPool, database: &Database) -> Result<(), Box<dyn Error>> {
+    let id = required(
+        database
+            .enqueue_initiative("synthetic-publication:kill", real_now()?)
+            .await?,
+    )?;
+    let mut child = Command::new(env::current_exe()?)
+        .args([
+            "--exact",
+            "synthetic_child_publication_waits_for_kill",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(CHILD_JOB_ENV, id.to_string())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(required(child.stdout.take())?).lines();
+    timeout(Duration::from_secs(5), async {
+        while let Some(line) = lines.next_line().await? {
+            if line == STAGED_MESSAGE {
+                return Ok(());
+            }
+        }
+        Err(io::Error::other(
+            "Child exited before staging its synthetic write",
+        ))
+    })
+    .await??;
+    assert!(!marker_exists(inspect).await?);
+    assert_eq!(database.readiness().await, Ok(()));
+    child.kill().await?;
+    assert!(!marker_exists(inspect).await?);
+    assert_eq!(state(inspect, id).await?.0, "running");
+
+    // Leave enough real time for the three-second lease to expire after the process exits.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let current = required(database.claim_local_initiative(real_now()?, 30).await?)?;
+    assert_eq!((current.id(), current.attempt()), (id, 2));
+    assert!(matches!(
+        database
+            .publish_initiative(&current, async |connection| {
+                publish_marker(connection).await?;
+                Err(JobStoreError::Database)
+            })
+            .await,
+        Err(JobStoreError::Database)
+    ));
+    assert!(!marker_exists(inspect).await?);
+    database
+        .publish_initiative(&current, async |connection| {
+            publish_marker(connection).await
+        })
+        .await?;
+    assert!(marker_exists(inspect).await?);
+    assert_eq!(state(inspect, id).await?.0, "done");
+    assert!(matches!(
+        database
+            .publish_initiative(&current, async |_connection| {
+                Err(JobStoreError::Database)
+            })
+            .await,
+        Err(JobStoreError::LeaseLost)
+    ));
+    Ok(())
+}
+
+async fn verify_publication_expiry(
+    inspect: &PgPool,
+    database: &Database,
+) -> Result<(), Box<dyn Error>> {
+    let now = real_now()?.unix_microseconds();
+    let two_seconds_ago = StoredInstant::from_unix_microseconds(now - 2_000_000)?;
+    let half_second_ago = StoredInstant::from_unix_microseconds(now - 500_000)?;
+    let id = required(
+        database
+            .enqueue_initiative("synthetic-publication:expiry", two_seconds_ago)
+            .await?,
+    )?;
+    let claim = required(database.claim_local_initiative(half_second_ago, 1).await?)?;
+    assert_eq!(claim.id(), id);
+    let result = database
+        .publish_initiative(&claim, async |connection| {
+            sqlx::query("DELETE FROM app_state WHERE key = $1")
+                .bind(PUBLICATION_KEY)
+                .execute(connection)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(JobStoreError::LeaseLost)));
+    assert!(marker_exists(inspect).await?);
+    assert_eq!(state(inspect, id).await?.0, "running");
+    let replacement = required(database.claim_local_initiative(real_now()?, 30).await?)?;
+    assert_eq!((replacement.id(), replacement.attempt()), (id, 2));
+    database
+        .publish_initiative(&replacement, async |_connection| Ok(()))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "child process used by the real database fixture test"]
+async fn synthetic_child_publication_waits_for_kill() -> Result<(), Box<dyn Error>> {
+    let Ok(id) = env::var(CHILD_JOB_ENV) else {
+        return Ok(());
+    };
+    let url = env::var("GA_TEST_DATABASE_URL")?;
+    let address = url
+        .strip_prefix("postgresql+psycopg://")
+        .ok_or_else(|| io::Error::other("Not a PostgreSQL fixture"))?;
+    let options = PgConnectOptions::from_str(&format!("postgresql://{address}"))?;
+    required(
+        options
+            .get_database()
+            .filter(|name| name.ends_with("_test")),
+    )?;
+    let database = Database::connect_lazy(&url)
+        .map_err(|_| io::Error::other("Invalid database configuration"))?;
+    let claim = required(database.claim_local_initiative(real_now()?, 3).await?)?;
+    assert_eq!(claim.id(), Uuid::parse_str(&id)?);
+    database
+        .publish_initiative(&claim, async |connection| {
+            publish_marker(connection).await?;
+            println!("{STAGED_MESSAGE}");
+            std::future::pending().await
+        })
+        .await?;
+    Err(io::Error::other("Synthetic child unexpectedly completed").into())
 }
