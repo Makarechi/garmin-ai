@@ -33,59 +33,67 @@ impl TelegramTransport {
             instance_id: binding.instance_id,
         };
         database
-            .dispatch_outbox_reply(destination, claim, requirements, |body| async move {
-                let intent = OutboundIntent::normalize(body).ok()?;
-                let started = clock()?;
-                let result = self.send_neutral_reply(binding, &intent, started).await;
-                let observed_at = clock()?;
-                let (state, provider_reference, detail) = match result {
-                    Ok(TelegramSendOutcome::Accepted {
-                        last_message_id, ..
-                    }) => (
-                        DeliveryState::ProviderAccepted,
-                        Some(last_message_id.to_string()),
-                        None,
-                    ),
-                    Ok(TelegramSendOutcome::RateLimited(delay)) => {
-                        return retry_after(observed_at, delay).map(ReplySendOutcome::RetryAt);
-                    }
-                    Ok(TelegramSendOutcome::Rejected) => (
-                        DeliveryState::Failed,
-                        None,
-                        Some("Telegram rejected the rendered message"),
-                    ),
-                    Ok(TelegramSendOutcome::Uncertain {
-                        last_message_id, ..
-                    }) => (
-                        DeliveryState::Uncertain,
-                        last_message_id.map(|id| id.to_string()),
-                        Some(if last_message_id.is_some() {
-                            "Telegram accepted only part of a multi-message intent"
-                        } else {
-                            "Telegram send outcome is unknown"
-                        }),
-                    ),
-                    Err(TelegramReplyError::Expired) => (DeliveryState::Expired, None, None),
-                    Err(TelegramReplyError::UnsupportedAttachments) => {
-                        return retry_after(observed_at, UNSUPPORTED_RETRY)
-                            .map(ReplySendOutcome::RetryAt);
-                    }
-                    Err(TelegramReplyError::WrongBinding) => (DeliveryState::Cancelled, None, None),
-                    Err(TelegramReplyError::InvalidButton | TelegramReplyError::InvalidContent) => {
-                        (
+            .dispatch_telegram_outbox_reply(
+                destination,
+                binding.external_owner_id,
+                claim,
+                requirements,
+                |body| async move {
+                    let intent = OutboundIntent::normalize(body).ok()?;
+                    let started = clock()?;
+                    let result = self.send_neutral_reply(binding, &intent, started).await;
+                    let observed_at = clock()?;
+                    let (state, provider_reference, detail) = match result {
+                        Ok(TelegramSendOutcome::Accepted {
+                            last_message_id, ..
+                        }) => (
+                            DeliveryState::ProviderAccepted,
+                            Some(last_message_id.to_string()),
+                            None,
+                        ),
+                        Ok(TelegramSendOutcome::RateLimited(delay)) => {
+                            return retry_after(observed_at, delay).map(ReplySendOutcome::RetryAt);
+                        }
+                        Ok(TelegramSendOutcome::Rejected) => (
+                            DeliveryState::Failed,
+                            None,
+                            Some("Telegram rejected the rendered message"),
+                        ),
+                        Ok(TelegramSendOutcome::Uncertain {
+                            last_message_id, ..
+                        }) => (
+                            DeliveryState::Uncertain,
+                            last_message_id.map(|id| id.to_string()),
+                            Some(if last_message_id.is_some() {
+                                "Telegram accepted only part of a multi-message intent"
+                            } else {
+                                "Telegram send outcome is unknown"
+                            }),
+                        ),
+                        Err(TelegramReplyError::Expired) => (DeliveryState::Expired, None, None),
+                        Err(TelegramReplyError::UnsupportedAttachments) => {
+                            return retry_after(observed_at, UNSUPPORTED_RETRY)
+                                .map(ReplySendOutcome::RetryAt);
+                        }
+                        Err(TelegramReplyError::WrongBinding) => {
+                            (DeliveryState::Cancelled, None, None)
+                        }
+                        Err(
+                            TelegramReplyError::InvalidButton | TelegramReplyError::InvalidContent,
+                        ) => (
                             DeliveryState::Failed,
                             None,
                             Some("Telegram reply could not be rendered"),
-                        )
-                    }
-                };
-                Some(ReplySendOutcome::Observation(ReplyObservation {
-                    state,
-                    observed_at,
-                    provider_reference,
-                    detail: detail.map(str::to_owned),
-                }))
-            })
+                        ),
+                    };
+                    Some(ReplySendOutcome::Observation(ReplyObservation {
+                        state,
+                        observed_at,
+                        provider_reference,
+                        detail: detail.map(str::to_owned),
+                    }))
+                },
+            )
             .await
     }
 }
