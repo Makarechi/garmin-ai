@@ -5,7 +5,10 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use ga_db::health_analysis::{ActivityReadError, HealthAnalysisError, HealthPeriod};
+use ga_db::{
+    diary::DiaryReadError,
+    health_analysis::{ActivityReadError, HealthAnalysisError, HealthPeriod, TimelineError},
+};
 use ga_domain::{
     access::{ReadToolInput, Scopes},
     timestamp::StoredInstant,
@@ -20,19 +23,23 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const REPLAY_NOTICE: &str = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже.";
 
 #[derive(Clone, Copy)]
-enum HealthTool {
+enum ReadTool {
     Snapshot,
     Range,
     Activities,
     ActivityDetails,
+    Events,
+    Timeline,
 }
 
-impl HealthTool {
-    const IMPLEMENTED: [Self; 4] = [
+impl ReadTool {
+    const IMPLEMENTED: [Self; 6] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
         Self::ActivityDetails,
+        Self::Events,
+        Self::Timeline,
     ];
 
     fn name(self) -> &'static str {
@@ -41,12 +48,21 @@ impl HealthTool {
             Self::Range => "health_range",
             Self::Activities => "activities",
             Self::ActivityDetails => "activity_details",
+            Self::Events => "events",
+            Self::Timeline => "timeline",
         }
     }
 
     fn catalog_entry(self) -> Value {
         let date = |title| json!({"format": "date", "title": title, "type": "string"});
         let datetime = |title| json!({"format": "date-time", "title": title, "type": "string"});
+        let typed_range = || {
+            json!({
+                "start": datetime("Start"),
+                "end": datetime("End"),
+                "kind": {"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Kind"}
+            })
+        };
         let (description, title, properties, required) = match self {
             Self::Snapshot => (
                 "Daily Garmin values and explicit missing metrics for one local date.",
@@ -63,11 +79,7 @@ impl HealthTool {
             Self::Activities => (
                 "List stored activity summaries in a half-open timestamp range.",
                 "activitiesArgs",
-                json!({
-                    "start": datetime("Start"),
-                    "end": datetime("End"),
-                    "kind": {"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Kind"}
-                }),
+                typed_range(),
                 &["start", "end"][..],
             ),
             Self::ActivityDetails => (
@@ -80,6 +92,18 @@ impl HealthTool {
                     "limit":{"default":100,"title":"Limit","type":"integer"},
                 }),
                 &["activity_id"][..],
+            ),
+            Self::Events => (
+                "Read confirmed, inferred, or pending diary events with their status; excludes deleted records.",
+                "eventsArgs",
+                typed_range(),
+                &["start", "end"][..],
+            ),
+            Self::Timeline => (
+                "Overlapping sleep, activity, wellbeing, context and plan layers with evidence. Segment labels are a legacy display projection; annotations preserve overlaps. Points cover no duration; calendar plans do not prove attendance. At most 500 annotations in 31 days.",
+                "timelineArgs",
+                json!({"start": datetime("Start"), "end": datetime("End")}),
+                &["start", "end"][..],
             ),
         };
         json!({
@@ -108,10 +132,10 @@ pub(super) async fn list(
         .authorization
         .authenticate(headers.get(header::AUTHORIZATION))
     {
-        let visible: Vec<_> = HealthTool::IMPLEMENTED
+        let visible: Vec<_> = ReadTool::IMPLEMENTED
             .into_iter()
             .filter(|tool| tool.permits(scopes))
-            .map(HealthTool::catalog_entry)
+            .map(ReadTool::catalog_entry)
             .collect();
         Json(visible).into_response()
     } else {
@@ -127,14 +151,14 @@ pub(super) async fn execute(
 ) -> Response {
     let (parts, body) = request.into_parts();
     let response = if parts.method == Method::POST {
-        execute_health_tool(state, &parts.headers, &name, body).await
+        execute_read_tool(state, &parts.headers, &name, body).await
     } else {
         method_not_allowed("POST")
     };
     private_cache(response, &parts.headers)
 }
 
-async fn execute_health_tool(
+async fn execute_read_tool(
     state: AppState,
     headers: &HeaderMap,
     name: &str,
@@ -146,7 +170,7 @@ async fn execute_health_tool(
     else {
         return unauthorized();
     };
-    let Some(tool) = HealthTool::IMPLEMENTED
+    let Some(tool) = ReadTool::IMPLEMENTED
         .into_iter()
         .find(|tool| tool.name() == name)
     else {
@@ -162,18 +186,27 @@ async fn execute_health_tool(
         Ok(arguments) => arguments,
         Err(error) => return error.into_response(),
     };
+    if matches!(tool, ReadTool::Events) {
+        let Some((start, end, kind)) = range_with_kind(&arguments) else {
+            return invalid_arguments();
+        };
+        return match database.list_owner_events(start, end, kind, 500).await {
+            Ok(document) => Json(document).into_response(),
+            Err(error) => diary_failure(error),
+        };
+    }
     let reader = match database.verified_health_reader().await {
         Ok(reader) => reader,
         Err(error) => return health_failure(error),
     };
     let outcome = match tool {
-        HealthTool::Snapshot if arguments.len() == 1 => {
+        ReadTool::Snapshot if arguments.len() == 1 => {
             match arguments.get("day").and_then(date_input) {
                 Some(day) => reader.snapshot(day).await,
                 None => return invalid_arguments(),
             }
         }
-        HealthTool::Range if arguments.len() == 2 => {
+        ReadTool::Range if arguments.len() == 2 => {
             let (Some(start), Some(end)) = (
                 arguments.get("start").and_then(date_input),
                 arguments.get("end").and_then(date_input),
@@ -185,31 +218,13 @@ async fn execute_health_tool(
                 Err(error) => Err(error),
             }
         }
-        HealthTool::Activities => {
-            if arguments
-                .keys()
-                .any(|key| !matches!(key.as_str(), "start" | "end" | "kind"))
-            {
-                return invalid_arguments();
-            }
-            let kind = match arguments.get("kind") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(kind)) => Some(kind.as_str()),
-                _ => return invalid_arguments(),
-            };
-            let (Some(start), Some(end)) = (
-                arguments
-                    .get("start")
-                    .and_then(StoredInstant::from_legacy_input),
-                arguments
-                    .get("end")
-                    .and_then(StoredInstant::from_legacy_input),
-            ) else {
+        ReadTool::Activities => {
+            let Some((start, end, kind)) = range_with_kind(&arguments) else {
                 return invalid_arguments();
             };
             return activity_response(reader.activity_summaries(start, end, kind, 200).await);
         }
-        HealthTool::ActivityDetails => {
+        ReadTool::ActivityDetails => {
             if arguments.keys().any(|key| {
                 !matches!(
                     key.as_str(),
@@ -233,11 +248,62 @@ async fn execute_health_tool(
             };
             return activity_response(reader.activity_details(id, samples, offset, limit).await);
         }
+        ReadTool::Timeline if arguments.len() == 2 => {
+            let (Some(start), Some(end)) = (
+                arguments
+                    .get("start")
+                    .and_then(StoredInstant::legacy_input_with_offset),
+                arguments
+                    .get("end")
+                    .and_then(StoredInstant::legacy_input_with_offset),
+            ) else {
+                return invalid_arguments();
+            };
+            return match reader.owner_timeline(start, end).await {
+                Ok(document) => {
+                    ([(header::CONTENT_TYPE, "application/json")], document).into_response()
+                }
+                Err(TimelineError::Health(error)) => health_failure(error),
+                Err(TimelineError::Diary(error)) => diary_failure(error),
+                Err(TimelineError::Database) => storage_unavailable(),
+                Err(_) => invalid_arguments(),
+            };
+        }
         _ => return invalid_arguments(),
     };
     match outcome {
         Ok(document) => Json(document).into_response(),
         Err(error) => health_failure(error),
+    }
+}
+
+fn range_with_kind(
+    arguments: &Map<String, Value>,
+) -> Option<(StoredInstant, StoredInstant, Option<&str>)> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "start" | "end" | "kind"))
+    {
+        return None;
+    }
+    let kind = match arguments.get("kind") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(kind)) => Some(kind.as_str()),
+        _ => return None,
+    };
+    Some((
+        StoredInstant::from_legacy_input(arguments.get("start")?)?,
+        StoredInstant::from_legacy_input(arguments.get("end")?)?,
+        kind,
+    ))
+}
+
+fn diary_failure(error: DiaryReadError) -> Response {
+    match error {
+        DiaryReadError::Storage(_) | DiaryReadError::Database | DiaryReadError::InvalidEvent => {
+            storage_unavailable()
+        }
+        _ => invalid_arguments(),
     }
 }
 

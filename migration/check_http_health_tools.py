@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import subprocess
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -15,22 +15,27 @@ from sqlalchemy.orm import Session
 
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
-from garmin_ai.models import HealthDay, SourcePayload
+from garmin_ai.events import EventInput, create_event
+from garmin_ai.models import HealthDay, SourcePayload, TimelineInterval
 
 TOKENS = {
     "health": "synthetic-health-http-token-" + "a" * 20,
     "diary": "synthetic-diary-http-token-" + "a" * 20,
+    "both": "synthetic-both-http-token-" + "a" * 20,
     "invalid": "synthetic-unregistered-http-token-" + "a" * 20,
 }
 SCOPED = [
     {"key": TOKENS["health"], "scopes": ["read:health"]},
     {"key": TOKENS["diary"], "scopes": ["read:diary"]},
+    {"key": TOKENS["both"], "scopes": ["read:health", "read:diary"]},
 ]
-TOOLS = {"health_snapshot", "health_range", "activities", "activity_details"}
+TOOLS = {"health_snapshot", "health_range", "activities", "activity_details", "events", "timeline"}
 SNAPSHOT = "/tools/health_snapshot"
 RANGE = "/tools/health_range"
 ACTIVITIES = "/tools/activities"
 DETAILS = "/tools/activity_details"
+EVENTS = "/tools/events"
+TIMELINE = "/tools/timeline"
 
 
 def seed(engine):
@@ -53,6 +58,33 @@ def seed(engine):
                 ),
             ]
         )
+
+
+def seed_timeline(engine):
+    start = datetime(2026, 10, 25, 9, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        session.add(
+            TimelineInterval(
+                id="synthetic-visit",
+                label="synthetic planned activity",
+                source="calendar",
+                start=start,
+                end=start + timedelta(minutes=55),
+                confidence=0.8,
+                confirmed=True,
+                evidence={"fixture": "visit"},
+            )
+        )
+        for begin, payload in [
+            (start, {"type": "note", "description": "synthetic point"}),
+            (start - timedelta(hours=1), {"type": "migraine"}),
+            (start + timedelta(minutes=5), {"type": "medication"}),
+        ]:
+            create_event(
+                session,
+                EventInput(start=begin, payload=payload, original_text="synthetic input"),
+                actor="fixture",
+            )
 
 
 def initial_cases():
@@ -146,6 +178,44 @@ def activity_cases():
         yield ("POST", DETAILS, "health", {"arguments": arguments})
 
 
+def diary_cases():
+    first = "2026-10-25T11:00:00+02:00"
+    last = "2026-10-25T06:00:00-04:00"
+    period = {"start": first, "end": last}
+    yield ("GET", "/tools", "both", None)
+    for token in ("health", "invalid", None):
+        yield ("POST", EVENTS, token, {"arguments": period})
+    for token in ("health", "diary", "invalid", None):
+        yield ("POST", TIMELINE, token, {"arguments": period})
+    for arguments in [
+        period,
+        {**period, "kind": "migraine"},
+        {**period, "kind": "system.medication"},
+        {**period, "kind": ""},
+        {**period, "kind": None},
+        {**period, "kind": "user.unknown"},
+        {**period, "kind": True},
+        {**period, "start": last},
+        {**period, "start": "2026-10-25T09:00:00"},
+        {**period, "limit": 1},
+    ]:
+        yield ("POST", EVENTS, "diary", {"arguments": arguments})
+    for arguments in [
+        period,
+        {**period, "end": "2026-10-25T09:01:00Z"},
+        {**period, "end": "2026-10-25T11:00:00+02:00"},
+        {**period, "end": "2026-10-25T09:00:00"},
+        {**period, "end": "2026-11-26T00:00:00Z"},
+        {**period, "kind": "note"},
+        {},
+        {
+            "start": datetime(2026, 10, 25, 9, tzinfo=UTC).timestamp(),
+            "end": datetime(2026, 10, 25, 10, tzinfo=UTC).timestamp(),
+        },
+    ]:
+        yield ("POST", TIMELINE, "both", {"arguments": arguments})
+
+
 def compare(python, native, cases):
     count = 0
     for method, route, credential, body in cases:
@@ -180,6 +250,7 @@ def run(binary):
     try:
         seed(engine)
         seed_activities(engine)
+        seed_timeline(engine)
         settings = Settings(api_tokens=SCOPED, api_key="")
         with TestClient(create_app(settings, engine=engine)) as python:
             with subprocess.Popen(
@@ -197,6 +268,7 @@ def run(binary):
                     with httpx.Client(base_url=line.split(" on ", 1)[1], trust_env=False) as native:
                         count = compare(python, native, initial_cases())
                         count += compare(python, native, activity_cases())
+                        count += compare(python, native, diary_cases())
                         with Session(engine) as session, session.begin():
                             session.add(
                                 SourcePayload(
@@ -221,6 +293,19 @@ def run(binary):
                                 ("POST", ACTIVITIES, "health", {}),
                                 ("POST", DETAILS, "health", {"arguments": {"activity_id": "run"}}),
                                 ("POST", DETAILS, "diary", {"arguments": {"activity_id": "run"}}),
+                                ("POST", TIMELINE, "both", {}),
+                                ("POST", TIMELINE, "diary", {}),
+                                (
+                                    "POST",
+                                    EVENTS,
+                                    "diary",
+                                    {
+                                        "arguments": {
+                                            "start": "2026-10-25T09:00:00Z",
+                                            "end": "2026-10-25T10:00:00Z",
+                                        }
+                                    },
+                                ),
                             ],
                         )
                         print(f"Matched {count} native health tool HTTP responses")
