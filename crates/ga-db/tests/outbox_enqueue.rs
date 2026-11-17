@@ -1,10 +1,18 @@
 use std::{env, error::Error, fs, str::FromStr};
 
 use ga_db::{
+    Database,
     action_tokens::{ActionTokenContext, consume_action_token},
     outbox_enqueue::{QueueIntent, QueueIntentError, queue_outbox_intent},
+    share_policy::{
+        DestinationKind, ShareCategory, ShareDestination, ShareRequirement, TrackerShareGrant,
+    },
 };
-use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};
+use ga_domain::{
+    access::{Scope, Scopes},
+    channel::OutboundIntent,
+    timestamp::StoredInstant,
+};
 use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use uuid::Uuid;
@@ -133,10 +141,120 @@ async fn queues_actions_once_and_rolls_back_partial_issues() -> Result<(), Box<d
         None
     );
     txn.rollback().await?;
+    consent_dependencies(&url, &pool, owner, now).await?;
     println!(
         "{} paired outbox enqueue and stored action snapshots matched",
         cases.len()
     );
+    Ok(())
+}
+
+async fn consent_dependencies(
+    url: &str,
+    pool: &PgPool,
+    owner: Uuid,
+    now: StoredInstant,
+) -> Result<(), Box<dyn Error>> {
+    let database = Database::connect_lazy(url).map_err(|_| "Invalid fixture connection")?;
+    let definition = Uuid::from_u128(995);
+    let version = Uuid::from_u128(996);
+    let previous_version = Uuid::from_u128(997);
+    sqlx::query(
+        "INSERT INTO event_definitions(id,namespace,key,owner_id,current_version,status,revision)
+         VALUES($1,'user','user.synthetic_dependency',$2,2,'active',1)",
+    )
+    .bind(definition)
+    .bind(owner)
+    .execute(pool)
+    .await?;
+    for (id, revision) in [(previous_version, 1), (version, 2)] {
+        sqlx::query(
+            "INSERT INTO event_definition_versions(id,definition_id,version,schema,schema_hash,topology,
+                field_metadata,labels,privacy,allowed_operations)
+             VALUES($1,$2,$3,'{}','synthetic','point','{}','{}','sensitive','[]')",
+        )
+        .bind(id)
+        .bind(definition)
+        .bind(revision)
+        .execute(pool)
+        .await?;
+    }
+    let manager: Scopes = [Scope::ManageIntegrations].into_iter().collect();
+    let destination = ShareDestination::new(DestinationKind::Channel, "fixture:primary")?;
+    let grant = TrackerShareGrant {
+        definition_id: definition,
+        destination,
+        categories: &[
+            ShareCategory::Schema,
+            ShareCategory::Facts,
+            ShareCategory::OriginalText,
+        ],
+        granted_at: now,
+    };
+    database.grant_tracker_share(manager, grant).await?;
+    let mut intent = json!({
+        "intent_id":Uuid::from_u128(998).to_string(), "owner_id":owner.to_string(), "conversation_id":CONVERSATION.to_string(),
+        "channel_instance":{"channel":"fixture","instance_id":"primary"},
+        "blocks":[{"text":"synthetic tracker response"}]
+    });
+    let mut txn = pool.begin().await?;
+    let canonical = format!("definition:{definition}");
+    let noncanonical = format!("definition:{}", definition.to_string().to_uppercase());
+    for (evidence, version_id, category) in [
+        (json!([]), version, ShareCategory::Facts),
+        (json!([canonical]), previous_version, ShareCategory::Facts),
+        (json!([canonical]), version, ShareCategory::OriginalText),
+        (json!([noncanonical]), version, ShareCategory::Facts),
+    ] {
+        intent["evidence_refs"] = evidence;
+        let result = queue_outbox_intent(
+            &mut txn,
+            QueueIntent {
+                intent: OutboundIntent::normalize(intent.clone())?,
+                operation_id: OPERATION,
+                inbound_id: Some(INBOUND),
+                dedup_key: Some("synthetic-consent-dependency"),
+                requirements: &[ShareRequirement {
+                    version_id,
+                    categories: &[category],
+                }],
+                now,
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(QueueIntentError::ConsentRequired)),
+            "accepted unrecorded dependency"
+        );
+    }
+    intent["evidence_refs"] = json!([canonical]);
+    let receipt = queue_outbox_intent(
+        &mut txn,
+        QueueIntent {
+            intent: OutboundIntent::normalize(intent)?,
+            operation_id: OPERATION,
+            inbound_id: Some(INBOUND),
+            dedup_key: Some("synthetic-consent-dependency"),
+            requirements: &[ShareRequirement {
+                version_id: version,
+                categories: &[ShareCategory::Facts],
+            }],
+            now,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    assert!(receipt.created);
+    assert!(
+        database
+            .revoke_tracker_share(manager, definition, destination)
+            .await?
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM outbox_messages WHERE id=$1")
+        .bind(receipt.outbox_id)
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(state, "cancelled");
     Ok(())
 }
 
