@@ -1,11 +1,13 @@
 mod activity_reads;
 mod device_history;
 mod read_daily;
+mod sleep_analysis;
 mod sleep_timing;
 
 pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
 pub use read_daily::DailyHealthReader;
+pub use sleep_analysis::NapPolicy;
 pub use sleep_timing::sleep_timing_result_hash;
 
 mod freshness;
@@ -46,6 +48,9 @@ pub enum HealthAnalysisError {
     InvalidTimezone,
     InvalidKnowledgeCutoff,
     TemporalVersionLimit,
+    SleepRange,
+    SleepNapLimit,
+    SleepSessionLimit,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -60,6 +65,11 @@ impl fmt::Display for HealthAnalysisError {
             Self::Database => "Daily metrics could not be read",
             Self::InvalidTimezone => "The analysis timezone is invalid",
             Self::InvalidKnowledgeCutoff => "As-known cutoff cannot follow the event",
+            Self::SleepRange => "Sleep analysis requires at most 31 calendar days",
+            Self::SleepNapLimit => "Sleep analysis exceeds 200 naps; narrow the interval",
+            Self::SleepSessionLimit => {
+                "Nap intervals span too many main sessions; inspect their dates"
+            }
             Self::TemporalVersionLimit => {
                 "Temporal context exceeds 100000 versions; narrow the activity range"
             }
