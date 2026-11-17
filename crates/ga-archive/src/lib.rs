@@ -34,6 +34,7 @@ const DIRECTORY_READ: OFlags = OFlags::RDONLY
 
 pub struct Archive {
     root: OwnedFd,
+    writable: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +49,7 @@ pub enum ArchiveError {
     InvalidObject,
     ExistingObjectDigestMismatch,
     ReadCancelled,
+    ReadOnly,
     PayloadTooLarge,
     InsufficientSpace,
     StagingEntropy,
@@ -63,6 +65,7 @@ impl fmt::Display for ArchiveError {
             Self::InvalidObject => "Archive object must be a regular file",
             Self::ExistingObjectDigestMismatch => "Existing archive object has a different digest",
             Self::ReadCancelled => "Archive verification was cancelled",
+            Self::ReadOnly => "Archive is open for read-only access",
             Self::PayloadTooLarge => "Archive input exceeds the byte limit",
             Self::InsufficientSpace => "Available archive space is below the required limit",
             Self::StagingEntropy => "Cannot allocate a private archive staging name",
@@ -105,6 +108,15 @@ impl Archive {
     pub fn open(path: &Path) -> Result<Self, ArchiveError> {
         Ok(Self {
             root: open_private_root(path)?,
+            writable: true,
+        })
+    }
+
+    /// Open an existing private archive without creating or changing entries.
+    pub fn open_read_only(path: &Path) -> Result<Self, ArchiveError> {
+        Ok(Self {
+            root: open_root(path, false)?,
+            writable: false,
         })
     }
 
@@ -136,6 +148,7 @@ impl Archive {
     }
 
     pub fn put_json(&self, payload: &[u8], limits: PutLimits) -> Result<ArchiveKey, ArchiveError> {
+        self.require_writable()?;
         let max_bytes = usize::try_from(limits.max_bytes).unwrap_or(usize::MAX);
         let encoded = legacy_json::encode(payload, Utf8Layout::Archive, max_bytes)
             .map_err(ArchiveError::Json)?;
@@ -144,6 +157,7 @@ impl Archive {
 
     /// Remove abandoned Rust staging entries while all writers are excluded.
     pub fn remove_orphaned_staging(&self) -> Result<usize, ArchiveError> {
+        self.require_writable()?;
         staging::remove_orphans(&self.root)
     }
 
@@ -154,6 +168,7 @@ impl Archive {
         kind: ArchiveKind,
         limits: PutLimits,
     ) -> Result<ArchiveKey, ArchiveError> {
+        self.require_writable()?;
         self.check_space(limits.disk_reserve_bytes, 0)?;
         let _publication = staging::lock_for_write(&self.root)?;
         let mut stage = Stage::create(&self.root)?;
@@ -202,6 +217,14 @@ impl Archive {
         Ok(key)
     }
 
+    fn require_writable(&self) -> Result<(), ArchiveError> {
+        if self.writable {
+            Ok(())
+        } else {
+            Err(ArchiveError::ReadOnly)
+        }
+    }
+
     fn check_space(&self, reserve: u64, next_bytes: u64) -> Result<(), ArchiveError> {
         let stat = fs::fstatvfs(&self.root)?;
         let available = stat.f_bavail.saturating_mul(stat.f_frsize);
@@ -213,6 +236,10 @@ impl Archive {
 }
 
 fn open_private_root(path: &Path) -> Result<OwnedFd, ArchiveError> {
+    open_root(path, true)
+}
+
+fn open_root(path: &Path, writable: bool) -> Result<OwnedFd, ArchiveError> {
     if path.as_os_str().is_empty() {
         return Err(ArchiveError::InvalidRoot);
     }
@@ -231,11 +258,22 @@ fn open_private_root(path: &Path) -> Result<OwnedFd, ArchiveError> {
     let mut directory = fs::open("/", DIRECTORY_READ, Mode::empty())?;
     for part in path.components() {
         if let Component::Normal(name) = part {
-            directory = ensure_directory(&directory, name)?;
+            directory = if writable {
+                ensure_directory(&directory, name)?
+            } else {
+                fs::openat(&directory, name, DIRECTORY_READ, Mode::empty())?
+            };
         }
     }
-    fs::fchmod(&directory, DIRECTORY_MODE)?;
-    fs::fsync(&directory)?;
+    if writable {
+        fs::fchmod(&directory, DIRECTORY_MODE)?;
+        fs::fsync(&directory)?;
+    } else {
+        let mode = Mode::from_raw_mode(fs::fstat(&directory)?.st_mode);
+        if mode.intersects(Mode::RWXG | Mode::RWXO) {
+            return Err(ArchiveError::InvalidRoot);
+        }
+    }
     Ok(directory)
 }
 
