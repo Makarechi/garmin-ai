@@ -1,7 +1,7 @@
 use crate::{ByteOrder, FitError, WireField};
 
 /// A wire value before profile enumeration, units, scaling or component expansion.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum RawFitValue {
     Invalid,
     Unsigned(u64),
@@ -24,7 +24,7 @@ impl WireField {
     }
 }
 
-fn decode(
+pub(crate) fn decode(
     identifier: u8,
     order: ByteOrder,
     data: &[u8],
