@@ -4,6 +4,7 @@ import json
 import sys
 
 DOMAIN_DEPENDENCIES = {
+    "base64",  # Gemini inline audio encoding
     "jiff",
     "jiter",
     "jsonschema",
