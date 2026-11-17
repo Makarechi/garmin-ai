@@ -34,15 +34,18 @@ pub enum ActivityDocument {
 }
 
 impl ActivityDocument {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Details,
+        Self::Splits,
+        Self::TypedSplits,
+        Self::Zones,
+        Self::Weather,
+    ];
+
     pub(crate) fn for_endpoint(endpoint: &str) -> Option<Self> {
-        match endpoint {
-            "activity_details" => Some(Self::Details),
-            "activity_splits" => Some(Self::Splits),
-            "activity_typed_splits" => Some(Self::TypedSplits),
-            "activity_zones" => Some(Self::Zones),
-            "activity_weather" => Some(Self::Weather),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.endpoint() == endpoint)
     }
 
     pub const fn endpoint(self) -> &'static str {
@@ -72,12 +75,12 @@ pub enum ActivitySummaryKind {
 }
 
 impl ActivitySummaryKind {
+    pub(crate) const ALL: [Self; 2] = [Self::Single, Self::Page];
+
     pub(crate) fn for_endpoint(endpoint: &str) -> Option<Self> {
-        match endpoint {
-            "activity" => Some(Self::Single),
-            "activities" => Some(Self::Page),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.endpoint() == endpoint)
     }
 
     pub const fn endpoint(self) -> &'static str {

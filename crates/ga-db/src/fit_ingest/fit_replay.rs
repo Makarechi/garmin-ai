@@ -15,6 +15,7 @@ use super::{
 };
 use crate::{
     Database,
+    jobs::{FailureReason, JobOutcome, JobStoreError, RecordedJobStatus, ReplayJobLease},
     raw_capture::{GARMIN_LEGACY_SOURCE, lock_legacy_scope},
     replay::{
         PreparedReplay, REPLAY_MUTATION_LOCK, ReadReplayInput, ReplayContent, ReplayInputError,
@@ -33,6 +34,7 @@ pub enum FitReplayOutcome {
 pub enum FitReplayError {
     Input(ReplayInputError),
     Publication(FitIngestError),
+    Lease(JobStoreError),
     Busy,
     Cancelled,
     OtherEndpoint,
@@ -45,6 +47,7 @@ impl fmt::Display for FitReplayError {
         f.write_str(match self {
             Self::Input(_) => "FIT replay input is unavailable",
             Self::Publication(_) => "FIT replay projection could not be restored",
+            Self::Lease(_) => "FIT replay job lease is unavailable",
             Self::Busy => "FIT replay overlaps another storage mutation",
             Self::Cancelled => "FIT replay was cancelled",
             Self::OtherEndpoint => "This raw source requires another replay handler",
@@ -63,6 +66,11 @@ impl From<ReplayInputError> for FitReplayError {
 impl From<FitIngestError> for FitReplayError {
     fn from(value: FitIngestError) -> Self {
         Self::Publication(value)
+    }
+}
+impl From<JobStoreError> for FitReplayError {
+    fn from(value: JobStoreError) -> Self {
+        Self::Lease(value)
     }
 }
 impl From<sqlx::Error> for FitReplayError {
@@ -96,11 +104,24 @@ impl Database {
     /// Rebuild FIT parts from verified archive bytes without contacting Garmin.
     pub async fn replay_fit(
         &self,
-        mut request: ReadReplayInput<'_>,
+        request: ReadReplayInput<'_>,
         archive: Arc<Archive>,
         limits: ExportLimits,
         cancelled: impl Fn() -> bool + Clone + Send + 'static,
     ) -> Result<FitReplayOutcome, FitReplayError> {
+        self.replay_fit_in_job(request, archive, limits, cancelled, None)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    pub(crate) async fn replay_fit_in_job(
+        &self,
+        mut request: ReadReplayInput<'_>,
+        archive: Arc<Archive>,
+        limits: ExportLimits,
+        cancelled: impl Fn() -> bool + Clone + Send + 'static,
+        lease: Option<&ReplayJobLease>,
+    ) -> Result<(FitReplayOutcome, Option<RecordedJobStatus>), FitReplayError> {
         require_parser(request.target_parser_version)?;
         request.max_fit_bytes = request
             .max_fit_bytes
@@ -114,6 +135,9 @@ impl Database {
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .await?;
         authorize_replay(&mut inspect, request.authenticated_fingerprint).await?;
+        if let Some(lease) = lease {
+            lease.assert_live(&mut inspect).await?;
+        }
         let registered = registered_fit(&mut inspect, request.source_id).await?;
         let prepared = match &registered {
             Ok(_) => read_input(&mut inspect, request, archive, cancelled.clone()).await,
@@ -193,6 +217,9 @@ impl Database {
             }
         };
         authorize_replay(&mut txn, request.authenticated_fingerprint).await?;
+        if let Some(lease) = lease {
+            lease.assert_live(&mut txn).await?;
+        }
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(REPLAY_MUTATION_LOCK)
             .fetch_one(&mut *txn)
@@ -213,8 +240,25 @@ impl Database {
             return Err(FitReplayError::Cancelled);
         }
         store_replay_outcome(&mut txn, request.source_id, outcome).await?;
+        let job = if let Some(lease) = lease {
+            let status = if matches!(
+                outcome,
+                FitReplayOutcome::RejectedArchive(_)
+                    | FitReplayOutcome::Applied(FitIngestOutcome::Error { .. })
+            ) {
+                JobOutcome::Failed {
+                    reason: FailureReason::RuntimeError,
+                    retry_at: None,
+                }
+            } else {
+                JobOutcome::Completed
+            };
+            Some(lease.finish_in(&mut txn, status).await?)
+        } else {
+            None
+        };
         txn.commit().await?;
-        Ok(outcome)
+        Ok((outcome, job))
     }
 }
 

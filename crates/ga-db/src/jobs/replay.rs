@@ -10,6 +10,8 @@ use super::{
 };
 use crate::{
     Database,
+    activity_documents::{ActivityDocument, ActivitySummaryKind},
+    fit_ingest::ENDPOINT as FIT_ENDPOINT,
     replay::{GARMIN_PARSER_VERSION, HEALTH_CALENDAR_ENDPOINTS, HEALTH_INTRADAY_ENDPOINTS},
 };
 
@@ -21,6 +23,7 @@ pub struct ReplayJobLease {
     seconds: i32,
     attempt: i32,
     payload: String,
+    endpoint: String,
 }
 
 impl ReplayJobLease {
@@ -30,6 +33,14 @@ impl ReplayJobLease {
 
     pub fn attempt(&self) -> i32 {
         self.attempt
+    }
+
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn lease_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.seconds as u64)
     }
 
     pub(crate) fn source(&self) -> Option<(Uuid, String)> {
@@ -75,6 +86,40 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<ReplayJobLease>, JobStoreError> {
+        let endpoints: Vec<_> = health_endpoints().collect();
+        self.claim_supported_replay(now, lease_seconds, endpoints)
+            .await
+    }
+
+    /// Claim one offline job handled by the installed Garmin replay worker.
+    pub async fn claim_replay_job(
+        &self,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<ReplayJobLease>, JobStoreError> {
+        let endpoints = health_endpoints()
+            .chain(
+                ActivityDocument::ALL
+                    .into_iter()
+                    .map(ActivityDocument::endpoint),
+            )
+            .chain(
+                ActivitySummaryKind::ALL
+                    .into_iter()
+                    .map(ActivitySummaryKind::endpoint),
+            )
+            .chain([FIT_ENDPOINT])
+            .collect();
+        self.claim_supported_replay(now, lease_seconds, endpoints)
+            .await
+    }
+
+    async fn claim_supported_replay(
+        &self,
+        now: StoredInstant,
+        lease_seconds: u32,
+        endpoints: Vec<&str>,
+    ) -> Result<Option<ReplayJobLease>, JobStoreError> {
         if !(1..=86_400).contains(&lease_seconds) {
             return Err(JobStoreError::InvalidLeaseDuration);
         }
@@ -88,13 +133,8 @@ impl Database {
             return Ok(None);
         }
         let token = Uuid::new_v4();
-        let endpoints: Vec<_> = HEALTH_CALENDAR_ENDPOINTS
-            .iter()
-            .chain(HEALTH_INTRADAY_ENDPOINTS)
-            .copied()
-            .collect();
         let claimed =
-            sqlx::query_as::<_, (Uuid, i32, String)>(include_str!("replay/claim_health.sql"))
+            sqlx::query_as::<_, (Uuid, i32, String, String)>(include_str!("replay/claim.sql"))
                 .bind(GARMIN_PARSER_VERSION)
                 .bind(ATTEMPT_LIMIT)
                 .bind(OffsetDateTime::from(now))
@@ -104,13 +144,16 @@ impl Database {
                 .fetch_optional(&mut *txn)
                 .await?;
         txn.commit().await?;
-        Ok(claimed.map(|(id, attempt, payload)| ReplayJobLease {
-            id,
-            token,
-            seconds,
-            attempt,
-            payload,
-        }))
+        Ok(
+            claimed.map(|(id, attempt, payload, endpoint)| ReplayJobLease {
+                id,
+                token,
+                seconds,
+                attempt,
+                payload,
+                endpoint,
+            }),
+        )
     }
 
     pub async fn renew_replay_job(
@@ -121,4 +164,11 @@ impl Database {
         self.renew_job(lease.id, lease.token, lease.seconds, KIND, now)
             .await
     }
+}
+
+fn health_endpoints() -> impl Iterator<Item = &'static str> {
+    HEALTH_CALENDAR_ENDPOINTS
+        .iter()
+        .chain(HEALTH_INTRADAY_ENDPOINTS)
+        .copied()
 }
