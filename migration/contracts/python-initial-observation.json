@@ -1,0 +1,586 @@
+{
+  "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+  "format_version": 1,
+  "implementation": {
+    "language": "python",
+    "revision": "ee3a14a48a6ad30c1085951bac2f53c9088c2450"
+  },
+  "scenarios": {
+    "archive": {
+      "accepted_nonfinite": false,
+      "file_count": 4,
+      "file_count_after_nonfinite": 4,
+      "missing_metric": {
+        "bytes_base64": "eyJhdCI6ICIyMDI2LTEwLTI1VDAyOjMwOjAwKzAxOjAwIn0=",
+        "key": "7c/7c843cd7d7703b716a2ddb01d757a91fea134a0abbff1490d4e1bd073643e389.json",
+        "repeat_key": "7c/7c843cd7d7703b716a2ddb01d757a91fea134a0abbff1490d4e1bd073643e389.json"
+      },
+      "null_metric": {
+        "bytes_base64": "eyJhdCI6ICIyMDI2LTEwLTI1VDAyOjMwOjAwKzAxOjAwIiwgInZhbHVlIjogbnVsbH0=",
+        "key": "c1/c1657ce3bfdbcffafa467fa795367406e1c2975b53ec8cc3adb72a61897c0fd0.json",
+        "repeat_key": "c1/c1657ce3bfdbcffafa467fa795367406e1c2975b53ec8cc3adb72a61897c0fd0.json"
+      },
+      "unicode_and_numbers": {
+        "bytes_base64": "eyJjYWbDqSI6IFsi4piVIiwgImXMgSIsIDkwMDcxOTkyNTQ3NDA5OTMsIDEuMCwgLTAuMCwgdHJ1ZSwgbnVsbF0sICJyZWNvcmRlZCI6ICIyMDI2LTEwLTI1VDAyOjMwOjAwKzAyOjAwIn0=",
+        "key": "51/51f81a2ae8d9f40f9b9a9374f1b84c7064f42044a2bf699994d6ddd38f61d3ce.json",
+        "repeat_key": "51/51f81a2ae8d9f40f9b9a9374f1b84c7064f42044a2bf699994d6ddd38f61d3ce.json"
+      },
+      "zero_metric": {
+        "bytes_base64": "eyJhdCI6ICIyMDI2LTEwLTI1VDAyOjMwOjAwKzAxOjAwIiwgInZhbHVlIjogMH0=",
+        "key": "c5/c517c0f099a1ee00f72aaedb458f099857ecf887229c7a4b0093033c2257b3ee.json",
+        "repeat_key": "c5/c517c0f099a1ee00f72aaedb458f099857ecf887229c7a4b0093033c2257b3ee.json"
+      }
+    },
+    "cli": {
+      "import_without_preview_confirmation": {
+        "status": 2,
+        "stderr": "usage: garmin-ai [-h]\n                 {login,enroll-account,pair-telegram,inventory,probe,import-probe,mcp,worker,resume-storage,migrate,import-file,serve,backup,backup-space,export,restore-db,unpack-backup,prune-telegram-text,projection-audit,erase-all} ...\ngarmin-ai: error: Apply requires the plan SHA-256 printed by preview\n",
+        "stdout": ""
+      },
+      "inventory": {
+        "status": 0,
+        "stderr": "",
+        "stdout": "daily\tget_stats\tday\nsteps\tget_steps_data\tday\nheart_rate\tget_heart_rates\tday\nsleep\tget_sleep_data\tday\nhrv\tget_hrv_data\tday\nstress\tget_stress_data\tday\nbody_battery\tget_body_battery\tday\nbody_battery_events\tget_body_battery_events\tday\nrespiration\tget_respiration_data\tday\nspo2\tget_spo2_data\tday\nreadiness\tget_training_readiness\tday\ntraining_status\tget_training_status\tday\nmax_metrics\tget_max_metrics\tday\nendurance\tget_endurance_score\tday\nhill\tget_hill_score\tday\nhydration\tget_hydration_data\tday\nbody_composition\tget_body_composition\tday\nintensity\tget_intensity_minutes_data\tday\nresting_hr\tget_rhr_day\tday\nall_day_events\tget_all_day_events\tday\ndevices\tget_devices\tglobal\nactivity\tget_activity\tactivity\nactivity_details\tget_activity_details\tactivity\nactivity_splits\tget_activity_splits\tactivity\nactivity_typed_splits\tget_activity_typed_splits\tactivity\nactivity_zones\tget_activity_hr_in_timezones\tactivity\nactivity_weather\tget_activity_weather\tactivity\nactivities\tget_activities\tpage\nactivity_fit\tdownload_activity\tactivity\n"
+      },
+      "missing_confirmation": {
+        "status": 2,
+        "stderr": "usage: garmin-ai erase-all [-h] --confirm CONFIRM\ngarmin-ai erase-all: error: the following arguments are required: --confirm\n",
+        "stdout": ""
+      }
+    },
+    "diary": {
+      "audit": [
+        {
+          "action": "create",
+          "actor": "api",
+          "after": {
+            "assertion_kind": "user_report",
+            "author": "owner",
+            "clock_uncertainty_seconds": null,
+            "confidence": 1.0,
+            "created_at": "time:1",
+            "definition_version_id": "uuid:2",
+            "deleted": false,
+            "end": null,
+            "envelope_version": 1,
+            "evidence_refs": [],
+            "id": "uuid:1",
+            "idempotency_key": "synthetic-differential-note",
+            "ingested_at": "time:2",
+            "kind": "note",
+            "original_text": null,
+            "payload": {
+              "amount": null,
+              "description": "Synthetic café ☕ diary",
+              "tags": [],
+              "type": "note",
+              "unit": null
+            },
+            "producer": "owner",
+            "recorded_at": "time:2",
+            "revision": 1,
+            "source": "manual",
+            "start": "2026-10-25T00:30:00+00:00",
+            "status": "confirmed",
+            "time_precision": "instant",
+            "timezone": "Europe/Bratislava",
+            "topology": "point",
+            "transport": "api",
+            "updated_at": "time:1",
+            "validation_status": "schema_validated"
+          },
+          "before": null,
+          "created_at": "time:2",
+          "event_id": "uuid:1",
+          "id": 1,
+          "operation_id": null
+        }
+      ],
+      "events": [
+        {
+          "assertion_kind": "user_report",
+          "author": "owner",
+          "clock_uncertainty_seconds": null,
+          "confidence": 1.0,
+          "created_at": "time:1",
+          "definition_version_id": "uuid:2",
+          "deleted": false,
+          "end": null,
+          "envelope_version": 1,
+          "evidence_refs": [],
+          "id": "uuid:1",
+          "idempotency_key": "synthetic-differential-note",
+          "ingested_at": "time:2",
+          "kind": "note",
+          "original_text": null,
+          "payload": {
+            "amount": null,
+            "description": "Synthetic café ☕ diary",
+            "tags": [],
+            "type": "note",
+            "unit": null
+          },
+          "producer": "owner",
+          "recorded_at": "time:2",
+          "revision": 1,
+          "source": "manual",
+          "start": "2026-10-25T00:30:00+00:00",
+          "status": "confirmed",
+          "time_precision": "instant",
+          "timezone": "Europe/Bratislava",
+          "topology": "point",
+          "transport": "api",
+          "updated_at": "time:1",
+          "validation_status": "schema_validated"
+        }
+      ],
+      "mcp": {
+        "disabled_write": {
+          "content": [
+            {
+              "text": "Operation failed (PermissionError); reload the record or check arguments. No sensitive details logged.",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        },
+        "invalid_input": {
+          "content": [
+            {
+              "text": "Operation failed (ValidationError); reload the record or check arguments. No sensitive details logged.",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        },
+        "read": {
+          "rows": [],
+          "truncated": false
+        },
+        "tools": [
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "health_snapshot"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "health_range"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "metric_series"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_stress_by_hour"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "activities"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "activity_details"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "events"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "event_definitions"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "resource_catalog"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "generic_analysis"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "timeline"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "data_freshness"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "insights_list"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "personal_baseline"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_compare_periods"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_running_efficiency"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_event_windows"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_migraine_windows"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_lagged_association"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_sleep"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "wellbeing_observations"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "analysis_coffee_sleep"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "name": "device_history"
+          }
+        ]
+      },
+      "responses": {
+        "conflicting_retry": {
+          "body": {
+            "detail": "Idempotency key already used for different data"
+          },
+          "status": 409
+        },
+        "create": {
+          "body": {
+            "assertion_kind": "user_report",
+            "author": "owner",
+            "canonical": {
+              "definition_version_id": "uuid:2",
+              "ingested_at": "time:2",
+              "observed": {
+                "end": null,
+                "precision": "instant",
+                "start": "2026-10-25T00:30:00+00:00",
+                "timezone": "Europe/Bratislava",
+                "topology": "point"
+              },
+              "provenance": {
+                "assertion_kind": "user_report",
+                "author": "owner",
+                "confidence": 1.0,
+                "evidence_refs": [],
+                "producer": "owner",
+                "transport": "api",
+                "validation_status": "schema_validated"
+              },
+              "recorded_at": "time:2",
+              "version": 1
+            },
+            "clock_uncertainty_seconds": null,
+            "confidence": 1.0,
+            "created_at": "time:1",
+            "definition_version_id": "uuid:2",
+            "deleted": false,
+            "end": null,
+            "envelope_version": 1,
+            "evidence_refs": [],
+            "id": "uuid:1",
+            "idempotency_key": "synthetic-differential-note",
+            "ingested_at": "time:2",
+            "kind": "note",
+            "missing_end": false,
+            "ongoing": false,
+            "original_text": null,
+            "payload": {
+              "amount": null,
+              "description": "Synthetic café ☕ diary",
+              "tags": [],
+              "type": "note",
+              "unit": null
+            },
+            "producer": "owner",
+            "recorded_at": "time:2",
+            "revision": 1,
+            "source": "manual",
+            "start": "2026-10-25T00:30:00+00:00",
+            "status": "confirmed",
+            "time_precision": "instant",
+            "timezone": "Europe/Bratislava",
+            "topology": "point",
+            "transport": "api",
+            "updated_at": "time:1",
+            "validation_status": "schema_validated"
+          },
+          "status": 200
+        },
+        "missing_payload": {
+          "body": {
+            "detail": [
+              {
+                "input": {
+                  "start": "2026-10-25T02:30:00+02:00"
+                },
+                "loc": [
+                  "body",
+                  "payload"
+                ],
+                "msg": "Field required",
+                "type": "missing"
+              }
+            ]
+          },
+          "status": 422
+        },
+        "read_after_restart": {
+          "body": {
+            "assertion_kind": "user_report",
+            "author": "owner",
+            "canonical": {
+              "definition_version_id": "uuid:2",
+              "ingested_at": "time:2",
+              "observed": {
+                "end": null,
+                "precision": "instant",
+                "start": "2026-10-25T00:30:00+00:00",
+                "timezone": "Europe/Bratislava",
+                "topology": "point"
+              },
+              "provenance": {
+                "assertion_kind": "user_report",
+                "author": "owner",
+                "confidence": 1.0,
+                "evidence_refs": [],
+                "producer": "owner",
+                "transport": "api",
+                "validation_status": "schema_validated"
+              },
+              "recorded_at": "time:2",
+              "version": 1
+            },
+            "clock_uncertainty_seconds": null,
+            "confidence": 1.0,
+            "created_at": "time:1",
+            "definition_version_id": "uuid:2",
+            "deleted": false,
+            "end": null,
+            "envelope_version": 1,
+            "evidence_refs": [],
+            "id": "uuid:1",
+            "idempotency_key": "synthetic-differential-note",
+            "ingested_at": "time:2",
+            "kind": "note",
+            "missing_end": false,
+            "ongoing": false,
+            "original_text": null,
+            "payload": {
+              "amount": null,
+              "description": "Synthetic café ☕ diary",
+              "tags": [],
+              "type": "note",
+              "unit": null
+            },
+            "producer": "owner",
+            "recorded_at": "time:2",
+            "revision": 1,
+            "source": "manual",
+            "start": "2026-10-25T00:30:00+00:00",
+            "status": "confirmed",
+            "time_precision": "instant",
+            "timezone": "Europe/Bratislava",
+            "topology": "point",
+            "transport": "api",
+            "updated_at": "time:1",
+            "validation_status": "schema_validated"
+          },
+          "status": 200
+        },
+        "read_scope_cannot_write": {
+          "body": {
+            "detail": "Insufficient scope"
+          },
+          "status": 403
+        },
+        "retry": {
+          "body": {
+            "assertion_kind": "user_report",
+            "author": "owner",
+            "canonical": {
+              "definition_version_id": "uuid:2",
+              "ingested_at": "time:2",
+              "observed": {
+                "end": null,
+                "precision": "instant",
+                "start": "2026-10-25T00:30:00+00:00",
+                "timezone": "Europe/Bratislava",
+                "topology": "point"
+              },
+              "provenance": {
+                "assertion_kind": "user_report",
+                "author": "owner",
+                "confidence": 1.0,
+                "evidence_refs": [],
+                "producer": "owner",
+                "transport": "api",
+                "validation_status": "schema_validated"
+              },
+              "recorded_at": "time:2",
+              "version": 1
+            },
+            "clock_uncertainty_seconds": null,
+            "confidence": 1.0,
+            "created_at": "time:1",
+            "definition_version_id": "uuid:2",
+            "deleted": false,
+            "end": null,
+            "envelope_version": 1,
+            "evidence_refs": [],
+            "id": "uuid:1",
+            "idempotency_key": "synthetic-differential-note",
+            "ingested_at": "time:2",
+            "kind": "note",
+            "missing_end": false,
+            "ongoing": false,
+            "original_text": null,
+            "payload": {
+              "amount": null,
+              "description": "Synthetic café ☕ diary",
+              "tags": [],
+              "type": "note",
+              "unit": null
+            },
+            "producer": "owner",
+            "recorded_at": "time:2",
+            "revision": 1,
+            "source": "manual",
+            "start": "2026-10-25T00:30:00+00:00",
+            "status": "confirmed",
+            "time_precision": "instant",
+            "timezone": "Europe/Bratislava",
+            "topology": "point",
+            "transport": "api",
+            "updated_at": "time:1",
+            "validation_status": "schema_validated"
+          },
+          "status": 200
+        },
+        "stale_revision": {
+          "body": {
+            "detail": "Event changed; reload before editing"
+          },
+          "status": 409
+        },
+        "without_token": {
+          "body": {
+            "detail": "Authentication required"
+          },
+          "status": 401
+        }
+      },
+      "row_counts": {
+        "audit": 1,
+        "events": 1
+      }
+    }
+  }
+}
