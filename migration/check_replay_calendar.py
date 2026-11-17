@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 from capture_reference import isolated_engine
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from garmin_ai import replay
@@ -100,6 +100,21 @@ def seed(engine, archive):
         write("daily", "2026-10-28", {"totalSteps": 184}, 45)
         mark_old(superseded)
 
+        tied_daily = write("daily", "2026-10-30", {"restingHeartRate": 50}, 53)
+        tied_heart = write("heart_rate", "2026-10-30", {"restingHeartRate": 60}, 53)
+        tied_day = session.get(HealthDay, date(2026, 10, 30))
+        assert tied_day.resting_hr == 60 and tied_day.sources["field:resting_hr"] == tied_heart
+        mark_old(tied_daily)
+
+        old_without_interval = sleep(
+            "2026-10-31", "2026-10-30T21:00:00Z", "2026-10-31T04:20:00Z", None, 67
+        )
+        missing_interval = write("sleep", "2026-10-31", old_without_interval, 54)
+        session.execute(delete(TimelineInterval).where(TimelineInterval.id == "sleep:2026-10-31"))
+        write("sleep", "2026-10-31", {"dailySleepDTO": {"sleepTimeSeconds": 400}}, 55)
+        assert session.get(TimelineInterval, "sleep:2026-10-31") is None
+        mark_old(missing_interval)
+
         forced = write("daily", "2026-10-29", {"totalSteps": 19000}, 47)
         mark_old(forced)
         session.execute(
@@ -121,6 +136,8 @@ def seed(engine, archive):
             "damaged": damaged,
             "superseded": superseded,
             "forced": forced,
+            "tied_daily": tied_daily,
+            "missing_interval": missing_interval,
         }
 
 
@@ -134,6 +151,8 @@ def apply_python(engine, archive, refs):
         "damaged": "error",
         "superseded": "superseded_revision",
         "forced": "normalized",
+        "tied_daily": "normalized",
+        "missing_interval": "normalized",
     }
     for name, identity in refs.items():
         args = {"raw_ref": identity, "target_version": 9, "account": ACCOUNT}

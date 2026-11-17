@@ -36,12 +36,19 @@ const DAILY_FIELDS: &[&str] = &[
     "vo2max",
 ];
 
+#[derive(Clone, Copy)]
+pub(super) enum FieldWrite<'a> {
+    Capture,
+    Replay { preceding: Option<&'a str> },
+}
+
 pub(super) async fn publish_fields(
     txn: &mut Transaction<'_, Postgres>,
     request: &ApplyActivity<'_>,
     day: Date,
     endpoint: &str,
     mut fields: Map<String, Value>,
+    write: FieldWrite<'_>,
 ) -> Result<bool, DocumentError> {
     if fields.is_empty() {
         return Ok(false);
@@ -76,7 +83,15 @@ pub(super) async fn publish_fields(
             .map(str::parse::<StoredInstant>)
             .transpose()
             .map_err(|_| DocumentError::InvalidRecordedState)?;
-        if recorded.is_some_and(|recorded| request.requested_at < recorded) {
+        let owner = old_sources[format!("field:{column}")].as_str();
+        if recorded.is_some_and(|recorded| request.requested_at < recorded)
+            || (recorded == Some(request.requested_at)
+                && matches!(
+                    write,
+                    FieldWrite::Replay { preceding }
+                        if owner.is_some() && owner != Some(source.as_str()) && owner != preceding
+                ))
+        {
             continue;
         }
         if *column == "steps" {
@@ -224,13 +239,12 @@ pub(super) async fn clear_owned_fields(
 pub(super) async fn prepare_sleep_replay(
     txn: &mut Transaction<'_, Postgres>,
     day: Date,
-    source: uuid::Uuid,
+    request: &ApplyActivity<'_>,
     parser_changed: bool,
-    retained: bool,
 ) -> Result<bool, DocumentError> {
     let key = format!("sleep:{day}");
     let journal = format!("interval-owner:{key}");
-    let reference = source.to_string();
+    let reference = request.source_id.to_string();
     let current: Option<Option<String>> = sqlx::query_scalar(
         "SELECT evidence->>'source_ref' FROM timeline_intervals WHERE id=$1 FOR UPDATE",
     )
@@ -251,12 +265,26 @@ pub(super) async fn prepare_sleep_replay(
         }
         return Ok(true);
     }
-    if retained && current.is_some() {
-        return Ok(false);
-    }
-    if retained {
-        let saved = crate::activity_documents::read_state(txn, &journal).await?;
-        return Ok(saved.get("source_ref").and_then(Value::as_str) == Some(&reference));
-    }
-    Ok(true)
+    let owner = match current {
+        Some(owner) => owner,
+        None => crate::activity_documents::read_state(txn, &journal)
+            .await?
+            .get("source_ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    let Some(owner) = owner.filter(|owner| owner != &reference && !owner.is_empty()) else {
+        return Ok(true);
+    };
+    let owner = uuid::Uuid::parse_str(&owner).map_err(|_| DocumentError::InvalidRecordedState)?;
+    let owner_clock: Option<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(meta.value->>'applied_at','')::timestamptz, raw.fetched_at)
+         FROM source_payloads AS raw
+         LEFT JOIN app_state AS meta ON meta.key='ingest-meta:' || raw.id::text
+         WHERE raw.id=$1",
+    )
+    .bind(owner)
+    .fetch_optional(&mut **txn)
+    .await?;
+    Ok(owner_clock.is_some_and(|time| OffsetDateTime::from(request.requested_at) > time))
 }

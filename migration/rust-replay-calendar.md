@@ -13,10 +13,12 @@ together under the storage mutation fence. Verified archives with an invalid
 hash are recorded as failed and cannot publish. A database error leaves the
 old projection and the original version ready for a later retry.
 
-`check_replay_calendar.py` compares eight operations on separate disposable
+`check_replay_calendar.py` compares ten operations on separate disposable
 TimescaleDB databases using pinned Python and a native Linux ARM64 binary.
 It includes the same sleep response reappearing after a correction, a newer
 retained sleep interval, both missing fields and empty responses, and damaged
-or superseded archive input. The test forces a SQL failure after old fields
+or superseded archive input. It also verifies a tied daily field whose owner
+is another endpoint and a retained sleep response whose interval was never
+installed by the older parser. The test forces a SQL failure after old fields
 were cleared, checks that the original state survived, and then retries
 successfully. It also exercises cancellation before mutation.

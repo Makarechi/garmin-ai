@@ -14,6 +14,17 @@ use crate::{
     system_metrics::ensure_system_metrics_in,
 };
 
+enum ProjectionWrite<'a> {
+    Capture {
+        unchanged: bool,
+        attestation: Option<&'a HealthReplacement>,
+    },
+    Replay {
+        publish_sleep: bool,
+        preceding: Option<&'a str>,
+    },
+}
+
 pub(super) async fn publish(
     txn: &mut Transaction<'_, Postgres>,
     request: &ApplyActivity<'_>,
@@ -40,9 +51,10 @@ pub(super) async fn publish(
         request,
         endpoint,
         projection,
-        unchanged,
-        true,
-        attestation,
+        ProjectionWrite::Capture {
+            unchanged,
+            attestation,
+        },
     )
     .await?;
     if !unchanged && (status == HealthStatus::Normalized || attestation.is_some()) {
@@ -63,7 +75,7 @@ pub(crate) async fn rebuild_calendar(
     endpoint: &str,
     document: &Value,
     parser_changed: bool,
-    retained: bool,
+    preceding: Option<&str>,
 ) -> Result<HealthStatus, DocumentError> {
     let projection = normalize_health_payload(endpoint, request.source_key, document)
         .map_err(|_| DocumentError::InvalidHealthPayload)?;
@@ -86,9 +98,7 @@ pub(crate) async fn rebuild_calendar(
             observations::preserve_for_replay(txn, request.source_id).await?;
         }
         if endpoint == "sleep" {
-            publish_sleep =
-                daily::prepare_sleep_replay(txn, day, request.source_id, parser_changed, retained)
-                    .await?;
+            publish_sleep = daily::prepare_sleep_replay(txn, day, request, parser_changed).await?;
         }
     }
     let status = projection.status;
@@ -97,9 +107,10 @@ pub(crate) async fn rebuild_calendar(
         request,
         endpoint,
         projection,
-        false,
-        publish_sleep,
-        None,
+        ProjectionWrite::Replay {
+            publish_sleep,
+            preceding,
+        },
     )
     .await?
     {
@@ -113,15 +124,29 @@ async fn publish_projection(
     request: &ApplyActivity<'_>,
     endpoint: &str,
     projection: HealthProjection,
-    unchanged: bool,
-    publish_sleep: bool,
-    attestation: Option<&HealthReplacement>,
+    write: ProjectionWrite<'_>,
 ) -> Result<bool, DocumentError> {
     if projection.status != HealthStatus::Normalized {
         return Ok(false);
     }
     let day = projection.day.ok_or(DocumentError::InvalidHealthPayload)?;
-    let mut changed = daily::publish_fields(txn, request, day, endpoint, projection.fields).await?;
+    let (unchanged, attestation, publish_sleep, field_write) = match write {
+        ProjectionWrite::Capture {
+            unchanged,
+            attestation,
+        } => (unchanged, attestation, true, daily::FieldWrite::Capture),
+        ProjectionWrite::Replay {
+            publish_sleep,
+            preceding,
+        } => (
+            false,
+            None,
+            publish_sleep,
+            daily::FieldWrite::Replay { preceding },
+        ),
+    };
+    let mut changed =
+        daily::publish_fields(txn, request, day, endpoint, projection.fields, field_write).await?;
     if let Some((start, end)) = projection.sleep_interval.filter(|_| publish_sleep) {
         changed |= daily::publish_sleep_interval(txn, request, day, start, end).await?;
     }

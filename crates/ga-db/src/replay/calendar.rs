@@ -293,13 +293,20 @@ async fn apply_calendar(
     let mut status = source.status.clone();
     if !unchanged || matches!(endpoint, "daily" | "body_battery") {
         let mut candidate = txn.begin().await?;
+        let preceding = if watermark.owns_attempt {
+            watermark.current["source_ref"].as_str()
+        } else if watermark.owns_current {
+            meta.get("preceding_source_ref").and_then(Value::as_str)
+        } else {
+            None
+        };
         let rebuilt = rebuild_calendar(
             &mut candidate,
             request,
             endpoint,
             payload,
             parser_changed,
-            watermark.retained,
+            preceding,
         )
         .await;
         match rebuilt {
