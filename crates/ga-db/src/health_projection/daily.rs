@@ -97,6 +97,7 @@ pub(super) async fn publish_fields(
     if columns.is_empty() {
         return Ok(false);
     }
+    fields.retain(|field, _| columns.contains(&field.as_str()));
     sources.insert(format!("payload:{source}"), json!(endpoint));
     // Column names come only from the installed projection contract above.
     let updates = columns
@@ -188,4 +189,74 @@ pub(super) async fn publish_sleep_interval(
                 || before["confirmed"] != true
                 || extra_evidence
         }))
+}
+
+pub(super) async fn clear_owned_fields(
+    txn: &mut Transaction<'_, Postgres>,
+    day: Date,
+    source: uuid::Uuid,
+) -> Result<(), DocumentError> {
+    lock_legacy_scope(txn, &format!("health-day:{day}"))
+        .await
+        .map_err(DocumentError::Access)?;
+    let source = source.to_string();
+    let mut command = QueryBuilder::<Postgres>::new("WITH owner AS (SELECT ");
+    command
+        .push_bind(source)
+        .push("::text AS id) UPDATE health_days SET ");
+    let mut assignments = command.separated(", ");
+    for column in DAILY_FIELDS.iter().copied().chain(["training_status"]) {
+        assignments.push(format!(
+            "{column}=CASE WHEN sources->>'field:{column}'=owner.id THEN NULL ELSE {column} END"
+        ));
+    }
+    command
+        .push(", updated_at=now() FROM owner WHERE day=")
+        .push_bind(day)
+        .push(
+            " AND EXISTS (SELECT 1 FROM jsonb_each_text(health_days.sources) AS field
+                    WHERE starts_with(field.key,'field:') AND field.value=owner.id)",
+        );
+    command.build().execute(&mut **txn).await?;
+    Ok(())
+}
+
+pub(super) async fn prepare_sleep_replay(
+    txn: &mut Transaction<'_, Postgres>,
+    day: Date,
+    source: uuid::Uuid,
+    parser_changed: bool,
+    retained: bool,
+) -> Result<bool, DocumentError> {
+    let key = format!("sleep:{day}");
+    let journal = format!("interval-owner:{key}");
+    let reference = source.to_string();
+    let current: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT evidence->>'source_ref' FROM timeline_intervals WHERE id=$1 FOR UPDATE",
+    )
+    .bind(&key)
+    .fetch_optional(&mut **txn)
+    .await?;
+    if current
+        .as_ref()
+        .is_some_and(|owner| owner.as_deref() == Some(&reference))
+    {
+        if parser_changed {
+            sqlx::query("DELETE FROM timeline_intervals WHERE id=$1 AND label='sleep'")
+                .bind(&key)
+                .execute(&mut **txn)
+                .await?;
+            crate::activity_documents::put_state(txn, &journal, &json!({"source_ref": reference}))
+                .await?;
+        }
+        return Ok(true);
+    }
+    if retained && current.is_some() {
+        return Ok(false);
+    }
+    if retained {
+        let saved = crate::activity_documents::read_state(txn, &journal).await?;
+        return Ok(saved.get("source_ref").and_then(Value::as_str) == Some(&reference));
+    }
+    Ok(true)
 }

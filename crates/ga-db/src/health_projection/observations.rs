@@ -147,3 +147,58 @@ async fn observation_history(
     }
     Ok(history)
 }
+
+pub(super) async fn preserve_for_replay(
+    txn: &mut Transaction<'_, Postgres>,
+    reference: uuid::Uuid,
+) -> Result<(), DocumentError> {
+    use futures_util::TryStreamExt;
+    use serde_json::json;
+
+    let key = format!("observation-owner:{reference}");
+    let saved = crate::activity_documents::read_state(txn, &key).await?;
+    let mut times = saved
+        .get("times")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut zones = saved
+        .get("zones")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut observations =
+        sqlx::query_as::<_, (OffsetDateTime, String, i32, String, OffsetDateTime, String)>(
+            "SELECT fetched_at, metric, sequence, feature_version, ingested_at, timezone
+         FROM metric_observations WHERE source_ref=$1",
+        )
+        .bind(reference)
+        .fetch(&mut **txn);
+    while let Some((fetched, metric, sequence, feature, ingested, timezone)) =
+        observations.try_next().await?
+    {
+        let fetched =
+            StoredInstant::try_from(fetched).map_err(|_| DocumentError::InvalidRecordedState)?;
+        let ingested =
+            StoredInstant::try_from(ingested).map_err(|_| DocumentError::InvalidRecordedState)?;
+        let identity = format!("{fetched}|{metric}|{sequence}|{feature}");
+        times
+            .entry(identity.clone())
+            .or_insert_with(|| json!(ingested.to_string()));
+        zones.entry(identity).or_insert_with(|| json!(timezone));
+    }
+    drop(observations);
+    if !times.is_empty() {
+        crate::activity_documents::put_state(
+            txn,
+            &key,
+            &json!({"source_ref": reference.to_string(), "times": times, "zones": zones}),
+        )
+        .await?;
+        sqlx::query("DELETE FROM metric_observations WHERE source_ref=$1")
+            .bind(reference)
+            .execute(&mut **txn)
+            .await?;
+    }
+    Ok(())
+}
