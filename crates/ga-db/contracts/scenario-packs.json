@@ -1,0 +1,128 @@
+[
+  {
+    "key": "general_diary",
+    "labels": {
+      "en": "General diary",
+      "ru": "Общий дневник"
+    },
+    "definitions": [
+      "alcohol",
+      "context",
+      "hydration",
+      "illness",
+      "meal",
+      "mood",
+      "note",
+      "stressor",
+      "travel"
+    ],
+    "forms": [
+      "note"
+    ],
+    "rules": [
+      "context_follow_up"
+    ],
+    "analysis": [
+      "history"
+    ]
+  },
+  {
+    "key": "wellbeing",
+    "labels": {
+      "en": "Wellbeing",
+      "ru": "Самочувствие"
+    },
+    "definitions": [
+      "wellbeing_observation"
+    ],
+    "forms": [
+      "wellbeing"
+    ],
+    "rules": [
+      "context_follow_up"
+    ],
+    "analysis": [
+      "stress_trends",
+      "wellbeing_summary"
+    ]
+  },
+  {
+    "key": "sleep",
+    "labels": {
+      "en": "Sleep",
+      "ru": "Сон"
+    },
+    "definitions": [
+      "nap"
+    ],
+    "forms": [],
+    "rules": [],
+    "analysis": [
+      "sleep_trends"
+    ]
+  },
+  {
+    "key": "caffeine",
+    "labels": {
+      "en": "Caffeine",
+      "ru": "Кофеин"
+    },
+    "definitions": [
+      "caffeine",
+      "caffeine_absence",
+      "caffeine_log_complete"
+    ],
+    "forms": [
+      "coffee",
+      "coffee_preset"
+    ],
+    "rules": [
+      "caffeine_follow_up"
+    ],
+    "analysis": [
+      "caffeine_timing"
+    ]
+  },
+  {
+    "key": "migraine",
+    "labels": {
+      "en": "Migraine",
+      "ru": "Мигрень"
+    },
+    "definitions": [
+      "headache_observation",
+      "medication",
+      "migraine",
+      "symptom_observation"
+    ],
+    "forms": [
+      "medication",
+      "migraine",
+      "migraine_end"
+    ],
+    "rules": [
+      "migraine_follow_up"
+    ],
+    "analysis": [
+      "migraine_comparison",
+      "migraine_windows"
+    ]
+  },
+  {
+    "key": "training",
+    "labels": {
+      "en": "Training",
+      "ru": "Тренировки"
+    },
+    "definitions": [
+      "activity_effort"
+    ],
+    "forms": [
+      "activity_effort"
+    ],
+    "rules": [],
+    "analysis": [
+      "training_trends"
+    ]
+  }
+]

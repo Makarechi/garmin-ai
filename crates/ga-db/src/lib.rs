@@ -5,6 +5,7 @@ pub mod health_analysis;
 pub mod jobs;
 pub mod raw_capture;
 pub mod replay;
+pub mod scenario_packs;
 pub mod system_definitions;
 pub mod system_metrics;
 
