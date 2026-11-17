@@ -13,11 +13,12 @@ use ga_db::{
     Database,
     fit_ingest::{FitIngestError, FitIngestOutcome, LegacyFitCapture},
     garmin_owner::OwnerVerificationError,
+    jobs::{FailureReason, GarminJobLease, JobStoreError},
     raw_capture::CaptureError,
 };
 use ga_domain::timestamp::StoredInstant;
 use ga_fit::{ExportLimits, MAX_FIT_BYTES};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -280,5 +281,239 @@ async fn real_postgres_late_failures_preserve_the_last_verified_fit() -> Result<
             .open_verified_reader(bad.key(), MAX_FIT_BYTES, || false)
             .is_ok()
     );
+    verify_atomic_queue_effects(
+        &db,
+        &inspect,
+        archive,
+        &fingerprint,
+        write_limits,
+        read_limits,
+    )
+    .await?;
+    Ok(())
+}
+
+fn clock(now: OffsetDateTime) -> Result<StoredInstant, Box<dyn Error>> {
+    Ok(StoredInstant::from_unix_microseconds(i64::try_from(
+        now.unix_timestamp_nanos() / 1_000,
+    )?)?)
+}
+
+async fn claim(
+    db: &Database,
+    inspect: &PgPool,
+    account: &str,
+    ttl: u32,
+) -> Result<GarminJobLease, Box<dyn Error>> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, payload, dedup_key, run_at, status, attempts)
+         VALUES ($1, 'garmin_fit', $2::jsonb, $3, clock_timestamp(), 'pending', 0)",
+    )
+    .bind(id)
+    .bind(json!({"activity_id": ACTIVITY, "account": account}).to_string())
+    .bind(format!("fit:synthetic:{id}"))
+    .execute(inspect)
+    .await?;
+    let now = OffsetDateTime::now_utc();
+    let lease = db
+        .claim_garmin_job(clock(now)?, now.date(), ttl, false)
+        .await?
+        .ok_or_else(|| io::Error::other("Synthetic FIT job was not claimed"))?;
+    assert_eq!(lease.id(), id);
+    Ok(lease)
+}
+
+async fn freshness(inspect: &PgPool) -> Result<Option<Value>, Box<dyn Error>> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key = $1")
+            .bind(format!("freshness:activity_fit:{ACTIVITY}"))
+            .fetch_optional(inspect)
+            .await?;
+    Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
+}
+
+async fn job_status(
+    inspect: &PgPool,
+    id: Uuid,
+) -> Result<(String, i32, Option<String>), sqlx::Error> {
+    sqlx::query_as("SELECT status, attempts, last_error FROM jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(inspect)
+        .await
+}
+
+async fn verify_atomic_queue_effects(
+    db: &Database,
+    inspect: &PgPool,
+    archive: Arc<Archive>,
+    fingerprint: &str,
+    put_limits: PutLimits,
+    limits: ExportLimits,
+) -> Result<(), Box<dyn Error>> {
+    let request = |fetched_at| LegacyFitCapture {
+        activity_id: ACTIVITY,
+        authenticated_fingerprint: fingerprint,
+        fetched_at,
+    };
+    let expiring = claim(db, inspect, fingerprint, 3).await?;
+    assert!(matches!(
+        db.authorize_legacy_fit_job(
+            &LegacyFitCapture {
+                activity_id: "synthetic-wrong-activity",
+                ..request(at(6)?)
+            },
+            &expiring
+        )
+        .await,
+        Err(FitIngestError::WrongJob)
+    ));
+    db.authorize_legacy_fit_job(&request(at(6)?), &expiring)
+        .await?;
+
+    sqlx::raw_sql(
+        "CREATE SEQUENCE synthetic_fit_started;
+         CREATE FUNCTION expire_fit_during_replacement() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+            PERFORM nextval('synthetic_fit_started');
+            PERFORM pg_sleep(3.15);
+            RETURN NEW;
+         END $$;
+         CREATE TRIGGER synthetic_fit_expires BEFORE INSERT ON activity_parts
+           FOR EACH ROW WHEN (NEW.kind = 'fit_record') EXECUTE FUNCTION expire_fit_during_replacement();",
+    )
+    .execute(inspect)
+    .await?;
+    let result = db
+        .ingest_leased_legacy_fit(
+            request(at(6)?),
+            &expiring,
+            Cursor::new(FIRST),
+            archive.clone(),
+            put_limits,
+            limits,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(FitIngestError::Lease(JobStoreError::LeaseLost))),
+        "{result:?}"
+    );
+    let began: bool = sqlx::query_scalar("SELECT is_called FROM synthetic_fit_started")
+        .fetch_one(inspect)
+        .await?;
+    assert!(began);
+    assert_eq!(visible(inspect).await?.2, [73]);
+    assert_eq!(freshness(inspect).await?, None);
+    assert_eq!(
+        job_status(inspect, expiring.id()).await?,
+        ("running".to_owned(), 1, None)
+    );
+    sqlx::raw_sql("DROP TRIGGER synthetic_fit_expires ON activity_parts; DROP FUNCTION expire_fit_during_replacement(); DROP SEQUENCE synthetic_fit_started;")
+        .execute(inspect)
+        .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let recovered = db
+        .claim_garmin_job(clock(now)?, now.date(), 30, false)
+        .await?
+        .ok_or_else(|| io::Error::other("Expired synthetic FIT job was not recovered"))?;
+    assert_eq!(recovered.id(), expiring.id());
+    assert!(matches!(
+        db.authorize_legacy_fit_job(&request(at(6)?), &expiring)
+            .await,
+        Err(FitIngestError::Lease(JobStoreError::LeaseLost))
+    ));
+    assert_eq!(
+        db.ingest_leased_legacy_fit(
+            request(at(7)?),
+            &recovered,
+            Cursor::new(FIRST),
+            archive.clone(),
+            put_limits,
+            limits,
+        )
+        .await?,
+        FitIngestOutcome::Normalized { rows: 1 }
+    );
+    assert_eq!(visible(inspect).await?.2, [72]);
+    assert_eq!(
+        job_status(inspect, recovered.id()).await?,
+        ("done".to_owned(), 2, None)
+    );
+    let good = freshness(inspect)
+        .await?
+        .ok_or("Successful fetch did not advance freshness")?;
+    assert_eq!(good["status"], "normalized");
+    assert_eq!(good["normalized_at"], at(7)?.to_string());
+
+    let rejected = claim(db, inspect, fingerprint, 30).await?;
+    let mut corrupted = NEXT.to_vec();
+    let last = corrupted.last_mut().ok_or("Missing synthetic checksum")?;
+    *last ^= 1;
+    assert!(matches!(
+        db.ingest_leased_legacy_fit(
+            request(at(8)?),
+            &rejected,
+            Cursor::new(corrupted),
+            archive.clone(),
+            put_limits,
+            limits,
+        )
+        .await?,
+        FitIngestOutcome::Error { .. }
+    ));
+    assert_eq!(
+        job_status(inspect, rejected.id()).await?,
+        ("pending".to_owned(), 1, Some("ValueError".to_owned()))
+    );
+    let parsed = freshness(inspect)
+        .await?
+        .ok_or("Parse failure was not recorded")?;
+    assert_eq!(parsed["status"], "error");
+    assert_eq!(parsed["success_at"], at(8)?.to_string());
+    assert_eq!(parsed["normalized_at"], good["normalized_at"]);
+    assert_eq!(visible(inspect).await?.2, [72]);
+
+    let throttled = claim(db, inspect, fingerprint, 30).await?;
+    let retry = OffsetDateTime::now_utc()
+        .checked_add(time::Duration::hours(1))
+        .ok_or("Invalid retry")?;
+    db.finish_legacy_fit_fetch_error(
+        request(at(9)?),
+        &throttled,
+        FailureReason::ProviderCooldown,
+        Some(clock(retry)?),
+    )
+    .await?;
+    assert_eq!(
+        job_status(inspect, throttled.id()).await?,
+        ("pending".to_owned(), 0, Some("ProviderCooldown".to_owned()))
+    );
+    let fetch = freshness(inspect)
+        .await?
+        .ok_or("Fetch failure was not recorded")?;
+    assert_eq!(fetch["status"], "fetch_error");
+    assert_eq!(fetch["success_at"], parsed["success_at"]);
+    assert_eq!(fetch["normalized_at"], good["normalized_at"]);
+    assert!(fetch["source_ref"].is_null());
+
+    let obsolete = claim(db, inspect, fingerprint, 30).await?;
+    assert_eq!(
+        db.ingest_leased_legacy_fit(
+            request(at(6)?),
+            &obsolete,
+            Cursor::new(NEXT),
+            archive,
+            put_limits,
+            limits,
+        )
+        .await?,
+        FitIngestOutcome::Stale
+    );
+    assert_eq!(
+        job_status(inspect, obsolete.id()).await?,
+        ("done".to_owned(), 1, None)
+    );
+    assert_eq!(freshness(inspect).await?, Some(fetch));
     Ok(())
 }

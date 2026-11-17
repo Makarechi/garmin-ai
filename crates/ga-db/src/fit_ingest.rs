@@ -18,6 +18,7 @@ use crate::{
     activity_documents::{invalidate_replay_outputs, put_state},
     check_readiness,
     fit_staging::{FitStageError, StagedFitProjection},
+    jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome, JobStoreError},
     raw_capture::{
         CaptureError, GARMIN_LEGACY_SOURCE, authorize_legacy_mutation, lock_legacy_scope,
     },
@@ -79,6 +80,8 @@ pub enum FitIngestError {
     Stage(FitStageError),
     InputTooLarge,
     ActivityMissing,
+    WrongJob,
+    Lease(JobStoreError),
     SourceMissing,
     InvalidRecordedState,
     ArchiveTaskFailed,
@@ -92,6 +95,8 @@ impl fmt::Display for FitIngestError {
             Self::Archive(_) => "Original activity export is unavailable",
             Self::Stage(_) => "Activity projection staging failed",
             Self::InputTooLarge => "Activity export exceeds its byte limit",
+            Self::WrongJob => "Activity export does not match the leased work",
+            Self::Lease(_) => "Activity export lease is no longer available",
             Self::ActivityMissing => "Activity summary must be imported first",
             Self::SourceMissing => "Activity export receipt could not be verified",
             Self::InvalidRecordedState => "Recorded activity export state could not be interpreted",
@@ -120,19 +125,119 @@ impl From<ArchiveError> for FitIngestError {
     }
 }
 
+impl From<JobStoreError> for FitIngestError {
+    fn from(error: JobStoreError) -> Self {
+        Self::Lease(error)
+    }
+}
+
 impl Database {
+    /// Check the job's bound account and permissions before a provider download.
+    pub async fn authorize_legacy_fit_job(
+        &self,
+        request: &LegacyFitCapture<'_>,
+        lease: &GarminJobLease,
+    ) -> Result<(), FitIngestError> {
+        verify_job_scope(
+            lease,
+            request.activity_id,
+            request.authenticated_fingerprint,
+        )?;
+        let mut txn = self.fit_transaction().await?;
+        authorize_legacy_mutation(&mut txn, request.authenticated_fingerprint, &["training"])
+            .await?;
+        lease.check_live(&mut txn).await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Archive a leased download and atomically publish its current view and queue result.
+    pub async fn ingest_leased_legacy_fit(
+        &self,
+        request: LegacyFitCapture<'_>,
+        lease: &GarminJobLease,
+        source: impl Read + Seek + Send + 'static,
+        archive: Arc<Archive>,
+        put_limits: PutLimits,
+        export_limits: ExportLimits,
+    ) -> Result<FitIngestOutcome, FitIngestError> {
+        verify_job_scope(
+            lease,
+            request.activity_id,
+            request.authenticated_fingerprint,
+        )?;
+        let capture = self
+            .capture_export(
+                request,
+                source,
+                Arc::clone(&archive),
+                put_limits,
+                Some(lease),
+            )
+            .await?;
+        self.apply_export(&capture, archive, export_limits, Some(lease))
+            .await
+    }
+
+    /// Record a failed download without erasing the last success or normalized result.
+    pub async fn finish_legacy_fit_fetch_error(
+        &self,
+        request: LegacyFitCapture<'_>,
+        lease: &GarminJobLease,
+        reason: FailureReason,
+        retry_at: Option<StoredInstant>,
+    ) -> Result<(), FitIngestError> {
+        verify_job_scope(
+            lease,
+            request.activity_id,
+            request.authenticated_fingerprint,
+        )?;
+        let mut txn = self.fit_transaction().await?;
+        authorize_legacy_mutation(&mut txn, request.authenticated_fingerprint, &["training"])
+            .await?;
+        lease.check_live(&mut txn).await?;
+        record_freshness(
+            &mut txn,
+            request.activity_id,
+            request.fetched_at,
+            "fetch_error",
+            None,
+        )
+        .await?;
+        lease
+            .finish_in(&mut txn, JobOutcome::Failed { reason, retry_at })
+            .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
     /// Archive the complete original FIT or ZIP after checking owner and consent.
     pub async fn capture_legacy_activity_export(
+        &self,
+        request: LegacyFitCapture<'_>,
+        source: impl Read + Seek + Send + 'static,
+        archive: Arc<Archive>,
+        limits: PutLimits,
+    ) -> Result<CapturedFit, FitIngestError> {
+        self.capture_export(request, source, archive, limits, None)
+            .await
+    }
+
+    async fn capture_export(
         &self,
         request: LegacyFitCapture<'_>,
         mut source: impl Read + Seek + Send + 'static,
         archive: Arc<Archive>,
         mut limits: PutLimits,
+        lease: Option<&GarminJobLease>,
     ) -> Result<CapturedFit, FitIngestError> {
         limits.max_bytes = limits.max_bytes.min(MAX_FIT_BYTES);
         let mut txn = self.fit_transaction().await?;
         let state = format!("fit-version:{}", request.activity_id);
         lock_fit_scope(&mut txn, request.authenticated_fingerprint, &state).await?;
+        if let Some(lease) = lease {
+            lease.check_live(&mut txn).await?;
+        }
         let (mut txn, key, bytes) = tokio::task::spawn_blocking(move || {
             let bytes = source.seek(SeekFrom::End(0)).map_err(ArchiveError::from)?;
             if bytes > limits.max_bytes {
@@ -188,6 +293,9 @@ impl Database {
                 existing.0
             }
         };
+        if let Some(lease) = lease {
+            lease.check_live(&mut txn).await?;
+        }
         txn.commit().await?;
         Ok(CapturedFit {
             id,
@@ -207,13 +315,22 @@ impl Database {
         archive: Arc<Archive>,
         limits: ExportLimits,
     ) -> Result<FitIngestOutcome, FitIngestError> {
+        self.apply_export(capture, archive, limits, None).await
+    }
+
+    async fn apply_export(
+        &self,
+        capture: &CapturedFit,
+        archive: Arc<Archive>,
+        limits: ExportLimits,
+        lease: Option<&GarminJobLease>,
+    ) -> Result<FitIngestOutcome, FitIngestError> {
         let mut txn = self.fit_transaction().await?;
-        let current = LockedFit::open(&mut txn, capture).await?;
-        let early = current.short_circuit(&mut txn, capture).await?;
-        txn.commit().await?;
-        if let Some(outcome) = early {
-            return Ok(outcome);
+        let current = LockedFit::open(&mut txn, capture, lease).await?;
+        if let Some(outcome) = current.short_circuit(&mut txn, capture).await? {
+            return commit_outcome(txn, capture, lease, outcome).await;
         }
+        txn.commit().await?;
 
         let key = capture.key.clone();
         let maximum = limits.max_bytes.min(MAX_FIT_BYTES);
@@ -223,10 +340,10 @@ impl Database {
         .await
         .map_err(|_| FitIngestError::ArchiveTaskFailed)??;
         match self.stage_fit_projection(source, limits).await {
-            Ok(staged) => publish_staged(staged, capture).await,
+            Ok(staged) => publish_staged(staged, capture, lease).await,
             Err(FitStageError::Decode(error)) if permanent_decode_error(error) => {
                 let mut txn = self.fit_transaction().await?;
-                let current = LockedFit::open(&mut txn, capture).await?;
+                let current = LockedFit::open(&mut txn, capture, lease).await?;
                 let early = current.short_circuit(&mut txn, capture).await?;
                 let outcome = match early {
                     Some(outcome) => outcome,
@@ -236,8 +353,7 @@ impl Database {
                             .await?
                     }
                 };
-                txn.commit().await?;
-                Ok(outcome)
+                commit_outcome(txn, capture, lease, outcome).await
             }
             Err(error) => Err(FitIngestError::Stage(error)),
         }
@@ -253,6 +369,115 @@ impl Database {
             .map_err(CaptureError::Storage)?;
         Ok(txn)
     }
+}
+
+fn verify_job_scope(
+    lease: &GarminJobLease,
+    activity: &str,
+    fingerprint: &str,
+) -> Result<(), FitIngestError> {
+    let payload: Value =
+        serde_json::from_str(lease.payload_json()).map_err(|_| FitIngestError::WrongJob)?;
+    let matches_account = match payload.get("account") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(account)) => account.is_empty() || account == fingerprint,
+        _ => false,
+    };
+    if lease.kind() != GarminJobKind::Fit
+        || payload["activity_id"].as_str() != Some(activity)
+        || !matches_account
+    {
+        return Err(FitIngestError::WrongJob);
+    }
+    Ok(())
+}
+
+async fn commit_outcome(
+    mut txn: Transaction<'_, Postgres>,
+    capture: &CapturedFit,
+    lease: Option<&GarminJobLease>,
+    outcome: FitIngestOutcome,
+) -> Result<FitIngestOutcome, FitIngestError> {
+    if let Some(lease) = lease {
+        let status = match outcome {
+            FitIngestOutcome::Normalized { .. } => "normalized",
+            FitIngestOutcome::Unchanged => "unchanged",
+            FitIngestOutcome::Empty => "empty",
+            FitIngestOutcome::Stale => "stale",
+            FitIngestOutcome::Error { .. } => "error",
+        };
+        record_freshness(
+            &mut txn,
+            &capture.activity,
+            capture.requested_at,
+            status,
+            Some(capture.id),
+        )
+        .await?;
+        let job = if matches!(outcome, FitIngestOutcome::Error { .. }) {
+            JobOutcome::Failed {
+                reason: FailureReason::InvalidGarminWork,
+                retry_at: None,
+            }
+        } else {
+            JobOutcome::Completed
+        };
+        lease.finish_in(&mut txn, job).await?;
+    }
+    txn.commit().await?;
+    Ok(outcome)
+}
+
+async fn record_freshness(
+    txn: &mut Transaction<'_, Postgres>,
+    activity: &str,
+    requested_at: StoredInstant,
+    status: &str,
+    source: Option<Uuid>,
+) -> Result<(), FitIngestError> {
+    let key = format!("freshness:{ENDPOINT}:{activity}");
+    let old: Option<String> =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key = $1")
+            .bind(&key)
+            .fetch_optional(&mut **txn)
+            .await?;
+    let previous: Value = old
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|_| FitIngestError::InvalidRecordedState)?
+        .unwrap_or(Value::Null);
+    let last = previous["fetched_at"]
+        .as_str()
+        .or_else(|| previous["success_at"].as_str());
+    if let Some(last) = last {
+        let last = last
+            .parse::<StoredInstant>()
+            .map_err(|_| FitIngestError::InvalidRecordedState)?;
+        if last > requested_at {
+            return Ok(());
+        }
+    }
+    let fetched = json!(requested_at.to_string());
+    let success = if status == "fetch_error" {
+        &previous["success_at"]
+    } else {
+        &fetched
+    };
+    let normalized = if matches!(status, "error" | "stale" | "fetch_error") {
+        &previous["normalized_at"]
+    } else {
+        &fetched
+    };
+    put_state(
+        txn,
+        &key,
+        &json!({
+            "fetched_at": fetched, "success_at": success, "normalized_at": normalized,
+            "status": status, "source_key": activity, "source_ref": source.map(|id| id.to_string()),
+        }),
+    )
+    .await?;
+    Ok(())
 }
 
 fn legacy_archive_kind(
@@ -296,9 +521,13 @@ impl LockedFit {
     async fn open(
         txn: &mut Transaction<'_, Postgres>,
         capture: &CapturedFit,
+        lease: Option<&GarminJobLease>,
     ) -> Result<Self, FitIngestError> {
         let scope = capture.state_key();
         lock_fit_scope(txn, &capture.owner, &scope).await?;
+        if let Some(lease) = lease {
+            lease.check_live(txn).await?;
+        }
         let archive_key = capture.key.to_string();
         let activity_is_current = sqlx::query_scalar::<_, bool>(
             "SELECT fit_key IS NOT DISTINCT FROM $2
@@ -465,13 +694,13 @@ async fn update_raw(
 async fn publish_staged(
     staged: StagedFitProjection,
     capture: &CapturedFit,
+    lease: Option<&GarminJobLease>,
 ) -> Result<FitIngestOutcome, FitIngestError> {
     let inventory = staged.inventory();
     let mut txn = staged.transaction;
-    let current = LockedFit::open(&mut txn, capture).await?;
+    let current = LockedFit::open(&mut txn, capture, lease).await?;
     if let Some(outcome) = current.short_circuit(&mut txn, capture).await? {
-        txn.commit().await?;
-        return Ok(outcome);
+        return commit_outcome(txn, capture, lease, outcome).await;
     }
 
     let mut replacement = txn.begin().await?;
@@ -483,15 +712,19 @@ async fn publish_staged(
         let outcome = current
             .record_error(&mut txn, capture, "DatabaseError")
             .await?;
-        txn.commit().await?;
-        return Ok(outcome);
+        return commit_outcome(txn, capture, lease, outcome).await;
     }
     replacement.commit().await?;
     current.record_success(&mut txn, capture).await?;
-    txn.commit().await?;
-    Ok(FitIngestOutcome::Normalized {
-        rows: inventory.messages,
-    })
+    commit_outcome(
+        txn,
+        capture,
+        lease,
+        FitIngestOutcome::Normalized {
+            rows: inventory.messages,
+        },
+    )
+    .await
 }
 
 async fn replace_fit_rows(
