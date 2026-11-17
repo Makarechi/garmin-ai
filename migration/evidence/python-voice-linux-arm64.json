@@ -1,0 +1,269 @@
+{
+  "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+  "platform": "linux/arm64",
+  "docker_engine": "2 10 8319438848 7.0.14-linuxkit",
+  "application_image_id": "sha256:c99c94edb95f38260cb5fcde2f7949a02648641de086e2461065cc7ea41aa95c",
+  "database_image": "timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d",
+  "postgresql": "17.11",
+  "timescaledb": "2.29.2",
+  "migration_revision": "c54f8a72d130",
+  "limits": {
+    "shared_cpu_affinity": "1",
+    "database_memory_mib": 320,
+    "api_memory_mib": 192,
+    "worker_memory_mib": 384,
+    "migration_memory_mib": 256
+  },
+  "config": {
+    "shared_buffers": "64MB",
+    "effective_cache_size": "256MB",
+    "work_mem": "2MB",
+    "maintenance_work_mem": "32MB",
+    "max_connections": "40",
+    "max_parallel_workers_per_gather": "0",
+    "timescaledb.max_background_workers": "4"
+  },
+  "lifecycle": {
+    "database_ready_seconds": 6.021,
+    "migrated_seconds": 7.101,
+    "api_observed_ready_seconds": 10.542,
+    "worker_observed_ready_seconds": 10.872
+  },
+  "migration": {
+    "cpu.max": "max 100000",
+    "cpu.stat": "usage_usec 695100\nuser_usec 645732\nsystem_usec 49367\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+    "io.stat": "254:0 rbytes=3997696 wbytes=0 rios=130 wios=0 dbytes=0 dios=0",
+    "memory.current": "14360576",
+    "memory.peak": "87441408",
+    "memory.stat": "anon 6897664\nfile 3997696\nkernel 2912256\nkernel_stack 49152\npagetables 684032\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 4194304\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 6791168\ninactive_file 1769472\nactive_file 2228224\nunevictable 0\nslab_reclaimable 1620384\nslab_unreclaimable 492256\nslab 2112640\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 28309\npgmajfault 2\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 11\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+    "memory.max": "268435456",
+    "memory.swap.current": "0",
+    "memory.swap.max": "268435456",
+    "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+    "pids.current": "3",
+    "process_memory": "1\nName:\tsleep\nVmHWM:\t    1432 kB\nVmRSS:\t    1432 kB\nThreads:\t1\nPss:                 315 kB"
+  },
+  "idle_samples": [
+    {
+      "elapsed_seconds": 11.034,
+      "health_live_ms": 19.175,
+      "database": {
+        "cpu.max": "max 100000",
+        "cpu.stat": "usage_usec 1136822\nuser_usec 579596\nsystem_usec 557225\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "io.stat": "254:0 rbytes=1667072 wbytes=86913024 rios=282 wios=3475 dbytes=0 dios=0",
+        "memory.current": "130752512",
+        "memory.peak": "131014656",
+        "memory.stat": "anon 32280576\nfile 87179264\nkernel 11198464\nkernel_stack 294912\npagetables 3092480\nsec_pagetables 0\npercpu 30048\nsock 0\nvmalloc 16384\nshmem 13930496\nzswap 0\nzswapped 0\nfile_mapped 12722176\nfile_dirty 81920\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 46153728\ninactive_file 73248768\nactive_file 0\nunevictable 0\nslab_reclaimable 6355808\nslab_unreclaimable 1381848\nslab 7737656\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 347337\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 37\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.max": "335544320",
+        "memory.swap.current": "0",
+        "memory.swap.max": "469762048",
+        "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+        "pids.current": "18",
+        "process_memory": "1\nName:\tpostgres\nVmHWM:\t   23124 kB\nVmRSS:\t   23124 kB\nThreads:\t1\nPss:                6384 kB\n178\nName:\tpostgres\nVmHWM:\t    5612 kB\nVmRSS:\t    5612 kB\nThreads:\t1\nPss:                 526 kB\n179\nName:\tpostgres\nVmHWM:\t    5828 kB\nVmRSS:\t    5828 kB\nThreads:\t1\nPss:                 622 kB\n181\nName:\tpostgres\nVmHWM:\t    7788 kB\nVmRSS:\t    7788 kB\nThreads:\t1\nPss:                1475 kB\n182\nName:\tpostgres\nVmHWM:\t    8304 kB\nVmRSS:\t    8304 kB\nThreads:\t1\nPss:                 942 kB\n183\nName:\tpostgres\nVmHWM:\t    8792 kB\nVmRSS:\t    8792 kB\nThreads:\t1\nPss:                1053 kB\n184\nName:\tpostgres\nVmHWM:\t    7780 kB\nVmRSS:\t    7780 kB\nThreads:\t1\nPss:                 886 kB\n185\nName:\tpostgres\nVmHWM:\t   16716 kB\nVmRSS:\t   16716 kB\nThreads:\t1\nPss:                3440 kB\n186\nName:\tpostgres\nVmHWM:\t   16248 kB\nVmRSS:\t   16248 kB\nThreads:\t1\nPss:                2430 kB\n204\nName:\tpostgres\nVmHWM:\t   20416 kB\nVmRSS:\t   20416 kB\nThreads:\t1\nPss:                2979 kB\n205\nName:\tpostgres\nVmHWM:\t   27700 kB\nVmRSS:\t   25068 kB\nThreads:\t1\nPss:                5260 kB\n206\nName:\tpostgres\nVmHWM:\t   23652 kB\nVmRSS:\t   23652 kB\nThreads:\t1\nPss:                4192 kB\n207\nName:\tpostgres\nVmHWM:\t   26532 kB\nVmRSS:\t   23720 kB\nThreads:\t1\nPss:                4461 kB\n208\nName:\tpostgres\nVmHWM:\t   23388 kB\nVmRSS:\t   22716 kB\nThreads:\t1\nPss:                3693 kB\n209\nName:\tpostgres\nVmHWM:\t   26020 kB\nVmRSS:\t   24448 kB\nThreads:\t1\nPss:                4805 kB\n210\nName:\tpostgres\nVmHWM:\t   26504 kB\nVmRSS:\t   23984 kB\nThreads:\t1\nPss:                4469 kB"
+      },
+      "api": {
+        "cpu.max": "max 100000",
+        "cpu.stat": "usage_usec 920818\nuser_usec 864198\nsystem_usec 56619\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "io.stat": "",
+        "memory.current": "130539520",
+        "memory.peak": "130703360",
+        "memory.stat": "anon 124669952\nfile 0\nkernel 5107712\nkernel_stack 65536\npagetables 1179648\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 4194304\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 124571648\ninactive_file 0\nactive_file 0\nunevictable 0\nslab_reclaimable 2987208\nslab_unreclaimable 814488\nslab 3801696\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 35771\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 4\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.max": "201326592",
+        "memory.swap.current": "0",
+        "memory.swap.max": "201326592",
+        "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+        "pids.current": "4",
+        "process_memory": "1\nName:\tgarmin-ai\nVmHWM:\t  162984 kB\nVmRSS:\t  162984 kB\nThreads:\t2\nPss:              128473 kB"
+      },
+      "worker": {
+        "cpu.max": "max 100000",
+        "cpu.stat": "usage_usec 939456\nuser_usec 871205\nsystem_usec 68251\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "io.stat": "254:0 rbytes=19619840 wbytes=0 rios=201 wios=0 dbytes=0 dios=0",
+        "memory.current": "147972096",
+        "memory.peak": "148127744",
+        "memory.stat": "anon 122585088\nfile 19619840\nkernel 4820992\nkernel_stack 147456\npagetables 1097728\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 6291456\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 122552320\ninactive_file 1282048\nactive_file 18337792\nunevictable 0\nslab_reclaimable 2656280\nslab_unreclaimable 859344\nslab 3515624\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 34244\npgmajfault 10\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 5\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.max": "402653184",
+        "memory.swap.current": "0",
+        "memory.swap.max": "671088640",
+        "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+        "pids.current": "9",
+        "process_memory": "1\nName:\tgarmin-ai\nVmHWM:\t  165436 kB\nVmRSS:\t  165436 kB\nThreads:\t7\nPss:              128679 kB"
+      }
+    }
+  ],
+  "voice_workload": {
+    "audio_bytes_per_call": 20971520,
+    "duration_seconds_per_clip": 600,
+    "repetitions": 2,
+    "downloads": 2,
+    "provider_attempts": [
+      {
+        "model": "synthetic-primary",
+        "timeout_seconds": 60
+      },
+      {
+        "model": "synthetic-fallback",
+        "timeout_seconds": 60
+      },
+      {
+        "model": "synthetic-primary",
+        "timeout_seconds": 60
+      },
+      {
+        "model": "synthetic-fallback",
+        "timeout_seconds": 60
+      }
+    ],
+    "oversized_rejected_before_download": true,
+    "elapsed_seconds": 0.48,
+    "final_memory": {
+      "cpu.max": "max 100000",
+      "cpu.stat": "usage_usec 906205\nuser_usec 808024\nsystem_usec 98180\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+      "io.stat": "254:0 rbytes=4096 wbytes=0 rios=1 wios=0 dbytes=0 dios=0",
+      "memory.current": "8278016",
+      "memory.peak": "245628928",
+      "memory.stat": "anon 3796992\nfile 12288\nkernel 3530752\nkernel_stack 49152\npagetables 655360\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 4096\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 3784704\ninactive_file 12288\nactive_file 0\nunevictable 0\nslab_reclaimable 2275584\nslab_unreclaimable 491600\nslab 2767184\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 79052\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 18\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+      "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+      "memory.max": "402653184",
+      "memory.swap.current": "0",
+      "memory.swap.max": "671088640",
+      "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+      "pids.current": "3",
+      "process_memory": "1\nName:\tsleep\nVmHWM:\t    1448 kB\nVmRSS:\t    1448 kB\nThreads:\t1\nPss:                 260 kB"
+    },
+    "samples": [
+      {
+        "elapsed_seconds": 12.034,
+        "health_live_ms": 20.173,
+        "database": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 1160326\nuser_usec 589840\nsystem_usec 570485\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "254:0 rbytes=1667072 wbytes=86994944 rios=282 wios=3485 dbytes=0 dios=0",
+          "memory.current": "131043328",
+          "memory.peak": "134594560",
+          "memory.stat": "anon 32362496\nfile 87179264\nkernel 11202560\nkernel_stack 294912\npagetables 3055616\nsec_pagetables 0\npercpu 30048\nsock 0\nvmalloc 16384\nshmem 13930496\nzswap 0\nzswapped 0\nfile_mapped 12763136\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 46252032\ninactive_file 73248768\nactive_file 0\nunevictable 0\nslab_reclaimable 6400120\nslab_unreclaimable 1383160\nslab 7783280\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 354161\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 37\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "335544320",
+          "memory.swap.current": "0",
+          "memory.swap.max": "469762048",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "18",
+          "process_memory": "1\nName:\tpostgres\nVmHWM:\t   23124 kB\nVmRSS:\t   23124 kB\nThreads:\t1\nPss:                6384 kB\n178\nName:\tpostgres\nVmHWM:\t    5612 kB\nVmRSS:\t    5612 kB\nThreads:\t1\nPss:                 526 kB\n179\nName:\tpostgres\nVmHWM:\t    5828 kB\nVmRSS:\t    5828 kB\nThreads:\t1\nPss:                 622 kB\n181\nName:\tpostgres\nVmHWM:\t    7788 kB\nVmRSS:\t    7788 kB\nThreads:\t1\nPss:                1474 kB\n182\nName:\tpostgres\nVmHWM:\t    8304 kB\nVmRSS:\t    8304 kB\nThreads:\t1\nPss:                 942 kB\n183\nName:\tpostgres\nVmHWM:\t    8792 kB\nVmRSS:\t    8792 kB\nThreads:\t1\nPss:                1053 kB\n184\nName:\tpostgres\nVmHWM:\t    7780 kB\nVmRSS:\t    7780 kB\nThreads:\t1\nPss:                 886 kB\n185\nName:\tpostgres\nVmHWM:\t   16716 kB\nVmRSS:\t   16716 kB\nThreads:\t1\nPss:                3440 kB\n186\nName:\tpostgres\nVmHWM:\t   16248 kB\nVmRSS:\t   16248 kB\nThreads:\t1\nPss:                2430 kB\n204\nName:\tpostgres\nVmHWM:\t   20416 kB\nVmRSS:\t   20416 kB\nThreads:\t1\nPss:                2979 kB\n205\nName:\tpostgres\nVmHWM:\t   27700 kB\nVmRSS:\t   25108 kB\nThreads:\t1\nPss:                5266 kB\n206\nName:\tpostgres\nVmHWM:\t   23652 kB\nVmRSS:\t   23652 kB\nThreads:\t1\nPss:                4192 kB\n207\nName:\tpostgres\nVmHWM:\t   26532 kB\nVmRSS:\t   23784 kB\nThreads:\t1\nPss:                4486 kB\n208\nName:\tpostgres\nVmHWM:\t   23624 kB\nVmRSS:\t   22784 kB\nThreads:\t1\nPss:                3723 kB\n209\nName:\tpostgres\nVmHWM:\t   26020 kB\nVmRSS:\t   24500 kB\nThreads:\t1\nPss:                4820 kB\n210\nName:\tpostgres\nVmHWM:\t   26504 kB\nVmRSS:\t   24044 kB\nThreads:\t1\nPss:                4492 kB"
+        },
+        "api": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 932526\nuser_usec 873745\nsystem_usec 58781\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "",
+          "memory.current": "129077248",
+          "memory.peak": "131387392",
+          "memory.stat": "anon 123658240\nfile 0\nkernel 4984832\nkernel_stack 65536\npagetables 1056768\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 2097152\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 123564032\ninactive_file 0\nactive_file 0\nunevictable 0\nslab_reclaimable 2988496\nslab_unreclaimable 815552\nslab 3804048\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 38247\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 4\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "201326592",
+          "memory.swap.current": "0",
+          "memory.swap.max": "201326592",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "4",
+          "process_memory": "1\nName:\tgarmin-ai\nVmHWM:\t  162992 kB\nVmRSS:\t  162992 kB\nThreads:\t2\nPss:              127857 kB"
+        },
+        "worker": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 975292\nuser_usec 904837\nsystem_usec 70454\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "254:0 rbytes=19619840 wbytes=0 rios=201 wios=0 dbytes=0 dios=0",
+          "memory.current": "144019456",
+          "memory.peak": "148824064",
+          "memory.stat": "anon 118923264\nfile 19619840\nkernel 4780032\nkernel_stack 147456\npagetables 1089536\nsec_pagetables 0\npercpu 26976\nsock 4096\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 4194304\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 118870016\ninactive_file 1282048\nactive_file 18337792\nunevictable 0\nslab_reclaimable 2669456\nslab_unreclaimable 813096\nslab 3482552\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 36935\npgmajfault 10\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 5\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "402653184",
+          "memory.swap.current": "0",
+          "memory.swap.max": "671088640",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "9",
+          "process_memory": "1\nName:\tgarmin-ai\nVmHWM:\t  166240 kB\nVmRSS:\t  166240 kB\nThreads:\t7\nPss:              128794 kB"
+        },
+        "workload": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 393813\nuser_usec 371393\nsystem_usec 22420\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "",
+          "memory.current": "44244992",
+          "memory.peak": "46993408",
+          "memory.stat": "anon 41066496\nfile 4096\nkernel 2297856\nkernel_stack 65536\npagetables 737280\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 40968192\ninactive_file 4096\nactive_file 0\nunevictable 0\nslab_reclaimable 909264\nslab_unreclaimable 528464\nslab 1437728\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 15957\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 2\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "402653184",
+          "memory.swap.current": "0",
+          "memory.swap.max": "671088640",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "4",
+          "process_memory": "1\nName:\tsh\nVmHWM:\t    1404 kB\nVmRSS:\t    1404 kB\nThreads:\t1\nPss:                 268 kB\n7\nName:\tpython\nVmHWM:\t   54444 kB\nVmRSS:\t   54444 kB\nThreads:\t1\nPss:               42375 kB"
+        }
+      },
+      {
+        "elapsed_seconds": 13.015,
+        "health_live_ms": 19.221,
+        "database": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 1184882\nuser_usec 604698\nsystem_usec 580184\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "254:0 rbytes=1667072 wbytes=86994944 rios=282 wios=3485 dbytes=0 dios=0",
+          "memory.current": "130793472",
+          "memory.peak": "134594560",
+          "memory.stat": "anon 32403456\nfile 87179264\nkernel 11083776\nkernel_stack 294912\npagetables 2940928\nsec_pagetables 0\npercpu 30048\nsock 0\nvmalloc 16384\nshmem 13930496\nzswap 0\nzswapped 0\nfile_mapped 12763136\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 0\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 46272512\ninactive_file 73248768\nactive_file 0\nunevictable 0\nslab_reclaimable 6393056\nslab_unreclaimable 1381488\nslab 7774544\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 361092\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 37\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "335544320",
+          "memory.swap.current": "0",
+          "memory.swap.max": "469762048",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "18",
+          "process_memory": "1\nName:\tpostgres\nVmHWM:\t   23124 kB\nVmRSS:\t   23124 kB\nThreads:\t1\nPss:                6384 kB\n178\nName:\tpostgres\nVmHWM:\t    5612 kB\nVmRSS:\t    5612 kB\nThreads:\t1\nPss:                 526 kB\n179\nName:\tpostgres\nVmHWM:\t    5828 kB\nVmRSS:\t    5828 kB\nThreads:\t1\nPss:                 622 kB\n181\nName:\tpostgres\nVmHWM:\t    7788 kB\nVmRSS:\t    7788 kB\nThreads:\t1\nPss:                1474 kB\n182\nName:\tpostgres\nVmHWM:\t    8304 kB\nVmRSS:\t    8304 kB\nThreads:\t1\nPss:                 942 kB\n183\nName:\tpostgres\nVmHWM:\t    8792 kB\nVmRSS:\t    8792 kB\nThreads:\t1\nPss:                1054 kB\n184\nName:\tpostgres\nVmHWM:\t    7780 kB\nVmRSS:\t    7780 kB\nThreads:\t1\nPss:                 886 kB\n185\nName:\tpostgres\nVmHWM:\t   16716 kB\nVmRSS:\t   16716 kB\nThreads:\t1\nPss:                3440 kB\n186\nName:\tpostgres\nVmHWM:\t   16248 kB\nVmRSS:\t   16248 kB\nThreads:\t1\nPss:                2430 kB\n204\nName:\tpostgres\nVmHWM:\t   20416 kB\nVmRSS:\t   20416 kB\nThreads:\t1\nPss:                2979 kB\n205\nName:\tpostgres\nVmHWM:\t   27700 kB\nVmRSS:\t   25108 kB\nThreads:\t1\nPss:                5266 kB\n206\nName:\tpostgres\nVmHWM:\t   23652 kB\nVmRSS:\t   23652 kB\nThreads:\t1\nPss:                4192 kB\n207\nName:\tpostgres\nVmHWM:\t   26544 kB\nVmRSS:\t   23800 kB\nThreads:\t1\nPss:                4502 kB\n208\nName:\tpostgres\nVmHWM:\t   23624 kB\nVmRSS:\t   22796 kB\nThreads:\t1\nPss:                3735 kB\n209\nName:\tpostgres\nVmHWM:\t   26020 kB\nVmRSS:\t   24516 kB\nThreads:\t1\nPss:                4836 kB\n210\nName:\tpostgres\nVmHWM:\t   26504 kB\nVmRSS:\t   24044 kB\nThreads:\t1\nPss:                4492 kB"
+        },
+        "api": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 943984\nuser_usec 883114\nsystem_usec 60870\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "",
+          "memory.current": "131956736",
+          "memory.peak": "132251648",
+          "memory.stat": "anon 126795776\nfile 0\nkernel 5107712\nkernel_stack 65536\npagetables 1175552\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 6291456\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 126783488\ninactive_file 0\nactive_file 0\nunevictable 0\nslab_reclaimable 2993080\nslab_unreclaimable 817792\nslab 3810872\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 40443\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 6\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "201326592",
+          "memory.swap.current": "0",
+          "memory.swap.max": "201326592",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "4",
+          "process_memory": "1\nName:\tgarmin-ai\nVmHWM:\t  163008 kB\nVmRSS:\t  163008 kB\nThreads:\t2\nPss:              126659 kB"
+        },
+        "worker": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 1002147\nuser_usec 927315\nsystem_usec 74832\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "254:0 rbytes=19619840 wbytes=0 rios=201 wios=0 dbytes=0 dios=0",
+          "memory.current": "147193856",
+          "memory.peak": "148824064",
+          "memory.stat": "anon 122400768\nfile 19619840\nkernel 4952064\nkernel_stack 147456\npagetables 1200128\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\nswapcached 0\nanon_thp 4194304\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 122294272\ninactive_file 1282048\nactive_file 18337792\nunevictable 0\nslab_reclaimable 2678160\nslab_unreclaimable 859584\nslab 3537744\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 39401\npgmajfault 10\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 5\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "402653184",
+          "memory.swap.current": "0",
+          "memory.swap.max": "671088640",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "9",
+          "process_memory": "1\nName:\tgarmin-ai\nVmHWM:\t  166244 kB\nVmRSS:\t  166244 kB\nThreads:\t7\nPss:              126877 kB"
+        },
+        "workload": {
+          "cpu.max": "max 100000",
+          "cpu.stat": "usage_usec 877170\nuser_usec 786023\nsystem_usec 91147\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+          "io.stat": "254:0 rbytes=4096 wbytes=0 rios=1 wios=0 dbytes=0 dios=0",
+          "memory.current": "10842112",
+          "memory.peak": "245628928",
+          "memory.stat": "anon 6897664\nfile 12288\nkernel 3436544\nkernel_stack 49152\npagetables 569344\nsec_pagetables 0\npercpu 27168\nsock 0\nvmalloc 16384\nshmem 0\nzswap 0\nzswapped 0\nfile_mapped 0\nfile_dirty 4096\nfile_writeback 0\nswapcached 0\nanon_thp 4194304\nfile_thp 0\nshmem_thp 0\ninactive_anon 0\nactive_anon 6819840\ninactive_file 12288\nactive_file 0\nunevictable 0\nslab_reclaimable 2266880\nslab_unreclaimable 489496\nslab 2756376\nworkingset_refault_anon 0\nworkingset_refault_file 0\nworkingset_activate_anon 0\nworkingset_activate_file 0\nworkingset_restore_anon 0\nworkingset_restore_file 0\nworkingset_nodereclaim 0\npgdemote_kswapd 0\npgdemote_direct 0\npgdemote_khugepaged 0\npgdemote_proactive 0\npgscan 0\npgsteal 0\npswpin 0\npswpout 0\npgscan_kswapd 0\npgscan_direct 0\npgscan_khugepaged 0\npgscan_proactive 0\npgsteal_kswapd 0\npgsteal_direct 0\npgsteal_khugepaged 0\npgsteal_proactive 0\npgfault 73602\npgmajfault 0\npgrefill 0\npgactivate 0\npgdeactivate 0\npglazyfree 0\npglazyfreed 0\nswpin_zero 0\nswpout_zero 0\nzswpin 0\nzswpout 0\nzswpwb 0\nthp_fault_alloc 18\nthp_collapse_alloc 0\nthp_swpout 0\nthp_swpout_fallback 0",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+          "memory.max": "402653184",
+          "memory.swap.current": "0",
+          "memory.swap.max": "671088640",
+          "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0",
+          "pids.current": "3",
+          "process_memory": "1\nName:\tsleep\nVmHWM:\t    1448 kB\nVmRSS:\t    1448 kB\nThreads:\t1\nPss:                 260 kB"
+        }
+      }
+    ]
+  }
+}
