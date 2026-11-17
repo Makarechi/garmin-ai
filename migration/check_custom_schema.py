@@ -77,6 +77,54 @@ def examples():
                             }
                         }
                     )
+    for pivot in (2**53, 2**64, 2**170, 10**308):
+        for sign in (-1, 1):
+            bound = pivot * sign
+            yield root({"value": {"type": "integer", "minimum": bound + 1, "maximum": bound}})
+            yield root({"value": {"type": "integer", "minimum": bound, "maximum": bound + 1}})
+            yield root(
+                {
+                    "value": {
+                        "type": "integer",
+                        "exclusiveMinimum": bound,
+                        "exclusiveMaximum": bound + 1,
+                    }
+                }
+            )
+            yield root(
+                {
+                    "value": {
+                        "type": "integer",
+                        "exclusiveMinimum": bound,
+                        "exclusiveMaximum": bound + 2,
+                    }
+                }
+            )
+            yield root({"value": {"type": "number", "minimum": bound + 1, "maximum": float(bound)}})
+            yield root({"value": {"type": "number", "minimum": float(bound), "maximum": bound}})
+            yield root(
+                {
+                    "value": {
+                        "type": "integer",
+                        "minimum": bound,
+                        "maximum": bound + 1,
+                        "enum": [bound - 1],
+                    }
+                }
+            )
+            yield root(
+                {
+                    "value": {
+                        "type": "number",
+                        "oneOf": [{"const": bound}, {"const": bound + 1}],
+                        "minimum": bound,
+                        "maximum": bound + 1,
+                    }
+                }
+            )
+    yield root({"value": {"type": "number", "minimum": 0, "maximum": 10**309}})
+    yield root({"value": {"type": "integer", "enum": [10**309]}})
+    yield root({"value": {"type": "integer", "exclusiveMinimum": -0.0, "maximum": 0}})
     for name in ("Target", "bad/path", "", "bad space", "missing"):
         yield root({"value": {"$ref": LOCAL + name}}, **{"$defs": {"Target": BOUNDED}})
     yield root({"value": {"$ref": "file:///synthetic"}})

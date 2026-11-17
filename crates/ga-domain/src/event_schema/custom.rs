@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{cmp::Ordering, collections::BTreeSet, error::Error, fmt};
+
+use num_bigint::{BigInt, ToBigInt};
 
 use serde_json::{Map, Value, json};
 
@@ -345,57 +347,117 @@ fn bounded(node: &Node, minimum: &str, maximum: &str, limit: u64) -> Result<(), 
     }
 }
 
+struct ExactNumber {
+    // Python compares integer inputs without converting them to double.
+    // Decimal/exponent inputs have already taken Python's binary64 path.
+    integer: BigInt,
+    fraction: f64,
+    fits_f64: bool,
+}
+
+impl ExactNumber {
+    fn read(value: &Value) -> Option<Self> {
+        let value = value.as_number()?;
+        if let Ok(integer) = value.as_str().parse::<BigInt>() {
+            return Some(Self {
+                integer,
+                fraction: 0.0,
+                fits_f64: value.as_f64().is_some_and(f64::is_finite),
+            });
+        }
+        let float = value.as_f64().filter(|value| value.is_finite())?;
+        Some(Self {
+            integer: float.to_bigint()?,
+            fraction: float.fract(),
+            fits_f64: true,
+        })
+    }
+
+    fn floor(&self) -> BigInt {
+        &self.integer - i32::from(self.fraction < 0.0)
+    }
+
+    fn ceil(&self) -> BigInt {
+        &self.integer + i32::from(self.fraction > 0.0)
+    }
+}
+
+impl PartialEq for ExactNumber {
+    fn eq(&self, other: &Self) -> bool {
+        self.integer == other.integer && self.fraction == other.fraction
+    }
+}
+impl Eq for ExactNumber {}
+impl PartialOrd for ExactNumber {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ExactNumber {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.integer.cmp(&other.integer).then_with(|| {
+            self.fraction
+                .partial_cmp(&other.fraction)
+                .unwrap_or(Ordering::Equal)
+        })
+    }
+}
+
 fn finite_numbers(node: &Node, integer_only: bool) -> Result<(), CustomSchemaError> {
     let number = |key| {
         node.get(key)
             .map(|bound| {
-                bound
-                    .as_f64()
-                    .filter(|bound| bound.is_finite())
+                ExactNumber::read(bound)
+                    .filter(|bound| bound.fits_f64)
                     .ok_or(CustomSchemaError::Constraint)
             })
             .transpose()
     };
-    let min = number("minimum")?.unwrap_or(f64::NEG_INFINITY);
-    let max = number("maximum")?.unwrap_or(f64::INFINITY);
-    let exclusive_min = number("exclusiveMinimum")?.unwrap_or(f64::NEG_INFINITY);
-    let exclusive_max = number("exclusiveMaximum")?.unwrap_or(f64::INFINITY);
-    let mut lower = min.max(exclusive_min);
-    let mut upper = max.min(exclusive_max);
+    let min = number("minimum")?;
+    let max = number("maximum")?;
+    let exclusive_min = number("exclusiveMinimum")?;
+    let exclusive_max = number("exclusiveMaximum")?;
     let members = node.get("enum").and_then(Value::as_array);
     let singleton = node.get("const");
     let declared = members.map_or_else(
         || singleton.into_iter().collect::<Vec<_>>(),
         |values| values.iter().collect(),
     );
-    let mut literal_min = f64::INFINITY;
-    let mut literal_max = f64::NEG_INFINITY;
-    for value in declared.into_iter().filter_map(Value::as_f64) {
-        if value < min || value > max || value <= exclusive_min || value >= exclusive_max {
+    let literals: Vec<_> = declared.into_iter().filter_map(ExactNumber::read).collect();
+    for value in &literals {
+        if min.as_ref().is_some_and(|bound| value < bound)
+            || max.as_ref().is_some_and(|bound| value > bound)
+            || exclusive_min.as_ref().is_some_and(|bound| value <= bound)
+            || exclusive_max.as_ref().is_some_and(|bound| value >= bound)
+        {
             return Err(CustomSchemaError::Contradiction);
         }
-        literal_min = literal_min.min(value);
-        literal_max = literal_max.max(value);
     }
-    if literal_min.is_finite() {
-        lower = lower.max(literal_min);
-        upper = upper.min(literal_max);
-    }
-    if !lower.is_finite()
-        || !upper.is_finite()
-        || lower > upper
-        || (lower == upper && (exclusive_min == lower || exclusive_max == upper))
-    {
+    let lower = [min.as_ref(), exclusive_min.as_ref(), literals.iter().min()]
+        .into_iter()
+        .flatten()
+        .max()
+        .filter(|bound| bound.fits_f64)
+        .ok_or(CustomSchemaError::Constraint)?;
+    let upper = [max.as_ref(), exclusive_max.as_ref(), literals.iter().max()]
+        .into_iter()
+        .flatten()
+        .min()
+        .filter(|bound| bound.fits_f64)
+        .ok_or(CustomSchemaError::Constraint)?;
+    let open_lower = exclusive_min.as_ref() == Some(lower);
+    let open_upper = exclusive_max.as_ref() == Some(upper);
+    if lower > upper || (lower == upper && (open_lower || open_upper)) {
         return Err(CustomSchemaError::Constraint);
     }
     if integer_only {
-        let first = if exclusive_min == lower {
-            lower.floor() + 1.0
+        let first = if open_lower {
+            lower.floor() + 1
         } else {
             lower.ceil()
         };
-        let last = if exclusive_max == upper {
-            upper.ceil() - 1.0
+        let last = if open_upper {
+            upper.ceil() - 1
         } else {
             upper.floor()
         };
@@ -408,9 +470,13 @@ fn finite_numbers(node: &Node, integer_only: bool) -> Result<(), CustomSchemaErr
 
 fn python_equal(left: &Value, right: &Value) -> bool {
     let number = |value: &Value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_bool().map(|value| f64::from(u8::from(value))))
+        ExactNumber::read(value).or_else(|| {
+            value.as_bool().map(|value| ExactNumber {
+                integer: BigInt::from(u8::from(value)),
+                fraction: 0.0,
+                fits_f64: true,
+            })
+        })
     };
     if let (Some(left), Some(right)) = (number(left), number(right)) {
         return left == right;

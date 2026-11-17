@@ -771,6 +771,7 @@ dependencies = [
  "jiff",
  "jiter",
  "jsonschema",
+ "num-bigint",
  "serde_json",
  "sha2 0.11.1",
  "speedate",
