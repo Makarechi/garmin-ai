@@ -12,6 +12,7 @@ pub mod garmin_summary;
 pub mod identity;
 pub mod language_tags;
 pub mod legacy_json;
+pub mod legacy_metrics;
 pub mod source_contract;
 pub mod statistics;
 pub mod text_offsets;
