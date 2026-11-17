@@ -360,7 +360,7 @@ fn has_timed_points(endpoint: &str, payload: &Value) -> Result<bool, ReplayInput
     Ok(false)
 }
 
-async fn legacy_application_order_unknown(
+pub(in crate::replay) async fn legacy_application_order_unknown(
     txn: &mut Transaction<'_, Postgres>,
     raw: &ReplaySource,
     max_bytes: u64,

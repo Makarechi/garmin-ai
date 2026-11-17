@@ -105,12 +105,13 @@ pub(super) async fn publish_measurements(
     Ok(changed)
 }
 
-pub(super) async fn record_application(
+pub(crate) async fn record_application(
     txn: &mut Transaction<'_, Postgres>,
     request: &ApplyActivity<'_>,
     endpoint: &str,
     document: &Value,
     attestation: Option<&HealthReplacement>,
+    replaying: bool,
 ) -> Result<(), DocumentError> {
     if replacement_channels(endpoint).is_empty()
         || (attestation.is_none()
@@ -142,13 +143,19 @@ pub(super) async fn record_application(
             }
         }
     };
+    let entry = json!({
+        "raw_ref": request.source_id.to_string(),
+        "at": request.requested_at.to_string(),
+        "timezone": request.timezone,
+        "replacement": attestation.map(HealthReplacement::document),
+    });
+    if replaying && applications.contains(&entry) {
+        return Ok(());
+    }
     if applications.len() >= MAX_HISTORY {
         return Err(DocumentError::InvalidRecordedState);
     }
-    applications.push(json!({
-        "raw_ref": request.source_id.to_string(), "at": request.requested_at.to_string(),
-        "timezone": request.timezone, "replacement": attestation.map(HealthReplacement::document),
-    }));
+    applications.push(entry);
     put_state(txn, &key, &json!({"applications": applications})).await?;
     Ok(())
 }

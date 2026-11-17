@@ -3,6 +3,9 @@ mod observations;
 mod replacement;
 mod samples;
 
+pub(crate) use replacement::remove as remove_attested_samples;
+pub(crate) use samples::record_application as record_sample_application;
+
 use ga_domain::garmin_health::{
     HealthProjection, HealthReplacement, HealthStatus, normalize_health_payload,
 };
@@ -58,7 +61,7 @@ pub(super) async fn publish(
     )
     .await?;
     if !unchanged && (status == HealthStatus::Normalized || attestation.is_some()) {
-        samples::record_application(txn, request, endpoint, &document, attestation).await?;
+        samples::record_application(txn, request, endpoint, &document, attestation, false).await?;
     }
     if let Some(attestation) = attestation {
         changed |= replacement::changed(txn, attestation).await?;
@@ -116,6 +119,38 @@ pub(crate) async fn rebuild_calendar(
     )
     .await?
     {
+        supersede_insights(txn).await?;
+    }
+    Ok(status)
+}
+
+pub(crate) async fn rebuild_intraday_view(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &ApplyActivity<'_>,
+    endpoint: &str,
+    projection: HealthProjection,
+    parser_changed: bool,
+    preceding: Option<&str>,
+) -> Result<HealthStatus, DocumentError> {
+    if parser_changed {
+        if let Some(day) = projection.day {
+            daily::clear_owned_fields(txn, day, request.source_id).await?;
+        }
+        observations::preserve_for_replay(txn, request.source_id).await?;
+    }
+    let status = projection.status;
+    let changed = publish_projection(
+        txn,
+        request,
+        endpoint,
+        projection,
+        ProjectionWrite::Replay {
+            publish_sleep: false,
+            preceding,
+        },
+    )
+    .await?;
+    if changed {
         supersede_insights(txn).await?;
     }
     Ok(status)
