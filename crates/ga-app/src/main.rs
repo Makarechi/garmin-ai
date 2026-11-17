@@ -1,5 +1,6 @@
 mod authorization;
 mod http;
+mod replay_worker;
 
 use std::{env, ffi::OsStr, process::ExitCode};
 
@@ -24,6 +25,12 @@ enum Command {
         host: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+    },
+    /// Restore projections from the local Garmin archive
+    Replay {
+        /// Run one planning pass and process at most one due job
+        #[arg(long)]
+        once: bool,
     },
 }
 
@@ -60,6 +67,12 @@ fn main() -> ExitCode {
         Some(Command::Serve { host, port }) => {
             if http::serve(&host, port).is_err() {
                 eprintln!("Could not run the HTTP server.");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Replay { once }) => {
+            if let Err(error) = replay_worker::run(once) {
+                eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
         }

@@ -94,7 +94,33 @@ pub(crate) async fn verify_owner_in_transaction(
     if !is_fingerprint(authenticated_fingerprint) {
         return Err(OwnerVerificationError::InvalidFingerprint);
     }
-    let rows = sqlx::query_as::<_, BindingRow>(
+    let rows = owner_bindings(txn).await?;
+    verify_binding(&rows, authenticated_fingerprint)
+}
+
+/// Existing cryptographic identity only. Offline maintenance never enrolls an owner.
+pub(crate) async fn stored_garmin_fingerprint(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<Option<String>, OwnerVerificationError> {
+    let rows = owner_bindings(txn).await?;
+    match rows.as_slice() {
+        [] | [(_, None, false, None)] => Ok(None),
+        [(_, canonical, _, legacy)] => {
+            let candidate = canonical
+                .as_deref()
+                .or(legacy.as_deref())
+                .ok_or(OwnerVerificationError::InvalidStoredBinding)?;
+            verify_binding(&rows, candidate)?;
+            Ok(Some(candidate.to_owned()))
+        }
+        _ => Err(OwnerVerificationError::InvalidStoredBinding),
+    }
+}
+
+async fn owner_bindings(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<BindingRow>, sqlx::Error> {
+    sqlx::query_as::<_, BindingRow>(
         "SELECT people.id, connection.external_id, legacy.key IS NOT NULL,
                     CASE WHEN jsonb_typeof(legacy.value->'fingerprint') = 'string'
                          THEN legacy.value->>'fingerprint' END
@@ -107,8 +133,7 @@ pub(crate) async fn verify_owner_in_transaction(
     .bind(EXISTING_NAMESPACE)
     .bind(LEGACY_BINDING_KEY)
     .fetch_all(&mut **txn)
-    .await?;
-    verify_binding(&rows, authenticated_fingerprint)
+    .await
 }
 
 fn verify_binding(
