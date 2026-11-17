@@ -17,6 +17,7 @@ const DELIVERY_POLICY_LOCK: i64 = 72104621;
 const CONTEXT_DELIVERY_LOCK: i64 = 72104643;
 const PRIMARY_CHANNEL: &str = "telegram:primary";
 const PENDING_KEY: &str = "analysis:conversation:pending";
+const POLICY_REVISION: u8 = 1;
 
 pub struct TrackerShareGrant<'a> {
     pub definition_id: Uuid,
@@ -33,7 +34,12 @@ struct SavedConsent {
     destination_instance_id: String,
     categories: Vec<ShareCategory>,
     granted_at: String,
+    #[serde(default = "legacy_policy_revision")]
     policy_revision: u8,
+}
+
+fn legacy_policy_revision() -> u8 {
+    1
 }
 
 impl Database {
@@ -76,7 +82,7 @@ impl Database {
                 if record.definition_id.parse::<Uuid>().ok() != Some(grant.definition_id)
                     || record.destination_kind != grant.destination.kind()
                     || record.destination_instance_id != grant.destination.instance()
-                    || record.policy_revision != 1
+                    || record.policy_revision != POLICY_REVISION
                     || record.granted_at.parse::<StoredInstant>().is_err()
                     || record.categories.is_empty()
                 {
@@ -111,7 +117,7 @@ impl Database {
                 "destination_instance_id": grant.destination.instance(),
                 "categories": categories,
                 "granted_at": granted_at,
-                "policy_revision": 1,
+                "policy_revision": POLICY_REVISION,
             });
             sqlx::query(
                 "INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)

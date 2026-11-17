@@ -197,6 +197,7 @@ def fixtures(engine):
         ),
         ("channel_facts_removed", "grant", SECONDARY, ["schema"], DEFINITION, AT, True),
         ("missing_consent", "revoke", "telegram:missing", [], DEFINITION, AT, True),
+        ("unsupported_revision", "grant", MODEL, ["schema"], DEFINITION, AT, True),
         ("model_schema_removed", "grant", MODEL, ["facts", "original_text"], DEFINITION, AT, True),
         ("model_original_text_removed", "grant", MODEL, ["facts"], DEFINITION, AT, True),
         ("revoke_model", "revoke", MODEL, [], DEFINITION, AT, True),
@@ -216,6 +217,15 @@ def fixtures(engine):
     results = []
     for name, operation, instance, categories, definition, at, authorized in steps:
         kind = "model" if instance.startswith("model:") else "channel"
+        if name in {"unsupported_revision", "model_schema_removed", "model_original_text_removed"}:
+            with Session(engine) as session, session.begin():
+                current = session.get(AppState, f"tracker-consent:{definition}:{kind}:{instance}")
+                data = dict(current.value)
+                if name == "model_original_text_removed":
+                    del data["policy_revision"]
+                else:
+                    data["policy_revision"] = 2 if name == "unsupported_revision" else 1
+                current.value = data
         try:
             with Session(engine) as session, session.begin():
                 if operation == "grant":
@@ -253,7 +263,11 @@ def fixtures(engine):
         )
     assert results[5]["state"]["outbox"]["secondary-match"] == ["cancelled", False]
     assert results[5]["state"]["outbox"]["primary-match"] == ["queued", True]
-    assert "analysis_turns" not in results[8]["state"]["conversations"][str(UUID(int=100))][0]
+    by_name = {result["name"]: result for result in results}
+    assert by_name["unsupported_revision"]["outcome"] == "invalid"
+    narrowed = by_name["model_original_text_removed"]
+    assert narrowed["outcome"] == "granted"
+    assert "analysis_turns" not in narrowed["state"]["conversations"][str(UUID(int=100))][0]
     return results
 
 

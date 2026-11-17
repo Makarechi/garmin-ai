@@ -67,6 +67,23 @@ async fn changes_consent_and_retires_only_affected_context() -> Result<(), Box<d
             categories: &case.categories,
             granted_at,
         };
+        let saved_revision = match case.name.as_str() {
+            "unsupported_revision" => Some(Some(2_i32)),
+            "model_schema_removed" => Some(Some(1)),
+            "model_original_text_removed" => Some(None),
+            _ => None,
+        };
+        if let Some(revision) = saved_revision {
+            let key = format!("tracker-consent:{definition_id}:model:{}", case.instance);
+            sqlx::query(
+                "UPDATE app_state SET value=CASE WHEN $2::int IS NULL THEN value-'policy_revision'
+                   ELSE jsonb_set(value,'{policy_revision}',to_jsonb($2::int)) END WHERE key=$1",
+            )
+            .bind(key)
+            .bind(revision)
+            .execute(&inspect)
+            .await?;
+        }
         if case.name == "channel_facts_removed" {
             let previous = snapshot(&inspect).await?;
             for lock in [72_104_631_i64, 72_104_643] {
