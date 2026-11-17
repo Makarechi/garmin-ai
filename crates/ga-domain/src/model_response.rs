@@ -5,7 +5,7 @@ use std::{error::Error, fmt};
 use jsonschema::Validator;
 use serde_json::Value;
 
-const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_USAGE_TOKENS: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
