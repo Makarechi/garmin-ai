@@ -23,6 +23,14 @@ impl StoredInstant {
         crate::event_time::aware(value)
     }
 
+    /// Interpret a timestamp and keep its display offset for a timeline boundary.
+    pub fn legacy_input_with_offset(value: &serde_json::Value) -> Option<OffsetDateTime> {
+        let parsed = crate::event_time::parse_aware_datetime(value)?;
+        let offset = UtcOffset::from_whole_seconds(parsed.time.tz_offset?).ok()?;
+        let at = OffsetDateTime::from(crate::event_time::as_stored_instant(parsed)?);
+        at.checked_to_offset(offset)
+    }
+
     pub fn from_unix_microseconds(value: i64) -> Result<Self, InvalidStoredInstant> {
         let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000)
             .map_err(|_| InvalidStoredInstant)?;

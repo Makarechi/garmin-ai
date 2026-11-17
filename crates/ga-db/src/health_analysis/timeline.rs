@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
-use super::{HealthAnalysisError, begin_verified_analysis, check_calendar_bounds};
+use super::{DailyHealthReader, HealthAnalysisError, check_calendar_bounds};
 use crate::{
     Database,
     diary::{DiaryReadError, owner_events_in},
@@ -164,67 +164,107 @@ impl Database {
         start: OffsetDateTime,
         end: OffsetDateTime,
     ) -> Result<Vec<u8>, TimelineError> {
-        let utc_start: OffsetDateTime = StoredInstant::try_from(start)
-            .map_err(|_| TimelineError::TimestampRange)?
-            .into();
-        let utc_end: OffsetDateTime = StoredInstant::try_from(end)
-            .map_err(|_| TimelineError::TimestampRange)?
-            .into();
-        check_calendar_bounds(utc_start.date(), utc_end.date()).map_err(TimelineError::Health)?;
-        if !(0..=32).contains(&(utc_end.date() - utc_start.date()).whole_days()) {
-            return Err(TimelineError::CalendarRange);
-        }
-        if start >= end || end - start > time::Duration::days(31) {
-            return Err(TimelineError::TimestampRange);
-        }
-        let (mut annotations, events) = tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = begin_verified_analysis(&self.work)
+        timeline_range(start, end)?;
+        let (annotations, events) = tokio::time::timeout(Duration::from_millis(1500), async {
+            self.verified_health_reader()
                 .await
-                .map_err(TimelineError::Health)?;
-            let mut annotations = read_intervals(&mut txn, start, end).await?;
-            let events = owner_events_in(&mut txn, utc_start, utc_end, None, MAX_ANNOTATIONS)
+                .map_err(TimelineError::Health)?
+                .timeline_snapshot(start, end)
                 .await
-                .map_err(TimelineError::Diary)?;
-            let entries = events["rows"].as_array().ok_or(TimelineError::Database)?;
-            if events["truncated"] == true
-                || annotations.len() + entries.len() > usize::from(MAX_ANNOTATIONS)
-            {
-                return Err(TimelineError::AnnotationLimit);
-            }
-            for entry in entries {
-                annotations.push(Annotation::from_event(entry, start, end)?);
-            }
-            txn.commit().await?;
-            Ok((annotations, events))
         })
         .await
         .map_err(|_| TimelineError::Database)??;
-
-        for annotation in &mut annotations {
-            let evidence =
-                serde_json::to_vec(&annotation.evidence).map_err(|_| TimelineError::Database)?;
-            annotation.evidence_order =
-                encode_ascii(&evidence, Utf8Layout::Archive, MAX_EVIDENCE_BYTES)
-                    .map_err(|_| TimelineError::ResponseLimit)?;
-        }
-        annotations.sort_by(|left, right| {
-            (
-                left.layer,
-                left.start,
-                left.end,
-                &left.source,
-                &left.evidence_order,
-            )
-                .cmp(&(
-                    right.layer,
-                    right.start,
-                    right.end,
-                    &right.source,
-                    &right.evidence_order,
-                ))
-        });
-        render::timeline(start, end, &annotations, &events)
+        render_timeline(start, end, annotations, &events)
     }
+}
+
+impl DailyHealthReader {
+    /// Keep the HTTP request's replay fence and display offsets through the timeline read.
+    pub async fn owner_timeline(
+        self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> Result<Vec<u8>, TimelineError> {
+        timeline_range(start, end)?;
+        let (annotations, events) = tokio::time::timeout(
+            Duration::from_millis(1500),
+            self.timeline_snapshot(start, end),
+        )
+        .await
+        .map_err(|_| TimelineError::Database)??;
+        render_timeline(start, end, annotations, &events)
+    }
+
+    async fn timeline_snapshot(
+        mut self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> Result<(Vec<Annotation>, Value), TimelineError> {
+        let mut annotations = read_intervals(&mut self.0, start, end).await?;
+        let events = owner_events_in(&mut self.0, start, end, None, MAX_ANNOTATIONS)
+            .await
+            .map_err(TimelineError::Diary)?;
+        let entries = events["rows"].as_array().ok_or(TimelineError::Database)?;
+        if events["truncated"] == true
+            || annotations.len() + entries.len() > usize::from(MAX_ANNOTATIONS)
+        {
+            return Err(TimelineError::AnnotationLimit);
+        }
+        for entry in entries {
+            annotations.push(Annotation::from_event(entry, start, end)?);
+        }
+        self.0.commit().await?;
+        Ok((annotations, events))
+    }
+}
+
+fn timeline_range(start: OffsetDateTime, end: OffsetDateTime) -> Result<(), TimelineError> {
+    let utc_start: OffsetDateTime = StoredInstant::try_from(start)
+        .map_err(|_| TimelineError::TimestampRange)?
+        .into();
+    let utc_end: OffsetDateTime = StoredInstant::try_from(end)
+        .map_err(|_| TimelineError::TimestampRange)?
+        .into();
+    check_calendar_bounds(utc_start.date(), utc_end.date()).map_err(TimelineError::Health)?;
+    if !(0..=32).contains(&(utc_end.date() - utc_start.date()).whole_days()) {
+        return Err(TimelineError::CalendarRange);
+    }
+    if start >= end || end - start > time::Duration::days(31) {
+        return Err(TimelineError::TimestampRange);
+    }
+    Ok(())
+}
+
+fn render_timeline(
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    mut annotations: Vec<Annotation>,
+    events: &Value,
+) -> Result<Vec<u8>, TimelineError> {
+    for annotation in &mut annotations {
+        let evidence =
+            serde_json::to_vec(&annotation.evidence).map_err(|_| TimelineError::Database)?;
+        annotation.evidence_order =
+            encode_ascii(&evidence, Utf8Layout::Archive, MAX_EVIDENCE_BYTES)
+                .map_err(|_| TimelineError::ResponseLimit)?;
+    }
+    annotations.sort_by(|left, right| {
+        (
+            left.layer,
+            left.start,
+            left.end,
+            &left.source,
+            &left.evidence_order,
+        )
+            .cmp(&(
+                right.layer,
+                right.start,
+                right.end,
+                &right.source,
+                &right.evidence_order,
+            ))
+    });
+    render::timeline(start, end, &annotations, events)
 }
 
 async fn read_intervals(
