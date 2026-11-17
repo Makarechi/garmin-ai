@@ -5,7 +5,12 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use time::{Date, Month};
 
-use crate::{Database, ReadinessError, check_readiness};
+use crate::{
+    Database, ReadinessError,
+    activity_documents::PARSER_VERSION,
+    check_readiness,
+    replay::{REPLAY_MUTATION_LOCK, projection_pending},
+};
 
 const MAX_RANGE_DAYS: i64 = 3660;
 
@@ -15,6 +20,7 @@ pub enum HealthAnalysisError {
     DateRange,
     Overlap,
     Storage(ReadinessError),
+    ReplayPending,
     Database,
 }
 
@@ -25,6 +31,7 @@ impl fmt::Display for HealthAnalysisError {
             Self::DateRange => "Date range must be ordered and at most 3660 days",
             Self::Overlap => "Comparison periods must not overlap",
             Self::Storage(_) => "Health analysis storage is unavailable",
+            Self::ReplayPending => "Garmin projections are being rebuilt",
             Self::Database => "Daily metrics could not be read",
         })
     }
@@ -71,7 +78,7 @@ impl Database {
         period: HealthPeriod,
     ) -> Result<Value, HealthAnalysisError> {
         let (metric, query) = daily_metric(metric)?;
-        let mut txn = begin_daily_analysis(&self.work).await?;
+        let mut txn = begin_verified_analysis(&self.work).await?;
         let values = observed_values(&mut txn, query, period).await?;
         txn.commit().await?;
         let description = describe(values.iter().map(|(_, value)| Some(*value)));
@@ -88,7 +95,7 @@ impl Database {
             return Err(HealthAnalysisError::Overlap);
         }
         let (metric, query) = daily_metric(metric)?;
-        let mut txn = begin_daily_analysis(&self.work).await?;
+        let mut txn = begin_verified_analysis(&self.work).await?;
         let first_values = observed_values(&mut txn, query, first).await?;
         let second_values = observed_values(&mut txn, query, second).await?;
         txn.commit().await?;
@@ -110,6 +117,23 @@ impl Database {
             ],
         }))
     }
+}
+
+async fn begin_verified_analysis(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, HealthAnalysisError> {
+    let mut txn = begin_daily_analysis(pool).await?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
+        .bind(REPLAY_MUTATION_LOCK)
+        .fetch_one(&mut *txn)
+        .await?;
+    if !locked {
+        return Err(HealthAnalysisError::Storage(ReadinessError::Unavailable));
+    }
+    if projection_pending(&mut txn, PARSER_VERSION).await? {
+        return Err(HealthAnalysisError::ReplayPending);
+    }
+    Ok(txn)
 }
 
 async fn begin_daily_analysis(

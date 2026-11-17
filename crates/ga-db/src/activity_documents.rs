@@ -16,7 +16,7 @@ use crate::{
     raw_capture::{CaptureError, GARMIN_LEGACY_SOURCE, lock_legacy_scope},
 };
 
-const PARSER_VERSION: i32 = 9;
+pub(crate) const PARSER_VERSION: i32 = 9;
 
 #[derive(Clone, Copy)]
 pub enum ActivityDocument {

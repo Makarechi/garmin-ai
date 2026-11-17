@@ -6,10 +6,9 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{ReplaySelectionError, source_page};
+use super::{REPLAY_MUTATION_LOCK, ReplaySelectionError, source_page};
 use crate::{Database, check_readiness, garmin_owner::verify_owner_in_transaction};
 
-const REPLAY_WRITE_LOCK: i64 = 72104619;
 const MAX_QUEUE: i64 = 100;
 const MAX_SCHEDULE: i64 = 25;
 const SOURCE_CURSOR_KEY: &str = "replay:source_scan_cursor";
@@ -71,7 +70,7 @@ impl Database {
             .await
             .map_err(ReplaySelectionError::Owner)?;
         let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(REPLAY_WRITE_LOCK)
+            .bind(REPLAY_MUTATION_LOCK)
             .fetch_one(&mut *txn)
             .await?;
         if !acquired {

@@ -1,6 +1,9 @@
 mod queue;
+mod status;
 
 pub use queue::{ReplaySchedule, ScheduleReplay};
+pub use status::ReplayStatus;
+pub(crate) use status::{REPLAY_MUTATION_LOCK, projection_pending};
 
 use std::{error::Error, fmt, time::Duration};
 
