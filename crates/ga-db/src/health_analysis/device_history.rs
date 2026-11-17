@@ -10,7 +10,7 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{HealthAnalysisError, begin_verified_analysis, check_calendar_bounds};
+use super::{DailyHealthReader, HealthAnalysisError, check_calendar_bounds};
 use crate::{Database, replay::GARMIN_PARSER_VERSION};
 
 const MAX_ACTIVITIES: u16 = 200;
@@ -101,26 +101,63 @@ impl Database {
         end: StoredInstant,
         limit: u16,
     ) -> Result<Value, DeviceHistoryError> {
-        let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
-        check_calendar_bounds(start.date(), end.date())?;
-        if !(0..=367).contains(&(end.date() - start.date()).whole_days()) {
-            return Err(DeviceHistoryError::CalendarRange);
-        }
-        if start >= end || end - start > time::Duration::days(366) {
-            return Err(DeviceHistoryError::TimestampRange);
-        }
-        if !(1..=MAX_ACTIVITIES).contains(&limit) {
-            return Err(DeviceHistoryError::Limit);
-        }
+        let (start, end) = device_range(start, end, limit)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = begin_verified_analysis(&self.work).await?;
-            let result = read_history(&mut txn, start, end, limit).await?;
-            txn.commit().await?;
-            serde_json::to_value(result).map_err(|_| HealthAnalysisError::Database.into())
+            self.verified_health_reader()
+                .await?
+                .read_device_history(start, end, limit)
+                .await
         })
         .await
         .map_err(|_| HealthAnalysisError::Database)?
     }
+}
+
+impl DailyHealthReader {
+    pub async fn device_history(
+        self,
+        start: StoredInstant,
+        end: StoredInstant,
+        limit: u16,
+    ) -> Result<Value, DeviceHistoryError> {
+        let (start, end) = device_range(start, end, limit)?;
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            self.read_device_history(start, end, limit),
+        )
+        .await
+        .map_err(|_| HealthAnalysisError::Database)?
+    }
+
+    async fn read_device_history(
+        mut self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        limit: u16,
+    ) -> Result<Value, DeviceHistoryError> {
+        let result = read_history(&mut self.0, start, end, limit).await?;
+        self.0.commit().await?;
+        serde_json::to_value(result).map_err(|_| HealthAnalysisError::Database.into())
+    }
+}
+
+fn device_range(
+    start: StoredInstant,
+    end: StoredInstant,
+    limit: u16,
+) -> Result<(OffsetDateTime, OffsetDateTime), DeviceHistoryError> {
+    let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
+    check_calendar_bounds(start.date(), end.date())?;
+    if !(0..=367).contains(&(end.date() - start.date()).whole_days()) {
+        return Err(DeviceHistoryError::CalendarRange);
+    }
+    if start >= end || end - start > time::Duration::days(366) {
+        return Err(DeviceHistoryError::TimestampRange);
+    }
+    if !(1..=MAX_ACTIVITIES).contains(&limit) {
+        return Err(DeviceHistoryError::Limit);
+    }
+    Ok((start, end))
 }
 
 async fn read_history(

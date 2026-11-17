@@ -6,17 +6,21 @@ import os
 import subprocess
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import httpx
 from capture_reference import isolated_engine
 from check_activity_reads import seed as seed_activities
+from check_device_history import seed as seed_devices
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import HealthDay, SourcePayload, TimelineInterval
+from garmin_ai.models import AppState, HealthDay, SourcePayload, TimelineInterval
 
 TOKENS = {
     "health": "synthetic-health-http-token-" + "a" * 20,
@@ -29,13 +33,25 @@ SCOPED = [
     {"key": TOKENS["diary"], "scopes": ["read:diary"]},
     {"key": TOKENS["both"], "scopes": ["read:health", "read:diary"]},
 ]
-TOOLS = {"health_snapshot", "health_range", "activities", "activity_details", "events", "timeline"}
+TOOLS = {
+    "health_snapshot",
+    "health_range",
+    "activities",
+    "activity_details",
+    "events",
+    "timeline",
+    "device_history",
+    "data_freshness",
+}
 SNAPSHOT = "/tools/health_snapshot"
 RANGE = "/tools/health_range"
 ACTIVITIES = "/tools/activities"
 DETAILS = "/tools/activity_details"
 EVENTS = "/tools/events"
 TIMELINE = "/tools/timeline"
+DEVICES = "/tools/device_history"
+FRESHNESS = "/tools/data_freshness"
+SETUP_ZONE = "Pacific/Kiritimati"
 
 
 def seed(engine):
@@ -84,6 +100,24 @@ def seed_timeline(engine):
                 session,
                 EventInput(start=begin, payload=payload, original_text="synthetic input"),
                 actor="fixture",
+            )
+
+
+def seed_freshness(engine):
+    now = datetime.now(UTC)
+    dates = {now.date(), now.astimezone(ZoneInfo(SETUP_ZONE)).date()}
+    with Session(engine) as session, session.begin():
+        for day in dates:
+            session.add(
+                AppState(
+                    key=f"freshness:daily:{day}",
+                    value={
+                        "source_key": str(day),
+                        "success_at": (now - timedelta(minutes=30)).isoformat(),
+                        "fetched_at": (now - timedelta(seconds=20)).isoformat(),
+                        "status": "normalized",
+                    },
+                )
             )
 
 
@@ -216,6 +250,35 @@ def diary_cases():
         yield ("POST", TIMELINE, "both", {"arguments": arguments})
 
 
+def history_cases():
+    period = {"start": "2026-10-25T11:00:00+02:00", "end": "2026-10-29T12:00:00Z"}
+    for token in ("diary", "invalid", None):
+        yield ("POST", DEVICES, token, {"arguments": period})
+        yield ("POST", FRESHNESS, token, {})
+    for arguments in [
+        period,
+        {**period, "limit": 1},
+        {**period, "limit": "+2.000"},
+        {**period, "limit": True},
+        {**period, "limit": 0},
+        {**period, "limit": 201},
+        {**period, "limit": "2.5"},
+        {**period, "limit": None},
+        {**period, "end": "2026-10-25T11:00:00+02:00"},
+        {**period, "end": "2026-10-25T10:30:00"},
+        {**period, "end": "2027-11-01T00:00:00Z"},
+        {**period, "kind": "running"},
+        {},
+        {"start": "2026-10-30T00:00:00Z", "end": "2026-10-31T00:00:00Z"},
+    ]:
+        yield ("POST", DEVICES, "health", {"arguments": arguments})
+    yield ("POST", FRESHNESS, "health", {})
+    yield ("POST", FRESHNESS, "both", {"arguments": {}})
+    yield ("POST", FRESHNESS, "health", {"arguments": {"day": "2026-10-25"}})
+    yield ("POST", FRESHNESS, "health", {"arguments": []})
+    yield ("GET", FRESHNESS, "health", None)
+
+
 def compare(python, native, cases):
     count = 0
     for method, route, credential, body in cases:
@@ -223,8 +286,19 @@ def compare(python, native, cases):
         payload = None if body is None else json.dumps(body).encode()
         if payload is not None:
             headers["Content-Type"] = "application/json"
-        expected = python.request(method, route, headers=headers, content=payload)
         actual = native.request(method, route, headers=headers, content=payload)
+        if route == FRESHNESS and actual.status_code == 200:
+            at = datetime.fromisoformat(actual.json()["checked_at"])
+
+            class RequestClock(datetime):
+                @classmethod
+                def now(cls, tz=None, *, instant=at):
+                    return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+            with patch("garmin_ai.queries.datetime", RequestClock):
+                expected = python.request(method, route, headers=headers, content=payload)
+        else:
+            expected = python.request(method, route, headers=headers, content=payload)
         desc = (method, route, credential, body)
         assert expected.status_code == actual.status_code, (desc, expected.status_code, actual.text)
         for name in ("cache-control", "allow", "retry-after"):
@@ -251,13 +325,16 @@ def run(binary):
         seed(engine)
         seed_activities(engine)
         seed_timeline(engine)
-        settings = Settings(api_tokens=SCOPED, api_key="")
+        seed_devices(engine)
+        seed_freshness(engine)
+        settings = Settings(api_tokens=SCOPED, api_key="", timezone="UTC")
         with TestClient(create_app(settings, engine=engine)) as python:
             with subprocess.Popen(
                 [binary, "serve", "--port", "0"],
                 env={
                     "GA_DATABASE_URL": os.environ["GA_TEST_DATABASE_URL"],
                     "GA_API_TOKENS": json.dumps(SCOPED),
+                    "GA_TIMEZONE": "UTC",
                 },
                 stdout=subprocess.PIPE,
                 text=True,
@@ -269,6 +346,13 @@ def run(binary):
                         count = compare(python, native, initial_cases())
                         count += compare(python, native, activity_cases())
                         count += compare(python, native, diary_cases())
+                        count += compare(python, native, history_cases())
+                        with Session(engine) as session, session.begin():
+                            session.execute(
+                                text("UPDATE people SET timezone=:zone"), {"zone": SETUP_ZONE}
+                            )
+                            session.add(AppState(key="preferences:onboarding", value={}))
+                        count += compare(python, native, [("POST", FRESHNESS, "health", {})])
                         with Session(engine) as session, session.begin():
                             session.add(
                                 SourcePayload(
@@ -295,6 +379,9 @@ def run(binary):
                                 ("POST", DETAILS, "diary", {"arguments": {"activity_id": "run"}}),
                                 ("POST", TIMELINE, "both", {}),
                                 ("POST", TIMELINE, "diary", {}),
+                                ("POST", DEVICES, "health", {}),
+                                ("POST", DEVICES, "diary", {}),
+                                ("POST", FRESHNESS, "health", {}),
                                 (
                                     "POST",
                                     EVENTS,

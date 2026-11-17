@@ -53,9 +53,38 @@ impl Database {
         at: StoredInstant,
         timezone: &str,
     ) -> Result<Value, HealthAnalysisError> {
-        let (today, midnight) = freshness_day(at, timezone)?;
+        self.freshness_report(at, timezone, false).await
+    }
+
+    /// Prefer the saved owner timezone once onboarding has selected preferences.
+    pub async fn owner_data_freshness(
+        &self,
+        at: StoredInstant,
+        configured_timezone: &str,
+    ) -> Result<Value, HealthAnalysisError> {
+        self.freshness_report(at, configured_timezone, true).await
+    }
+
+    async fn freshness_report(
+        &self,
+        at: StoredInstant,
+        configured_timezone: &str,
+        owner_preferences: bool,
+    ) -> Result<Value, HealthAnalysisError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = begin_daily_analysis(&self.work).await?;
+            let selected: Option<String> = if owner_preferences {
+                sqlx::query_scalar(
+                    "SELECT timezone FROM people
+                    WHERE EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding')",
+                )
+                .fetch_optional(&mut *txn)
+                .await?
+            } else {
+                None
+            };
+            let timezone = selected.as_deref().unwrap_or(configured_timezone);
+            let (today, midnight) = freshness_day(at, timezone)?;
             let report = read_report(&mut txn, at, today, midnight).await?;
             txn.commit().await?;
             Ok(report)
