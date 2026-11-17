@@ -1,5 +1,12 @@
 //! Local validation of the structured diary interpretation returned by a model.
 
+mod time_evidence;
+
+pub use time_evidence::TimeClarification;
+
+use crate::timestamp::StoredInstant;
+use time::OffsetDateTime;
+
 use std::{collections::BTreeSet, error::Error, fmt, sync::OnceLock};
 
 use jsonschema::Validator;
@@ -50,6 +57,7 @@ pub struct DraftLink {
 pub struct AgentInterpretation {
     intent: AgentIntent,
     events: Vec<EventInput>,
+    reported_times: Vec<[Option<OffsetDateTime>; 2]>,
     draft_links: Vec<DraftLink>,
     target_event_id: Option<Uuid>,
     target_question_id: Option<Uuid>,
@@ -96,7 +104,8 @@ impl AgentInterpretation {
         let confidence = value["confidence"]
             .as_f64()
             .ok_or(InterpretationError::InvalidResponse)?;
-        let events = items(&value["events"])
+        let drafts = items(&value["events"]);
+        let events = drafts
             .iter()
             .map(|event| {
                 let bytes =
@@ -112,6 +121,15 @@ impl AgentInterpretation {
         {
             return Err(InterpretationError::MissingEvents);
         }
+        let reported_times = drafts
+            .iter()
+            .map(|draft| {
+                [
+                    StoredInstant::legacy_input_with_offset(&draft["start"]),
+                    StoredInstant::legacy_input_with_offset(&draft["end"]),
+                ]
+            })
+            .collect();
         let target_event_id = optional_uuid(&value["target_event_id"])?;
         if matches!(intent, AgentIntent::Update | AgentIntent::Close) && target_event_id.is_none() {
             return Err(InterpretationError::TargetRequired);
@@ -129,6 +147,7 @@ impl AgentInterpretation {
             intent,
             confidence,
             events,
+            reported_times,
             draft_links,
             target_event_id,
             question_context_ids,

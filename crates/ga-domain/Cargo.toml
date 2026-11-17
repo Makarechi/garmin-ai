@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 base64 = "0.22.1"
+fancy-regex = { version = "=0.20.2", default-features = false, features = ["std", "unicode"] }
 jiff = { version = "1.0.0", default-features = false, features = ["std", "tzdb-zoneinfo"] }
 jiter = "0.18"
 num-bigint = "0.4.8"
