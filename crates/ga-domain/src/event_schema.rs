@@ -1,4 +1,7 @@
 mod custom;
+mod specification;
+pub use specification::{CustomDefinition, CustomDefinitionError};
+
 pub use custom::{CustomSchemaError, validate_custom_schema};
 
 use std::{error::Error, fmt};

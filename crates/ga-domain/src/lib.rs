@@ -10,6 +10,7 @@ pub mod file_import;
 pub mod garmin_health;
 pub mod garmin_summary;
 pub mod identity;
+pub mod language_tags;
 pub mod legacy_json;
 pub mod source_contract;
 pub mod statistics;
