@@ -1,8 +1,10 @@
 mod consent_records;
 mod consent_writes;
+mod outbound;
 
 pub use consent_records::TrackerShareConsent;
 pub use consent_writes::TrackerShareGrant;
+pub(crate) use outbound::intent_sharing_allowed;
 
 use std::{error::Error, fmt, future::Future, time::Duration};
 
