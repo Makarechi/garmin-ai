@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "handoff_sha": "d22be2a87cb7c71137dd8556ec1763f4aee3ea0e",
+  "git_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+  "delta_from_handoff": [
+    {
+      "pull_request": 204,
+      "change_sha": "959501f4",
+      "summary": "Safe Gemini failure diagnostics and worker handling",
+      "paths": [
+        "docs/provider-cooldown.md",
+        "src/garmin_ai/llm.py",
+        "src/garmin_ai/runtime.py",
+        "tests/test_gemini_failure_diagnostics.py"
+      ]
+    }
+  ],
+  "dependencies": {
+    "lockfile": "uv.lock",
+    "lockfile_sha256": "40f02df60e24153d69265a6a48b29773352399cdf93f3b7c52a4dee83bbbd609",
+    "python": "3.15.2",
+    "uv": "0.13.5",
+    "pytest": "9.1.1",
+    "playwright": "1.63.0"
+  },
+  "database": {
+    "test_image": "timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d",
+    "postgresql_observed_local": "17.11",
+    "timescaledb_observed_local": "2.29.2",
+    "alembic_head": "c54f8a72d130",
+    "alembic_observed_local": "c54f8a72d130",
+    "production_access": false
+  },
+  "images": {
+    "python_base": "python:3.15.2-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd",
+    "uv_base": "ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff",
+    "local_application_linux_arm64_manifest": "sha256:628e7075f36b5d928279f4df8933f43488ff17c48efe73744a677981e531172c",
+    "ci_application_linux_amd64_registry_digest": "sha256:7c4b66572c1ec8e8c78b607d5ead37e02ea0746f079f58f313f1af6303c85397"
+  },
+  "test_collection": {
+    "command": "pytest --collect-only -q",
+    "exit_code": 0,
+    "profile": "full",
+    "test_count": 4369,
+    "nodeids_path": "migration/baseline-test-nodeids.txt",
+    "nodeids_sha256": "5015fd5b0bbaefbf2f4e6f3f2fdf19dcd937f4b8062069ee2c80cb1268d45727"
+  },
+  "verification": {
+    "live_services_used": false,
+    "ci_run": "https://github.com/Makarechi/garmin-ai/actions/runs/43986714123",
+    "ci_full": {
+      "exit_code": 1,
+      "counts": {
+        "tests": 4369,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 80,
+        "passed": 4288
+      },
+      "failed_cases": [
+        {
+          "nodeid": "tests/test_agent_telegram.py::test_slow_job_coordination_keeps_heartbeat_running[checkins]",
+          "outcome": "failure",
+          "detail": "The synthetic slow check-in did not start within the test deadline. This was observed on main before the Rust work."
+        }
+      ],
+      "skipped_by_reason": {
+        "Explicit live Anthropic opt-in required": [
+          "tests/test_anthropic_live.py::test_selected_anthropic_model_handles_synthetic_safety_screen"
+        ],
+        "Explicit live Gemini opt-in required": [
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043a\\u043e\\u0444\\u0435 \\u0431\\u044b\\u043b \\u0432 11-log-caffeine]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u0434\\u0432\\u0430 \\u044d\\u0441\\u043f\\u0440\\u0435\\u0441\\u0441\\u043e \\u043f\\u043e\\u0441\\u043b\\u0435 \\u043e\\u0431\\u0435\\u0434\\u0430-clarify-None]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043c\\u0438\\u0433\\u0440\\u0435\\u043d\\u044c \\u043d\\u0430\\u0447\\u0430\\u043b\\u0430\\u0441\\u044c \\u0447\\u0430\\u0441\\u0430 \\u0434\\u0432\\u0430 \\u043d\\u0430\\u0437\\u0430\\u0434, 6 \\u0438\\u0437 10-log-migraine]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u0442\\u0430\\u0431\\u043b\\u0435\\u0442\\u043a\\u0443 \\u0432\\u044b\\u043f\\u0438\\u043b \\u0447\\u0435\\u0440\\u0435\\u0437 20 \\u043c\\u0438\\u043d\\u0443\\u0442-clarify-None]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043e\\u0442\\u043c\\u0435\\u043d\\u0438 \\u043f\\u043e\\u0441\\u043b\\u0435\\u0434\\u043d\\u044e\\u044e \\u0437\\u0430\\u043f\\u0438\\u0441\\u044c-undo-None]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043a\\u043e\\u0444\\u0435 \\u0432 11 \\u0438 \\u043c\\u0438\\u0433\\u0440\\u0435\\u043d\\u044c \\u0432 13, \\u0431\\u043e\\u043b\\u044c 6 \\u0438\\u0437 10-log-caffeine]",
+          "tests/test_gemini_live.py::test_live_english_diary[I had coffee at 11:00.-log-caffeine]",
+          "tests/test_gemini_live.py::test_live_english_diary[I had two espressos after lunch.-clarify-None]",
+          "tests/test_gemini_live.py::test_live_close_and_correction",
+          "tests/test_gemini_live.py::test_live_voice_transcription",
+          "tests/test_gemini_live.py::test_live_button_refinement_changes_existing_episode",
+          "tests/test_gemini_live.py::test_live_urgent_report_bypasses_stalled_diary",
+          "tests/test_gemini_live.py::test_live_close_selects_bounded_candidates_in_large_diary",
+          "tests/test_gemini_live.py::test_live_oversized_transcript_detects_urgent_report",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u041a\\u043e\\u0433\\u0434\\u0430 \\u044f \\u0437\\u0430\\u0441\\u043d\\u0443\\u043b \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f?-2026-10-15T21:42:37+00:00-start-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u041a\\u043e\\u0433\\u0434\\u0430 \\u044f \\u0437\\u0430\\u0441\\u043d\\u0443\\u043b \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f?-2026-10-15T22:17:37+00:00-start-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u0412\\u043e \\u0441\\u043a\\u043e\\u043b\\u044c\\u043a\\u043e \\u044f \\u0432\\u0447\\u0435\\u0440\\u0430 \\u0432\\u0435\\u0447\\u0435\\u0440\\u043e\\u043c \\u043b\\u0451\\u0433 \\u0441\\u043f\\u0430\\u0442\\u044c?-2026-10-15T21:42:37+00:00-start-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u041a\\u043e\\u0433\\u0434\\u0430 \\u044f \\u043f\\u0440\\u043e\\u0441\\u043d\\u0443\\u043b\\u0441\\u044f \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f?-2026-10-15T21:42:37+00:00-end-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[What time did I fall asleep today?-2026-10-15T21:42:37+00:00-start-en]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[When did I wake up today?-2026-10-15T21:42:37+00:00-end-en]",
+          "tests/test_gemini_live.py::test_live_informal_english_sleep_question_selects_a_valid_sleep_read"
+        ],
+        "Explicit live OpenAI opt-in required": [
+          "tests/test_openai_live.py::test_selected_openai_model_handles_synthetic_safety_screen"
+        ],
+        "Requires a case-insensitive filesystem": [
+          "tests/test_deployment.py::test_setup_detects_case_aliases_in_storage_roots[GA_TOKEN_DIR]",
+          "tests/test_deployment.py::test_setup_detects_case_aliases_in_storage_roots[GA_BACKUP_DIR]",
+          "tests/test_deployment.py::test_setup_detects_case_aliases_in_storage_roots[GA_LOCK_DIR]"
+        ],
+        "could not import 'synthetic_adapters': No module named 'synthetic_adapters'": [
+          "tests/test_extension_tck.py::test_installed_source_and_channel_pass_contract_kit",
+          "tests/test_extension_tck.py::test_source_probe_rejects_mapping_page_even_if_schema_valid",
+          "tests/test_extension_tck.py::test_installation_does_not_enable_plugin_and_instances_stay_separate",
+          "tests/test_extension_tck.py::test_runtime_starts_and_closes_selected_channel",
+          "tests/test_extension_tck.py::test_runtime_rejects_initiative_channel_without_text",
+          "tests/test_extension_tck.py::test_channel_plugin_retries_transient_start_failure",
+          "tests/test_extension_tck.py::test_plugin_initiative_runs_while_telegram_startup_is_unavailable",
+          "tests/test_extension_tck.py::test_channel_selection_change_activates_configured_plugin_without_restart",
+          "tests/test_extension_tck.py::test_web_only_worker_still_queues_pull_based_reminders",
+          "tests/test_extension_tck.py::test_unavailable_plugin_primary_is_exposed_to_fallback_delivery",
+          "tests/test_extension_tck.py::test_runtime_rejects_duplicate_derived_channel_destinations",
+          "tests/test_extension_tck.py::test_fallback_telegram_does_not_receive_primary_insight_notices",
+          "tests/test_extension_tck.py::test_direct_telegram_notice_requires_primary_channel",
+          "tests/test_extension_tck.py::test_runtime_delivers_neutral_initiative_through_selected_channel",
+          "tests/test_extension_tck.py::test_initiative_claim_refreshes_time_after_delivery_fences",
+          "tests/test_extension_tck.py::test_source_contract_rejects_duplicate_records_and_payload_on_deletion",
+          "tests/test_extension_tck.py::test_source_payload_has_bounded_json_shape_and_size",
+          "tests/test_extension_tck.py::test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals",
+          "tests/test_extension_tck.py::test_calendar_day_probe_uses_source_local_day_overlap",
+          "tests/test_extension_tck.py::test_channel_probe_uses_provider_and_rejects_foreign_receipt",
+          "tests/test_extension_tck.py::test_channel_probe_accepts_configured_synthetic_recipient",
+          "tests/test_extension_tck.py::test_channel_probe_reports_optional_capabilities_as_unverified",
+          "tests/test_extension_tck.py::test_channel_text_probe_rejects_advertised_voice_render",
+          "tests/test_extension_tck.py::test_channel_text_probe_rejects_unrequested_optional_rendering",
+          "tests/test_extension_tck.py::test_declared_status_does_not_require_local_plugin_config_or_secrets",
+          "tests/test_extension_tck.py::test_model_probe_closes_adapter_after_failure",
+          "tests/test_extension_tck.py::test_model_probe_accepts_any_schema_valid_boolean",
+          "tests/test_source_metric_plugin.py::test_installed_source_projects_paginated_records",
+          "tests/test_source_runtime.py::test_source_worker_persists_pages_and_cursor_together",
+          "tests/test_source_runtime.py::test_source_worker_detects_cursor_cycle_across_bounded_jobs",
+          "tests/test_source_runtime.py::test_source_worker_respects_onboarding_selection",
+          "tests/test_source_runtime.py::test_source_worker_revalidates_capabilities_and_page_type",
+          "tests/test_source_runtime.py::test_non_garmin_payloads_do_not_enter_garmin_replay",
+          "tests/test_source_runtime.py::test_source_worker_accepts_interval_overlapping_window_start",
+          "tests/test_source_runtime.py::test_source_worker_uses_local_day_overlap_at_window_start",
+          "tests/test_source_runtime.py::test_source_worker_rejects_undeclared_correction",
+          "tests/test_source_runtime.py::test_source_worker_rejects_oversized_payload_without_cursor_advance",
+          "tests/test_source_runtime.py::test_declared_correction_and_deletion_preserve_raw_history",
+          "tests/test_source_runtime.py::test_source_worker_records_reversion_as_a_new_revision",
+          "tests/test_source_runtime.py::test_source_worker_rejects_invalid_page_before_advancing_cursor",
+          "tests/test_source_runtime.py::test_paginated_final_page_cannot_claim_complete_snapshot",
+          "tests/test_source_runtime.py::test_source_worker_rejects_undeclared_deletion",
+          "tests/test_source_runtime.py::test_concurrent_source_polls_only_advance_one_cursor",
+          "tests/test_source_runtime.py::test_source_instances_keep_separate_progress_and_records",
+          "tests/test_source_runtime.py::test_source_retry_deadline_is_respected",
+          "tests/test_source_runtime.py::test_selected_source_runs_through_ordinary_runtime"
+        ],
+        "could not import 'synthetic_model': No module named 'synthetic_model'": [
+          "tests/test_synthetic_plugin.py::test_explicit_discovery_and_agent_handler",
+          "tests/test_synthetic_plugin.py::test_persisted_onboarding_revoke_stops_existing_plugin",
+          "tests/test_synthetic_plugin.py::test_installed_plugin_uses_durable_instance_scoped_cooldown",
+          "tests/test_synthetic_plugin.py::test_instance_configuration_secret_scope_and_consent",
+          "tests/test_synthetic_plugin.py::test_plugin_load_failure_does_not_disable_core",
+          "tests/test_synthetic_plugin.py::test_transcription_only_plugin_cannot_be_selected_as_text_model",
+          "tests/test_synthetic_plugin.py::test_installed_plugin_http_repeated_operation_writes_one_fact",
+          "tests/test_synthetic_plugin.py::test_runtime_starts_and_closes_installed_plugin"
+        ]
+      },
+      "command": "uv run pytest -q -ra --junitxml=test-results/pytest.xml --cov=garmin_ai --cov-branch --cov-report=term --cov-report=xml:test-results/coverage.xml --cov-report=html:test-results/htmlcov"
+    },
+    "ci_core_only": {
+      "exit_code": 0,
+      "counts": {
+        "tests": 20,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 20
+      },
+      "failed_cases": [],
+      "skipped_by_reason": {}
+    },
+    "ci_installed_extensions": {
+      "status": "not_run",
+      "reason": "The preceding full suite failed before this CI step."
+    },
+    "ci_native_amd64_install": "passed",
+    "ci_offhost_restore": {
+      "status": "passed",
+      "run": "https://github.com/Makarechi/garmin-ai/actions/runs/43986713908"
+    },
+    "local_linux_arm64": {
+      "platform": "Debian 12 (Docker Desktop), Linux arm64",
+      "chromium": "153.0.8010.12",
+      "command": "pytest -q -ra --junitxml=test-results/pytest.xml",
+      "exit_code": 0,
+      "counts": {
+        "tests": 4369,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 81,
+        "passed": 4288
+      },
+      "failed_cases": [],
+      "skipped_by_reason": {
+        "Docker Compose is unavailable": [
+          "tests/test_release_bundle.py::test_release_compose_resolves_to_the_pinned_image_without_source"
+        ],
+        "Explicit live Anthropic opt-in required": [
+          "tests/test_anthropic_live.py::test_selected_anthropic_model_handles_synthetic_safety_screen"
+        ],
+        "Explicit live Gemini opt-in required": [
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043a\\u043e\\u0444\\u0435 \\u0431\\u044b\\u043b \\u0432 11-log-caffeine]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u0434\\u0432\\u0430 \\u044d\\u0441\\u043f\\u0440\\u0435\\u0441\\u0441\\u043e \\u043f\\u043e\\u0441\\u043b\\u0435 \\u043e\\u0431\\u0435\\u0434\\u0430-clarify-None]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043c\\u0438\\u0433\\u0440\\u0435\\u043d\\u044c \\u043d\\u0430\\u0447\\u0430\\u043b\\u0430\\u0441\\u044c \\u0447\\u0430\\u0441\\u0430 \\u0434\\u0432\\u0430 \\u043d\\u0430\\u0437\\u0430\\u0434, 6 \\u0438\\u0437 10-log-migraine]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u0442\\u0430\\u0431\\u043b\\u0435\\u0442\\u043a\\u0443 \\u0432\\u044b\\u043f\\u0438\\u043b \\u0447\\u0435\\u0440\\u0435\\u0437 20 \\u043c\\u0438\\u043d\\u0443\\u0442-clarify-None]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043e\\u0442\\u043c\\u0435\\u043d\\u0438 \\u043f\\u043e\\u0441\\u043b\\u0435\\u0434\\u043d\\u044e\\u044e \\u0437\\u0430\\u043f\\u0438\\u0441\\u044c-undo-None]",
+          "tests/test_gemini_live.py::test_live_russian_diary[\\u043a\\u043e\\u0444\\u0435 \\u0432 11 \\u0438 \\u043c\\u0438\\u0433\\u0440\\u0435\\u043d\\u044c \\u0432 13, \\u0431\\u043e\\u043b\\u044c 6 \\u0438\\u0437 10-log-caffeine]",
+          "tests/test_gemini_live.py::test_live_english_diary[I had coffee at 11:00.-log-caffeine]",
+          "tests/test_gemini_live.py::test_live_english_diary[I had two espressos after lunch.-clarify-None]",
+          "tests/test_gemini_live.py::test_live_close_and_correction",
+          "tests/test_gemini_live.py::test_live_voice_transcription",
+          "tests/test_gemini_live.py::test_live_button_refinement_changes_existing_episode",
+          "tests/test_gemini_live.py::test_live_urgent_report_bypasses_stalled_diary",
+          "tests/test_gemini_live.py::test_live_close_selects_bounded_candidates_in_large_diary",
+          "tests/test_gemini_live.py::test_live_oversized_transcript_detects_urgent_report",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u041a\\u043e\\u0433\\u0434\\u0430 \\u044f \\u0437\\u0430\\u0441\\u043d\\u0443\\u043b \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f?-2026-10-15T21:42:37+00:00-start-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u041a\\u043e\\u0433\\u0434\\u0430 \\u044f \\u0437\\u0430\\u0441\\u043d\\u0443\\u043b \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f?-2026-10-15T22:17:37+00:00-start-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u0412\\u043e \\u0441\\u043a\\u043e\\u043b\\u044c\\u043a\\u043e \\u044f \\u0432\\u0447\\u0435\\u0440\\u0430 \\u0432\\u0435\\u0447\\u0435\\u0440\\u043e\\u043c \\u043b\\u0451\\u0433 \\u0441\\u043f\\u0430\\u0442\\u044c?-2026-10-15T21:42:37+00:00-start-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[\\u041a\\u043e\\u0433\\u0434\\u0430 \\u044f \\u043f\\u0440\\u043e\\u0441\\u043d\\u0443\\u043b\\u0441\\u044f \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f?-2026-10-15T21:42:37+00:00-end-ru]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[What time did I fall asleep today?-2026-10-15T21:42:37+00:00-start-en]",
+          "tests/test_gemini_live.py::test_live_sleep_time_uses_one_night_and_verified_timestamp[When did I wake up today?-2026-10-15T21:42:37+00:00-end-en]",
+          "tests/test_gemini_live.py::test_live_informal_english_sleep_question_selects_a_valid_sleep_read"
+        ],
+        "Explicit live OpenAI opt-in required": [
+          "tests/test_openai_live.py::test_selected_openai_model_handles_synthetic_safety_screen"
+        ],
+        "Requires a case-insensitive filesystem": [
+          "tests/test_deployment.py::test_setup_detects_case_aliases_in_storage_roots[GA_TOKEN_DIR]",
+          "tests/test_deployment.py::test_setup_detects_case_aliases_in_storage_roots[GA_BACKUP_DIR]",
+          "tests/test_deployment.py::test_setup_detects_case_aliases_in_storage_roots[GA_LOCK_DIR]"
+        ],
+        "could not import 'synthetic_adapters': No module named 'synthetic_adapters'": [
+          "tests/test_extension_tck.py::test_installed_source_and_channel_pass_contract_kit",
+          "tests/test_extension_tck.py::test_source_probe_rejects_mapping_page_even_if_schema_valid",
+          "tests/test_extension_tck.py::test_installation_does_not_enable_plugin_and_instances_stay_separate",
+          "tests/test_extension_tck.py::test_runtime_starts_and_closes_selected_channel",
+          "tests/test_extension_tck.py::test_runtime_rejects_initiative_channel_without_text",
+          "tests/test_extension_tck.py::test_channel_plugin_retries_transient_start_failure",
+          "tests/test_extension_tck.py::test_plugin_initiative_runs_while_telegram_startup_is_unavailable",
+          "tests/test_extension_tck.py::test_channel_selection_change_activates_configured_plugin_without_restart",
+          "tests/test_extension_tck.py::test_web_only_worker_still_queues_pull_based_reminders",
+          "tests/test_extension_tck.py::test_unavailable_plugin_primary_is_exposed_to_fallback_delivery",
+          "tests/test_extension_tck.py::test_runtime_rejects_duplicate_derived_channel_destinations",
+          "tests/test_extension_tck.py::test_fallback_telegram_does_not_receive_primary_insight_notices",
+          "tests/test_extension_tck.py::test_direct_telegram_notice_requires_primary_channel",
+          "tests/test_extension_tck.py::test_runtime_delivers_neutral_initiative_through_selected_channel",
+          "tests/test_extension_tck.py::test_initiative_claim_refreshes_time_after_delivery_fences",
+          "tests/test_extension_tck.py::test_source_contract_rejects_duplicate_records_and_payload_on_deletion",
+          "tests/test_extension_tck.py::test_source_payload_has_bounded_json_shape_and_size",
+          "tests/test_extension_tck.py::test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals",
+          "tests/test_extension_tck.py::test_calendar_day_probe_uses_source_local_day_overlap",
+          "tests/test_extension_tck.py::test_channel_probe_uses_provider_and_rejects_foreign_receipt",
+          "tests/test_extension_tck.py::test_channel_probe_accepts_configured_synthetic_recipient",
+          "tests/test_extension_tck.py::test_channel_probe_reports_optional_capabilities_as_unverified",
+          "tests/test_extension_tck.py::test_channel_text_probe_rejects_advertised_voice_render",
+          "tests/test_extension_tck.py::test_channel_text_probe_rejects_unrequested_optional_rendering",
+          "tests/test_extension_tck.py::test_declared_status_does_not_require_local_plugin_config_or_secrets",
+          "tests/test_extension_tck.py::test_model_probe_closes_adapter_after_failure",
+          "tests/test_extension_tck.py::test_model_probe_accepts_any_schema_valid_boolean",
+          "tests/test_source_metric_plugin.py::test_installed_source_projects_paginated_records",
+          "tests/test_source_runtime.py::test_source_worker_persists_pages_and_cursor_together",
+          "tests/test_source_runtime.py::test_source_worker_detects_cursor_cycle_across_bounded_jobs",
+          "tests/test_source_runtime.py::test_source_worker_respects_onboarding_selection",
+          "tests/test_source_runtime.py::test_source_worker_revalidates_capabilities_and_page_type",
+          "tests/test_source_runtime.py::test_non_garmin_payloads_do_not_enter_garmin_replay",
+          "tests/test_source_runtime.py::test_source_worker_accepts_interval_overlapping_window_start",
+          "tests/test_source_runtime.py::test_source_worker_uses_local_day_overlap_at_window_start",
+          "tests/test_source_runtime.py::test_source_worker_rejects_undeclared_correction",
+          "tests/test_source_runtime.py::test_source_worker_rejects_oversized_payload_without_cursor_advance",
+          "tests/test_source_runtime.py::test_declared_correction_and_deletion_preserve_raw_history",
+          "tests/test_source_runtime.py::test_source_worker_records_reversion_as_a_new_revision",
+          "tests/test_source_runtime.py::test_source_worker_rejects_invalid_page_before_advancing_cursor",
+          "tests/test_source_runtime.py::test_paginated_final_page_cannot_claim_complete_snapshot",
+          "tests/test_source_runtime.py::test_source_worker_rejects_undeclared_deletion",
+          "tests/test_source_runtime.py::test_concurrent_source_polls_only_advance_one_cursor",
+          "tests/test_source_runtime.py::test_source_instances_keep_separate_progress_and_records",
+          "tests/test_source_runtime.py::test_source_retry_deadline_is_respected",
+          "tests/test_source_runtime.py::test_selected_source_runs_through_ordinary_runtime"
+        ],
+        "could not import 'synthetic_model': No module named 'synthetic_model'": [
+          "tests/test_synthetic_plugin.py::test_explicit_discovery_and_agent_handler",
+          "tests/test_synthetic_plugin.py::test_persisted_onboarding_revoke_stops_existing_plugin",
+          "tests/test_synthetic_plugin.py::test_installed_plugin_uses_durable_instance_scoped_cooldown",
+          "tests/test_synthetic_plugin.py::test_instance_configuration_secret_scope_and_consent",
+          "tests/test_synthetic_plugin.py::test_plugin_load_failure_does_not_disable_core",
+          "tests/test_synthetic_plugin.py::test_transcription_only_plugin_cannot_be_selected_as_text_model",
+          "tests/test_synthetic_plugin.py::test_installed_plugin_http_repeated_operation_writes_one_fact",
+          "tests/test_synthetic_plugin.py::test_runtime_starts_and_closes_installed_plugin"
+        ]
+      }
+    },
+    "local_installed_extensions": {
+      "exit_code": 0,
+      "counts": {
+        "tests": 54,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "passed": 54
+      },
+      "failed_cases": [],
+      "skipped_by_reason": {},
+      "method": "Installed both sample packages as wheels in an isolated overlay, then ran test_synthetic_plugin.py, test_extension_tck.py, test_source_runtime.py, and test_source_metric_plugin.py against a separate disposable test database."
+    }
+  }
+}
