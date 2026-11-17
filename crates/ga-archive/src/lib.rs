@@ -2,6 +2,8 @@ mod key;
 mod staging;
 mod token_file;
 
+pub mod backup_envelope;
+
 use std::{
     env,
     error::Error,
