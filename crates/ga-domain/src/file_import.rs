@@ -1,7 +1,9 @@
 mod csv;
+mod json;
 mod mapping;
 
 pub use csv::{CsvRows, read_csv_rows};
+pub use json::{JsonRow, JsonRowIssue, read_json_rows};
 pub use mapping::{FileFormat, FileMapping, MAX_MAPPING_BYTES};
 
 use std::{error::Error, fmt};
@@ -18,6 +20,11 @@ pub enum ImportFileError {
     Headers,
     RowWidth,
     RowCount,
+    JsonRoot,
+    JsonDuplicateKey,
+    JsonNonfinite,
+    JsonFloatOverflow,
+    JsonPrecision,
 }
 
 impl fmt::Display for ImportFileError {
@@ -30,6 +37,11 @@ impl fmt::Display for ImportFileError {
             Self::Headers => "CSV headers must be unique",
             Self::RowWidth => "CSV rows must match the header width",
             Self::RowCount => "File must contain 1 to 500 object rows",
+            Self::JsonRoot => "JSON root must be a list",
+            Self::JsonDuplicateKey => "Duplicate JSON key",
+            Self::JsonNonfinite => "Non-finite JSON value",
+            Self::JsonFloatOverflow => "non-finite JSON value",
+            Self::JsonPrecision => "JSON number exceeds the supported precision",
         })
     }
 }

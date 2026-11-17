@@ -120,7 +120,7 @@ fn write_string(out: &mut Vec<u8>, value: &str) -> Result<(), JsonError> {
     serde_json::to_writer(out, value).map_err(|_| JsonError::InvalidJson)
 }
 
-fn write_float(out: &mut Vec<u8>, value: f64) -> Result<(), JsonError> {
+pub(crate) fn write_float(out: &mut Vec<u8>, value: f64) -> Result<(), JsonError> {
     if !value.is_finite() {
         return Err(JsonError::NonfiniteNumber);
     }
