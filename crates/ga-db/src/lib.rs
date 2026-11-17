@@ -26,6 +26,7 @@ pub mod share_policy;
 pub mod source_pages;
 pub mod system_definitions;
 pub mod system_metrics;
+pub mod telegram_binding;
 pub mod telegram_cursor;
 
 use std::{str::FromStr, time::Duration};
