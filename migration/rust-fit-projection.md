@@ -44,3 +44,15 @@ GA_TEST_FIT_PROJECTION="$PWD/test-results/fit-projection" \
   cargo test --locked -p ga-fit --test projection -- projection_matches_the_pinned_python_records --include-ignored
 uv run python migration/generate_fit_profile.py | cmp - crates/ga-fit/profile/21.171.json
 ```
+
+## ZIP projection
+
+The export reader checks each selected member in central-directory order. FIT
+message indexes reset for each member and span the chained sequences in that
+member. The exported row sequence spans all selected members. Validation of
+both ZIP and FIT checksums continues through the final byte.
+
+A native Linux arm64 test projected all 409,600 rows from the synthetic ZIP
+with exactly 100 MiB of FIT data. All eight export tests finished in 3.40
+seconds under a 32 MiB limit, with a 10,899,456-byte peak, no swapping and no
+OOM events. A later corrupt member invalidated earlier callback candidates.

@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom},
     num::NonZeroUsize,
     path::Component,
     time::{Duration, Instant},
@@ -7,7 +7,10 @@ use std::{
 
 use zip::{CompressionMethod, ZipReadOptions, read::Config, unstable::read::ZipIterable};
 
-use crate::{FitError, FitFrame, MAX_FIT_BYTES, verify_frames};
+use crate::{
+    FitError, FitFrame, FitInventory, FitProjectionMessage, MAX_FIT_BYTES, verify_frames,
+    visit_fit_projection,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExportLimits {
@@ -37,13 +40,84 @@ pub struct ExportInventory {
     pub frames: u32,
 }
 
+pub struct ExportProjectionMessage {
+    pub fit_member_index: usize,
+    pub sequence: u32,
+    pub message: FitProjectionMessage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExportProjectionInventory {
+    pub export: ExportInventory,
+    pub messages: u32,
+}
+
 /// Verify a seekable activity export without extracting paths or keeping members in memory.
 /// Callback offsets belong to candidates until the complete export has passed validation.
 pub fn verify_activity_export(
     source: impl Read + Seek,
     limits: ExportLimits,
     cancelled: impl Fn() -> bool,
-    on_frame: impl FnMut(ExportFrame),
+    mut on_frame: impl FnMut(ExportFrame),
+) -> Result<ExportInventory, FitError> {
+    scan_activity_export(
+        source,
+        limits,
+        cancelled,
+        |index, member, max_bytes, cancelled| {
+            verify_frames(member, max_bytes, cancelled, |frame| {
+                on_frame(ExportFrame {
+                    fit_member_index: index,
+                    frame,
+                });
+            })
+        },
+    )
+}
+
+/// Decode raw FIT or ZIP-contained messages in export order. A read, checksum,
+/// deadline or callback failure aborts the entire candidate projection.
+pub fn visit_activity_projection(
+    source: impl Read + Seek,
+    limits: ExportLimits,
+    cancelled: impl Fn() -> bool,
+    mut on_message: impl FnMut(ExportProjectionMessage) -> Result<(), FitError>,
+) -> Result<ExportProjectionInventory, FitError> {
+    let mut messages = 0;
+    let export = scan_activity_export(
+        source,
+        limits,
+        cancelled,
+        |index, member, max_bytes, cancelled| {
+            let buffered = BufReader::with_capacity(64 * 1024, member);
+            let inventory = visit_fit_projection(buffered, max_bytes, cancelled, |message| {
+                on_message(ExportProjectionMessage {
+                    fit_member_index: index,
+                    sequence: messages,
+                    message,
+                })?;
+                messages += 1;
+                Ok(())
+            })?;
+            Ok(inventory.member)
+        },
+    )?;
+    Ok(ExportProjectionInventory { export, messages })
+}
+
+type ReadMember<'a> =
+    dyn FnMut(usize, &mut dyn Read, u64, &dyn Fn() -> bool) -> Result<FitInventory, FitError> + 'a;
+
+fn scan_activity_export(
+    source: impl Read + Seek,
+    limits: ExportLimits,
+    cancelled: impl Fn() -> bool,
+    mut read_member: impl FnMut(
+        usize,
+        &mut dyn Read,
+        u64,
+        &dyn Fn() -> bool,
+    ) -> Result<FitInventory, FitError>,
 ) -> Result<ExportInventory, FitError> {
     let budget = Budget {
         started: Instant::now(),
@@ -54,16 +128,16 @@ pub fn verify_activity_export(
         source,
         budget: &budget,
     };
-    let result = verify(source, limits, &budget, on_frame);
+    let result = scan(source, limits, &budget, &mut read_member);
     budget.check()?;
     result
 }
 
-fn verify(
+fn scan(
     mut source: impl Read + Seek,
     limits: ExportLimits,
     budget: &Budget<impl Fn() -> bool>,
-    mut on_frame: impl FnMut(ExportFrame),
+    read_member: &mut ReadMember<'_>,
 ) -> Result<ExportInventory, FitError> {
     let original_bytes = source.seek(SeekFrom::End(0))?;
     let max_bytes = limits.max_bytes.min(MAX_FIT_BYTES);
@@ -77,30 +151,20 @@ fn verify(
         source.seek(SeekFrom::Start(0))?;
     }
     match ZipIterable::try_new(&mut source, Config::default()) {
-        Ok(zip) => verify_zip(
+        Ok(zip) => scan_zip(
             zip.enforce_header_consistency(true),
             original_bytes,
             max_bytes,
             limits.max_zip_entries.get(),
             budget,
-            on_frame,
+            read_member,
         ),
         Err(_) if matches!(&prefix, b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08") => {
             Err(FitError::InvalidZip)
         }
         Err(_) => {
             source.seek(SeekFrom::Start(0))?;
-            let fit = verify_frames(
-                source,
-                max_bytes,
-                || budget.check().is_err(),
-                |frame| {
-                    on_frame(ExportFrame {
-                        fit_member_index: 0,
-                        frame,
-                    });
-                },
-            )?;
+            let fit = read_member(0, &mut source, max_bytes, &|| budget.check().is_err())?;
             Ok(ExportInventory {
                 format: ActivityExport::Fit,
                 original_bytes,
@@ -112,13 +176,13 @@ fn verify(
     }
 }
 
-fn verify_zip<R: Read + Seek>(
+fn scan_zip<R: Read + Seek>(
     mut zip: ZipIterable<R>,
     original_bytes: u64,
     max_bytes: u64,
     max_entries: usize,
     budget: &Budget<impl Fn() -> bool>,
-    mut on_frame: impl FnMut(ExportFrame),
+    read_member: &mut ReadMember<'_>,
 ) -> Result<ExportInventory, FitError> {
     if zip.len() > max_entries {
         return Err(FitError::TooManyZipMembers);
@@ -161,19 +225,14 @@ fn verify_zip<R: Read + Seek>(
             continue;
         }
         let declared = entry.size();
-        let file = entry
+        let mut file = entry
             .with_reader(entries.reader_mut(), ZipReadOptions::default())
             .map_err(|_| FitError::InvalidZip)?;
-        let fit = verify_frames(
-            file,
+        let fit = read_member(
+            inventory.fit_members,
+            &mut file,
             declared.min(max_bytes - inventory.fit_bytes),
-            || budget.check().is_err(),
-            |frame| {
-                on_frame(ExportFrame {
-                    fit_member_index: inventory.fit_members,
-                    frame,
-                });
-            },
+            &|| budget.check().is_err(),
         )
         .map_err(|error| {
             if error == FitError::ReadFailed {

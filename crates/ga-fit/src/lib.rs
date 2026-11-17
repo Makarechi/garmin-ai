@@ -5,7 +5,8 @@ mod value;
 mod wire;
 
 pub use export::{
-    ActivityExport, ExportFrame, ExportInventory, ExportLimits, verify_activity_export,
+    ActivityExport, ExportFrame, ExportInventory, ExportLimits, ExportProjectionInventory,
+    ExportProjectionMessage, verify_activity_export, visit_activity_projection,
 };
 pub use projection::{FitProjectionMessage, visit_fit_projection};
 pub use value::RawFitValue;
