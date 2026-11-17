@@ -28,9 +28,13 @@ pub mod timestamp;
 use sha2::{Digest, Sha256};
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    lower_hex(&Sha256::digest(bytes))
+}
+
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
         hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
         hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
