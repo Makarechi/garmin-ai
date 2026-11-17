@@ -1,7 +1,9 @@
 mod metrics;
 mod revisions;
+mod undo;
 
-pub use revisions::UpdateSystemEvent;
+pub use revisions::{DeleteEvent, UpdateSystemEvent};
+pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 
 use std::{error::Error, fmt};
 
@@ -47,6 +49,9 @@ pub enum DiaryWriteError {
     TrackingDisabled,
     EventMissing,
     RevisionChanged,
+    DeletionForbidden,
+    NothingToUndo,
+    UndoConflict,
     CustomEntry,
     SelfReference(&'static str),
     LinkedObservations,
@@ -70,6 +75,9 @@ impl fmt::Display for DiaryWriteError {
             Self::TrackingDisabled => "The scenario pack is disabled",
             Self::EventMissing => "Event not found",
             Self::RevisionChanged => "Event changed; reload before editing",
+            Self::DeletionForbidden => "Definition does not allow deletion",
+            Self::NothingToUndo => "Nothing to undo",
+            Self::UndoConflict => "The last operation has already been changed or undone",
             Self::CustomEntry => "Custom entries must use the custom correction endpoint",
             Self::SelfReference(message) => message,
             Self::LinkedObservations => {
@@ -192,7 +200,7 @@ impl Database {
             },
         )
         .await?;
-        metrics::project_event(&mut txn, id, version.id, report, now, now).await?;
+        metrics::project_event(&mut txn, id, &written.snapshot, now).await?;
         txn.commit().await?;
         Ok(written)
     }
@@ -319,14 +327,28 @@ async fn validate_relation(
     txn: &mut Transaction<'_, Postgres>,
     report: &EventInput,
 ) -> Result<(), DiaryWriteError> {
-    let payload = report.payload().json();
-    let valid = match report.payload().kind() {
+    validate_stored_relation(
+        txn,
+        report.payload().kind(),
+        report.payload().json(),
+        report.start().into(),
+    )
+    .await
+}
+
+async fn validate_stored_relation(
+    txn: &mut Transaction<'_, Postgres>,
+    kind: &str,
+    payload: &Value,
+    start: OffsetDateTime,
+) -> Result<(), DiaryWriteError> {
+    let valid = match kind {
         "activity_effort" => {
             sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM activities WHERE id = $1 AND start <= $2)",
             )
             .bind(payload["activity_id"].as_str())
-            .bind(OffsetDateTime::from(report.start()))
+            .bind(start)
             .fetch_one(&mut **txn)
             .await?
         }
@@ -338,7 +360,7 @@ async fn validate_relation(
                    AND start <= $2 AND (\"end\" IS NULL OR \"end\" >= $2))",
             )
             .bind(related)
-            .bind(OffsetDateTime::from(report.start()))
+            .bind(start)
             .fetch_one(&mut **txn)
             .await?
         }

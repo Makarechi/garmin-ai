@@ -3,6 +3,7 @@ pub mod event_input;
 pub mod event_payload;
 pub mod event_provenance;
 pub mod event_replay;
+pub mod event_schema;
 mod event_time;
 pub mod garmin_health;
 pub mod garmin_summary;

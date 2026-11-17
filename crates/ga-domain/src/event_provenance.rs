@@ -1,9 +1,6 @@
 use std::{error::Error, fmt};
 
-use crate::{
-    event_input::{EventInput, EventSource, EventStatus},
-    timestamp::StoredInstant,
-};
+use crate::{event_input::EventInput, timestamp::StoredInstant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventTopology {
@@ -68,7 +65,7 @@ enum Channel {
 }
 
 impl Channel {
-    fn from_actor(actor: Option<&str>, source: EventSource) -> Self {
+    fn from_actor(actor: Option<&str>, source: &str) -> Self {
         match actor {
             Some(actor) if actor.starts_with("wearable:") => Self::Wearable,
             Some(actor) if actor.starts_with("telegram:") => Self::Telegram,
@@ -76,11 +73,9 @@ impl Channel {
             Some("api") => Self::Api,
             Some(_) => Self::Local,
             None => match source {
-                EventSource::Wearable => Self::Wearable,
-                EventSource::TelegramText
-                | EventSource::TelegramButton
-                | EventSource::TelegramVoice => Self::Telegram,
-                EventSource::Mcp => Self::Mcp,
+                "wearable" => Self::Wearable,
+                "telegram_text" | "telegram_button" | "telegram_voice" => Self::Telegram,
+                "mcp" => Self::Mcp,
                 _ => Self::Local,
             },
         }
@@ -97,58 +92,116 @@ impl EventInput {
         recorded: StoredInstant,
         clock_uncertainty_seconds: Option<u32>,
     ) -> Result<EventProvenance, InvalidClockUncertainty> {
-        let channel = Channel::from_actor(actor, self.source());
-        if clock_uncertainty_seconds.is_some_and(|value| {
-            value > 31_536_000 || !actor.is_some_and(|actor| actor.starts_with("wearable:"))
-        }) {
-            return Err(InvalidClockUncertainty);
-        }
-        let topology = definition_topology.resolved(self);
-        let time_precision = if clock_uncertainty_seconds.is_some_and(|value| value != 0) {
-            "unknown"
-        } else {
-            match topology {
-                EventTopology::Point => "instant",
-                EventTopology::OpenInterval | EventTopology::BoundedInterval => "interval",
-                EventTopology::Flexible => "unknown",
-            }
-        };
-        let system_inference = self.source() == EventSource::Inferred
-            && actor.is_none_or(|actor| actor == "system" || actor.starts_with("system:"));
-        let source = self.source().label();
-        let (assertion_kind, producer, transport, author) = match channel {
-            Channel::Wearable => ("device_measurement", "wearable", Some("connector"), None),
-            Channel::Local if system_inference => ("inferred", "system", None, None),
-            Channel::Telegram => {
-                let transport = if source.starts_with("telegram_") {
-                    source
-                } else {
-                    "telegram"
-                };
-                ("user_report", "telegram", Some(transport), Some("owner"))
-            }
-            Channel::Mcp => ("user_report", "owner", Some("mcp"), Some("owner")),
-            Channel::Api => ("user_report", "owner", Some("api"), Some("owner")),
-            Channel::Local => ("user_report", "owner", Some(source), Some("owner")),
-        };
-        let validation_status = if self.status() != EventStatus::Confirmed {
-            "needs_confirmation"
-        } else if channel == Channel::Wearable {
-            "trusted"
-        } else {
-            "schema_validated"
-        };
-        Ok(EventProvenance {
-            topology,
-            time_precision,
-            assertion_kind,
-            producer,
-            transport,
-            author,
-            validation_status,
-            recorded_at: recorded,
-            ingested_at: recorded,
+        derive_provenance(
+            actor,
+            self.source().label(),
+            self.status().label(),
+            definition_topology.resolved(self),
+            recorded,
             clock_uncertainty_seconds,
-        })
+        )
+    }
+}
+
+/// Reconstruct older audit envelopes where the source may be file import.
+pub fn restore_legacy_provenance(
+    actor: &str,
+    source: &str,
+    status: &str,
+    topology: EventTopology,
+    recorded: StoredInstant,
+) -> Option<EventProvenance> {
+    if !matches!(
+        source,
+        "manual"
+            | "telegram_text"
+            | "telegram_button"
+            | "telegram_voice"
+            | "mcp"
+            | "inferred"
+            | "wearable"
+            | "file_import"
+    ) {
+        return None;
+    }
+    derive_provenance(Some(actor), source, status, topology, recorded, None).ok()
+}
+
+fn derive_provenance(
+    actor: Option<&str>,
+    source: &str,
+    status: &str,
+    topology: EventTopology,
+    recorded: StoredInstant,
+    clock_uncertainty_seconds: Option<u32>,
+) -> Result<EventProvenance, InvalidClockUncertainty> {
+    let channel = Channel::from_actor(actor, source);
+    if clock_uncertainty_seconds.is_some_and(|value| {
+        value > 31_536_000 || !actor.is_some_and(|actor| actor.starts_with("wearable:"))
+    }) {
+        return Err(InvalidClockUncertainty);
+    }
+    let time_precision = if clock_uncertainty_seconds.is_some_and(|value| value != 0) {
+        "unknown"
+    } else {
+        match topology {
+            EventTopology::Point => "instant",
+            EventTopology::OpenInterval | EventTopology::BoundedInterval => "interval",
+            EventTopology::Flexible => "unknown",
+        }
+    };
+    let system_inference = source == "inferred"
+        && actor.is_none_or(|actor| actor == "system" || actor.starts_with("system:"));
+    let (assertion_kind, producer, transport, author) = match channel {
+        Channel::Wearable => ("device_measurement", "wearable", Some("connector"), None),
+        Channel::Local if system_inference => ("inferred", "system", None, None),
+        Channel::Telegram => {
+            let transport = if source.starts_with("telegram_") {
+                legacy_transport(source)
+            } else {
+                "telegram"
+            };
+            ("user_report", "telegram", Some(transport), Some("owner"))
+        }
+        Channel::Mcp => ("user_report", "owner", Some("mcp"), Some("owner")),
+        Channel::Api => ("user_report", "owner", Some("api"), Some("owner")),
+        Channel::Local => (
+            "user_report",
+            "owner",
+            Some(legacy_transport(source)),
+            Some("owner"),
+        ),
+    };
+    let validation_status = if status != "confirmed" {
+        "needs_confirmation"
+    } else if channel == Channel::Wearable {
+        "trusted"
+    } else {
+        "schema_validated"
+    };
+    Ok(EventProvenance {
+        topology,
+        time_precision,
+        assertion_kind,
+        producer,
+        transport,
+        author,
+        validation_status,
+        recorded_at: recorded,
+        ingested_at: recorded,
+        clock_uncertainty_seconds,
+    })
+}
+
+fn legacy_transport(source: &str) -> &'static str {
+    match source {
+        "telegram_text" => "telegram_text",
+        "telegram_button" => "telegram_button",
+        "telegram_voice" => "telegram_voice",
+        "wearable" => "wearable",
+        "mcp" => "mcp",
+        "inferred" => "inferred",
+        "file_import" => "file_import",
+        _ => "manual",
     }
 }

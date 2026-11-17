@@ -1,4 +1,7 @@
-use ga_domain::event_input::{EventInput, EventStatus};
+use ga_domain::{
+    event_input::{EventInput, EventStatus},
+    timestamp::StoredInstant,
+};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -20,7 +23,79 @@ pub struct UpdateSystemEvent<'a> {
     pub operation_id: Option<Uuid>,
 }
 
+pub struct DeleteEvent<'a> {
+    pub owner_id: Uuid,
+    pub authenticated_actor: &'a str,
+    pub event_id: Uuid,
+    pub expected_revision: i32,
+}
+
 impl Database {
+    /// Tombstone the expected revision, preserving the original payload in its audit.
+    pub async fn delete_event(
+        &self,
+        request: DeleteEvent<'_>,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        let mut txn = self.begin_diary_write(request.owner_id).await?;
+        let (revision, deleted, deletion_allowed, query_allowed) =
+            sqlx::query_as::<_, (i32, bool, bool, bool)>(
+                "SELECT entry.revision, entry.deleted,
+                     coalesce(version.allowed_operations ? 'delete', true),
+                     entry.definition_version_id IS NULL
+                        OR coalesce(version.allowed_operations ? 'query', false)
+                 FROM events AS entry
+                 LEFT JOIN event_definition_versions AS version ON version.id = entry.definition_version_id
+                 WHERE entry.id = $1 FOR UPDATE OF entry",
+            )
+            .bind(request.event_id)
+            .fetch_optional(&mut *txn)
+            .await?
+            .ok_or(DiaryWriteError::EventMissing)?;
+        if deleted {
+            return Err(DiaryWriteError::EventMissing);
+        }
+        if revision != request.expected_revision {
+            return Err(DiaryWriteError::RevisionChanged);
+        }
+        if !deletion_allowed {
+            return Err(DiaryWriteError::DeletionForbidden);
+        }
+        let id = request.event_id;
+        let before = load_event(&mut txn, id, false).await?;
+        ensure_unreferenced(&mut txn, id, false).await?;
+        let transition = tombstone(&mut txn, id).await?;
+        let mut deleted = load_event(&mut txn, id, false).await?;
+        metrics::invalidate(&mut txn, id, transition).await?;
+        invalidate_migraine_insights(&mut txn, snapshot_kind(&before.snapshot)?).await?;
+        sync_migraine_questions(
+            &mut txn,
+            request.owner_id,
+            id,
+            &before.snapshot,
+            &deleted.snapshot,
+            transition,
+        )
+        .await?;
+        append_audit(
+            &mut txn,
+            AuditEntry {
+                id,
+                action: "delete",
+                before: Some(&before.snapshot),
+                after: &deleted.snapshot,
+                actor: request.authenticated_actor,
+                operation: None,
+                at: transition,
+            },
+        )
+        .await?;
+        if !query_allowed {
+            deleted.snapshot = serde_json::json!({"id": id.to_string(), "revision": deleted.revision, "deleted": true});
+        }
+        txn.commit().await?;
+        Ok(deleted)
+    }
+
     /// Apply a correction to exactly the authenticated owner's expected revision.
     pub async fn update_system_event(
         &self,
@@ -113,16 +188,16 @@ impl Database {
         if old_kind != kind {
             invalidate_migraine_insights(&mut txn, kind).await?;
         }
+        let corrected = load_event(&mut txn, request.event_id, false).await?;
         sync_migraine_questions(
             &mut txn,
             request.owner_id,
             request.event_id,
             &before.snapshot,
-            report,
+            &corrected.snapshot,
             transition,
         )
         .await?;
-        let corrected = load_event(&mut txn, request.event_id, false).await?;
         append_audit(
             &mut txn,
             AuditEntry {
@@ -137,15 +212,7 @@ impl Database {
         )
         .await?;
         metrics::invalidate(&mut txn, request.event_id, transition).await?;
-        metrics::project_event(
-            &mut txn,
-            request.event_id,
-            definition.id,
-            report,
-            recorded,
-            transition,
-        )
-        .await?;
+        metrics::project_event(&mut txn, request.event_id, &corrected.snapshot, transition).await?;
         txn.commit().await?;
         Ok(corrected)
     }
@@ -178,22 +245,25 @@ async fn check_episode_links(
 ) -> Result<(), DiaryWriteError> {
     let kind = report.payload().kind();
     if old_kind == "migraine" && (kind != "migraine" || report.status() != EventStatus::Confirmed) {
-        let id = event.to_string();
-        let linked: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM events WHERE NOT deleted
-                  AND ((kind = 'symptom_observation' AND payload->>'episode_id' = $1)
-                    OR ($2 AND kind = 'medication' AND payload->>'reason_event_id' = $1))
-             )",
-        )
-        .bind(id)
-        .bind(kind != "migraine")
-        .fetch_one(&mut **txn)
-        .await?;
-        if linked {
-            return Err(DiaryWriteError::LinkedObservations);
-        }
+        ensure_unreferenced(txn, event, kind == "migraine").await?;
     }
+    validate_symptom_bounds(
+        txn,
+        event,
+        kind,
+        report.start().into(),
+        report.end().map(Into::into),
+    )
+    .await
+}
+
+pub(super) async fn validate_symptom_bounds(
+    txn: &mut Transaction<'_, Postgres>,
+    event: Uuid,
+    kind: &str,
+    start: OffsetDateTime,
+    end: Option<OffsetDateTime>,
+) -> Result<(), DiaryWriteError> {
     if kind == "migraine" {
         let outside: bool = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -202,8 +272,8 @@ async fn check_episode_links(
              )",
         )
         .bind(event.to_string())
-        .bind(OffsetDateTime::from(report.start()))
-        .bind(report.end().map(OffsetDateTime::from))
+        .bind(start)
+        .bind(end)
         .fetch_one(&mut **txn)
         .await?;
         if outside {
@@ -213,12 +283,12 @@ async fn check_episode_links(
     Ok(())
 }
 
-async fn sync_migraine_questions(
+pub(super) async fn sync_migraine_questions(
     txn: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     id: Uuid,
     before: &Value,
-    report: &EventInput,
+    after: &Value,
     now: OffsetDateTime,
 ) -> Result<(), DiaryWriteError> {
     let reminders: bool = sqlx::query_scalar(
@@ -230,8 +300,9 @@ async fn sync_migraine_questions(
     .fetch_one(&mut **txn)
     .await?;
     if !reminders
-        || report.payload().kind() != "migraine"
-        || report.status() != EventStatus::Confirmed
+        || after["kind"] != "migraine"
+        || after["status"] != "confirmed"
+        || after["deleted"] == true
     {
         sqlx::query(
             "UPDATE pending_questions SET status = 'cancelled'
@@ -241,10 +312,7 @@ async fn sync_migraine_questions(
         .bind(id)
         .execute(&mut **txn)
         .await?;
-    } else if report
-        .end()
-        .is_some_and(|end| OffsetDateTime::from(end) <= now)
-    {
+    } else if snapshot_instant(after, "end")?.is_some_and(|end| end <= now) {
         sqlx::query(
             "UPDATE pending_questions SET status = 'answered',
                 evidence = evidence || jsonb_build_object('answer_event_id', $2::text)
@@ -271,4 +339,67 @@ async fn sync_migraine_questions(
         .bind(id).bind(now).execute(&mut **txn).await?;
     }
     Ok(())
+}
+
+pub(super) async fn ensure_unreferenced(
+    txn: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    symptoms_only: bool,
+) -> Result<(), DiaryWriteError> {
+    let linked: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM events WHERE NOT deleted
+              AND ((kind = 'symptom_observation' AND payload->>'episode_id' = $1)
+                OR (NOT $2 AND kind = 'medication' AND payload->>'reason_event_id' = $1))
+         )",
+    )
+    .bind(id.to_string())
+    .bind(symptoms_only)
+    .fetch_one(&mut **txn)
+    .await?;
+    if linked {
+        return Err(DiaryWriteError::LinkedObservations);
+    }
+    Ok(())
+}
+
+pub(super) async fn tombstone(
+    txn: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<OffsetDateTime, DiaryWriteError> {
+    Ok(sqlx::query_scalar(
+        "UPDATE events SET deleted = true, revision = revision + 1, updated_at = clock_timestamp()
+         WHERE id = $1 RETURNING updated_at",
+    )
+    .bind(id)
+    .fetch_one(&mut **txn)
+    .await?)
+}
+
+pub(super) fn snapshot_kind(snapshot: &Value) -> Result<&str, DiaryWriteError> {
+    snapshot_text(snapshot, "kind")
+}
+
+pub(super) fn snapshot_instant(
+    snapshot: &Value,
+    field: &str,
+) -> Result<Option<OffsetDateTime>, DiaryWriteError> {
+    match snapshot.get(field) {
+        Some(Value::String(value)) => value
+            .parse::<StoredInstant>()
+            .map(OffsetDateTime::from)
+            .map(Some)
+            .map_err(|_| DiaryWriteError::InvalidRecordedState),
+        None | Some(Value::Null) => Ok(None),
+        _ => Err(DiaryWriteError::InvalidRecordedState),
+    }
+}
+
+pub(super) fn snapshot_text<'a>(
+    snapshot: &'a Value,
+    field: &str,
+) -> Result<&'a str, DiaryWriteError> {
+    snapshot[field]
+        .as_str()
+        .ok_or(DiaryWriteError::InvalidRecordedState)
 }
