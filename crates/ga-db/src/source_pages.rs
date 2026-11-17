@@ -122,7 +122,7 @@ impl Database {
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .await?;
         check_source_storage(&mut txn, owner).await?;
-        if !source_selected(&mut txn, instance).await? {
+        if !crate::scenario_packs::source_instance_selected(&mut txn, instance).await? {
             return Ok(SourcePoll::Disabled);
         }
         let previous = read_state(&mut txn, &key).await?;
@@ -231,7 +231,7 @@ impl Database {
         if !locked {
             return Err(SourcePageError::Busy);
         }
-        if !source_selected(&mut txn, &poll.instance).await? {
+        if !crate::scenario_packs::source_instance_selected(&mut txn, &poll.instance).await? {
             return Ok(PublishedSourcePage {
                 state: PublicationState::Disabled,
                 records: 0,
@@ -356,22 +356,6 @@ fn read_cursor_hashes(value: &Value) -> Result<BTreeSet<String>, SourcePageError
                 .ok_or(SourcePageError::InvalidCursor)
         })
         .collect()
-}
-
-async fn source_selected(
-    txn: &mut Transaction<'_, Postgres>,
-    instance: &str,
-) -> Result<bool, SourcePageError> {
-    let selected = sqlx::query_scalar(
-        "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
-            OR EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding'
-                AND jsonb_typeof(value->'source_instance_ids')='array'
-                AND (value->'source_instance_ids') ? $1)",
-    )
-    .bind(instance)
-    .fetch_one(&mut **txn)
-    .await?;
-    Ok(selected)
 }
 
 async fn read_state(

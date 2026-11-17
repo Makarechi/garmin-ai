@@ -390,3 +390,18 @@ async fn forget_shared_context(
     .await?;
     Ok(())
 }
+
+pub(crate) async fn source_instance_selected(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
+            OR EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding'
+                AND jsonb_typeof(value->'source_instance_ids')='array'
+                AND (value->'source_instance_ids') ? $1)",
+    )
+    .bind(instance)
+    .fetch_one(&mut **txn)
+    .await
+}

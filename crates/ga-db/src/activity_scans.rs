@@ -101,43 +101,52 @@ impl Database {
             return Ok(ActivityScansStarted::CollectionDisabled);
         }
 
-        let account = request.authenticated_fingerprint;
-        let mut pages = 0;
-        for (lane, days) in [("recent", RECENT_DAYS), ("history", request.history_days)] {
-            if days == 0 {
-                continue;
-            }
-            let scan_key = format!("activity_scan:{account}:{lane}");
-            if !scan_is_due(&mut txn, &scan_key, request.now).await? {
-                continue;
-            }
-            let since = today
-                .checked_sub(Duration::days(i64::from(days)))
-                .ok_or(ActivityScanError::InvalidHorizon)?;
-            let generation = Uuid::new_v4().to_string();
-            let job = json!({
-                "generation": generation, "scan_key": scan_key, "account": account,
-                "offset": 0, "round": 0, "anchor": [], "backfill": lane == "history",
-                "since": since.to_string(),
-            });
-            let id = enqueue_page(
-                &mut txn,
-                &job,
-                &format!("activity-page:{account}:{generation}:0:0"),
-                request.now,
-            )
-            .await?;
-            let mut state = job;
-            state["status"] = json!("running");
-            state["job_id"] = json!(id.to_string());
-            state["started_at"] = json!(request.now.to_string());
-            state["pages"] = json!(0);
-            put_state(&mut txn, &scan_key, &state).await?;
-            pages += 1;
-        }
+        let pages = start_activity_scans_in(&mut txn, request, today).await?;
         txn.commit().await?;
         Ok(ActivityScansStarted::Scheduled { pages })
     }
+}
+
+pub(crate) async fn start_activity_scans_in(
+    txn: &mut Transaction<'_, Postgres>,
+    request: StartActivityScans<'_>,
+    today: time::Date,
+) -> Result<usize, ActivityScanError> {
+    let account = request.authenticated_fingerprint;
+    let mut pages = 0;
+    for (lane, days) in [("recent", RECENT_DAYS), ("history", request.history_days)] {
+        if days == 0 {
+            continue;
+        }
+        let scan_key = format!("activity_scan:{account}:{lane}");
+        if !scan_is_due(txn, &scan_key, request.now).await? {
+            continue;
+        }
+        let since = today
+            .checked_sub(Duration::days(i64::from(days)))
+            .ok_or(ActivityScanError::InvalidHorizon)?;
+        let generation = Uuid::new_v4().to_string();
+        let job = json!({
+            "generation": generation, "scan_key": scan_key, "account": account,
+            "offset": 0, "round": 0, "anchor": [], "backfill": lane == "history",
+            "since": since.to_string(),
+        });
+        let id = enqueue_page(
+            txn,
+            &job,
+            &format!("activity-page:{account}:{generation}:0:0"),
+            request.now,
+        )
+        .await?;
+        let mut state = job;
+        state["status"] = json!("running");
+        state["job_id"] = json!(id.to_string());
+        state["started_at"] = json!(request.now.to_string());
+        state["pages"] = json!(0);
+        put_state(txn, &scan_key, &state).await?;
+        pages += 1;
+    }
+    Ok(pages)
 }
 
 async fn collection_enabled(
