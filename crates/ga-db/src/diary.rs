@@ -1,3 +1,6 @@
+mod agent_batch;
+pub use agent_batch::CreateAgentLogBatch;
+
 pub mod custom_entries;
 pub mod custom_registry;
 pub use custom_registry::{
@@ -56,6 +59,7 @@ pub enum DiaryWriteError {
     Storage(ReadinessError),
     UnknownOwner,
     Input(InvalidEvent),
+    InvalidBatch,
     TrackingDisabled,
     EventMissing,
     RevisionChanged,
@@ -84,6 +88,7 @@ impl fmt::Display for DiaryWriteError {
             Self::Storage(_) => "Diary storage is unavailable",
             Self::UnknownOwner => "Diary owner could not be verified",
             Self::Input(error) => return error.fmt(formatter),
+            Self::InvalidBatch => "Diary log batch is invalid",
             Self::TrackingDisabled => "The scenario pack is disabled",
             Self::EventMissing => "Event not found",
             Self::RevisionChanged => "Event changed; reload before editing",
@@ -129,10 +134,18 @@ impl Database {
             .validate_for_write()
             .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
+        let written = Self::create_system_event_in(&mut txn, request).await?;
+        txn.commit().await?;
+        Ok(written)
+    }
+
+    async fn create_system_event_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: CreateSystemEvent<'_>,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
         if let Some(key) = request.idempotency_key {
             check_idempotency_key(key).map_err(DiaryWriteError::Replay)?;
-            if let Some(existing) = existing_replay(&mut txn, key, request.report).await? {
-                txn.commit().await?;
+            if let Some(existing) = existing_replay(txn, key, request.report).await? {
                 return Ok(existing);
             }
         }
@@ -140,18 +153,18 @@ impl Database {
         let report = request.report;
         let kind = report.payload().kind();
         check_pack(
-            &mut txn,
+            txn,
             request.owner_id,
             kind,
             request.authenticated_actor.starts_with("wearable:"),
         )
         .await?;
-        let version = ensure_system_definition_in(&mut txn, kind)
+        let version = ensure_system_definition_in(txn, kind)
             .await
             .map_err(DiaryWriteError::Definition)?;
-        validate_relation(&mut txn, report).await?;
+        validate_relation(txn, report).await?;
         let now: OffsetDateTime = sqlx::query_scalar("SELECT now()")
-            .fetch_one(&mut *txn)
+            .fetch_one(&mut **txn)
             .await?;
         let clock = stored_instant(now)?;
         let provenance = report
@@ -197,12 +210,12 @@ impl Database {
         .bind(provenance.validation_status)
         .bind(now)
         .bind(request.idempotency_key)
-        .execute(&mut *txn)
+        .execute(&mut **txn)
         .await?;
-        let written = load_event(&mut txn, id, false).await?;
-        invalidate_migraine_insights(&mut txn, kind).await?;
+        let written = load_event(txn, id, false).await?;
+        invalidate_migraine_insights(txn, kind).await?;
         append_audit(
-            &mut txn,
+            txn,
             AuditEntry {
                 id,
                 action: "create",
@@ -214,8 +227,7 @@ impl Database {
             },
         )
         .await?;
-        metrics::project_event(&mut txn, id, &written.snapshot, now).await?;
-        txn.commit().await?;
+        metrics::project_event(txn, id, &written.snapshot, now).await?;
         Ok(written)
     }
 

@@ -204,6 +204,46 @@ impl EventInput {
         Ok(())
     }
 
+    /// Apply authenticated message evidence to a new diary report.
+    pub fn for_agent_report(
+        &self,
+        source: EventSource,
+        original_text: &str,
+        linked_parent: Option<uuid::Uuid>,
+    ) -> Result<Self, InvalidEvent> {
+        if !matches!(
+            source,
+            EventSource::Manual
+                | EventSource::TelegramText
+                | EventSource::TelegramButton
+                | EventSource::TelegramVoice
+        ) {
+            return Err(InvalidEvent::InvalidField("source"));
+        }
+        if original_text.chars().count() > 16_000 {
+            return Err(InvalidEvent::InvalidField("original_text"));
+        }
+        let mut payload = self.payload.json().clone();
+        if let Some(parent) = linked_parent {
+            if self.payload.kind() != "medication" || !payload["reason_event_id"].is_null() {
+                return Err(InvalidEvent::InvalidField("reason_event_id"));
+            }
+            payload["reason_event_id"] = Value::String(parent.to_string());
+        }
+        let mut event = Self {
+            start: self.start,
+            end: self.end,
+            timezone: self.timezone.clone(),
+            source,
+            status: EventStatus::Confirmed,
+            confidence: self.confidence,
+            original_text: Some(original_text.to_owned()),
+            payload: SystemPayload::from_value(payload).map_err(InvalidEvent::Payload)?,
+        };
+        event.verify_context(ValidationMode::NewReport)?;
+        Ok(event)
+    }
+
     pub fn start(&self) -> StoredInstant {
         self.start
     }
