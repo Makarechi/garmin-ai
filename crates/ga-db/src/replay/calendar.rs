@@ -2,7 +2,7 @@ use std::{error::Error, fmt, sync::Arc};
 
 use ga_archive::{Archive, ArchiveError};
 use ga_domain::{
-    garmin_health::{HealthReplacement, normalize_health_payload, replacement_channels},
+    garmin_health::{HealthReplacement, normalize_health_payload},
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
@@ -105,15 +105,32 @@ enum ReplayScope {
 
 impl ReplayScope {
     fn for_endpoint(endpoint: &str) -> Option<Self> {
-        match endpoint {
-            "daily" | "hydration" | "sleep" | "body_battery" | "readiness" | "max_metrics" => {
-                Some(Self::Calendar)
-            }
-            _ if !replacement_channels(endpoint).is_empty() => Some(Self::Intraday),
-            _ => None,
+        if HEALTH_CALENDAR_ENDPOINTS.contains(&endpoint) {
+            Some(Self::Calendar)
+        } else if HEALTH_INTRADAY_ENDPOINTS.contains(&endpoint) {
+            Some(Self::Intraday)
+        } else {
+            None
         }
     }
 }
+
+pub(crate) const HEALTH_CALENDAR_ENDPOINTS: &[&str] = &[
+    "daily",
+    "hydration",
+    "sleep",
+    "body_battery",
+    "readiness",
+    "max_metrics",
+];
+pub(crate) const HEALTH_INTRADAY_ENDPOINTS: &[&str] = &[
+    "heart_rate",
+    "stress",
+    "hrv",
+    "respiration",
+    "spo2",
+    "steps",
+];
 
 struct ArchiveReplay<C> {
     archive: Arc<Archive>,

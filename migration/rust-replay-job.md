@@ -1,7 +1,9 @@
 # Lease-bound offline Garmin health replay
 
 The replay lane claims work for the installed parser independently of Garmin
-request pacing. It verifies the current lease before reading the archive,
+request pacing. Claim and retry exhaustion are limited to supported health
+endpoints, leaving activity and FIT jobs for their own handlers. The worker
+verifies the current lease before reading the archive,
 selects the calendar or intraday replay, and finishes the job using the
 database clock in the transaction that publishes the projection.
 
@@ -13,3 +15,8 @@ deferred retry without changing the projection, and a cancelled intraday
 replay left the sample untouched. Retrying the intraday job installed the
 verified sample and completed the job. Peak memory was 8,286,208 bytes in a
 32 MiB container, with no swap or OOM events.
+
+The scoped regression first reproduced selection of an unsupported job.
+After the correction, both fresh and exhausted activity jobs stayed pending.
+An exhausted health job still became terminal, and the complete native
+fixture passed again with a 32 MiB limit.

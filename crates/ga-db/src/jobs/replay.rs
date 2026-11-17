@@ -6,9 +6,12 @@ use uuid::Uuid;
 
 use super::{
     ATTEMPT_LIMIT, JobOutcome, JobStoreError, RecordedJobStatus, STORAGE_QUEUE_LOCK, begin,
-    fail_exhausted, finish_in_transaction,
+    finish_in_transaction,
 };
-use crate::{Database, replay::GARMIN_PARSER_VERSION};
+use crate::{
+    Database,
+    replay::{GARMIN_PARSER_VERSION, HEALTH_CALENDAR_ENDPOINTS, HEALTH_INTRADAY_ENDPOINTS},
+};
 
 const KIND: &str = "raw_replay";
 
@@ -65,9 +68,9 @@ impl ReplayJobLease {
 }
 
 impl Database {
-    /// Claim archived replay work for the installed parser using the existing durable lease.
+    /// Claim supported Garmin health work for the installed parser using the durable lease.
     /// Offline work does not consume a Garmin request or depend on its cooldown.
-    pub async fn claim_replay_job(
+    pub async fn claim_health_replay_job(
         &self,
         now: StoredInstant,
         lease_seconds: u32,
@@ -84,30 +87,22 @@ impl Database {
         if !admitted {
             return Ok(None);
         }
-        fail_exhausted(&mut txn, now.into(), Some(&[KIND])).await?;
         let token = Uuid::new_v4();
-        let claimed = sqlx::query_as::<_, (Uuid, i32, String)>(
-            "WITH candidate AS (
-                 SELECT id FROM jobs
-                 WHERE kind='raw_replay' AND payload->>'target_version'=$1::int::text
-                   AND attempts<$2
-                   AND ((status='pending' AND run_at<=$3)
-                      OR (status='running' AND lease_until<$3))
-                 ORDER BY (payload->'backfill' IS NOT DISTINCT FROM 'true'::jsonb),run_at,id
-                 FOR UPDATE SKIP LOCKED LIMIT 1
-             )
-             UPDATE jobs SET status='running',attempts=attempts+1,lease_token=$4,
-                             lease_until=$3+$5*interval '1 second'
-             FROM candidate WHERE jobs.id=candidate.id
-             RETURNING jobs.id,jobs.attempts,jobs.payload::text",
-        )
-        .bind(GARMIN_PARSER_VERSION)
-        .bind(ATTEMPT_LIMIT)
-        .bind(OffsetDateTime::from(now))
-        .bind(token)
-        .bind(seconds)
-        .fetch_optional(&mut *txn)
-        .await?;
+        let endpoints: Vec<_> = HEALTH_CALENDAR_ENDPOINTS
+            .iter()
+            .chain(HEALTH_INTRADAY_ENDPOINTS)
+            .copied()
+            .collect();
+        let claimed =
+            sqlx::query_as::<_, (Uuid, i32, String)>(include_str!("replay/claim_health.sql"))
+                .bind(GARMIN_PARSER_VERSION)
+                .bind(ATTEMPT_LIMIT)
+                .bind(OffsetDateTime::from(now))
+                .bind(token)
+                .bind(seconds)
+                .bind(endpoints)
+                .fetch_optional(&mut *txn)
+                .await?;
         txn.commit().await?;
         Ok(claimed.map(|(id, attempt, payload)| ReplayJobLease {
             id,

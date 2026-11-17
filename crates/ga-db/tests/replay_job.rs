@@ -163,8 +163,60 @@ async fn replay_loses_lease_without_changing_original_data_and_recovers()
         "synthetic-replay-current",
     )
     .await?;
+    let activity = db
+        .capture_legacy_json(
+            LegacyCapture {
+                authenticated_fingerprint: &fingerprint,
+                endpoint: "activity",
+                source_key: "1",
+                fetched_at: now,
+                body: br#"{"activityId":1}"#.to_vec(),
+            },
+            archive.clone(),
+            PutLimits {
+                max_bytes: 512_000,
+                disk_reserve_bytes: 0,
+            },
+        )
+        .await?;
+    let unhandled = enqueue(
+        &inspect,
+        activity.id,
+        &fingerprint,
+        9,
+        "synthetic-replay-other",
+    )
+    .await?;
+    let exhausted = enqueue(
+        &inspect,
+        activity.id,
+        &fingerprint,
+        9,
+        "synthetic-replay-other-exhausted",
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE jobs SET run_at=clock_timestamp()-interval '5 minutes',
+                    attempts=CASE WHEN id=$2 THEN 8 ELSE 0 END WHERE id IN ($1,$2)",
+    )
+    .bind(unhandled)
+    .bind(exhausted)
+    .execute(&inspect)
+    .await?;
+    let health_exhausted = enqueue(
+        &inspect,
+        raw.id,
+        &fingerprint,
+        9,
+        "synthetic-health-exhausted",
+    )
+    .await?;
+    sqlx::query("UPDATE jobs SET attempts=8 WHERE id=$1")
+        .bind(health_exhausted)
+        .execute(&inspect)
+        .await?;
     let first = db
-        .claim_replay_job(clock(&inspect).await?, 30)
+        .claim_health_replay_job(clock(&inspect).await?, 30)
         .await?
         .ok_or("Missing replay lease")?;
     assert_eq!((first.id(), first.attempt()), (job, 1));
@@ -213,7 +265,7 @@ async fn replay_loses_lease_without_changing_original_data_and_recovers()
         .await?;
 
     let retry = db
-        .claim_replay_job(clock(&inspect).await?, 30)
+        .claim_health_replay_job(clock(&inspect).await?, 30)
         .await?
         .ok_or("Missing retry")?;
     assert_eq!((retry.id(), retry.attempt()), (job, 2));
@@ -236,7 +288,7 @@ async fn replay_loses_lease_without_changing_original_data_and_recovers()
         (9, None, Some("normalized".to_owned()), "done".to_owned(), 2),
     );
     assert!(
-        db.claim_replay_job(clock(&inspect).await?, 30)
+        db.claim_health_replay_job(clock(&inspect).await?, 30)
             .await?
             .is_none()
     );
@@ -246,6 +298,27 @@ async fn replay_loses_lease_without_changing_original_data_and_recovers()
             .fetch_one(&inspect)
             .await?,
         "pending",
+    );
+
+    let unaffected: Vec<(String, i32)> =
+        sqlx::query_as("SELECT status, attempts FROM jobs WHERE id IN ($1,$2) ORDER BY attempts")
+            .bind(unhandled)
+            .bind(exhausted)
+            .fetch_all(&inspect)
+            .await?;
+    assert_eq!(
+        unaffected,
+        vec![("pending".to_owned(), 0), ("pending".to_owned(), 8)]
+    );
+
+    let final_state: (String, String) =
+        sqlx::query_as("SELECT status,last_error FROM jobs WHERE id=$1")
+            .bind(health_exhausted)
+            .fetch_one(&inspect)
+            .await?;
+    assert_eq!(
+        final_state,
+        ("failed".to_owned(), "RetryLimitExceeded".to_owned())
     );
 
     let object = path.join(raw.archive_key.to_string());
@@ -261,7 +334,7 @@ async fn replay_loses_lease_without_changing_original_data_and_recovers()
     )
     .await?;
     let lease = db
-        .claim_replay_job(clock(&inspect).await?, 30)
+        .claim_health_replay_job(clock(&inspect).await?, 30)
         .await?
         .ok_or("Missing corrupt job")?;
     let rejected = db
@@ -322,7 +395,7 @@ async fn replay_loses_lease_without_changing_original_data_and_recovers()
     )
     .await?;
     let lease = db
-        .claim_replay_job(clock(&inspect).await?, 30)
+        .claim_health_replay_job(clock(&inspect).await?, 30)
         .await?
         .ok_or("Missing intraday job")?;
     assert_eq!(lease.id(), intraday);
