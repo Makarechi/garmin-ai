@@ -5,6 +5,7 @@ pub mod fit_staging;
 pub mod garmin_owner;
 pub mod health_analysis;
 mod health_projection;
+pub mod history_windows;
 pub mod jobs;
 pub mod raw_capture;
 pub mod replay;
