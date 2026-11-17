@@ -739,6 +739,7 @@ dependencies = [
  "ga-fit",
  "ga-garmin",
  "ga-model",
+ "markdown-it-rust-core",
  "reqwest",
  "rustls",
  "rustls-native-certs",
@@ -1462,6 +1463,15 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "markdown-it-rust-core"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85be5daff7df527b379b79f097c3a6435349224828da85ad93896a9659d171ea"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "matchit"
