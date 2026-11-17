@@ -15,6 +15,7 @@ use crate::{ModelTransportError, ModelUnavailability};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FallbackError {
     ConsentRequired,
+    StateUnavailable,
     Cooldown {
         reason: ModelGateReason,
         retry_after: Duration,
@@ -124,7 +125,9 @@ impl ModelFallback<'_> {
                 Err(error) => error,
             };
             match error {
-                FallbackError::ConsentRequired | FallbackError::Cooldown { .. } => {
+                FallbackError::ConsentRequired
+                | FallbackError::StateUnavailable
+                | FallbackError::Cooldown { .. } => {
                     return Err(error);
                 }
                 FallbackError::Deadline => {

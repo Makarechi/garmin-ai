@@ -19,6 +19,7 @@ ga-db = { path = "../ga-db" }
 ga-domain = { path = "../ga-domain" }
 ga-fit = { path = "../ga-fit" }
 ga-garmin = { path = "../ga-garmin" }
+ga-model = { path = "../ga-model" }
 serde_json = "1"
 sha2 = { version = "0.11.1", default-features = false }
 speedate = "=0.17.0"

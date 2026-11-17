@@ -138,68 +138,92 @@ impl ModelGateSession<'_> {
     /// Persistence errors do not imply that the upstream request can be sent again.
     pub async fn record(&mut self, outcome: RecordModelGate<'_>) -> Result<(), ModelGateError> {
         let mut txn = self.connection.begin().await?;
-        prepare(&mut txn).await?;
-        let prior = read_value(&mut txn, self.identity).await?;
-        let prior_pause = prior["scheduler_pause_until"]
-            .as_str()
-            .filter(|_| prior["configuration"].as_str() == Some(self.identity.configuration()))
-            .and_then(|text| Some((text, text.parse::<StoredInstant>().ok()?)))
-            .filter(|(_, at)| *at > outcome.now);
-        let scheduler_pause = match prior_pause {
-            Some((text, previous))
-                if outcome
-                    .scheduler_pause_until
-                    .is_none_or(|until| previous > until) =>
-            {
-                Some(text.to_owned())
-            }
-            _ => outcome.scheduler_pause_until.map(|at| at.to_string()),
-        };
-        let model_cooldowns: BTreeMap<_, _> = outcome
-            .model_cooldowns
-            .iter()
-            .map(|(model, at)| (model, at.to_string()))
-            .collect();
-        let mut value = json!({
-            "configuration": self.identity.configuration(),
-            "reason": outcome.reason.label(),
-            "blocked_until": outcome.blocked_until.map(|at| at.to_string()),
-            "scheduler_pause_until": scheduler_pause,
-            "model_cooldowns": model_cooldowns,
-            "at": outcome.now.to_string(),
-        });
-        if self.identity.state_key() == PRIMARY_GEMINI_STATE
-            && (prior_pause.is_none() || prior.get("instance_id").is_some())
+        let result = record_in(&mut txn, self.identity, outcome).await;
+        finish(txn, result).await
+    }
+}
+
+async fn record_in(
+    txn: &mut Transaction<'_, Postgres>,
+    identity: &ModelGateIdentity,
+    outcome: RecordModelGate<'_>,
+) -> Result<(), ModelGateError> {
+    prepare(txn).await?;
+    let prior = read_value(txn, identity).await?;
+    let prior_pause = prior["scheduler_pause_until"]
+        .as_str()
+        .filter(|_| prior["configuration"].as_str() == Some(identity.configuration()))
+        .and_then(|text| Some((text, text.parse::<StoredInstant>().ok()?)))
+        .filter(|(_, at)| *at > outcome.now);
+    let scheduler_pause = match prior_pause {
+        Some((text, previous))
+            if outcome
+                .scheduler_pause_until
+                .is_none_or(|until| previous > until) =>
         {
-            value["instance_id"] = json!(ga_domain::model_gate::PRIMARY_GEMINI_INSTANCE);
+            Some(text.to_owned())
         }
-        let gemini = self.identity.state_key() == PRIMARY_GEMINI_STATE
-            || self.identity.inherits_legacy_gemini_state();
-        if gemini && outcome.notify_quota && outcome.reason == ModelGateOutcomeReason::Quota {
-            let now = OffsetDateTime::from(outcome.now);
-            let key = format!("quota:{}-{:02}", now.date(), now.hour());
-            sqlx::query(
-                "INSERT INTO jobs (id,kind,payload,dedup_key,status,run_at,attempts)
-                 VALUES ($1,'telegram_provider_notice',$2::jsonb,$3,'pending',$4,0)
-                 ON CONFLICT (dedup_key) DO NOTHING",
-            )
-            .bind(Uuid::new_v4())
-            .bind(json!({"outbox_key": key}).to_string())
-            .bind(format!("provider-notice:{key}"))
-            .bind(now)
-            .execute(&mut *txn)
-            .await?;
-        }
+        _ => outcome.scheduler_pause_until.map(|at| at.to_string()),
+    };
+    let model_cooldowns: BTreeMap<_, _> = outcome
+        .model_cooldowns
+        .iter()
+        .map(|(model, at)| (model, at.to_string()))
+        .collect();
+    let mut value = json!({
+        "configuration": identity.configuration(),
+        "reason": outcome.reason.label(),
+        "blocked_until": outcome.blocked_until.map(|at| at.to_string()),
+        "scheduler_pause_until": scheduler_pause,
+        "model_cooldowns": model_cooldowns,
+        "at": outcome.now.to_string(),
+    });
+    if identity.state_key() == PRIMARY_GEMINI_STATE
+        && (prior_pause.is_none() || prior.get("instance_id").is_some())
+    {
+        value["instance_id"] = json!(ga_domain::model_gate::PRIMARY_GEMINI_INSTANCE);
+    }
+    let gemini =
+        identity.state_key() == PRIMARY_GEMINI_STATE || identity.inherits_legacy_gemini_state();
+    if gemini && outcome.notify_quota && outcome.reason == ModelGateOutcomeReason::Quota {
+        let now = OffsetDateTime::from(outcome.now);
+        let key = format!("quota:{}-{:02}", now.date(), now.hour());
         sqlx::query(
-            "INSERT INTO app_state (key, value) VALUES ($1, $2::jsonb)
-             ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO jobs (id,kind,payload,dedup_key,status,run_at,attempts)
+             VALUES ($1,'telegram_provider_notice',$2::jsonb,$3,'pending',$4,0)
+             ON CONFLICT (dedup_key) DO NOTHING",
         )
-        .bind(self.identity.state_key())
-        .bind(value.to_string())
-        .execute(&mut *txn)
+        .bind(Uuid::new_v4())
+        .bind(json!({"outbox_key": key}).to_string())
+        .bind(format!("provider-notice:{key}"))
+        .bind(now)
+        .execute(&mut **txn)
         .await?;
-        txn.commit().await?;
-        Ok(())
+    }
+    sqlx::query(
+        "INSERT INTO app_state (key, value) VALUES ($1, $2::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(identity.state_key())
+    .bind(value.to_string())
+    .execute(&mut **txn)
+    .await?;
+    Ok(())
+}
+
+async fn finish<T>(
+    txn: Transaction<'_, Postgres>,
+    result: Result<T, ModelGateError>,
+) -> Result<T, ModelGateError> {
+    match result {
+        Ok(value) => {
+            txn.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            txn.rollback().await?;
+            Err(error)
+        }
     }
 }
 
