@@ -186,7 +186,8 @@ async fn valid_fence(
     owner_id: Uuid,
     candidate: &Candidate,
 ) -> Result<bool, sqlx::Error> {
-    let Some(fence) = candidate.fence.as_deref() else {
+    // SQLAlchemy can persist an explicit None as JSON null.
+    let Some(fence) = candidate.fence.as_deref().filter(|value| *value != "null") else {
         return Ok(true);
     };
     let Ok(fence) = serde_json::from_str::<MemoryFence>(fence) else {

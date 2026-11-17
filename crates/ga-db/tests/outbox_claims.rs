@@ -176,6 +176,11 @@ async fn seed(pool: &PgPool, owner: Uuid, outbox: &Value) -> Result<(), sqlx::Er
     .bind(outbox.to_string())
     .execute(pool)
     .await?;
+    // An explicitly written None in the legacy JSONB column is a JSON null.
+    sqlx::query("UPDATE outbox_messages SET memory_fence='null'::jsonb WHERE id=$1")
+        .bind(Uuid::from_u128(1005))
+        .execute(pool)
+        .await?;
     for (id, initiative, legacy_key, legacy_inbound, foreign) in [
         (901, true, None, None, false),
         (902, false, Some("synthetic-legacy-alias"), None, false),
