@@ -1,4 +1,6 @@
+mod poller;
 mod send;
+pub use poller::{PollBatch, PollProgress, TelegramLoopError};
 pub use send::TelegramSendOutcome;
 
 use std::{error::Error, fmt, time::Duration};

@@ -15,6 +15,10 @@ use super::{
 };
 use crate::{
     check_readiness,
+    jobs::{
+        JobStoreError,
+        telegram_ack::{TelegramAckTarget, enqueue_telegram_ack},
+    },
     runtime_lease::RuntimeLease,
     telegram_cursor::{
         TelegramCursorError, advance_telegram_poll_cursor, lock_ingress, record_telegram_ordering,
@@ -35,6 +39,7 @@ pub struct TelegramPollInput<'a> {
     pub update_id: i64,
     pub received_at: StoredInstant,
     pub event: TelegramPollEvent<'a>,
+    pub callback_id: Option<&'a str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -42,6 +47,7 @@ pub struct TelegramPollReceipt {
     pub selected: bool,
     pub inbound: Option<InboundReceipt>,
     pub new_ordering_epoch: Option<i64>,
+    pub acknowledgement_queued: bool,
 }
 
 #[derive(Debug)]
@@ -51,6 +57,7 @@ pub enum TelegramPollError {
     Busy,
     Ingress(IngressError),
     Cursor(TelegramCursorError),
+    Acknowledgement(JobStoreError),
     Database,
 }
 
@@ -64,6 +71,7 @@ impl fmt::Display for TelegramPollError {
             Self::Busy => f.write_str("Telegram channel selection is changing"),
             Self::Ingress(error) => error.fmt(f),
             Self::Cursor(error) => error.fmt(f),
+            Self::Acknowledgement(error) => error.fmt(f),
             Self::Database => f.write_str("Telegram poll update could not be committed"),
         }
     }
@@ -86,6 +94,26 @@ impl From<TelegramCursorError> for TelegramPollError {
 }
 
 impl RuntimeLease {
+    pub async fn telegram_channel_selected(
+        &mut self,
+        instance: &str,
+    ) -> Result<bool, TelegramPollError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = Connection::begin(&mut self.connection).await?;
+            sqlx::query("SET LOCAL statement_timeout = '750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(IngressError::Storage)?;
+            let selected = selection(&mut txn, instance).await?;
+            txn.commit().await?;
+            Ok(selected)
+        })
+        .await
+        .map_err(|_| TelegramPollError::Database)?
+    }
+
     /// The inbox, button consumption, ordering record and offset commit on the
     /// same connection that holds the shared Python/Rust runtime advisory lock.
     pub async fn persist_telegram_poll_event(
@@ -122,6 +150,13 @@ impl RuntimeLease {
             } else {
                 None
             };
+            let acknowledgement_queued = if let Some(callback_id) = input.callback_id.filter(|_| selected) {
+                let target = TelegramAckTarget { owner_id: input.owner_id, instance_id: input.instance_id };
+                enqueue_telegram_ack(&mut txn, target, input.update_id, callback_id, input.received_at)
+                    .await.map_err(TelegramPollError::Acknowledgement)?
+            } else {
+                false
+            };
             advance_telegram_poll_cursor(
                 &mut txn,
                 input.instance_id,
@@ -134,6 +169,7 @@ impl RuntimeLease {
                 selected,
                 inbound,
                 new_ordering_epoch,
+                acknowledgement_queued,
             })
         })
         .await

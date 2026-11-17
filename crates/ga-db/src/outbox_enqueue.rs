@@ -1,3 +1,6 @@
+mod generated;
+pub use generated::queue_generated_outbox_intent;
+
 use std::{error::Error, fmt};
 
 use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};
