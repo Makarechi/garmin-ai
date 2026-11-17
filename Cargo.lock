@@ -738,6 +738,7 @@ dependencies = [
  "ga-domain",
  "ga-fit",
  "ga-garmin",
+ "ga-model",
  "reqwest",
  "rustls",
  "rustls-native-certs",

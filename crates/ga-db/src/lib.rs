@@ -15,6 +15,7 @@ mod health_projection;
 pub mod history_windows;
 pub mod jobs;
 pub mod model_gate;
+pub mod outbox_claims;
 pub mod raw_capture;
 pub mod replay;
 pub mod runtime_lease;
@@ -23,6 +24,7 @@ pub mod share_policy;
 pub mod source_pages;
 pub mod system_definitions;
 pub mod system_metrics;
+pub mod telegram_cursor;
 
 use std::{str::FromStr, time::Duration};
 

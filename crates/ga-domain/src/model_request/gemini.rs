@@ -99,6 +99,13 @@ impl GeminiModelRequest {
         Ok(Self { body, schema })
     }
 
+    /// Switch the candidate without rebuilding the schema or copying inline audio.
+    pub fn select_model(&mut self, model: &str) -> Result<(), ModelRequestError> {
+        check_model(model)?;
+        self.body["model"] = json!(model);
+        Ok(())
+    }
+
     pub fn body(&self) -> &Value {
         &self.body
     }

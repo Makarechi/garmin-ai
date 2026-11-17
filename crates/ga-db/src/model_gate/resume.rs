@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use sqlx::{Connection, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::{ModelGateError, ModelGateSession, prepare};
+use super::{ModelGateError, ModelGateSession, finish, prepare};
 
 const IDENTITY_VERSION: u64 = 2;
 const MAX_RESUME_BYTES: i32 = 32 * 1024;
@@ -168,22 +168,6 @@ impl ModelGateSession<'_> {
             Ok(true)
         }.await;
         finish(txn, result).await
-    }
-}
-
-async fn finish<T>(
-    txn: Transaction<'_, Postgres>,
-    result: Result<T, ModelGateError>,
-) -> Result<T, ModelGateError> {
-    match result {
-        Ok(value) => {
-            txn.commit().await?;
-            Ok(value)
-        }
-        Err(error) => {
-            txn.rollback().await?;
-            Err(error)
-        }
     }
 }
 
