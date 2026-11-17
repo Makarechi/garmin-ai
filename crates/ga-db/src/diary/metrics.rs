@@ -8,12 +8,13 @@ use super::DiaryWriteError;
 
 const DURATION_FIELD: &str = "__derived_duration_minutes_v1__";
 
-pub(super) async fn project_creation(
+pub(super) async fn project_event(
     txn: &mut Transaction<'_, Postgres>,
     source: Uuid,
     definition: Uuid,
     report: &EventInput,
-    now: OffsetDateTime,
+    recorded_at: OffsetDateTime,
+    transition_at: OffsetDateTime,
 ) -> Result<(), DiaryWriteError> {
     type Mapping = (
         String,
@@ -81,8 +82,11 @@ pub(super) async fn project_creation(
                  metric_definition_version_id, source_entry_id, field_id, projection_version,
                  observed_at, effective_start, effective_end, recorded_at, source_calendar_date,
                  source_ref, fetched_at, ingested_at, timezone, quality, valid, sequence, feature_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $10, $11, $12,
-                 $13, $8, $12, $12, $14, 'observed', true, $15, 'event-projection-v1')",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                 (SELECT coalesce(max(projection_version),0) + 1 FROM metric_observations
+                    WHERE source_entry_id = $8 AND field_id = $9),
+                 $10, $10, $11, $12, $13, $8, $14, $14, $15, 'observed', true, $16,
+                 'event-projection-v1')",
         )
         .bind(Uuid::new_v4())
         .bind(key)
@@ -95,13 +99,30 @@ pub(super) async fn project_creation(
         .bind(field)
         .bind(start)
         .bind(end)
-        .bind(now)
+        .bind(recorded_at)
         .bind(day)
+        .bind(transition_at)
         .bind(report.timezone())
         .bind(sequence)
         .execute(&mut **txn)
         .await?;
     }
+    Ok(())
+}
+
+pub(super) async fn invalidate(
+    txn: &mut Transaction<'_, Postgres>,
+    event: Uuid,
+    transition: OffsetDateTime,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE metric_observations SET valid = false, invalidated_at = $2
+         WHERE source_entry_id = $1 AND valid",
+    )
+    .bind(event)
+    .bind(transition)
+    .execute(&mut **txn)
+    .await?;
     Ok(())
 }
 
