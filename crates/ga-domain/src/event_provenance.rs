@@ -127,7 +127,7 @@ pub fn restore_legacy_provenance(
     derive_provenance(Some(actor), source, status, topology, recorded, None).ok()
 }
 
-fn derive_provenance(
+pub(crate) fn derive_provenance(
     actor: Option<&str>,
     source: &str,
     status: &str,

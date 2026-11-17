@@ -1,5 +1,7 @@
 mod custom;
+mod entry;
 mod specification;
+pub use entry::{CustomEntry, CustomEntryError, ResolvedCustomEntry};
 pub use specification::{CustomDefinition, CustomDefinitionError};
 
 pub use custom::{CustomSchemaError, validate_custom_schema};
