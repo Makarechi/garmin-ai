@@ -51,7 +51,7 @@ impl From<sqlx::Error> for FitStageError {
 
 /// Holds a PostgreSQL transaction with candidates visible only to this connection.
 pub struct StagedFitProjection {
-    transaction: Transaction<'static, Postgres>,
+    pub(crate) transaction: Transaction<'static, Postgres>,
     inventory: ExportProjectionInventory,
 }
 
