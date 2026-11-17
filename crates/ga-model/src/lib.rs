@@ -1,4 +1,7 @@
 pub mod fallback;
+mod gemini;
+
+pub use gemini::GeminiTransport;
 
 use std::{
     error::Error,
@@ -13,7 +16,7 @@ use ga_domain::{
     },
 };
 use reqwest::{
-    Client, StatusCode,
+    Client, Response, StatusCode,
     header::{
         ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, HeaderName, HeaderValue, RETRY_AFTER,
     },
@@ -98,37 +101,11 @@ impl ModelTransport {
         timeout: Duration,
         https_only: bool,
     ) -> Result<Self, ModelTransportError> {
-        let invalid = ModelTransportError::InvalidConfiguration;
-        if !(Duration::from_secs(1)..=Duration::from_secs(120)).contains(&timeout)
-            || api_key.is_empty()
-            || api_key.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-        {
-            return Err(invalid);
+        if !(Duration::from_secs(1)..=Duration::from_secs(120)).contains(&timeout) {
+            return Err(ModelTransportError::InvalidConfiguration);
         }
-        let mut authorization =
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| invalid)?;
-        authorization.set_sensitive(true);
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        if roots.is_empty() {
-            return Err(invalid);
-        }
-        let tls = rustls::ClientConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .map_err(|_| invalid)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let client = Client::builder()
-            .tls_backend_preconfigured(tls)
-            .https_only(https_only)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .timeout(timeout)
-            .build()
-            .map_err(|_| invalid)?;
+        let authorization = credential_header(api_key, true)?;
+        let client = transport_client(timeout, https_only)?;
         Ok(Self {
             client,
             provider,
@@ -168,44 +145,99 @@ impl ModelTransport {
                 ANTHROPIC_VERSION,
             );
         }
-        let network = |_| ModelUnavailability::Upstream.with_retry(None);
-        let mut response = http.send().await.map_err(network)?;
+        let response = http.send().await.map_err(network_failure)?;
         if !response.status().is_success() {
-            let retry = response
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| retry_delay(value, SystemTime::now()));
-            return Err(http_failure(response.status(), retry));
+            return Err(http_failure(response.status(), response_retry(&response)));
         }
-        if response
-            .headers()
-            .get_all(CONTENT_ENCODING)
-            .iter()
-            .any(|encoding| !encoding.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
-            return Err(ModelTransportError::Response(
-                ModelResponseError::InvalidEnvelope,
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
+        let body = read_body(response, MAX_RESPONSE_BYTES).await?;
+        request.decode_response(&body).map_err(response_failure)
+    }
+}
+
+fn credential_header(api_key: &str, bearer: bool) -> Result<HeaderValue, ModelTransportError> {
+    let invalid = ModelTransportError::InvalidConfiguration;
+    if api_key.is_empty() || api_key.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
+        return Err(invalid);
+    }
+    let mut header = if bearer {
+        HeaderValue::from_str(&format!("Bearer {api_key}"))
+    } else {
+        HeaderValue::from_str(api_key)
+    }
+    .map_err(|_| invalid)?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
+fn transport_client(timeout: Duration, https_only: bool) -> Result<Client, ModelTransportError> {
+    let invalid = ModelTransportError::InvalidConfiguration;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if roots.is_empty() {
+        return Err(invalid);
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(|_| invalid)?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Client::builder()
+        .tls_backend_preconfigured(tls)
+        .https_only(https_only)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(timeout)
+        .build()
+        .map_err(|_| invalid)
+}
+
+fn network_failure(_: reqwest::Error) -> ModelTransportError {
+    ModelUnavailability::Upstream.with_retry(None)
+}
+
+fn response_failure(error: ModelResponseError) -> ModelTransportError {
+    match error {
+        ModelResponseError::Unavailable => ModelUnavailability::Upstream.with_retry(None),
+        other => ModelTransportError::Response(other),
+    }
+}
+
+fn response_retry(response: &Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| retry_delay(value, SystemTime::now()))
+}
+
+async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, ModelTransportError> {
+    if response
+        .headers()
+        .get_all(CONTENT_ENCODING)
+        .iter()
+        .any(|encoding| !encoding.as_bytes().eq_ignore_ascii_case(b"identity"))
+    {
+        return Err(ModelTransportError::Response(
+            ModelResponseError::InvalidEnvelope,
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(ModelTransportError::Response(ModelResponseError::TooLarge));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(network_failure)? {
+        if chunk.len() > limit - body.len() {
             return Err(ModelTransportError::Response(ModelResponseError::TooLarge));
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(network)? {
-            if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
-                return Err(ModelTransportError::Response(ModelResponseError::TooLarge));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        request.decode_response(&body).map_err(|error| match error {
-            ModelResponseError::Unavailable => ModelUnavailability::Upstream.with_retry(None),
-            other => ModelTransportError::Response(other),
-        })
+        body.extend_from_slice(&chunk);
     }
+    Ok(body)
 }
 
 fn http_failure(status: StatusCode, retry: Option<Duration>) -> ModelTransportError {

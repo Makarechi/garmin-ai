@@ -310,3 +310,185 @@ fn calculates_bounded_retry_after_with_the_request_clock() {
         assert_eq!(retry_delay(invalid, now), None);
     }
 }
+
+async fn gemini_exchange(
+    request: &ga_domain::model_request::GeminiModelRequest,
+    response: Vec<u8>,
+) -> Result<Result<StructuredModelOutput, ModelTransportError>, Box<dyn Error + Send + Sync>> {
+    let transport = GeminiTransport::connect(SYNTHETIC_KEY, false)?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/v1beta/interactions", listener.local_addr()?);
+    let server = async {
+        let (mut connection, _) = listener.accept().await?;
+        let (headers, body) = read_request(&mut connection).await?;
+        assert!(headers.starts_with("POST /v1beta/interactions HTTP/1.1\r\n"));
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains(&format!("x-goog-api-key: {SYNTHETIC_KEY}\r\n")));
+        assert!(!headers.contains("authorization:"));
+        assert_eq!(&body, request.body());
+        assert_eq!(body["store"], false);
+        if let Err(error) = connection.write_all(&response).await
+            && !matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+            )
+        {
+            return Err(error.into());
+        }
+        drop(connection);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(15), listener.accept())
+                .await
+                .is_err()
+        );
+        Ok::<_, Box<dyn Error + Send + Sync>>(())
+    };
+    let (result, observed) = tokio::join!(
+        transport.send_to(request, Duration::from_secs(1), &endpoint),
+        server
+    );
+    observed?;
+    Ok(result)
+}
+
+fn gemini_request()
+-> Result<ga_domain::model_request::GeminiModelRequest, ga_domain::model_request::ModelRequestError>
+{
+    ga_domain::model_request::GeminiModelRequest::structured(
+        ApprovedModelSchema::ModelProbe,
+        "fixture-model",
+        "low",
+        "fixture instruction",
+        "fixture input",
+    )
+}
+
+#[tokio::test]
+async fn delivers_gemini_text_and_voice_to_one_interaction()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let text = gemini_request()?;
+    let voice = ga_domain::model_request::GeminiModelRequest::transcribe(
+        "fixture-model",
+        "",
+        b"synthetic",
+        "audio/ogg",
+    )?;
+    for (request, value) in [
+        (text, json!({"urgent":false})),
+        (voice, json!({"text":"synthetic transcript"})),
+    ] {
+        let body = json!({
+            "status":"completed", "steps":[{"type":"model_output", "content":[{"type":"text", "text":value.to_string()}]}],
+            "usage":{"total_input_tokens":11, "total_output_tokens":3},
+        }).to_string();
+        let result = gemini_exchange(&request, reply(200, "", body.as_bytes())).await??;
+        assert_eq!(result.value, value);
+        assert_eq!(result.usage.and_then(|usage| usage.input_tokens), Some(11));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn handles_gemini_error_envelopes_without_leaking_details()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let request = gemini_request()?;
+    let error = br#"{"error":{"message":"synthetic private input","details":[{"reason":"API_KEY_INVALID"}]}}"#;
+    let cases: [(u16, &[u8], ModelTransportError); 8] = [
+        (
+            400,
+            error,
+            ModelUnavailability::Authorization.with_retry(Some(Duration::from_secs(1900))),
+        ),
+        (
+            429,
+            error,
+            ModelUnavailability::RateLimited.with_retry(Some(Duration::from_secs(1900))),
+        ),
+        (
+            404,
+            b"{}",
+            ModelUnavailability::MissingModel.with_retry(Some(Duration::from_secs(1900))),
+        ),
+        (
+            503,
+            b"{}",
+            ModelUnavailability::Upstream.with_retry(Some(Duration::from_secs(1900))),
+        ),
+        (
+            400,
+            b"invalid synthetic body",
+            ModelTransportError::RequestRejected,
+        ),
+        (307, b"", ModelTransportError::RequestRejected),
+        (
+            200,
+            br#"{"status":"budget_exceeded"}"#,
+            ModelTransportError::Response(ModelResponseError::Incomplete),
+        ),
+        (
+            200,
+            br#"{"status":"cancelled"}"#,
+            ModelUnavailability::Upstream.with_retry(None),
+        ),
+    ];
+    for (status, body, expected) in cases {
+        let actual = gemini_exchange(
+            &request,
+            reply(status, "retry-after: 1900\r\nlocation: /moved\r\n", body),
+        )
+        .await?;
+        assert_eq!(actual.err(), Some(expected));
+        assert!(!expected.to_string().contains("synthetic"));
+    }
+    let mut oversized = vec![b' '; 33 * 1024];
+    oversized.extend_from_slice(error);
+    assert_eq!(
+        gemini_exchange(&request, reply(400, "", &oversized))
+            .await?
+            .err(),
+        Some(ModelTransportError::RequestRejected)
+    );
+    let oversized = vec![b' '; MAX_RESPONSE_BYTES + 1];
+    assert_eq!(
+        gemini_exchange(&request, reply(200, "", &oversized))
+            .await?
+            .err(),
+        Some(ModelTransportError::Response(ModelResponseError::TooLarge))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn enforces_gemini_attempt_deadline_on_a_slow_body()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let request = gemini_request()?;
+    let transport = GeminiTransport::connect(SYNTHETIC_KEY, false)?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/v1beta/interactions", listener.local_addr()?);
+    let server = async {
+        let (mut connection, _) = listener.accept().await?;
+        read_request(&mut connection).await?;
+        connection
+            .write_all(b"HTTP/1.1 200 Fixture\r\ncontent-length: 30\r\n\r\n{")
+            .await?;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        Ok::<_, Box<dyn Error + Send + Sync>>(())
+    };
+    let (result, observed) = tokio::join!(
+        transport.send_to(&request, Duration::from_millis(50), &endpoint),
+        server
+    );
+    observed?;
+    assert_eq!(
+        result.err(),
+        Some(ModelUnavailability::Upstream.with_retry(None))
+    );
+    assert_eq!(
+        transport
+            .send_to(&request, Duration::ZERO, &endpoint)
+            .await
+            .err(),
+        Some(ModelTransportError::InvalidConfiguration)
+    );
+    Ok(())
+}
