@@ -1,0 +1,2279 @@
+[
+  {
+    "kind": "activity_effort",
+    "hash": "1d34eb83780532061499ea85fd14853aa0290eb7e35fdcc1b18cb5441c70955c",
+    "contract": {
+      "key": "system.activity_effort",
+      "labels": {
+        "en": "activity effort"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "activity_effort",
+            "default": "activity_effort",
+            "title": "Type",
+            "type": "string"
+          },
+          "activity_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Activity Id",
+            "type": "string"
+          },
+          "perceived_exertion": {
+            "maximum": 10,
+            "minimum": 0,
+            "title": "Perceived Exertion",
+            "type": "integer"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
+          }
+        },
+        "required": [
+          "activity_id",
+          "perceived_exertion",
+          "type"
+        ],
+        "title": "ActivityEffort",
+        "type": "object"
+      },
+      "fields": {
+        "activity_id": {
+          "id": "system.activity_effort.activity_id",
+          "labels": {
+            "en": "activity id"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "perceived_exertion": {
+          "id": "system.activity_effort.perceived_exertion",
+          "labels": {
+            "en": "perceived exertion"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "notes": {
+          "id": "system.activity_effort.notes",
+          "labels": {
+            "en": "notes"
+          },
+          "semantic": "text",
+          "unit": null
+        }
+      },
+      "topology": "point",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "alcohol",
+    "hash": "79064ba927d6aa5e0e6120c954cdb12254928a1de3fda2fea45bcb21932c28cb",
+    "contract": {
+      "key": "system.alcohol",
+      "labels": {
+        "en": "alcohol"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "alcohol",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.alcohol.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.alcohol.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.alcohol.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.alcohol.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "caffeine",
+    "hash": "5dc80a83ce411a58307201e18f128112ad4f2ea597c31e6380b7ac2e3d561e0b",
+    "contract": {
+      "key": "system.caffeine",
+      "labels": {
+        "en": "caffeine"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "caffeine",
+            "default": "caffeine",
+            "title": "Type",
+            "type": "string"
+          },
+          "beverage": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Beverage",
+            "type": "string"
+          },
+          "servings": {
+            "default": 1,
+            "exclusiveMinimum": 0,
+            "maximum": 30,
+            "title": "Servings",
+            "type": "number"
+          },
+          "dose_basis": {
+            "default": "unknown",
+            "enum": [
+              "total",
+              "per_serving",
+              "unknown"
+            ],
+            "title": "Dose Basis",
+            "type": "string"
+          },
+          "dose_provenance": {
+            "default": "unknown",
+            "enum": [
+              "estimated",
+              "reported_label",
+              "unknown"
+            ],
+            "title": "Dose Provenance",
+            "type": "string"
+          },
+          "dose_notes": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dose Notes"
+          },
+          "caffeine_mg_estimate": {
+            "anyOf": [
+              {
+                "maximum": 5000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caffeine Mg Estimate"
+          },
+          "caffeine_mg_min": {
+            "anyOf": [
+              {
+                "maximum": 5000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caffeine Mg Min"
+          },
+          "caffeine_mg_max": {
+            "anyOf": [
+              {
+                "maximum": 5000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caffeine Mg Max"
+          }
+        },
+        "required": [
+          "beverage",
+          "type"
+        ],
+        "title": "Caffeine",
+        "type": "object",
+        "x-server-validation": {
+          "model": "Caffeine",
+          "cross_field_rules": [
+            "caffeine_mg_min <= caffeine_mg_max when both are present",
+            "caffeine_mg_estimate lies within the supplied minimum and maximum"
+          ]
+        }
+      },
+      "fields": {
+        "beverage": {
+          "id": "system.caffeine.beverage",
+          "labels": {
+            "en": "beverage"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "servings": {
+          "id": "system.caffeine.servings",
+          "labels": {
+            "en": "servings"
+          },
+          "semantic": "count",
+          "unit": "count"
+        },
+        "dose_basis": {
+          "id": "system.caffeine.dose_basis",
+          "labels": {
+            "en": "dose basis"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "dose_provenance": {
+          "id": "system.caffeine.dose_provenance",
+          "labels": {
+            "en": "dose provenance"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "dose_notes": {
+          "id": "system.caffeine.dose_notes",
+          "labels": {
+            "en": "dose notes"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "caffeine_mg_estimate": {
+          "id": "system.caffeine.caffeine_mg_estimate",
+          "labels": {
+            "en": "caffeine mg estimate"
+          },
+          "semantic": "quantity",
+          "unit": "mg"
+        },
+        "caffeine_mg_min": {
+          "id": "system.caffeine.caffeine_mg_min",
+          "labels": {
+            "en": "caffeine mg min"
+          },
+          "semantic": "quantity",
+          "unit": "mg"
+        },
+        "caffeine_mg_max": {
+          "id": "system.caffeine.caffeine_mg_max",
+          "labels": {
+            "en": "caffeine mg max"
+          },
+          "semantic": "quantity",
+          "unit": "mg"
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "caffeine_absence",
+    "hash": "be76013e95494419e18ad7699ac75f77aa64afb5cba54132d4bb76d535ca0753",
+    "contract": {
+      "key": "system.caffeine_absence",
+      "labels": {
+        "en": "caffeine absence"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "caffeine_absence",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.caffeine_absence.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.caffeine_absence.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.caffeine_absence.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.caffeine_absence.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "bounded_interval",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "caffeine_log_complete",
+    "hash": "cf72abc9587da01c41f8fb4fdadb857e2da7dc4617094e6eadcca426145afaef",
+    "contract": {
+      "key": "system.caffeine_log_complete",
+      "labels": {
+        "en": "caffeine log complete"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "caffeine_log_complete",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.caffeine_log_complete.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.caffeine_log_complete.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.caffeine_log_complete.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.caffeine_log_complete.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "bounded_interval",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "context",
+    "hash": "a84f4363826637dbb3151b5ac6f0250ccc26ed741713aef7cb0c7ddbb2a4735b",
+    "contract": {
+      "key": "system.context",
+      "labels": {
+        "en": "context"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "context",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.context.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.context.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.context.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.context.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "headache_observation",
+    "hash": "fc4ef962a139459889a19d1b1183e6e7790b3df8dafc868910ecbf60a3f0a011",
+    "contract": {
+      "key": "system.headache_observation",
+      "labels": {
+        "en": "headache observation"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "headache_observation",
+            "default": "headache_observation",
+            "title": "Type",
+            "type": "string"
+          },
+          "headache": {
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "title": "Headache",
+            "type": "string"
+          },
+          "migraine": {
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "title": "Migraine",
+            "type": "string"
+          }
+        },
+        "required": [
+          "headache",
+          "migraine",
+          "type"
+        ],
+        "title": "HeadacheObservation",
+        "type": "object"
+      },
+      "fields": {
+        "headache": {
+          "id": "system.headache_observation.headache",
+          "labels": {
+            "en": "headache"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "migraine": {
+          "id": "system.headache_observation.migraine",
+          "labels": {
+            "en": "migraine"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "bounded_interval",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "hydration",
+    "hash": "6f6de8dc826268617614b64a24d4eaed48c19aa48eab22d6e91953645eacc839",
+    "contract": {
+      "key": "system.hydration",
+      "labels": {
+        "en": "hydration"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "hydration",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.hydration.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.hydration.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.hydration.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.hydration.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "illness",
+    "hash": "5c39a1c033f17c245920bd5a387775362a7e6bbff0d54f2389c55212556238f5",
+    "contract": {
+      "key": "system.illness",
+      "labels": {
+        "en": "illness"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "illness",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.illness.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.illness.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.illness.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.illness.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "open_interval",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "meal",
+    "hash": "6557b4d8593839d2c9cf9c7604a07c8f556e3d4a9c52e1156690bbae24cbc249",
+    "contract": {
+      "key": "system.meal",
+      "labels": {
+        "en": "meal"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "meal",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.meal.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.meal.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.meal.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.meal.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "medication",
+    "hash": "0fec96f36522d8544bbf37ff662153ac595992679fa5bd09a66b2a4de726b116",
+    "contract": {
+      "key": "system.medication",
+      "labels": {
+        "en": "medication"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "medication",
+            "default": "medication",
+            "title": "Type",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name"
+          },
+          "dose": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "maximum": 100000,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dose"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "enum": [
+                  "mg",
+                  "mcg",
+                  "g",
+                  "ml",
+                  "tablet",
+                  "drop",
+                  "IU"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "reason_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason Event Id"
+          }
+        },
+        "title": "Medication",
+        "type": "object",
+        "required": [
+          "type"
+        ]
+      },
+      "fields": {
+        "name": {
+          "id": "system.medication.name",
+          "labels": {
+            "en": "name"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "dose": {
+          "id": "system.medication.dose",
+          "labels": {
+            "en": "dose"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.medication.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "reason_event_id": {
+          "id": "system.medication.reason_event_id",
+          "labels": {
+            "en": "reason event id"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "migraine",
+    "hash": "5e956f7794c1733063f47cb72ccf4bade933e881bb0ee7fda0021b07aa9100b1",
+    "contract": {
+      "key": "system.migraine",
+      "labels": {
+        "en": "migraine"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "migraine",
+            "default": "migraine",
+            "title": "Type",
+            "type": "string"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Severity"
+          },
+          "aura": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aura"
+          },
+          "symptoms": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Symptoms",
+            "type": "array"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
+          }
+        },
+        "title": "Migraine",
+        "type": "object",
+        "required": [
+          "type"
+        ]
+      },
+      "fields": {
+        "severity": {
+          "id": "system.migraine.severity",
+          "labels": {
+            "en": "severity"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "aura": {
+          "id": "system.migraine.aura",
+          "labels": {
+            "en": "aura"
+          },
+          "semantic": "boolean",
+          "unit": null
+        },
+        "symptoms": {
+          "id": "system.migraine.symptoms",
+          "labels": {
+            "en": "symptoms"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "notes": {
+          "id": "system.migraine.notes",
+          "labels": {
+            "en": "notes"
+          },
+          "semantic": "text",
+          "unit": null
+        }
+      },
+      "topology": "open_interval",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "mood",
+    "hash": "b3445d631a454864257a3e6ce57253d90766274ec0128d78aaeec8c1bcf2f7b8",
+    "contract": {
+      "key": "system.mood",
+      "labels": {
+        "en": "mood"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "mood",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.mood.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.mood.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.mood.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.mood.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "nap",
+    "hash": "83e59843a6dfddd55b71cdcbe5642553fd8d6c9fc38c943b4641e770c81569a4",
+    "contract": {
+      "key": "system.nap",
+      "labels": {
+        "en": "nap"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "nap",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.nap.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.nap.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.nap.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.nap.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "note",
+    "hash": "a3d2992ddade86865b427590da5ecbec6556e5e10880c1560060fffe6f10e288",
+    "contract": {
+      "key": "system.note",
+      "labels": {
+        "en": "note"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "note",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.note.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.note.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.note.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.note.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "stressor",
+    "hash": "adbd50e761a7d741aa98b81bde8e57ce89208bccc88f5228d09bdbec597b1a37",
+    "contract": {
+      "key": "system.stressor",
+      "labels": {
+        "en": "stressor"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "stressor",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.stressor.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.stressor.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.stressor.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.stressor.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "symptom_observation",
+    "hash": "dda40464785f5c6f943acf0360af577cea48d296224997bdc2a7150c2ca1b586",
+    "contract": {
+      "key": "system.symptom_observation",
+      "labels": {
+        "en": "symptom observation"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "symptom_observation",
+            "default": "symptom_observation",
+            "title": "Type",
+            "type": "string"
+          },
+          "episode_id": {
+            "format": "uuid",
+            "title": "Episode Id",
+            "type": "string"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Severity"
+          },
+          "aura": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aura"
+          },
+          "symptoms": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Symptoms",
+            "type": "array"
+          },
+          "impact": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Impact"
+          }
+        },
+        "required": [
+          "episode_id",
+          "type"
+        ],
+        "title": "SymptomObservation",
+        "type": "object",
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "required": [
+                  "severity"
+                ],
+                "properties": {
+                  "severity": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "aura"
+                ],
+                "properties": {
+                  "aura": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "symptoms"
+                ],
+                "properties": {
+                  "symptoms": {
+                    "type": "array",
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "required": [
+                  "impact"
+                ],
+                "properties": {
+                  "impact": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "fields": {
+        "episode_id": {
+          "id": "system.symptom_observation.episode_id",
+          "labels": {
+            "en": "episode id"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "severity": {
+          "id": "system.symptom_observation.severity",
+          "labels": {
+            "en": "severity"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "aura": {
+          "id": "system.symptom_observation.aura",
+          "labels": {
+            "en": "aura"
+          },
+          "semantic": "boolean",
+          "unit": null
+        },
+        "symptoms": {
+          "id": "system.symptom_observation.symptoms",
+          "labels": {
+            "en": "symptoms"
+          },
+          "semantic": "nominal",
+          "unit": null
+        },
+        "impact": {
+          "id": "system.symptom_observation.impact",
+          "labels": {
+            "en": "impact"
+          },
+          "semantic": "text",
+          "unit": null
+        }
+      },
+      "topology": "point",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "travel",
+    "hash": "21835d7833699b34e053b63bcdd1a78988c29f2ce6e31b8d8042146712235996",
+    "contract": {
+      "key": "system.travel",
+      "labels": {
+        "en": "travel"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "travel",
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "fields": {
+        "description": {
+          "id": "system.travel.description",
+          "labels": {
+            "en": "description"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "amount": {
+          "id": "system.travel.amount",
+          "labels": {
+            "en": "amount"
+          },
+          "semantic": "quantity",
+          "unit": null
+        },
+        "unit": {
+          "id": "system.travel.unit",
+          "labels": {
+            "en": "unit"
+          },
+          "semantic": "text",
+          "unit": null
+        },
+        "tags": {
+          "id": "system.travel.tags",
+          "labels": {
+            "en": "tags"
+          },
+          "semantic": "nominal",
+          "unit": null
+        }
+      },
+      "topology": "flexible",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  },
+  {
+    "kind": "wellbeing_observation",
+    "hash": "b74e6c67cb9e467e8485eb8ff5bd6068c5bdef263c026491ac69b6d41f18d413",
+    "contract": {
+      "key": "system.wellbeing_observation",
+      "labels": {
+        "en": "wellbeing observation"
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "wellbeing_observation",
+            "default": "wellbeing_observation",
+            "title": "Type",
+            "type": "string"
+          },
+          "energy": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Energy"
+          },
+          "restedness": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Restedness"
+          },
+          "pain": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pain"
+          },
+          "functional_impact": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Functional Impact"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
+          }
+        },
+        "title": "WellbeingObservation",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "required": [
+                  "energy"
+                ],
+                "properties": {
+                  "energy": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "restedness"
+                ],
+                "properties": {
+                  "restedness": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "pain"
+                ],
+                "properties": {
+                  "pain": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "functional_impact"
+                ],
+                "properties": {
+                  "functional_impact": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "notes"
+                ],
+                "properties": {
+                  "notes": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "fields": {
+        "energy": {
+          "id": "system.wellbeing_observation.energy",
+          "labels": {
+            "en": "energy"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "restedness": {
+          "id": "system.wellbeing_observation.restedness",
+          "labels": {
+            "en": "restedness"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "pain": {
+          "id": "system.wellbeing_observation.pain",
+          "labels": {
+            "en": "pain"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "functional_impact": {
+          "id": "system.wellbeing_observation.functional_impact",
+          "labels": {
+            "en": "functional impact"
+          },
+          "semantic": "ordinal",
+          "unit": "score_1-10"
+        },
+        "notes": {
+          "id": "system.wellbeing_observation.notes",
+          "labels": {
+            "en": "notes"
+          },
+          "semantic": "text",
+          "unit": null
+        }
+      },
+      "topology": "point",
+      "privacy": "sensitive",
+      "allowed_operations": [
+        "create",
+        "update",
+        "delete",
+        "query"
+      ]
+    }
+  }
+]
