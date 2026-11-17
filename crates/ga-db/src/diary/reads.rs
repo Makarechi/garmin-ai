@@ -1,13 +1,19 @@
-use std::{error::Error, fmt, time::Duration};
+use std::{collections::BTreeSet, error::Error, fmt, time::Duration};
 
 use futures_util::TryStreamExt;
 use ga_domain::timestamp::StoredInstant;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::{Date, Month, OffsetDateTime};
+use uuid::Uuid;
 
 use super::{EventSnapshotRow, event_snapshot};
-use crate::{Database, ReadinessError, check_readiness, system_definitions::known_system_event};
+use crate::{
+    Database, ReadinessError, check_readiness,
+    scenario_packs::model_disallowed_event_kinds,
+    share_policy::{DestinationKind, ShareDestination},
+    system_definitions::known_system_event,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum DiaryReadError {
@@ -19,6 +25,8 @@ pub enum DiaryReadError {
     Limit,
     Database,
     InvalidEvent,
+    ModelConsent,
+    InvalidDestination,
 }
 
 impl fmt::Display for DiaryReadError {
@@ -32,6 +40,8 @@ impl fmt::Display for DiaryReadError {
             Self::Limit => "Invalid event limit",
             Self::Database => "Diary entries could not be read",
             Self::InvalidEvent => "Recorded diary entry could not be interpreted",
+            Self::ModelConsent => "The diary model category is disabled",
+            Self::InvalidDestination => "Invalid diary sharing destination",
         })
     }
 }
@@ -42,6 +52,26 @@ impl From<sqlx::Error> for DiaryReadError {
     fn from(_: sqlx::Error) -> Self {
         Self::Database
     }
+}
+
+pub struct ModelDiaryQuery<'a> {
+    pub start: StoredInstant,
+    pub end: StoredInstant,
+    pub kind: Option<&'a str>,
+    pub limit: u16,
+    pub model: ShareDestination<'a>,
+    pub channel: Option<ShareDestination<'a>>,
+}
+
+pub struct ModelDiaryPage {
+    pub value: Value,
+    pub channel_versions: BTreeSet<Uuid>,
+}
+
+struct ModelAudience<'a> {
+    model: &'a str,
+    channel: Option<&'a str>,
+    pack_denials: Vec<&'static str>,
 }
 
 impl Database {
@@ -56,26 +86,81 @@ impl Database {
         let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
         check_range(start, end)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = self
-                .work
-                .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .await?;
-            sqlx::query("SET LOCAL statement_timeout = '750ms'")
-                .execute(&mut *txn)
-                .await?;
-            check_readiness(&mut txn)
-                .await
-                .map_err(DiaryReadError::Storage)?;
+            let mut txn = self.begin_diary_read().await?;
             let kind = stored_kind(&mut txn, kind).await?;
             if !(1..=1000).contains(&limit) {
                 return Err(DiaryReadError::Limit);
             }
-            let response = read_events(&mut txn, start, end, kind.as_deref(), limit).await?;
+            let response = read_events(&mut txn, start, end, kind.as_deref(), limit, None).await?;
             txn.commit().await?;
-            Ok(response)
+            Ok(response.value)
         })
         .await
         .map_err(|_| DiaryReadError::Database)?
+    }
+
+    /// Return only model-visible entries and the version dependencies for a queued channel reply.
+    pub async fn list_model_events(
+        &self,
+        query: ModelDiaryQuery<'_>,
+    ) -> Result<ModelDiaryPage, DiaryReadError> {
+        if query.model.kind() != DestinationKind::Model
+            || query
+                .channel
+                .is_some_and(|channel| channel.kind() != DestinationKind::Channel)
+        {
+            return Err(DiaryReadError::InvalidDestination);
+        }
+        let (start, end) = (
+            OffsetDateTime::from(query.start),
+            OffsetDateTime::from(query.end),
+        );
+        check_range(start, end)?;
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.begin_diary_read().await?;
+            let diary_allowed: bool = sqlx::query_scalar(
+                "SELECT COALESCE((SELECT COALESCE(value->'model_categories' @> '[\"diary\"]'::jsonb,false)
+                    FROM app_state WHERE key='preferences:onboarding'), true)",
+            )
+            .fetch_one(&mut *txn)
+            .await?;
+            if !diary_allowed {
+                return Err(DiaryReadError::ModelConsent);
+            }
+            let audience = ModelAudience {
+                model: query.model.instance(),
+                channel: query.channel.map(ShareDestination::instance),
+                pack_denials: model_disallowed_event_kinds(&mut txn)
+                    .await
+                    .map_err(|_| DiaryReadError::Database)?,
+            };
+            let kind = match query.kind {
+                Some(key) if key.starts_with("user.") => Some(key.to_owned()),
+                kind => stored_kind(&mut txn, kind).await?,
+            };
+            if !(1..=1000).contains(&query.limit) {
+                return Err(DiaryReadError::Limit);
+            }
+            let page = read_events(&mut txn, start, end, kind.as_deref(), query.limit, Some(audience)).await?;
+            txn.commit().await?;
+            Ok(page)
+        })
+        .await
+        .map_err(|_| DiaryReadError::Database)?
+    }
+
+    async fn begin_diary_read(&self) -> Result<Transaction<'static, Postgres>, DiaryReadError> {
+        let mut txn = self
+            .work
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(DiaryReadError::Storage)?;
+        Ok(txn)
     }
 }
 
@@ -129,7 +214,8 @@ async fn read_events(
     end: OffsetDateTime,
     kind: Option<&str>,
     limit: u16,
-) -> Result<Value, DiaryReadError> {
+    audience: Option<ModelAudience<'_>>,
+) -> Result<ModelDiaryPage, DiaryReadError> {
     type EventRow = (
         String,
         OffsetDateTime,
@@ -141,11 +227,25 @@ async fn read_events(
         bool,
     );
     let mut rows = Vec::new();
-    let mut query = sqlx::query_as::<_, EventRow>(include_str!("reads/events.sql"))
+    let mut channel_versions = BTreeSet::new();
+    let model = audience.as_ref().map(|audience| audience.model);
+    let channel = audience.as_ref().and_then(|audience| audience.channel);
+    let denials = audience
+        .as_ref()
+        .map_or(&[][..], |audience| audience.pack_denials.as_slice());
+    let mut query = sqlx::query_as::<_, EventRow>(concat!(
+        include_str!("reads/events.sql"),
+        include_str!("../share_policy/consent.sql"),
+        ") IS NOT TRUE)) ELSE NOT (regexp_replace(event.kind, '^system[.]', '') = ANY($7::text[])) END)
+         ORDER BY (event.start >= $1) DESC,event.start,event.id LIMIT $4"
+    ))
         .bind(start)
         .bind(end)
         .bind(kind)
         .bind(i64::from(limit) + 1)
+        .bind(model)
+        .bind(channel)
+        .bind(denials)
         .fetch(&mut **txn);
     let mut truncated = false;
     while let Some((document, start, end, created, updated, recorded, ingested, can_update)) =
@@ -157,11 +257,30 @@ async fn read_events(
         }
         let snapshot: EventSnapshotRow =
             (document, start, end, created, updated, recorded, ingested);
-        rows.push(serialize(snapshot, can_update)?);
+        let mut event = serialize(snapshot, can_update)?;
+        if model.is_some() {
+            let fields = event.as_object_mut().ok_or(DiaryReadError::InvalidEvent)?;
+            fields.remove("original_text");
+            if channel.is_some()
+                && fields["kind"]
+                    .as_str()
+                    .is_some_and(|kind| kind.starts_with("user."))
+            {
+                let version = fields["definition_version_id"]
+                    .as_str()
+                    .and_then(|id| id.parse::<Uuid>().ok())
+                    .ok_or(DiaryReadError::InvalidEvent)?;
+                channel_versions.insert(version);
+            }
+        }
+        rows.push(event);
     }
     let mut response = json!({"truncated": truncated});
     response["rows"] = Value::Array(rows);
-    Ok(response)
+    Ok(ModelDiaryPage {
+        value: response,
+        channel_versions,
+    })
 }
 
 fn serialize(row: EventSnapshotRow, can_update: bool) -> Result<Value, DiaryReadError> {

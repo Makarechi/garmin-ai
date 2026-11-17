@@ -1,9 +1,7 @@
 use std::{error::Error, fmt, future::Future, time::Duration};
 
-use ga_domain::timestamp::StoredInstant;
 use serde::Deserialize;
 use sqlx::{Postgres, Transaction};
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK};
@@ -53,6 +51,14 @@ impl<'a> ShareDestination<'a> {
         }
         Ok(Self { kind, instance })
     }
+
+    pub(crate) fn kind(self) -> DestinationKind {
+        self.kind
+    }
+
+    pub(crate) fn instance(self) -> &'a str {
+        self.instance
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -61,6 +67,16 @@ pub enum ShareCategory {
     Schema,
     Facts,
     OriginalText,
+}
+
+impl ShareCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Schema => "schema",
+            Self::Facts => "facts",
+            Self::OriginalText => "original_text",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -93,22 +109,6 @@ impl From<sqlx::Error> for SharePolicyError {
     fn from(_: sqlx::Error) -> Self {
         Self::Database
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Consent {
-    definition_id: String,
-    destination_kind: DestinationKind,
-    destination_instance_id: String,
-    categories: Vec<ShareCategory>,
-    granted_at: String,
-    #[serde(default = "initial_revision")]
-    policy_revision: u8,
-}
-
-const fn initial_revision() -> u8 {
-    1
 }
 
 impl Database {
@@ -208,45 +208,21 @@ async fn allows(
     if requirement.categories.is_empty() {
         return Ok(false);
     }
-    type Row = (Uuid, String, Option<String>, OffsetDateTime);
-    let row = sqlx::query_as::<_, Row>(
-        "SELECT version.definition_id, version.privacy, consent.value::text, clock_timestamp()
-         FROM event_definition_versions AS version
-         LEFT JOIN app_state AS consent
-           ON consent.key = concat('tracker-consent:', version.definition_id, ':', $2::text, ':', $3::text)
-         WHERE version.id=$1",
-    )
+    let categories: Vec<_> = requirement
+        .categories
+        .iter()
+        .map(|part| part.label())
+        .collect();
+    sqlx::query_scalar(concat!(
+        include_str!("share_policy/version.sql"),
+        include_str!("share_policy/consent.sql"),
+        ")) )"
+    ))
     .bind(requirement.version_id)
     .bind(destination.kind.label())
     .bind(destination.instance)
-    .fetch_optional(&mut **txn)
-    .await?;
-    let Some((definition, privacy, saved, checked_at)) = row else {
-        return Ok(false);
-    };
-    if privacy == "private"
-        && !requirement
-            .categories
-            .contains(&ShareCategory::OriginalText)
-    {
-        return Ok(true);
-    }
-    let Some(consent) = saved.and_then(|value| serde_json::from_str::<Consent>(&value).ok()) else {
-        return Ok(false);
-    };
-    let valid_time = consent
-        .granted_at
-        .parse::<StoredInstant>()
-        .is_ok_and(|at| OffsetDateTime::from(at) <= checked_at);
-    Ok(
-        consent.definition_id.parse::<Uuid>().ok() == Some(definition)
-            && consent.destination_kind == destination.kind
-            && consent.destination_instance_id == destination.instance
-            && consent.policy_revision == 1
-            && valid_time
-            && requirement
-                .categories
-                .iter()
-                .all(|category| consent.categories.contains(category)),
-    )
+    .bind(categories)
+    .fetch_one(&mut **txn)
+    .await
+    .map_err(Into::into)
 }
