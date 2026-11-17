@@ -30,6 +30,15 @@ pub(super) async fn begin(
     .bind(OffsetDateTime::from(replacement.end()))
     .execute(&mut **txn)
     .await?;
+    remove(txn, request, endpoint, replacement).await
+}
+
+pub(crate) async fn remove(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &ApplyActivity<'_>,
+    endpoint: &str,
+    replacement: &HealthReplacement,
+) -> Result<(), DocumentError> {
     sqlx::query(include_str!("replace_samples.sql"))
         .bind(GARMIN_LEGACY_SOURCE)
         .bind(endpoint)

@@ -1,7 +1,10 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use ga_archive::{Archive, ArchiveError};
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{
+    garmin_health::{HealthReplacement, normalize_health_payload, replacement_channels},
+    timestamp::StoredInstant,
+};
 use serde_json::{Value, json};
 use sqlx::{Acquire, Postgres, Transaction};
 use time::OffsetDateTime;
@@ -11,6 +14,7 @@ use super::{
     GARMIN_PARSER_VERSION, PreparedReplay, ReadReplayInput, ReplayContent, ReplayInputError,
     ReplaySkip, ReplaySource,
     input::{authorize_replay, read_input, require_parser},
+    intraday,
 };
 use crate::{
     Database,
@@ -18,7 +22,7 @@ use crate::{
         ApplyActivity, DocumentError, DocumentStatus, Projection, invalidate_replay_outputs,
         put_state, raw_status, read_state,
     },
-    health_projection::rebuild_calendar,
+    health_projection::{rebuild_calendar, rebuild_intraday_view},
     raw_capture::{GARMIN_LEGACY_SOURCE, lock_legacy_scope},
 };
 
@@ -75,11 +79,45 @@ impl From<DocumentError> for CalendarReplayError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReplayScope {
+    Calendar,
+    Intraday,
+}
+
+struct ArchiveReplay<C> {
+    archive: Arc<Archive>,
+    byte_limit: u64,
+    cancelled: C,
+}
+
 impl Database {
     /// Rebuild one date-keyed Garmin projection from its locally verified source.
     /// The historical projection, its outcome and the analysis fence commit together.
     pub async fn replay_calendar(
         &self,
+        request: ReadReplayInput<'_>,
+        archive: Arc<Archive>,
+        cancelled: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
+        self.replay_health(ReplayScope::Calendar, request, archive, cancelled)
+            .await
+    }
+
+    /// Rebuild one intraday response and its retained overlap history.
+    pub async fn replay_intraday(
+        &self,
+        request: ReadReplayInput<'_>,
+        archive: Arc<Archive>,
+        cancelled: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
+        self.replay_health(ReplayScope::Intraday, request, archive, cancelled)
+            .await
+    }
+
+    async fn replay_health(
+        &self,
+        scope: ReplayScope,
         request: ReadReplayInput<'_>,
         archive: Arc<Archive>,
         cancelled: impl Fn() -> bool + Clone + Send + 'static,
@@ -97,7 +135,7 @@ impl Database {
         if cancelled() {
             return Err(CalendarReplayError::Cancelled);
         }
-        let input = read_input(&mut txn, request, archive, cancelled.clone()).await;
+        let input = read_input(&mut txn, request, Arc::clone(&archive), cancelled.clone()).await;
         let mut source_ref = None;
         let mut error_type = None;
         let outcome = match input {
@@ -109,31 +147,65 @@ impl Database {
             }
             Ok(PreparedReplay::Ready(input)) => {
                 let endpoint = input.source.endpoint.as_str();
-                if !matches!(
-                    endpoint,
-                    "daily" | "hydration" | "sleep" | "body_battery" | "readiness" | "max_metrics"
-                ) {
+                let supported = match scope {
+                    ReplayScope::Calendar => matches!(
+                        endpoint,
+                        "daily"
+                            | "hydration"
+                            | "sleep"
+                            | "body_battery"
+                            | "readiness"
+                            | "max_metrics"
+                    ),
+                    ReplayScope::Intraday => !replacement_channels(endpoint).is_empty(),
+                };
+                if !supported {
                     return Err(CalendarReplayError::OtherEndpoint);
                 }
                 let ReplayContent::Json {
                     payload,
                     timezone,
-                    replacement: None,
+                    replacement,
                 } = input.content
                 else {
                     return Err(CalendarReplayError::OtherEndpoint);
                 };
+                let proof = replacement
+                    .map(|proof| {
+                        HealthReplacement::new(
+                            endpoint,
+                            proof.start,
+                            proof.end,
+                            proof.metrics,
+                            proof.evidence,
+                        )
+                        .map_err(|_| CalendarReplayError::InvalidState)
+                    })
+                    .transpose()?;
                 source_ref = Some(input.source.id);
                 let applied = ApplyActivity {
                     account_fingerprint: request.authenticated_fingerprint,
                     source_key: &input.source.source_key,
-                    projection: Projection::Health(endpoint, None),
+                    projection: Projection::Health(endpoint, proof.as_ref()),
                     source_id: input.source.id,
                     requested_at: input.requested_at,
                     timezone: &timezone,
                 };
-                let (status, failure) =
-                    apply_calendar(&mut txn, &input.source, &applied, &payload).await?;
+                let reader = ArchiveReplay {
+                    archive,
+                    byte_limit: request.max_json_bytes,
+                    cancelled: cancelled.clone(),
+                };
+                let (status, failure) = apply_health(
+                    &mut txn,
+                    &input.source,
+                    &applied,
+                    &payload,
+                    proof.as_ref(),
+                    scope,
+                    reader,
+                )
+                .await?;
                 error_type = failure;
                 CalendarReplayOutcome::Applied(status)
             }
@@ -246,12 +318,18 @@ fn stored_clock(value: &Value) -> Result<Option<StoredInstant>, CalendarReplayEr
         .ok_or(CalendarReplayError::InvalidState)
 }
 
-async fn apply_calendar(
+async fn apply_health<C>(
     txn: &mut Transaction<'_, Postgres>,
     source: &ReplaySource,
     request: &ApplyActivity<'_>,
     payload: &Value,
-) -> Result<(DocumentStatus, Option<&'static str>), CalendarReplayError> {
+    proof: Option<&HealthReplacement>,
+    scope_mode: ReplayScope,
+    reader: ArchiveReplay<C>,
+) -> Result<(DocumentStatus, Option<&'static str>), CalendarReplayError>
+where
+    C: Fn() -> bool + Clone + Send + 'static,
+{
     let endpoint = source.endpoint.as_str();
     let scope = format!("{GARMIN_LEGACY_SOURCE}:{endpoint}:{}", source.source_key);
     lock_legacy_scope(txn, &scope)
@@ -276,10 +354,13 @@ async fn apply_calendar(
         return Ok((DocumentStatus::Stale, None));
     }
     let parser_changed = source.previous_parser_version != GARMIN_PARSER_VERSION;
+    let replacement = proof
+        .map(HealthReplacement::document)
+        .unwrap_or(Value::Null);
     let unchanged = !parser_changed
         && !matches!(source.status.as_str(), "pending" | "error")
         && watermark.current["hash"].as_str() == Some(&hash)
-        && watermark.current["replacement"].is_null();
+        && watermark.current["replacement"] == replacement;
     let meta_key = format!("ingest-meta:{}", source.id);
     let mut meta = read_state(txn, &meta_key).await?;
     let requested = request.requested_at.to_string();
@@ -287,11 +368,11 @@ async fn apply_calendar(
         "hash": hash,
         "source_ref": reference,
         "requested_at": requested,
-        "replacement": null,
-        "completeness": "unverified",
+        "replacement": replacement,
+        "completeness": if proof.is_some() { "adapter_attested" } else { "unverified" },
     });
     let mut status = source.status.clone();
-    if !unchanged || matches!(endpoint, "daily" | "body_battery") {
+    if !unchanged || matches!(endpoint, "daily" | "body_battery" | "heart_rate") {
         let mut candidate = txn.begin().await?;
         let preceding = if watermark.owns_attempt {
             watermark.current["source_ref"].as_str()
@@ -300,23 +381,68 @@ async fn apply_calendar(
         } else {
             None
         };
-        let rebuilt = rebuild_calendar(
-            &mut candidate,
-            request,
-            endpoint,
-            payload,
-            parser_changed,
-            watermark.retained,
-            preceding,
-        )
-        .await;
+        let rebuilt = match scope_mode {
+            ReplayScope::Calendar => rebuild_calendar(
+                &mut candidate,
+                request,
+                endpoint,
+                payload,
+                parser_changed,
+                watermark.retained,
+                preceding,
+            )
+            .await
+            .map_err(CalendarReplayError::Publication),
+            ReplayScope::Intraday if unchanged => {
+                let mut projection =
+                    normalize_health_payload(endpoint, request.source_key, payload)
+                        .map_err(|_| DocumentError::InvalidHealthPayload)?;
+                projection.samples.clear();
+                projection.observations.clear();
+                rebuild_intraday_view(
+                    &mut candidate,
+                    request,
+                    endpoint,
+                    projection,
+                    false,
+                    preceding,
+                )
+                .await
+                .map_err(CalendarReplayError::Publication)
+            }
+            ReplayScope::Intraday => {
+                intraday::rebuild(
+                    &mut candidate,
+                    intraday::Rebuild {
+                        source,
+                        request,
+                        payload,
+                        proof,
+                        archive: reader.archive,
+                        byte_limit: reader.byte_limit,
+                        cancelled: reader.cancelled,
+                        parser_changed,
+                        retained: watermark.retained,
+                        preceding,
+                    },
+                )
+                .await
+            }
+        };
         match rebuilt {
             Ok(new) => {
                 status = new.label().to_owned();
                 raw_status(&mut candidate, source.id, &status, GARMIN_PARSER_VERSION).await?;
                 candidate.commit().await?;
             }
-            Err(DocumentError::InvalidHealthPayload | DocumentError::InvalidRecordedState) => {
+            Err(error) => {
+                let failure = match error {
+                    CalendarReplayError::Publication(
+                        DocumentError::InvalidHealthPayload | DocumentError::InvalidRecordedState,
+                    ) => "ValueError",
+                    CalendarReplayError::Preparation(error) => permanent_preflight_error(error)?,
+                    error => return Err(error),
+                };
                 candidate.rollback().await?;
                 raw_status(txn, source.id, "error", source.previous_parser_version).await?;
                 meta.insert("timezone".to_owned(), json!(request.timezone));
@@ -336,9 +462,8 @@ async fn apply_calendar(
                     };
                     put_state(txn, &key, &state).await?;
                 }
-                return Ok((DocumentStatus::Error, Some("ValueError")));
+                return Ok((DocumentStatus::Error, Some(failure)));
             }
-            Err(error) => return Err(error.into()),
         }
     }
     if !unchanged {
@@ -367,6 +492,7 @@ async fn apply_calendar(
                 .unwrap_or(json!(status));
             attempt
         } else if status == "empty"
+            && proof.is_none()
             && !watermark.owns_current
             && !watermark.current["source_ref"].is_null()
         {
