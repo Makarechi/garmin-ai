@@ -24,3 +24,5 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     }
     hex
 }
+
+pub mod metric_contract;
