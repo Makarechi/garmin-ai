@@ -152,17 +152,25 @@ impl Database {
             return Err(CaptureError::CollectionDisabled);
         }
         let scope = format!("{GARMIN_LEGACY_SOURCE}:{}:{}", endpoint, source_key);
-        let locked: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(scope)
-                .fetch_one(&mut *txn)
-                .await?;
-        if !locked {
-            return Err(CaptureError::Busy);
-        }
-
+        lock_legacy_scope(&mut txn, &scope).await?;
         Ok(txn)
     }
+}
+
+pub(crate) async fn lock_legacy_scope(
+    txn: &mut Transaction<'_, Postgres>,
+    scope: &str,
+) -> Result<(), CaptureError> {
+    let locked: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(scope)
+            .fetch_one(&mut **txn)
+            .await?;
+    if !locked {
+        return Err(CaptureError::Busy);
+    }
+
+    Ok(())
 }
 
 async fn insert_source(

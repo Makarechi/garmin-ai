@@ -276,7 +276,7 @@ impl EventStatus {
     }
 }
 
-fn known_timezone(name: &str) -> bool {
+pub fn known_timezone(name: &str) -> bool {
     let database = jiff::tz::db();
     database.get(name).is_ok_and(|zone| {
         zone.iana_name() == Some(name)

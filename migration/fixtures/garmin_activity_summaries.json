@@ -1,0 +1,52 @@
+[
+  {
+    "page": "page:0",
+    "second": 2,
+    "status": "normalized",
+    "summary": {
+      "activityId": "ID",
+      "startTimeGMT": "2026-10-25 00:30:00.123456",
+      "duration": 90.25,
+      "elapsedDuration": 120.5,
+      "activityName": "Synthetic run",
+      "activityType": {"typeKey": "running"},
+      "timeZoneUnitDTO": {"timeZone": "Europe/Bratislava"},
+      "distance": 400.25,
+      "averageHR": 144.0,
+      "averageRunCadence": 175,
+      "aerobicTrainingEffect": 2.5
+    }
+  },
+  {
+    "page": null,
+    "second": 3,
+    "status": "normalized",
+    "summary": {
+      "activityId": "ID",
+      "startTimeGMT": "2026-10-25T02:30:00.123456+02:00",
+      "duration": 88,
+      "summaryDTO": {
+        "duration": 91.125,
+        "elapsedDuration": 0,
+        "distance": 401.25,
+        "averageHR": false,
+        "averageRunningCadenceInStepsPerMinute": -1,
+        "averageRunCadence": 176,
+        "trainingEffect": 2.1
+      }
+    }
+  },
+  {
+    "page": "page:1",
+    "second": 1,
+    "status": "normalized",
+    "summary": {
+      "activityId": "ID",
+      "startTimeGMT": 1792888200123,
+      "duration": 60,
+      "activityName": "Synthetic older run",
+      "timeZoneUnitDTO": {"timeZone": "America/New_York"},
+      "distance": 9999
+    }
+  }
+]
