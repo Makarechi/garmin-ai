@@ -4,6 +4,7 @@ pub mod garmin_owner;
 pub mod jobs;
 pub mod raw_capture;
 pub mod replay;
+pub mod scenario_packs;
 pub mod system_definitions;
 pub mod system_metrics;
 
