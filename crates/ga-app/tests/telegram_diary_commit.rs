@@ -226,7 +226,11 @@ async fn owner_event_reply_and_inbox_commit_together() -> Result<(), Box<dyn Err
             "SELECT jsonb_build_object(
              'job',j.status,'inbox',i.status,'outbox',o.state,'operation',o.operation_id,
              'text',(SELECT jsonb_agg(original_text) FROM events),
-             'source',(SELECT jsonb_agg(source) FROM events)
+             'source',(SELECT jsonb_agg(source) FROM events),
+             'producer',(SELECT jsonb_agg(producer) FROM events),
+             'transport',(SELECT jsonb_agg(transport) FROM events),
+             'audit_actor',(SELECT jsonb_agg(actor) FROM audit_log),
+             'audit_producer',(SELECT jsonb_agg(after->>'producer') FROM audit_log)
          )::text
          FROM inbound_messages i JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id)
          JOIN outbox_messages o ON o.inbound_message_id=i.id WHERE o.id=$1",
@@ -240,6 +244,8 @@ async fn owner_event_reply_and_inbox_commit_together() -> Result<(), Box<dyn Err
         json!({
             "job":"done","inbox":"processed","outbox":"queued","operation":receipt.operation_id.to_string(),
             "text":[OWNER_TEXT,OWNER_TEXT,OWNER_TEXT],"source":["telegram_text","telegram_text","telegram_text"],
+            "producer":["telegram","telegram","telegram"],"transport":["telegram_text","telegram_text","telegram_text"],
+            "audit_actor":["telegram:42","telegram:42","telegram:42"],"audit_producer":["telegram","telegram","telegram"],
         })
     );
     let stored = counts(&pool).await?;

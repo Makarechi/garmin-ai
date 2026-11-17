@@ -1,6 +1,6 @@
 # Atomic diary replies for Telegram text
 
-The native worker can commit a self-contained diary log from a leased Telegram text message. It uses the exact saved message and timestamp, verifies that the chat is still paired and selected, and rejects expired leases and older revisions. The diary writer validates and stores the records, projects the configured metrics, and queues a confirmation for the same conversation. All of that work and the inbox completion commit together.
+The native worker can commit a self-contained diary log from a leased Telegram text message. It uses the exact saved message and timestamp, verifies that the chat is still paired and selected, and rejects expired leases and older revisions. The diary writer records the verified Telegram actor and channel in the events and audit snapshots, validates and stores the records, projects the configured metrics, and queues a confirmation for the same conversation. All of that work and the inbox completion commit together.
 
 This entry point accepts sufficiently confident log commands. Medication reports require the dedicated intake-evidence path. Reports pointing to existing records need current offered context. An edit of a message whose diary operation was already recorded needs that context to prevent an unintended second write. The later worker integration will supply the confirmation text and handle clarifications.
 

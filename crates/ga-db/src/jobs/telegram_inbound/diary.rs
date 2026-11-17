@@ -166,10 +166,11 @@ impl Database {
             }
             let operation = lease.operation_id;
             let key = format!("telegram:native:{operation}");
+            let actor = format!("telegram:{chat}");
             let events = Self::create_agent_log_batch_in(&mut txn, CreateAgentLogBatch {
                 owner_id: owner,
                 command,
-                authenticated_actor: "owner",
+                authenticated_actor: &actor,
                 message_text: text,
                 source: EventSource::TelegramText,
                 operation_id: operation,
