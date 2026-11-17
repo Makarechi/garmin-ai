@@ -22,7 +22,8 @@ use crate::{
     runtime_lease::RuntimeLease,
     telegram_binding::{TelegramBindingError, confirmed_pairing},
     telegram_cursor::{
-        TelegramCursorError, advance_telegram_poll_cursor, lock_ingress, record_telegram_ordering,
+        TelegramCursorError, advance_telegram_poll_cursor, lock_ingress,
+        record_native_telegram_ordering, record_telegram_ordering,
     },
 };
 
@@ -205,14 +206,17 @@ async fn persist(
     } else {
         None
     };
-    if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
-        native_telegram::enqueue(&mut txn, receipt.message_id, input.received_at)
+    let new_ordering_epoch = if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
+        let epoch =
+            record_native_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?;
+        native_telegram::enqueue(&mut txn, receipt.message_id, epoch, input.received_at)
             .await
             .map_err(TelegramPollError::Processing)?;
-    }
-    let new_ordering_epoch = if advances_ordering && inbound.is_some_and(|receipt| receipt.created)
-    {
-        Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
+        if advances_ordering {
+            Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
+        } else {
+            None
+        }
     } else {
         None
     };
