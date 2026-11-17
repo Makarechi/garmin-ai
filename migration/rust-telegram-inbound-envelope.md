@@ -1,0 +1,5 @@
+# Native Telegram input normalization
+
+Rust checks the configured sender and private chat before exposing callback data or creating an inbox envelope. Messages, edits, voice attachments, replies and callback actions use the existing Telegram channel instance and stable conversation UUID. Callback timing comes from the transport's evidence. Consumed callback tokens are removed before saving the action, and legacy actions require an explicit compatibility mode. [Telegram Bot API update contract](https://core.telegram.org/bots/api#update)
+
+Seventeen synthetic cases matched pinned Python for envelope fields and private chat decisions. Native cases also rejected competing update types, string update identifiers, unresolved callbacks and a callback without trusted timing evidence. The Linux ARM64 run used 9,863,168 bytes in a 32 MiB container with no swap. A future Telegram transport supplies the verified sender configuration, resolves durable action tokens, and persists the envelope through the inbox.
