@@ -1,7 +1,12 @@
 # FIT decoder selection
 
-Status — use pinned rustyfit as the starting point for the R15 streaming adapter.
-The comparison exposes compatibility defects that must be closed before publishing projections.
+Status — use the native wire reader with the pinned 21.171 compatibility profile for
+R15. Keep the pinned rustyfit and fitparser implementations as independent comparators.
+
+The raw-field and checksum differences below motivated separating wire decoding from
+profile interpretation. The native adapter can keep both the wire definition and every
+raw value, and apply the same profile version as the Python application. Its projection
+also matches the order and representation of derived and developer fields.
 
 ## Comparison
 

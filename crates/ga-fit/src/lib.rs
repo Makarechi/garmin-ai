@@ -1,10 +1,13 @@
 mod export;
+mod profile;
+mod projection;
 mod value;
 mod wire;
 
 pub use export::{
     ActivityExport, ExportFrame, ExportInventory, ExportLimits, verify_activity_export,
 };
+pub use projection::{FitProjectionMessage, visit_fit_projection};
 pub use value::RawFitValue;
 
 pub use wire::{ByteOrder, FitWireMessage, WireField, WireInventory, visit_fit_wire};
@@ -51,6 +54,9 @@ pub enum FitError {
     InvalidDefinition,
     InvalidRecord,
     MissingDefinition,
+    InvalidProfile,
+    MissingHeartRateStart,
+    InvalidHeartRateComponent,
     HeaderChecksum,
     Truncated,
     FileChecksum,
@@ -74,6 +80,13 @@ impl fmt::Display for FitError {
             Self::InvalidDefinition => "FIT input has an invalid message definition",
             Self::InvalidRecord => "FIT record does not fit its message definition or frame",
             Self::MissingDefinition => "FIT data record has no local definition",
+            Self::InvalidProfile => "Bundled FIT compatibility profile is invalid",
+            Self::MissingHeartRateStart => {
+                "Legacy FIT projection requires an initial heart-rate timestamp"
+            }
+            Self::InvalidHeartRateComponent => {
+                "Legacy FIT projection cannot decode this heart-rate component"
+            }
             Self::HeaderChecksum => "FIT header checksum mismatched",
             Self::Truncated => "FIT input ended unexpectedly",
             Self::FileChecksum => "FIT file checksum mismatched",

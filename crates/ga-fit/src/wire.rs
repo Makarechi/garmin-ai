@@ -57,17 +57,23 @@ pub struct WireInventory {
 }
 
 #[derive(Clone, Copy)]
-struct FieldDefinition {
-    number: u8,
+pub(crate) struct FieldDefinition {
+    pub(crate) number: u8,
     size: u8,
     base_type: Option<u8>,
-    developer_data_index: Option<u8>,
+    pub(crate) developer_data_index: Option<u8>,
 }
 
-struct Definition {
-    global_number: u16,
+pub(crate) struct Definition {
+    pub(crate) global_number: u16,
     order: ByteOrder,
-    fields: Vec<FieldDefinition>,
+    pub(crate) fields: Vec<FieldDefinition>,
+}
+
+pub(crate) enum WireRecord<'a> {
+    Frame,
+    Definition(u8, &'a Definition),
+    Message(&'a FitWireMessage),
 }
 
 struct Body<'a, R> {
@@ -92,10 +98,22 @@ impl<R: Read> Body<'_, R> {
 /// Read the bytes behind each FIT message without a profile-based type substitution.
 /// Results are candidates until all sequence checksums and the member have passed.
 pub fn visit_fit_wire(
+    source: impl Read,
+    max_bytes: u64,
+    cancelled: impl FnMut() -> bool,
+    mut visit: impl FnMut(&FitWireMessage) -> Result<(), FitError>,
+) -> Result<WireInventory, FitError> {
+    visit_fit_records(source, max_bytes, cancelled, |record| match record {
+        WireRecord::Message(message) => visit(message),
+        _ => Ok(()),
+    })
+}
+
+pub(crate) fn visit_fit_records(
     mut source: impl Read,
     max_bytes: u64,
     mut cancelled: impl FnMut() -> bool,
-    mut visit: impl FnMut(&FitWireMessage) -> Result<(), FitError>,
+    mut visit: impl FnMut(WireRecord<'_>) -> Result<(), FitError>,
 ) -> Result<WireInventory, FitError> {
     let mut inventory = WireInventory::default();
     let limit = max_bytes.min(MAX_FIT_BYTES);
@@ -104,6 +122,7 @@ pub fn visit_fit_wire(
         let Some((frame, header)) = read_frame_header(&mut source, inventory.member, limit)? else {
             return Ok(inventory);
         };
+        visit(WireRecord::Frame)?;
         let mut checksum = FIT_CRC.digest();
         checksum.update(&header[..usize::from(frame.header_bytes)]);
         let mut body = Body {
@@ -129,8 +148,9 @@ pub fn visit_fit_wire(
                 header & 0x0f
             };
             if !compressed && header & 0x40 != 0 {
-                definitions[usize::from(local)] =
-                    Some(read_definition(&mut body, header & 0x20 != 0)?);
+                let definition = read_definition(&mut body, header & 0x20 != 0)?;
+                visit(WireRecord::Definition(local, &definition))?;
+                definitions[usize::from(local)] = Some(definition);
                 continue;
             }
             let definition = definitions[usize::from(local)]
@@ -182,7 +202,7 @@ pub fn visit_fit_wire(
                 compressed_timestamp,
                 fields,
             };
-            visit(&message)?;
+            visit(WireRecord::Message(&message))?;
             fields = message.fields;
             inventory.messages += 1;
         }
