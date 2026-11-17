@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     fs::{self, Permissions},
     io::{self, Read},
     os::unix::fs::{PermissionsExt, symlink},
@@ -65,7 +66,8 @@ fn rejects_paths_other_than_legacy_content_addressed_keys() {
 }
 
 #[test]
-fn streaming_writes_100_mib_without_an_input_buffer() -> Result<(), Box<dyn std::error::Error>> {
+fn streaming_writes_and_verifies_100_mib_with_bounded_memory()
+-> Result<(), Box<dyn std::error::Error>> {
     const SIZE: u64 = 100 * 1024 * 1024;
     let (_temp, root) = directory()?;
     let archive = Archive::open(&root)?;
@@ -81,10 +83,40 @@ fn streaming_writes_100_mib_without_an_input_buffer() -> Result<(), Box<dyn std:
         key.to_string(),
         "22/2279306afc5fd86754d2e0f92e8af4adecc15bc1aea93c17945569a973a502e9.fit"
     );
-    let mut file = archive.open_reader(&key)?;
+    let mut file = archive.open_verified_reader(&key, SIZE, || false)?;
     assert_eq!(file.metadata()?.len(), SIZE);
     assert_eq!(io::copy(&mut file, &mut io::sink())?, SIZE);
     assert_eq!(permission_bits(&root.join(key.to_string()))?, 0o600);
+    Ok(())
+}
+
+#[test]
+fn verifies_digest_even_when_damaged_file_has_the_same_length()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_temp, root) = directory()?;
+    let archive = Archive::open(&root)?;
+    let key = archive.put_reader(b"synthetic".as_slice(), ArchiveKind::Binary, SMALL)?;
+    assert!(matches!(
+        archive.open_verified_reader(&key, 8, || false),
+        Err(ArchiveError::PayloadTooLarge)
+    ));
+    let checks = Cell::new(0);
+    assert!(matches!(
+        archive.open_verified_reader(&key, 9, || {
+            checks.set(checks.get() + 1);
+            checks.get() == 3
+        }),
+        Err(ArchiveError::ReadCancelled)
+    ));
+    let mut verified = archive.open_verified_reader(&key, 9, || false)?;
+    let mut payload = String::new();
+    verified.read_to_string(&mut payload)?;
+    assert_eq!(payload, "synthetic");
+    fs::write(root.join(key.to_string()), b"changed!!")?;
+    assert!(matches!(
+        archive.open_verified_reader(&key, 9, || false),
+        Err(ArchiveError::ExistingObjectDigestMismatch)
+    ));
     Ok(())
 }
 
