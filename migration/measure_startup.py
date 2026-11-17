@@ -93,8 +93,8 @@ def sample(container, *, user=None):
 def report_run(args):
     started = time.monotonic()
     prefix = f"garmin-benchmark-{secrets.token_hex(5)}"
-    db, api, worker, migrate, observer = (
-        f"{prefix}-{role}" for role in ("db", "api", "worker", "migrate", "observer")
+    db, api, worker, migrate, observer, workload = (
+        f"{prefix}-{role}" for role in ("db", "api", "worker", "migrate", "observer", "workload")
     )
     password = secrets.token_urlsafe(24)
     app_env = {
@@ -108,6 +108,19 @@ def report_run(args):
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
     }
+    if args.replay_days:
+        app_env["GA_TIMEZONE"] = "UTC"
+    api_env = dict(app_env)
+    control_env = {}
+    if args.controls_during_fit:
+        control_env = {
+            "GA_API_KEY": secrets.token_urlsafe(32),
+            "GA_TELEGRAM_WEBHOOK_SECRET": secrets.token_urlsafe(24),
+            "GA_TELEGRAM_USER_ID": "42",
+        }
+        api_env.pop("GA_INTEGRATIONS")
+        api_env.update(control_env)
+        api_env["GA_TELEGRAM_BOT_TOKEN"] = "synthetic-fixture"
     db_env = {
         "POSTGRES_USER": "garmin",
         "POSTGRES_PASSWORD": password,
@@ -132,7 +145,7 @@ def report_run(args):
     if not engine.startswith("2 "):
         raise RuntimeError("The startup benchmark requires cgroup v2")
 
-    def launch(name, image, *command, limits=(), env=None):
+    def launch(name, image, *command, limits=(), env=None, mounts=()):
         env_flags = [flag for key in env or {} for flag in ("-e", key)]
         cleanup.callback(docker, "rm", "-fv", name, check=False)
         docker(
@@ -145,6 +158,7 @@ def report_run(args):
             "--network",
             prefix,
             *limits,
+            *mounts,
             *env_flags,
             image,
             *command,
@@ -233,7 +247,7 @@ def report_run(args):
             "--host",
             "0.0.0.0",
             limits=(*cpu, "-m", "192m", "--memory-swap", "384m"),
-            env=app_env,
+            env=api_env,
         )
         launch(
             worker,
@@ -244,7 +258,7 @@ def report_run(args):
             env=app_env,
         )
         # Readiness probes execute in a separate cgroup. Their RSS is excluded.
-        launch(observer, image, "sleep", "infinity", env=app_env)
+        launch(observer, image, "sleep", "infinity", env=app_env | control_env)
 
         def probe(path):
             url = f"http://{api}:8080{path}"
@@ -272,6 +286,108 @@ def report_run(args):
                 }
             )
             time.sleep(args.interval)
+
+        workload_result = {}
+        workload_modes = (
+            ("fit", args.fit_records),
+            ("fitlimit", args.fit_limit_mib),
+            ("sync", args.sync_days),
+            ("reconcile", args.reconcile_days),
+            ("backup", args.backup_mib),
+            ("analytics", args.analytics_rounds),
+            ("mcp", args.mcp_idle_seconds),
+            ("voice", args.voice_rounds),
+            ("replay", args.replay_days),
+        )
+        selected = next(
+            ((name, value) for name, value in workload_modes if value is not None), None
+        )
+        if selected:
+            name, quantity = selected
+            workload_key = f"{name}_workload"
+            directory = Path(__file__).resolve().parent
+            mounts = ["--mount", f"type=bind,src={directory},dst=/benchmark,readonly"]
+            if name == "replay":
+                docker("stop", "-t", "30", worker)
+            if name == "backup":
+                docker("exec", db, "createdb", "-U", "garmin", "garmin_resource_restore_test")
+                mounts.extend(("--tmpfs", "/tmp/low-backup-space:rw,size=8m,uid=1000,gid=1000"))
+            extra = " --preload-history" if args.preload_history else ""
+            if args.fit_developer:
+                extra = " --developer"
+            if args.controls_during_fit:
+                extra += " --lease-probe"
+            workload_command = (
+                f"python /benchmark/{workload_key}.py {quantity}{extra} > /tmp/result.json; "
+                "task_status=$?; echo $task_status > /tmp/finished; "
+                "exec sleep infinity"
+            )
+            launch(
+                workload,
+                image,
+                "sh",
+                "-c",
+                workload_command,
+                limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
+                env=app_env,
+                mounts=mounts,
+            )
+            controls = {}
+            if args.controls_during_fit:
+                until_ready(
+                    lambda: docker(
+                        "exec", workload, "test", "-f", "/tmp/fit-projection-started", check=False
+                    ),
+                    "FIT projection start",
+                )
+                script = Path(__file__).with_name("control_overlap.py").read_text(encoding="utf-8")
+                response = docker("exec", observer, "python", "-c", script, f"http://{api}:8080")
+                write_finished = docker(
+                    "exec",
+                    workload,
+                    "test",
+                    "-f",
+                    "/tmp/fit-projection-store-finished",
+                    check=False,
+                )
+                controls = json.loads(response.stdout)
+                controls["store_finished_during_probes"] = write_finished.returncode == 0
+            workload_samples = []
+            deadline = time.monotonic() + 1600
+            while time.monotonic() < deadline:
+                finished = docker("exec", workload, "test", "-f", "/tmp/finished", check=False)
+                if not finished.returncode:
+                    break
+                state = docker("inspect", workload, "--format", "{{.State.Status}}").stdout.strip()
+                if state != "running":
+                    raise RuntimeError("Synthetic workload exited before completing")
+                live = probe("/health/live")
+                workload_samples.append(
+                    {
+                        "elapsed_seconds": elapsed(),
+                        "health_live_ms": float(live.stdout) if not live.returncode else None,
+                        "database": sample(db, user="postgres"),
+                        "api": sample(api),
+                        "worker": None if name == "replay" else sample(worker),
+                        "workload": sample(workload),
+                    }
+                )
+                time.sleep(args.interval)
+            else:
+                raise RuntimeError("Synthetic workload exceeded the measurement deadline")
+            status = int(docker("exec", workload, "cat", "/tmp/finished").stdout)
+            if status and name != "fitlimit":
+                logs = docker("logs", "--tail", "1", workload, check=False).stderr
+                detail = logs.replace(password, "<redacted>").strip()[:300]
+                raise RuntimeError(f"Synthetic workload failed with status {status}: {detail}")
+            result_path = "/tmp/fit-limit-input.json" if status else "/tmp/result.json"
+            workload_result[workload_key] = {
+                **json.loads(docker("exec", workload, "cat", result_path).stdout),
+                "exit_code": status,
+                "final_memory": sample(workload),
+                "samples": workload_samples,
+                **({"control_overlap": controls} if controls else {}),
+            }
         revision = docker(
             "exec",
             db,
@@ -306,6 +422,7 @@ def report_run(args):
             "lifecycle": lifecycle,
             "migration": migration_sample,
             "idle_samples": samples,
+            **workload_result,
         }
 
 
@@ -317,9 +434,30 @@ def main():
     parser.add_argument("--cpu", default="0", help="Shared Docker CPU affinity")
     parser.add_argument("--samples", default=8, type=int, choices=range(1, 61), metavar="1..60")
     parser.add_argument("--interval", default=2, type=float, choices=(0.5, 1, 2, 5))
+    workload = parser.add_mutually_exclusive_group()
+    workload.add_argument("--fit-records", type=int, choices=(5000, 50000))
+    workload.add_argument("--fit-limit-mib", type=int, choices=(100,))
+    workload.add_argument("--sync-days", type=int, choices=(1, 7, 30, 365))
+    workload.add_argument("--reconcile-days", type=int, choices=(7, 30))
+    workload.add_argument("--backup-mib", type=int, choices=(32, 128))
+    workload.add_argument("--analytics-rounds", type=int, choices=(1, 10))
+    workload.add_argument("--mcp-idle-seconds", type=int, choices=(5, 10))
+    workload.add_argument("--voice-rounds", type=int, choices=(1, 2))
+    workload.add_argument("--replay-days", type=int, choices=(7, 30))
+    parser.add_argument("--preload-history", action="store_true")
+    parser.add_argument("--fit-developer", action="store_true")
+    parser.add_argument("--controls-during-fit", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(report_run(args), indent=2))
+    if args.preload_history and args.sync_days not in (7, 30, 365):
+        parser.error("--preload-history requires --sync-days 7, 30 or 365")
+    if args.fit_developer and not args.fit_records:
+        parser.error("--fit-developer requires --fit-records")
+    if args.controls_during_fit and args.fit_records != 50000:
+        parser.error("--controls-during-fit requires --fit-records 50000")
+    report = report_run(args)
+    print(json.dumps(report, indent=2))
+    return 1 if report.get("fitlimit_workload", {}).get("exit_code") else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
