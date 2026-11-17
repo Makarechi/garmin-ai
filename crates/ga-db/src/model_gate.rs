@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
-mod onboarding;
+pub(crate) mod onboarding;
 mod resume;
 
 pub use resume::ModelResume;

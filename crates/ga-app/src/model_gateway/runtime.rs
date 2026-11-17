@@ -216,28 +216,28 @@ where
                     .map_err(|_| FallbackError::StateUnavailable)?;
             }
             database
-                .with_tracker_delivery(destination, self.requirements, || async {
-                    let allowed = self
-                        .gateway
-                        .authorize((self.policy)(), self.operation, self.now())
-                        .map_err(|_| FallbackError::ConsentRequired)?;
-                    if !allowed.contains(&candidate)
-                        || !database
-                            .model_onboarding_allows(self.operation.categories())
+                .with_model_delivery(
+                    destination,
+                    self.operation.categories(),
+                    self.requirements,
+                    || async {
+                        let allowed = self
+                            .gateway
+                            .authorize((self.policy)(), self.operation, self.now())
+                            .map_err(|_| FallbackError::ConsentRequired)?;
+                        if !allowed.contains(&candidate) {
+                            return Err(FallbackError::ConsentRequired);
+                        }
+                        let remaining = self.deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err(FallbackError::Deadline);
+                        }
+                        self.sender
+                            .send(&self.prepared, remaining)
                             .await
-                            .map_err(|_| FallbackError::StateUnavailable)?
-                    {
-                        return Err(FallbackError::ConsentRequired);
-                    }
-                    let remaining = self.deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(FallbackError::Deadline);
-                    }
-                    self.sender
-                        .send(&self.prepared, remaining)
-                        .await
-                        .map_err(FallbackError::Provider)
-                })
+                            .map_err(FallbackError::Provider)
+                    },
+                )
                 .await
                 .map_err(|error| match error {
                     SharePolicyError::Busy => busy(),

@@ -8,14 +8,19 @@ pub(crate) use outbound::intent_sharing_allowed;
 
 use std::{error::Error, fmt, future::Future, time::Duration};
 
+use ga_domain::model_consent::ModelCategories;
 use serde::Deserialize;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK};
+use crate::{
+    Database, ReadinessError, check_readiness, model_gate::onboarding::onboarding_allows_model,
+    replay::REPLAY_MUTATION_LOCK,
+};
 
 pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72104631;
 const MODEL_CONSENT_LOCK: i64 = 72104632;
+const OWNER_ONBOARDING_LOCK: i64 = 72104621;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -153,9 +158,41 @@ impl Database {
     where
         F: Future<Output = T>,
     {
+        self.with_delivery_policy(destination, requirements, None, deliver)
+            .await
+    }
+
+    /// Hold current onboarding and tracker policy for the actual model send.
+    pub async fn with_model_delivery<T, F>(
+        &self,
+        destination: ShareDestination<'_>,
+        categories: ModelCategories,
+        requirements: &[ShareRequirement<'_>],
+        deliver: impl FnOnce() -> F,
+    ) -> Result<Option<T>, SharePolicyError>
+    where
+        F: Future<Output = T>,
+    {
+        if destination.kind != DestinationKind::Model {
+            return Err(SharePolicyError::InvalidDestination);
+        }
+        self.with_delivery_policy(destination, requirements, Some(categories), deliver)
+            .await
+    }
+
+    async fn with_delivery_policy<T, F>(
+        &self,
+        destination: ShareDestination<'_>,
+        requirements: &[ShareRequirement<'_>],
+        model: Option<ModelCategories>,
+        deliver: impl FnOnce() -> F,
+    ) -> Result<Option<T>, SharePolicyError>
+    where
+        F: Future<Output = T>,
+    {
         let txn = tokio::time::timeout(
             Duration::from_millis(1500),
-            self.prepare_tracker_delivery(destination, requirements),
+            self.prepare_tracker_delivery(destination, requirements, model),
         )
         .await
         .map_err(|_| SharePolicyError::Database)??;
@@ -184,12 +221,19 @@ impl Database {
         &self,
         destination: ShareDestination<'_>,
         requirements: &[ShareRequirement<'_>],
+        model: Option<ModelCategories>,
     ) -> Result<Option<Transaction<'static, Postgres>>, SharePolicyError> {
         let mut txn = self.begin_share_check().await?;
         if destination.kind == DestinationKind::Channel {
             try_shared_lock(&mut txn, REPLAY_MUTATION_LOCK).await?;
         }
         try_shared_lock(&mut txn, destination.kind.lock()).await?;
+        if let Some(categories) = model {
+            try_shared_lock(&mut txn, OWNER_ONBOARDING_LOCK).await?;
+            if !onboarding_allows_model(&mut txn, categories).await? {
+                return Ok(None);
+            }
+        }
         for requirement in requirements {
             if !allows(&mut txn, *requirement, destination).await? {
                 txn.rollback().await?;
