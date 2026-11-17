@@ -9,7 +9,7 @@ mod reads;
 mod revisions;
 mod undo;
 
-pub use reads::DiaryReadError;
+pub use reads::{DiaryReadError, ModelDiaryPage, ModelDiaryQuery};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 

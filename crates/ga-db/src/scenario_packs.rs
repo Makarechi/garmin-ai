@@ -301,6 +301,29 @@ async fn ensure_scenario_packs(
     Ok(())
 }
 
+pub(crate) async fn model_disallowed_event_kinds(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<&'static str>, ScenarioPackError> {
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT pack_key,llm_enabled FROM module_configs
+         JOIN people ON people.id=module_configs.owner_id WHERE people.singleton",
+    )
+    .fetch_all(&mut **txn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let allowed: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter_map(|(key, enabled)| enabled.then_some(key.as_str()))
+        .collect();
+    Ok(catalog()?
+        .iter()
+        .filter(|pack| !allowed.contains(pack.key))
+        .flat_map(|pack| pack.definitions.iter().copied())
+        .collect())
+}
+
 fn state(pack: &ScenarioPack, row: PackRow) -> Value {
     json!({
         "key": pack.key, "labels": pack.labels, "definitions": pack.definitions,
