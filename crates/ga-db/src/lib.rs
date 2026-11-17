@@ -1,3 +1,4 @@
+pub mod activity_documents;
 pub mod garmin_owner;
 pub mod jobs;
 pub mod raw_capture;

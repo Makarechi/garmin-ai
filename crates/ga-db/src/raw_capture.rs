@@ -11,7 +11,7 @@ use crate::{
     garmin_owner::{OwnerVerificationError, verify_owner_in_transaction},
 };
 
-const GARMIN_LEGACY_SOURCE: &str = "garmin_connect";
+pub(crate) const GARMIN_LEGACY_SOURCE: &str = "garmin_connect";
 const MUTATION_LOCK: i64 = 72104619;
 
 pub struct LegacyCapture<'a> {
@@ -77,11 +77,47 @@ impl Database {
         archive: Arc<Archive>,
         limits: PutLimits,
     ) -> Result<CapturedSource, CaptureError> {
-        let packs = required_packs(request.endpoint).ok_or(CaptureError::UnknownEndpoint)?;
         if request.body.len() as u64 > limits.max_bytes {
             return Err(CaptureError::InputTooLarge);
         }
         let body = String::from_utf8(request.body).map_err(|_| CaptureError::InvalidInput)?;
+        let txn = self
+            .begin_legacy_source(
+                request.authenticated_fingerprint,
+                request.endpoint,
+                request.source_key,
+            )
+            .await?;
+
+        // Keep the authorization transaction alive until blocking filesystem work stops,
+        // even if the async caller is cancelled while the archive is being written.
+        let (mut txn, archive_key, body) = tokio::task::spawn_blocking(move || {
+            let key = archive
+                .put_json(body.as_bytes(), limits)
+                .map_err(CaptureError::Archive)?;
+            Ok::<_, CaptureError>((txn, key, body))
+        })
+        .await
+        .map_err(|_| CaptureError::ArchiveTaskFailed)??;
+        let capture = insert_source(
+            &mut txn,
+            request.endpoint,
+            request.source_key,
+            request.fetched_at,
+            archive_key,
+            &body,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(capture)
+    }
+    pub(crate) async fn begin_legacy_source(
+        &self,
+        fingerprint: &str,
+        endpoint: &str,
+        source_key: &str,
+    ) -> Result<Transaction<'static, Postgres>, CaptureError> {
+        let packs = required_packs(endpoint).ok_or(CaptureError::UnknownEndpoint)?;
         let mut txn = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
@@ -89,7 +125,7 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(CaptureError::Storage)?;
-        let owner = verify_owner_in_transaction(&mut txn, request.authenticated_fingerprint)
+        let owner = verify_owner_in_transaction(&mut txn, fingerprint)
             .await
             .map_err(CaptureError::Owner)?;
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
@@ -115,10 +151,7 @@ impl Database {
         if !allowed {
             return Err(CaptureError::CollectionDisabled);
         }
-        let scope = format!(
-            "{GARMIN_LEGACY_SOURCE}:{}:{}",
-            request.endpoint, request.source_key
-        );
+        let scope = format!("{GARMIN_LEGACY_SOURCE}:{}:{}", endpoint, source_key);
         let locked: bool =
             sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
                 .bind(scope)
@@ -128,27 +161,7 @@ impl Database {
             return Err(CaptureError::Busy);
         }
 
-        // Keep the authorization transaction alive until blocking filesystem work stops,
-        // even if the async caller is cancelled while the archive is being written.
-        let (mut txn, archive_key, body) = tokio::task::spawn_blocking(move || {
-            let key = archive
-                .put_json(body.as_bytes(), limits)
-                .map_err(CaptureError::Archive)?;
-            Ok::<_, CaptureError>((txn, key, body))
-        })
-        .await
-        .map_err(|_| CaptureError::ArchiveTaskFailed)??;
-        let capture = insert_source(
-            &mut txn,
-            request.endpoint,
-            request.source_key,
-            request.fetched_at,
-            archive_key,
-            &body,
-        )
-        .await?;
-        txn.commit().await?;
-        Ok(capture)
+        Ok(txn)
     }
 }
 
