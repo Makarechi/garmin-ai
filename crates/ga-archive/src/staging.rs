@@ -43,7 +43,7 @@ pub(crate) fn remove_orphans(root: &OwnedFd) -> Result<usize, ArchiveError> {
     Ok(removed)
 }
 
-fn lock(root: &OwnedFd, operation: FlockOperation) -> Result<OwnedFd, ArchiveError> {
+pub(crate) fn lock(root: &OwnedFd, operation: FlockOperation) -> Result<OwnedFd, ArchiveError> {
     // Each open creates its own file description, including for threads sharing an Archive.
     let directory = fs::openat(root, ".", DIRECTORY_READ, Mode::empty())?;
     match fs::flock(&directory, operation) {

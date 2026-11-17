@@ -1,5 +1,6 @@
 mod key;
 mod staging;
+mod token_file;
 
 use std::{
     env,
@@ -21,6 +22,7 @@ use sha2::{Digest, Sha256};
 use staging::Stage;
 
 pub use key::{ArchiveKey, ArchiveKind, InvalidArchiveKey};
+pub use token_file::{GarminTokenFile, GarminTokenGuard};
 
 const BUFFER_SIZE: usize = 64 * 1024;
 const DIRECTORY_MODE: Mode = Mode::RWXU;
@@ -99,30 +101,9 @@ impl From<io::Error> for ArchiveError {
 
 impl Archive {
     pub fn open(path: &Path) -> Result<Self, ArchiveError> {
-        if path.as_os_str().is_empty() {
-            return Err(ArchiveError::InvalidRoot);
-        }
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            env::current_dir()?.join(path)
-        };
-        if path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-            || path.parent().is_none()
-        {
-            return Err(ArchiveError::InvalidRoot);
-        }
-        let mut directory = fs::open("/", DIRECTORY_READ, Mode::empty())?;
-        for part in path.components() {
-            if let Component::Normal(name) = part {
-                directory = ensure_directory(&directory, name)?;
-            }
-        }
-        fs::fchmod(&directory, DIRECTORY_MODE)?;
-        fs::fsync(&directory)?;
-        Ok(Self { root: directory })
+        Ok(Self {
+            root: open_private_root(path)?,
+        })
     }
 
     pub fn open_reader(&self, key: &ArchiveKey) -> Result<File, ArchiveError> {
@@ -206,6 +187,33 @@ impl Archive {
         }
         Ok(())
     }
+}
+
+fn open_private_root(path: &Path) -> Result<OwnedFd, ArchiveError> {
+    if path.as_os_str().is_empty() {
+        return Err(ArchiveError::InvalidRoot);
+    }
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    if path
+        .components()
+        .any(|part| matches!(part, Component::ParentDir))
+        || path.parent().is_none()
+    {
+        return Err(ArchiveError::InvalidRoot);
+    }
+    let mut directory = fs::open("/", DIRECTORY_READ, Mode::empty())?;
+    for part in path.components() {
+        if let Component::Normal(name) = part {
+            directory = ensure_directory(&directory, name)?;
+        }
+    }
+    fs::fchmod(&directory, DIRECTORY_MODE)?;
+    fs::fsync(&directory)?;
+    Ok(directory)
 }
 
 fn ensure_directory(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, ArchiveError> {

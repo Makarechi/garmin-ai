@@ -51,13 +51,13 @@ impl Fixture {
     }
 }
 
-struct Server {
-    base: Url,
+pub(crate) struct Server {
+    pub(crate) base: Url,
     task: JoinHandle<()>,
 }
 
 impl Server {
-    async fn start(app: Router) -> Result<Self, Box<dyn Error>> {
+    pub(crate) async fn start(app: Router) -> Result<Self, Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
         let task = tokio::spawn(async move {
@@ -77,7 +77,7 @@ impl Drop for Server {
     }
 }
 
-fn test_config() -> TransportConfig {
+pub(crate) fn test_config() -> TransportConfig {
     TransportConfig {
         pacing: Duration::ZERO,
         connect_timeout: Duration::from_secs(2),
