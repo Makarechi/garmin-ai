@@ -79,6 +79,8 @@ impl Sequence {
                 .iter()
                 .filter(|component| component.accumulate)
             {
+                // The pinned compatibility reader restarts each component when
+                // its local definition appears, including another local slot.
                 self.accumulators
                     .insert((definition.global_number, component.number), 0);
             }
@@ -170,6 +172,8 @@ impl Sequence {
             if field.developer_index.is_none()
                 && let Some(name) = &field.name
             {
+                // ActivityPart uses the first occurrence. Its field list still
+                // retains both the directly supplied and expanded values.
                 payload
                     .entry(name.clone())
                     .or_insert_with(|| field.value.clone());
@@ -230,10 +234,10 @@ impl Sequence {
         let mut rendered = render::label(profile, field, &raw);
         if wire.global_number == HR_MESSAGE && source_number == HR_EVENT_TIMESTAMP_12 {
             use RawFitValue::Float;
-            let value = render::number(&rendered).ok_or(FitError::InvalidRecord)?;
             if self.hr_start_timestamp == 0 {
-                return Err(FitError::InvalidRecord);
+                return Err(FitError::MissingHeartRateStart);
             }
+            let value = render::number(&rendered).ok_or(FitError::InvalidHeartRateComponent)?;
             rendered = Float(value + self.hr_start_timestamp as f64);
         }
         Ok(Some(DisplayField::projected(field, &raw, rendered)?))

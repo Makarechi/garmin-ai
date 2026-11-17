@@ -86,6 +86,21 @@ fn projection_matches_the_pinned_python_records() -> Result<(), Box<dyn Error>> 
         assert_eq!(result.messages, count, "{name}");
         assert!(expected.next().is_none(), "{name}");
     }
+    let rejections: Vec<(String, String)> =
+        serde_json::from_reader(File::open(base.join("rejections.json"))?)?;
+    for (name, expected) in rejections {
+        let file = File::open(base.join(&name))?;
+        let error = match expected.as_str() {
+            "AssertionError" => FitError::MissingHeartRateStart,
+            "TypeError" => FitError::InvalidHeartRateComponent,
+            _ => return Err("Unexpected fixture error type".into()),
+        };
+        assert_eq!(
+            visit_fit_projection(file, MAX_FIT_BYTES, || false, |_| Ok(())),
+            Err(error),
+            "{name}"
+        );
+    }
     Ok(())
 }
 

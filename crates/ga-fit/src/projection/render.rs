@@ -111,6 +111,8 @@ pub(super) fn display(
 }
 
 pub(super) fn label(profile: &FitProfile, field: &Field, raw: &RawFitValue) -> RawFitValue {
+    // Enumeration applies to scalar fields. The pinned profile lookup compares
+    // a whole array to enum keys and leaves its numeric elements intact.
     integer(raw)
         .and_then(|index| profile.types.get(&field.kind)?.values.get(&index))
         .map_or_else(|| raw.clone(), |label| Text(label.clone()))

@@ -41,10 +41,32 @@ def extra_cases():
     record += definition(3, 20, [(99, 4, 0x84)]) + struct.pack("<BHH", 3, 0xFF11, 0x1201)
     missing_description = definition(4, 20, [(3, 1, 2)], developer=(19, 2, 7))
     missing_description += b"\x24\x45\x00\xff"
+    cycle_definition = [(18, 1, 2)]
+    cycles = definition(0, 20, cycle_definition) + bytes([0, 250, 0, 5])
+    cycles += definition(0, 20, cycle_definition) + bytes([0, 9])
+    cycles += definition(1, 20, cycle_definition) + bytes([1, 2, 0, 3])
+    speed = definition(0, 20, [(6, 2, 0x84), (73, 4, 0x86)])
+    speed += struct.pack("<BHI", 0, 5000, 6789)
+    speed += definition(0, 20, [(73, 4, 0x86), (6, 2, 0x84)])
+    speed += struct.pack("<BIH", 0, 6789, 5000)
+    enums = definition(0, 103, [(1, 2, 0x00)]) + bytes([0, 1, 2])
     return {
         "clocks-and-subfield.fit": packet(clocks + file_id),
         "hr-and-respiration.fit": packet(hr + record),
         "missing-description.fit": packet(missing_description),
+        "accumulation-after-definition.fit": packet(cycles),
+        "explicit-and-expanded-speed.fit": packet(speed),
+        "monitoring-enum-array.fit": packet(enums),
+    }
+
+
+def rejected_cases():
+    available_start = definition(0, 132, [(253, 4, 0x86), (9, 4, 0x86), (10, 3, 0x0D)])
+    available_start += struct.pack("<BII", 0, 1_160_000_000, 1234) + b"\xff\xff\xff"
+    missing_start = definition(0, 132, [(10, 3, 0x0D)]) + b"\x00\x12\x34\x56"
+    return {
+        "missing-compressed-hr-value.fit": ("TypeError", packet(available_start)),
+        "missing-compressed-hr-start.fit": ("AssertionError", packet(missing_start)),
     }
 
 
@@ -78,6 +100,19 @@ def prepare(probe_dir, output):
         path.write_bytes(data)
         counts.append([name, reference(path, path.with_suffix(".ndjson"))])
     (output / "manifest.json").write_text(json.dumps(counts) + "\n", encoding="utf-8")
+
+    rejections = []
+    for name, (expected, data) in rejected_cases().items():
+        path = output / name
+        path.write_bytes(data)
+        try:
+            reference(path, path.with_suffix(".ndjson"))
+        except (TypeError, AssertionError) as error:
+            assert type(error).__name__ == expected
+            rejections.append([name, expected])
+        else:
+            raise ValueError(f"Pinned Python unexpectedly projected {name}")
+    (output / "rejections.json").write_text(json.dumps(rejections) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

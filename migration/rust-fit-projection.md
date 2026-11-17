@@ -13,13 +13,22 @@ Definitions retain their existing descriptors across later descriptor changes.
 The wire API also retains the exact bytes and base types. Source-dependent
 timestamps remain tied to FIT data.
 
-The conformance check compared 50,039 synthetic Python rows across 12 FIT files.
+The conformance check compared 50,047 synthetic Python rows across 15 FIT files.
 It includes FIT developer metadata, unknown messages, byte arrays, invalid
 sentinels, compressed timestamps, component expansion, scaling and two chained
 sequences. Native Linux arm64 decoded the 100 MiB source as 409,600 rows inside a
 32 MiB limit without swapping or OOM. The test inspects each row as it is decoded.
 The measured peak includes file cache. Database and archive writing are tested
 separately.
+
+Additional cases record importer behavior on ambiguous fields. A repeated
+message definition resets the legacy component accumulator. The first field
+with a duplicate name supplies the top-level value, and the ordered field list
+keeps both the expanded and explicit values. Profile enumeration leaves an
+array's numeric elements unchanged. Two checksum-valid heart-rate files
+reproduce the pinned Python failures for a missing starting timestamp and an
+unavailable compressed component. Their failure classes are distinguished in
+the native projection, and the original wire values remain available.
 
 Each row remains a candidate until the FIT checksum and the enclosing export
 both pass. The next step owns validation of the complete activity export and

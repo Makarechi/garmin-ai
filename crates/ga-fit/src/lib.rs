@@ -55,6 +55,8 @@ pub enum FitError {
     InvalidRecord,
     MissingDefinition,
     InvalidProfile,
+    MissingHeartRateStart,
+    InvalidHeartRateComponent,
     HeaderChecksum,
     Truncated,
     FileChecksum,
@@ -79,6 +81,12 @@ impl fmt::Display for FitError {
             Self::InvalidRecord => "FIT record does not fit its message definition or frame",
             Self::MissingDefinition => "FIT data record has no local definition",
             Self::InvalidProfile => "Bundled FIT compatibility profile is invalid",
+            Self::MissingHeartRateStart => {
+                "Legacy FIT projection requires an initial heart-rate timestamp"
+            }
+            Self::InvalidHeartRateComponent => {
+                "Legacy FIT projection cannot decode this heart-rate component"
+            }
             Self::HeaderChecksum => "FIT header checksum mismatched",
             Self::Truncated => "FIT input ended unexpectedly",
             Self::FileChecksum => "FIT file checksum mismatched",
