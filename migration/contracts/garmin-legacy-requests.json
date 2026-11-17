@@ -1,0 +1,149 @@
+{
+  "activities": [
+    "/activitylist-service/activities/search/activities",
+    {
+      "limit": "100",
+      "start": "10"
+    }
+  ],
+  "activity": [
+    "/activity-service/activity/42",
+    {}
+  ],
+  "activity_details": [
+    "/activity-service/activity/42/details",
+    {
+      "maxChartSize": "2000",
+      "maxPolylineSize": "4000"
+    }
+  ],
+  "activity_fit": [
+    "/download-service/files/activity/42",
+    {}
+  ],
+  "activity_splits": [
+    "/activity-service/activity/42/splits",
+    {}
+  ],
+  "activity_typed_splits": [
+    "/activity-service/activity/42/typedsplits",
+    {}
+  ],
+  "activity_weather": [
+    "/activity-service/activity/42/weather",
+    {}
+  ],
+  "activity_zones": [
+    "/activity-service/activity/42/hrTimeInZones",
+    {}
+  ],
+  "all_day_events": [
+    "/wellness-service/wellness/dailyEvents",
+    {
+      "calendarDate": "2026-11-01"
+    }
+  ],
+  "body_battery": [
+    "/wellness-service/wellness/bodyBattery/reports/daily",
+    {
+      "endDate": "2026-11-01",
+      "startDate": "2026-11-01"
+    }
+  ],
+  "body_battery_events": [
+    "/wellness-service/wellness/bodyBattery/events/2026-11-01",
+    {}
+  ],
+  "body_composition": [
+    "/weight-service/weight/dateRange",
+    {
+      "endDate": "2026-11-01",
+      "startDate": "2026-11-01"
+    }
+  ],
+  "daily": [
+    "/usersummary-service/usersummary/daily/Synthetic%20Profile",
+    {
+      "calendarDate": "2026-11-01"
+    }
+  ],
+  "devices": [
+    "/device-service/deviceregistration/devices",
+    {}
+  ],
+  "endurance": [
+    "/metrics-service/metrics/endurancescore",
+    {
+      "calendarDate": "2026-11-01"
+    }
+  ],
+  "heart_rate": [
+    "/wellness-service/wellness/dailyHeartRate/Synthetic%20Profile",
+    {
+      "date": "2026-11-01"
+    }
+  ],
+  "hill": [
+    "/metrics-service/metrics/hillscore",
+    {
+      "calendarDate": "2026-11-01"
+    }
+  ],
+  "hrv": [
+    "/hrv-service/hrv/2026-11-01",
+    {}
+  ],
+  "hydration": [
+    "/usersummary-service/usersummary/hydration/daily/2026-11-01",
+    {}
+  ],
+  "intensity": [
+    "/wellness-service/wellness/daily/im/2026-11-01",
+    {}
+  ],
+  "max_metrics": [
+    "/metrics-service/metrics/maxmet/daily/2026-11-01/2026-11-01",
+    {}
+  ],
+  "readiness": [
+    "/metrics-service/metrics/trainingreadiness/2026-11-01",
+    {}
+  ],
+  "respiration": [
+    "/wellness-service/wellness/daily/respiration/2026-11-01",
+    {}
+  ],
+  "resting_hr": [
+    "/userstats-service/wellness/daily/Synthetic%20Profile",
+    {
+      "fromDate": "2026-11-01",
+      "metricId": "60",
+      "untilDate": "2026-11-01"
+    }
+  ],
+  "sleep": [
+    "/wellness-service/wellness/dailySleepData/Synthetic%20Profile",
+    {
+      "date": "2026-11-01",
+      "nonSleepBufferMinutes": "60"
+    }
+  ],
+  "spo2": [
+    "/wellness-service/wellness/daily/spo2/2026-11-01",
+    {}
+  ],
+  "steps": [
+    "/wellness-service/wellness/dailySummaryChart/Synthetic%20Profile",
+    {
+      "date": "2026-11-01"
+    }
+  ],
+  "stress": [
+    "/wellness-service/wellness/dailyStress/2026-11-01",
+    {}
+  ],
+  "training_status": [
+    "/metrics-service/metrics/trainingstatus/aggregated/2026-11-01",
+    {}
+  ]
+}

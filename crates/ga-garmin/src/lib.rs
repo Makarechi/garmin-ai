@@ -123,6 +123,10 @@ struct Inner {
 
 struct Session {
     token: Option<Token>,
+    schedule: Schedule,
+}
+
+struct Schedule {
     next_request: Instant,
     throttle: Option<(Instant, Duration)>,
 }
@@ -161,8 +165,7 @@ impl PersonalClient {
                 pacing: config.pacing,
                 state: Mutex::new(Session {
                     token: None,
-                    next_request: Instant::now(),
-                    throttle: None,
+                    schedule: Schedule::new(),
                 }),
             }),
         })
@@ -176,13 +179,7 @@ impl PersonalClient {
     ) -> Result<Option<Vec<u8>>, GarminError> {
         let url = request.url(&self.inner.base)?;
         let response = self.authorized_get(url, "application/json").await?;
-        let bytes = read_bounded(response, max_bytes).await?;
-        if bytes.iter().all(u8::is_ascii_whitespace) {
-            return Ok(None);
-        }
-        serde_json::from_slice::<&serde_json::value::RawValue>(&bytes)
-            .map_err(|_| GarminError::InvalidJson)?;
-        Ok(Some(bytes))
+        read_json_body(response, max_bytes).await
     }
 
     /// Write the original activity bytes to a caller-owned staging destination.
@@ -201,17 +198,7 @@ impl PersonalClient {
         let response = self
             .authorized_get(url, "application/x-zip-compressed")
             .await?;
-        let mut body = BoundedBody::new(response, max_bytes)?;
-        while let Some(chunk) = body.next().await? {
-            destination
-                .write_all(&chunk)
-                .await
-                .map_err(|_| GarminError::DestinationWrite)?;
-        }
-        if body.total == 0 {
-            return Err(GarminError::EmptyDownload);
-        }
-        Ok(body.total)
+        stream_download(response, max_bytes, destination).await
     }
 
     async fn authorized_get(
@@ -244,7 +231,7 @@ impl PersonalClient {
                 .get(url.clone())
                 .header(AUTHORIZATION, authorization)
                 .header(ACCEPT, accept);
-            let response = self.send(&mut session, request).await?;
+            let response = session.schedule.send(self.inner.pacing, request).await?;
             if response.status() == StatusCode::UNAUTHORIZED {
                 session.token = None;
                 if !refreshed {
@@ -267,32 +254,49 @@ impl PersonalClient {
             .post(url)
             .header(AUTHORIZATION, self.inner.api_key.clone())
             .header(ACCEPT, "*/*");
-        let response = successful(self.send(session, request).await?)?;
+        let response = successful(session.schedule.send(self.inner.pacing, request).await?)?;
         let body = read_bounded(response, MAX_TOKEN_BYTES).await?;
         token_from_response(&body)
     }
+}
 
-    async fn send(
-        &self,
-        session: &mut Session,
-        request: RequestBuilder,
-    ) -> Result<Response, GarminError> {
-        let now = Instant::now();
-        if let Some((since, duration)) = session.throttle {
-            let retry_after = duration.saturating_sub(now.duration_since(since));
+impl Schedule {
+    fn new() -> Self {
+        Self {
+            next_request: Instant::now(),
+            throttle: None,
+        }
+    }
+
+    fn cooldown(&mut self, duration: Duration) {
+        self.throttle = Some((Instant::now(), duration));
+    }
+
+    fn check(&mut self) -> Result<(), GarminError> {
+        if let Some((since, duration)) = self.throttle {
+            let retry_after = duration.saturating_sub(since.elapsed());
             if !retry_after.is_zero() {
                 return Err(GarminError::RateLimited { retry_after });
             }
-            session.throttle = None;
+            self.throttle = None;
         }
-        sleep_until(session.next_request).await;
-        session.next_request = Instant::now()
-            .checked_add(self.inner.pacing)
+        Ok(())
+    }
+
+    async fn send(
+        &mut self,
+        pacing: Duration,
+        request: RequestBuilder,
+    ) -> Result<Response, GarminError> {
+        self.check()?;
+        sleep_until(self.next_request).await;
+        self.next_request = Instant::now()
+            .checked_add(pacing)
             .ok_or(GarminError::InvalidConfiguration)?;
         let response = send(request).await?;
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             let retry_after = retry_delay(&response);
-            session.throttle = Some((Instant::now(), retry_after));
+            self.cooldown(retry_after);
             return Err(GarminError::RateLimited { retry_after });
         }
         Ok(response)
@@ -419,6 +423,37 @@ fn successful(response: Response) -> Result<Response, GarminError> {
         status if status.is_success() => Ok(response),
         status => Err(GarminError::UnexpectedStatus(status.as_u16())),
     }
+}
+
+async fn read_json_body(
+    response: Response,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, GarminError> {
+    let bytes = read_bounded(response, max_bytes).await?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    serde_json::from_slice::<&serde_json::value::RawValue>(&bytes)
+        .map_err(|_| GarminError::InvalidJson)?;
+    Ok(Some(bytes))
+}
+
+async fn stream_download(
+    response: Response,
+    max_bytes: u64,
+    destination: &mut (impl AsyncWrite + Unpin),
+) -> Result<u64, GarminError> {
+    let mut body = BoundedBody::new(response, max_bytes)?;
+    while let Some(chunk) = body.next().await? {
+        destination
+            .write_all(&chunk)
+            .await
+            .map_err(|_| GarminError::DestinationWrite)?;
+    }
+    if body.total == 0 {
+        return Err(GarminError::EmptyDownload);
+    }
+    Ok(body.total)
 }
 
 struct BoundedBody {
