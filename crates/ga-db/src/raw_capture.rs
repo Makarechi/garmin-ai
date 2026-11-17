@@ -77,10 +77,7 @@ impl Database {
         archive: Arc<Archive>,
         limits: PutLimits,
     ) -> Result<CapturedSource, CaptureError> {
-        if request.body.len() as u64 > limits.max_bytes {
-            return Err(CaptureError::InputTooLarge);
-        }
-        let body = String::from_utf8(request.body).map_err(|_| CaptureError::InvalidInput)?;
+        let body = checked_json_body(request.body, limits)?;
         let txn = self
             .begin_legacy_source(
                 request.authenticated_fingerprint,
@@ -89,16 +86,7 @@ impl Database {
             )
             .await?;
 
-        // Keep the authorization transaction alive until blocking filesystem work stops,
-        // even if the async caller is cancelled while the archive is being written.
-        let (mut txn, archive_key, body) = tokio::task::spawn_blocking(move || {
-            let key = archive
-                .put_json(body.as_bytes(), limits)
-                .map_err(CaptureError::Archive)?;
-            Ok::<_, CaptureError>((txn, key, body))
-        })
-        .await
-        .map_err(|_| CaptureError::ArchiveTaskFailed)??;
+        let (mut txn, archive_key, body) = archive_json(txn, body, archive, limits).await?;
         let capture = insert_source(
             &mut txn,
             request.endpoint,
@@ -130,6 +118,31 @@ impl Database {
         lock_legacy_scope(&mut txn, &scope).await?;
         Ok(txn)
     }
+}
+
+pub(crate) fn checked_json_body(body: Vec<u8>, limits: PutLimits) -> Result<String, CaptureError> {
+    if body.len() as u64 > limits.max_bytes {
+        return Err(CaptureError::InputTooLarge);
+    }
+    String::from_utf8(body).map_err(|_| CaptureError::InvalidInput)
+}
+
+pub(crate) async fn archive_json(
+    txn: Transaction<'static, Postgres>,
+    body: String,
+    archive: Arc<Archive>,
+    limits: PutLimits,
+) -> Result<(Transaction<'static, Postgres>, ArchiveKey, String), CaptureError> {
+    // Keep the authorization transaction alive until blocking filesystem work stops,
+    // even if the async caller is cancelled while the archive is being written.
+    tokio::task::spawn_blocking(move || {
+        let key = archive
+            .put_json(body.as_bytes(), limits)
+            .map_err(CaptureError::Archive)?;
+        Ok::<_, CaptureError>((txn, key, body))
+    })
+    .await
+    .map_err(|_| CaptureError::ArchiveTaskFailed)?
 }
 
 pub(crate) async fn authorize_legacy_mutation(
@@ -182,7 +195,7 @@ pub(crate) async fn lock_legacy_scope(
     Ok(())
 }
 
-async fn insert_source(
+pub(crate) async fn insert_source(
     txn: &mut Transaction<'_, Postgres>,
     endpoint: &str,
     source_key: &str,

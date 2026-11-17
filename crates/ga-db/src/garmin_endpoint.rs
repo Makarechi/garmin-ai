@@ -1,6 +1,8 @@
 mod history_window;
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
+
+use ga_archive::{Archive, PutLimits};
 
 use ga_domain::{
     event_input::known_timezone, garmin_health::HealthReplacement, timestamp::StoredInstant,
@@ -20,7 +22,8 @@ use crate::{
     garmin_freshness::record_freshness,
     jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome, JobStoreError},
     raw_capture::{
-        CaptureError, GARMIN_LEGACY_SOURCE, authorize_legacy_mutation, lock_legacy_scope,
+        CaptureError, CapturedSource, GARMIN_LEGACY_SOURCE, archive_json,
+        authorize_legacy_mutation, checked_json_body, insert_source, lock_legacy_scope,
         required_packs,
     },
 };
@@ -41,6 +44,19 @@ pub enum EndpointPublication {
     Retry,
     CollectionDisabled,
     Superseded,
+}
+
+pub enum EndpointCapture {
+    Captured(CapturedSource),
+    CollectionDisabled,
+    Superseded,
+}
+
+pub struct CaptureEndpoint<'a> {
+    pub authenticated_fingerprint: &'a str,
+    pub lease: &'a GarminJobLease,
+    pub requested_at: StoredInstant,
+    pub body: Vec<u8>,
 }
 
 pub struct PublishEndpoint<'a> {
@@ -162,6 +178,12 @@ impl Endpoint {
 }
 
 #[derive(Clone, Copy)]
+enum LeaseRead {
+    Observe,
+    Lock,
+}
+
+#[derive(Clone, Copy)]
 enum Eligibility {
     Work,
     Disabled,
@@ -177,7 +199,9 @@ impl Database {
         at: StoredInstant,
     ) -> Result<EndpointPreflight, EndpointError> {
         let endpoint = Endpoint::from_lease(lease, account)?;
-        let (txn, eligibility) = self.begin_endpoint(&endpoint, account, lease, at).await?;
+        let (txn, eligibility) = self
+            .begin_endpoint(&endpoint, account, lease, at, LeaseRead::Lock)
+            .await?;
         let result = match eligibility {
             Eligibility::Work => EndpointPreflight::Fetch {
                 endpoint: endpoint.name,
@@ -185,6 +209,50 @@ impl Database {
             },
             Eligibility::Disabled => EndpointPreflight::CollectionDisabled,
             Eligibility::Superseded => EndpointPreflight::Superseded,
+        };
+        txn.commit().await?;
+        Ok(result)
+    }
+
+    /// Archive a response under its saved scope and index it only if the lease is still live.
+    pub async fn capture_garmin_endpoint(
+        &self,
+        request: CaptureEndpoint<'_>,
+        archive: Arc<Archive>,
+        limits: PutLimits,
+    ) -> Result<EndpointCapture, EndpointError> {
+        let endpoint = Endpoint::from_lease(request.lease, request.authenticated_fingerprint)?;
+        let body = checked_json_body(request.body, limits).map_err(EndpointError::Capture)?;
+        let (txn, eligibility) = self
+            .begin_endpoint(
+                &endpoint,
+                request.authenticated_fingerprint,
+                request.lease,
+                request.requested_at,
+                LeaseRead::Observe,
+            )
+            .await?;
+        let result = match eligibility {
+            Eligibility::Disabled => EndpointCapture::CollectionDisabled,
+            Eligibility::Superseded => EndpointCapture::Superseded,
+            Eligibility::Work => {
+                let (mut txn, key, body) = archive_json(txn, body, archive, limits)
+                    .await
+                    .map_err(EndpointError::Capture)?;
+                let source = insert_source(
+                    &mut txn,
+                    &endpoint.name,
+                    &endpoint.key,
+                    request.requested_at,
+                    key,
+                    &body,
+                )
+                .await
+                .map_err(EndpointError::Capture)?;
+                request.lease.check_live(&mut txn).await?;
+                txn.commit().await?;
+                return Ok(EndpointCapture::Captured(source));
+            }
         };
         txn.commit().await?;
         Ok(result)
@@ -209,6 +277,7 @@ impl Database {
                 request.authenticated_fingerprint,
                 request.lease,
                 request.requested_at,
+                LeaseRead::Lock,
             )
             .await?;
         let result = match eligibility {
@@ -230,7 +299,9 @@ impl Database {
         retry_at: Option<StoredInstant>,
     ) -> Result<(), EndpointError> {
         let endpoint = Endpoint::from_lease(lease, account)?;
-        let (mut txn, eligibility) = self.begin_endpoint(&endpoint, account, lease, at).await?;
+        let (mut txn, eligibility) = self
+            .begin_endpoint(&endpoint, account, lease, at, LeaseRead::Lock)
+            .await?;
         if let Eligibility::Work = eligibility {
             record_freshness(
                 &mut txn,
@@ -255,6 +326,7 @@ impl Database {
         account: &str,
         lease: &GarminJobLease,
         at: StoredInstant,
+        lease_read: LeaseRead,
     ) -> Result<(Transaction<'static, Postgres>, Eligibility), EndpointError> {
         let mut txn = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
@@ -268,7 +340,10 @@ impl Database {
             Err(CaptureError::CollectionDisabled) => false,
             Err(error) => return Err(EndpointError::Capture(error)),
         };
-        lease.check_live(&mut txn).await?;
+        match lease_read {
+            LeaseRead::Observe => lease.observe_live(&mut txn).await?,
+            LeaseRead::Lock => lease.check_live(&mut txn).await?,
+        };
         let eligibility = if history_window::superseded(&mut txn, endpoint, lease.id()).await? {
             Eligibility::Superseded
         } else if !enabled {

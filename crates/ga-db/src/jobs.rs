@@ -463,20 +463,45 @@ impl Database {
 }
 
 impl GarminJobLease {
+    pub(crate) async fn observe_live(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), JobStoreError> {
+        self.require_live(txn, false).await
+    }
+
     pub(crate) async fn check_live(
         &self,
         txn: &mut Transaction<'_, Postgres>,
     ) -> Result<(), JobStoreError> {
-        let found = sqlx::query_scalar::<_, i32>(
-            "SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2
-               AND status = 'running' AND lease_until > clock_timestamp() AND kind = $3
-             FOR UPDATE NOWAIT",
-        )
-        .bind(self.id)
-        .bind(self.token)
-        .bind(self.kind.label())
-        .fetch_optional(&mut **txn)
-        .await?;
+        self.require_live(txn, true).await
+    }
+
+    async fn require_live(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        lock: bool,
+    ) -> Result<(), JobStoreError> {
+        macro_rules! live {
+            ($suffix:literal) => {
+                concat!(
+                    "SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2
+                     AND status = 'running' AND lease_until > clock_timestamp() AND kind = $3",
+                    $suffix
+                )
+            };
+        }
+        let query = if lock {
+            live!(" FOR UPDATE NOWAIT")
+        } else {
+            live!("")
+        };
+        let found = sqlx::query_scalar::<_, i32>(query)
+            .bind(self.id)
+            .bind(self.token)
+            .bind(self.kind.label())
+            .fetch_optional(&mut **txn)
+            .await?;
         found.map(|_| ()).ok_or(JobStoreError::LeaseLost)
     }
 
