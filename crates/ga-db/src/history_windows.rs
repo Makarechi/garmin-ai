@@ -22,7 +22,7 @@ const MAX_HORIZON: u16 = 3660;
 const SCAN_DAYS: i64 = 3661;
 const DAYS_PER_PASS: i64 = 2;
 
-const DAY_ENDPOINTS: &[&str] = &[
+pub(crate) const DAY_ENDPOINTS: &[&str] = &[
     "all_day_events",
     "body_battery",
     "body_battery_events",
@@ -120,29 +120,39 @@ impl Database {
         if !allowed {
             return Ok(HistorySchedule::default());
         }
-        let endpoints = enabled_endpoints(&mut txn, owner.owner_id()).await?;
-        if endpoints.is_empty() {
-            return Ok(HistorySchedule::default());
-        }
-        let prefix = format!("syncwindow:{}:", request.authenticated_fingerprint);
-        let scope = Scope {
-            prefix: &prefix,
-            account: request.authenticated_fingerprint,
-            endpoints: &endpoints,
-            now: request.now,
-        };
-        let reenabled = retry_disabled(&mut txn, &scope).await?;
-        let mut progress =
-            schedule_windows(&mut txn, &scope, yesterday, request.horizon_days).await?;
-        progress.reenabled = reenabled;
+        let endpoints = enabled_endpoints(&mut txn, owner.owner_id(), DAY_ENDPOINTS).await?;
+        let progress = schedule_history_in(&mut txn, request, yesterday, &endpoints).await?;
         txn.commit().await?;
         Ok(progress)
     }
 }
 
-async fn enabled_endpoints(
+pub(crate) async fn schedule_history_in(
+    txn: &mut Transaction<'_, Postgres>,
+    request: ScheduleHistory<'_>,
+    yesterday: Date,
+    endpoints: &[&'static str],
+) -> Result<HistorySchedule, HistoryScheduleError> {
+    if request.horizon_days == 0 || endpoints.is_empty() {
+        return Ok(HistorySchedule::default());
+    }
+    let prefix = format!("syncwindow:{}:", request.authenticated_fingerprint);
+    let scope = Scope {
+        prefix: &prefix,
+        account: request.authenticated_fingerprint,
+        endpoints,
+        now: request.now,
+    };
+    let reenabled = retry_disabled(txn, &scope).await?;
+    let mut progress = schedule_windows(txn, &scope, yesterday, request.horizon_days).await?;
+    progress.reenabled = reenabled;
+    Ok(progress)
+}
+
+pub(crate) async fn enabled_endpoints(
     txn: &mut Transaction<'_, Postgres>,
     owner: Uuid,
+    endpoints: &[&'static str],
 ) -> Result<Vec<&'static str>, HistoryScheduleError> {
     let rows: Vec<(String, bool)> =
         sqlx::query_as("SELECT pack_key, collection_enabled FROM module_configs WHERE owner_id=$1")
@@ -151,9 +161,9 @@ async fn enabled_endpoints(
             .await?;
     let choices: BTreeMap<_, _> = rows.into_iter().collect();
     if choices.is_empty() {
-        return Ok(DAY_ENDPOINTS.to_vec());
+        return Ok(endpoints.to_vec());
     }
-    Ok(DAY_ENDPOINTS
+    Ok(endpoints
         .iter()
         .copied()
         .filter(|endpoint| {

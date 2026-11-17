@@ -6,6 +6,7 @@ pub mod fit_staging;
 pub mod garmin_endpoint;
 mod garmin_freshness;
 pub mod garmin_owner;
+pub mod garmin_periodic;
 pub mod health_analysis;
 mod health_projection;
 pub mod history_windows;

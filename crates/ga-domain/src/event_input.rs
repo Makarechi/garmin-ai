@@ -301,15 +301,20 @@ pub fn known_timezone(name: &str) -> bool {
 }
 
 pub fn source_calendar_date(start: StoredInstant, timezone: &str) -> Option<time::Date> {
+    source_calendar_clock(start, timezone).map(|(date, _)| date)
+}
+
+pub fn source_calendar_clock(start: StoredInstant, timezone: &str) -> Option<(time::Date, u8)> {
     let instant = jiff::Timestamp::from_microsecond(start.unix_microseconds()).ok()?;
     let zone = jiff::tz::db().get(timezone).ok()?;
-    let local = instant.to_zoned_datetime(zone).date();
-    time::Date::from_calendar_date(
+    let local = instant.to_zoned_datetime(zone);
+    let date = time::Date::from_calendar_date(
         i32::from(local.year()),
         time::Month::try_from(u8::try_from(local.month()).ok()?).ok()?,
         u8::try_from(local.day()).ok()?,
     )
-    .ok()
+    .ok()?;
+    Some((date, u8::try_from(local.hour()).ok()?))
 }
 
 /// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
