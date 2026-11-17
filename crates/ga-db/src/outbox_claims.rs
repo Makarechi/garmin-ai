@@ -1,3 +1,6 @@
+mod dispatch;
+pub use dispatch::{ReplyDispatchError, ReplyDispatchResult, ReplyObservation};
+
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
@@ -56,6 +59,20 @@ struct Candidate {
     fence: Option<String>,
     memory_epoch: Uuid,
     owner_memory: bool,
+}
+
+impl Candidate {
+    fn read(row: &PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            conversation_id: row.try_get("conversation_id")?,
+            operation_id: row.try_get("operation_id")?,
+            inbound_id: row.try_get("inbound_message_id")?,
+            fence: row.try_get("fence")?,
+            memory_epoch: row.try_get("memory_epoch")?,
+            owner_memory: row.try_get("share_owner_memory")?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -168,15 +185,7 @@ async fn candidate(
     .bind(destination.channel)
     .bind(destination.instance_id)
     .bind(OffsetDateTime::from(now))
-    .try_map(|row: PgRow| Ok(Candidate {
-        id: row.try_get("id")?,
-        conversation_id: row.try_get("conversation_id")?,
-        operation_id: row.try_get("operation_id")?,
-        inbound_id: row.try_get("inbound_message_id")?,
-        fence: row.try_get("fence")?,
-        memory_epoch: row.try_get("memory_epoch")?,
-        owner_memory: row.try_get("share_owner_memory")?,
-    }))
+    .try_map(|row: PgRow| Candidate::read(&row))
     .fetch_optional(&mut **txn)
     .await
 }
