@@ -1,6 +1,11 @@
+mod input;
 mod queue;
 mod status;
 
+pub use input::{
+    GARMIN_PARSER_VERSION, PreparedReplay, ReadReplayInput, ReplayContent, ReplayInput,
+    ReplayInputError, ReplayReplacement, ReplaySkip,
+};
 pub use queue::{ReplaySchedule, ScheduleReplay};
 pub use status::ReplayStatus;
 pub(crate) use status::{REPLAY_MUTATION_LOCK, projection_pending};
@@ -118,6 +123,16 @@ async fn source_page(
     after: Option<Uuid>,
     ids: Option<&[Uuid]>,
 ) -> Result<ReplayPage, ReplaySelectionError> {
+    select_sources(txn, target, after, ids, false).await
+}
+
+async fn select_sources(
+    txn: &mut Transaction<'_, Postgres>,
+    target: i32,
+    after: Option<Uuid>,
+    ids: Option<&[Uuid]>,
+    include_current: bool,
+) -> Result<ReplayPage, ReplaySelectionError> {
     type SourceRow = (
         Uuid,
         String,
@@ -133,6 +148,7 @@ async fn source_page(
         .bind(after)
         .bind(SCAN_LIMIT)
         .bind(ids)
+        .bind(include_current)
         .fetch_all(&mut **txn)
         .await?;
     let next_after = if rows.len() as i64 == SCAN_LIMIT {

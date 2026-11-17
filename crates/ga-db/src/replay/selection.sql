@@ -1,7 +1,7 @@
 WITH source_page AS MATERIALIZED (
     SELECT id, source, endpoint, source_key, status, fetched_at, parser_version, archive_key, payload
     FROM source_payloads
-    WHERE source = 'garmin_connect' AND parser_version != $1
+    WHERE source = 'garmin_connect' AND ($5::boolean OR parser_version != $1)
       AND ($2::uuid IS NULL OR id > $2)
       AND ($4::uuid[] IS NULL OR id = ANY($4))
     ORDER BY id
