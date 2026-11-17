@@ -22,6 +22,7 @@ use crate::{
 
 pub const GARMIN_PARSER_VERSION: i32 = crate::activity_documents::PARSER_VERSION;
 
+#[derive(Clone, Copy)]
 pub struct ReadReplayInput<'a> {
     pub authenticated_fingerprint: &'a str,
     pub source_id: Uuid,
@@ -118,34 +119,45 @@ impl Database {
         archive: Arc<Archive>,
         cancelled: impl Fn() -> bool + Send + 'static,
     ) -> Result<PreparedReplay, ReplayInputError> {
-        let target = request.target_parser_version.cmp(&GARMIN_PARSER_VERSION);
-        match target {
-            std::cmp::Ordering::Greater => return Err(ReplayInputError::NewerParserRequired),
-            std::cmp::Ordering::Less => return Err(ReplayInputError::MatchingParserRequired),
-            std::cmp::Ordering::Equal => {}
-        }
+        require_parser(request.target_parser_version)?;
         let mut txn = self
             .work
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .await?;
-        sqlx::query("SET LOCAL statement_timeout = '750ms'")
-            .execute(&mut *txn)
-            .await?;
-        check_readiness(&mut txn)
-            .await
-            .map_err(ReplaySelectionError::Unavailable)
-            .map_err(ReplayInputError::Access)?;
-        verify_owner_in_transaction(&mut txn, request.authenticated_fingerprint)
-            .await
-            .map_err(ReplaySelectionError::Owner)
-            .map_err(ReplayInputError::Access)?;
+        authorize_replay(&mut txn, request.authenticated_fingerprint).await?;
         let input = read_input(&mut txn, request, archive, cancelled).await;
         txn.rollback().await?;
         input
     }
 }
 
-async fn read_input(
+pub(super) fn require_parser(target: i32) -> Result<(), ReplayInputError> {
+    match target.cmp(&GARMIN_PARSER_VERSION) {
+        std::cmp::Ordering::Greater => Err(ReplayInputError::NewerParserRequired),
+        std::cmp::Ordering::Less => Err(ReplayInputError::MatchingParserRequired),
+        std::cmp::Ordering::Equal => Ok(()),
+    }
+}
+
+pub(super) async fn authorize_replay(
+    txn: &mut Transaction<'_, Postgres>,
+    authenticated_fingerprint: &str,
+) -> Result<(), ReplayInputError> {
+    sqlx::query("SET LOCAL statement_timeout = '750ms'")
+        .execute(&mut **txn)
+        .await?;
+    check_readiness(txn)
+        .await
+        .map_err(ReplaySelectionError::Unavailable)
+        .map_err(ReplayInputError::Access)?;
+    verify_owner_in_transaction(txn, authenticated_fingerprint)
+        .await
+        .map_err(ReplaySelectionError::Owner)
+        .map_err(ReplayInputError::Access)?;
+    Ok(())
+}
+
+pub(super) async fn read_input(
     txn: &mut Transaction<'_, Postgres>,
     request: ReadReplayInput<'_>,
     archive: Arc<Archive>,

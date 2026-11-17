@@ -1,7 +1,9 @@
+mod calendar;
 mod input;
 mod queue;
 mod status;
 
+pub use calendar::{CalendarReplayError, CalendarReplayOutcome};
 pub use input::{
     GARMIN_PARSER_VERSION, PreparedReplay, ReadReplayInput, ReplayContent, ReplayInput,
     ReplayInputError, ReplayReplacement, ReplaySkip,

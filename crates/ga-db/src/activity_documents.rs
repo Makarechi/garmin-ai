@@ -95,7 +95,7 @@ pub struct ApplyHealthPayload<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum Projection<'a> {
+pub(crate) enum Projection<'a> {
     Document(ActivityDocument),
     Summary(ActivitySummaryKind),
     Health(&'a str, Option<&'a HealthReplacement>),
@@ -128,7 +128,7 @@ impl<'a> Projection<'a> {
 pub(crate) struct ApplyActivity<'a> {
     pub(crate) account_fingerprint: &'a str,
     pub(crate) source_key: &'a str,
-    projection: Projection<'a>,
+    pub(crate) projection: Projection<'a>,
     pub(crate) source_id: Uuid,
     pub(crate) requested_at: StoredInstant,
     pub(crate) timezone: &'a str,
@@ -402,7 +402,7 @@ fn last_request(state: &Map<String, Value>) -> Result<Option<StoredInstant>, Doc
         .transpose()
 }
 
-async fn read_state(
+pub(crate) async fn read_state(
     txn: &mut Transaction<'_, Postgres>,
     key: &str,
 ) -> Result<Map<String, Value>, DocumentError> {
@@ -434,7 +434,7 @@ pub(crate) async fn put_state(
     Ok(())
 }
 
-async fn raw_status(
+pub(crate) async fn raw_status(
     txn: &mut Transaction<'_, Postgres>,
     id: Uuid,
     status: &str,
