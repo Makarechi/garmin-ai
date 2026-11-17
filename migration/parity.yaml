@@ -1,0 +1,1507 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "PAR-01",
+      "capability": "installation_configuration_onboarding",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/config.py",
+        "src/garmin_ai/accounts.py",
+        "src/garmin_ai/onboarding.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "serve"
+        ],
+        "http": [
+          "GET /capabilities",
+          "GET /onboarding",
+          "PUT /onboarding"
+        ],
+        "settings": [
+          "GA_API_PORT",
+          "GA_APP_GID",
+          "GA_APP_UID",
+          "GA_CONTAINER_DATABASE_URL",
+          "GA_DATABASE_URL",
+          "GA_DB_PORT",
+          "GA_INTEGRATIONS",
+          "GA_LOCALE",
+          "GA_POSTGRES_PASSWORD",
+          "GA_TIMEZONE",
+          "GA_UNITS"
+        ],
+        "operations": [
+          "Dockerfile",
+          "compose.release.yml",
+          "compose.yml",
+          "install.sh",
+          "scripts/configure.py",
+          "scripts/release_mounts.py"
+        ],
+        "tables": [
+          "module_configs"
+        ],
+        "universal": [
+          "UT-02",
+          "UT-04",
+          "UT-38",
+          "UT-49",
+          "UT-50"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_deployment.py",
+        "tests/test_onboarding.py",
+        "tests/test_core_only_flow.py",
+        "tests/test_release_bundle.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Environment and config precedence, instance isolation, owner locale/time zone/units, repeatable onboarding."
+      ],
+      "permissions": [
+        "Onboarding requires its management scope or admin."
+      ],
+      "resource_scenario": "Clean core-only install and cold startup",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R34",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-02",
+      "capability": "owner_and_account_binding",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/accounts.py",
+        "src/garmin_ai/models.py",
+        "src/garmin_ai/pairing.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "enroll-account"
+        ],
+        "tables": [
+          "channel_bindings",
+          "people",
+          "source_connections"
+        ],
+        "universal": [
+          "UT-05",
+          "UT-15"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_owner_identity.py",
+        "tests/test_account_binding.py",
+        "tests/test_pairing.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Internal UUID, singleton owner, explicit account binding, legacy owner confirmation, and account mismatch fencing."
+      ],
+      "permissions": [
+        "Only its owner can bind an account; a conflicting account cannot read, fetch, archive or write owner data."
+      ],
+      "resource_scenario": "Startup and gated import with legacy owner",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R07",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-03",
+      "capability": "garmin_login_and_reauthentication",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/garmin.py",
+        "src/garmin_ai/garmin_web_auth.py",
+        "src/garmin_ai/cli.py",
+        "src/garmin_ai/integration.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "login"
+        ],
+        "http": [
+          "GET /garmin-auth",
+          "POST /garmin-auth/complete",
+          "POST /garmin-auth/start"
+        ],
+        "settings": [
+          "GA_GARMIN_AUTH_HOST",
+          "GA_GARMIN_AUTH_URL",
+          "GA_GARMIN_EMAIL",
+          "GA_GARMIN_PASSWORD_SECRET_VERSION",
+          "GA_TOKEN_DIR"
+        ],
+        "jobs": [
+          "telegram_connection_notice"
+        ],
+        "operations": [
+          "deploy/gcp/Caddyfile.garmin-auth"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_garmin_web_auth.py",
+        "tests/test_integration_state.py",
+        "tests/test_account_binding.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Interactive login, MFA, saved sessions, refresh, and web reauth with email code and optional Secret Manager."
+      ],
+      "permissions": [
+        "Local terminal or authenticated owner web session; never expose credentials or reusable session state."
+      ],
+      "resource_scenario": "Bounded Garmin reauth attempts",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R12",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-04",
+      "capability": "garmin_read_only_acquisition",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/garmin.py",
+        "src/garmin_ai/garmin_contract.py",
+        "src/garmin_ai/probe.py",
+        "src/garmin_ai/integration.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "inventory",
+          "probe"
+        ],
+        "garmin": [
+          "activities",
+          "activity",
+          "activity_details",
+          "activity_fit",
+          "activity_splits",
+          "activity_typed_splits",
+          "activity_weather",
+          "activity_zones",
+          "all_day_events",
+          "body_battery",
+          "body_battery_events",
+          "body_composition",
+          "daily",
+          "devices",
+          "endurance",
+          "heart_rate",
+          "hill",
+          "hrv",
+          "hydration",
+          "intensity",
+          "max_metrics",
+          "readiness",
+          "respiration",
+          "resting_hr",
+          "sleep",
+          "spo2",
+          "steps",
+          "stress",
+          "training_status"
+        ],
+        "integrations": [
+          "source:garmin"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_reconnaissance.py",
+        "tests/test_integration_state.py",
+        "tests/test_ingestion.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Endpoint identity, pagination, per-capability availability, request pacing, retry and cooldown."
+      ],
+      "permissions": [
+        "Allowlisted reads to the bound account, including optional archive-only endpoints."
+      ],
+      "resource_scenario": "Synthetic day sync using all enabled endpoints",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R13",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-05",
+      "capability": "garmin_history_and_reconciliation",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/sync.py",
+        "src/garmin_ai/backfill.py",
+        "src/garmin_ai/activity_sync.py",
+        "src/garmin_ai/reconciliation.py"
+      ],
+      "entrypoints": {
+        "jobs": [
+          "garmin_activities",
+          "garmin_endpoint"
+        ],
+        "settings": [
+          "GA_BACKFILL_DAYS"
+        ],
+        "tables": [
+          "activities",
+          "activity_parts",
+          "health_days"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_backfill.py",
+        "tests/test_activity_generations.py",
+        "tests/test_schedule_coalescing.py",
+        "tests/test_partial_reconciliation.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Durable backfill windows, activity generations and overlap, bounded scheduling and partial or empty responses."
+      ],
+      "permissions": [
+        "Only scheduled, selected Garmin sources can enqueue collection."
+      ],
+      "resource_scenario": "Initial history backfill, repeated nightly and weekly reconcile",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R16",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-06",
+      "capability": "immutable_archive_and_provenance",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/archive.py",
+        "src/garmin_ai/ingest.py",
+        "src/garmin_ai/normalize.py",
+        "src/garmin_ai/storage_files.py"
+      ],
+      "entrypoints": {
+        "settings": [
+          "GA_DATA_DIR"
+        ],
+        "tables": [
+          "measurement_history",
+          "measurement_revisions",
+          "measurements",
+          "source_payloads"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_ingestion.py",
+        "tests/test_storage.py",
+        "tests/test_archive_replay.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Legacy serialized JSON and untouched binary, immutable identity bytes, A–B–A revisions, timestamp order."
+      ],
+      "permissions": [
+        "Private storage and bound source; safe path and permission checks."
+      ],
+      "resource_scenario": "Streaming ingest plus archive write and staging",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R08",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-07",
+      "capability": "fit_and_device_history",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/fit.py",
+        "src/garmin_ai/fit_messages.py",
+        "src/garmin_ai/device_history.py",
+        "src/garmin_ai/activity_sync.py"
+      ],
+      "entrypoints": {
+        "jobs": [
+          "garmin_fit"
+        ],
+        "tools": [
+          "activity_details",
+          "device_history"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_fit_provenance.py",
+        "tests/test_device_history.py",
+        "tests/test_activity_generations.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "FIT/ZIP message order, original bytes, developer and unknown fields, CRC and atomic replacement."
+      ],
+      "permissions": [
+        "Only private files and approved Garmin/wearable ingress; bounded archive decoding."
+      ],
+      "resource_scenario": "Large multi-member FIT ZIP plus 10x larger record count",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R15",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-08",
+      "capability": "offline_replay_and_projection_freshness",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/replay.py",
+        "src/garmin_ai/freshness.py",
+        "src/garmin_ai/temporal.py",
+        "src/garmin_ai/projection_changes.py",
+        "src/garmin_ai/projection_history.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "import-probe",
+          "projection-audit"
+        ],
+        "jobs": [
+          "raw_replay"
+        ],
+        "tools": [
+          "data_freshness"
+        ],
+        "universal": [
+          "UT-14",
+          "UT-16"
+        ],
+        "agent": [
+          "AT-17"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_archive_replay.py",
+        "tests/test_observation_freshness.py",
+        "tests/test_metric_definitions.py",
+        "tests/test_temporal.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Parser-version identity, replay checkpoint, failed revisions, historical timezone and invalidation."
+      ],
+      "permissions": [
+        "Replay only approved local archive and associated owner; fenced partial outputs remain unavailable."
+      ],
+      "resource_scenario": "Full offline replay, corruption and restart",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R16",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-09",
+      "capability": "system_diary_and_event_topology",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/events.py",
+        "src/garmin_ai/canonical_events.py",
+        "src/garmin_ai/diary_forms.py",
+        "src/garmin_ai/caffeine_presets.py"
+      ],
+      "entrypoints": {
+        "tools": [
+          "events",
+          "wellbeing_observations"
+        ],
+        "tables": [
+          "events",
+          "timeline_intervals"
+        ],
+        "event_types": [
+          "activity_effort",
+          "alcohol",
+          "caffeine",
+          "caffeine_absence",
+          "caffeine_log_complete",
+          "context",
+          "headache_observation",
+          "hydration",
+          "illness",
+          "meal",
+          "medication",
+          "migraine",
+          "mood",
+          "nap",
+          "note",
+          "stressor",
+          "symptom_observation",
+          "travel",
+          "wellbeing_observation"
+        ],
+        "settings": [
+          "GA_CAFFEINE_PRESETS"
+        ],
+        "universal": [
+          "UT-03",
+          "UT-10",
+          "UT-20"
+        ],
+        "agent": [
+          "AT-06",
+          "AT-07",
+          "AT-10"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_canonical_events.py",
+        "tests/test_event_topology.py",
+        "tests/test_incomplete_medication.py",
+        "tests/test_caffeine_dose.py",
+        "tests/test_diary_forms.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Typed event payloads, interval semantics, incomplete medications and dose uncertainty."
+      ],
+      "permissions": [
+        "Diary read and write scopes for facts; source and role restrictions survive normalization."
+      ],
+      "resource_scenario": "Long diary history across local midnight and DST",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R17",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-10",
+      "capability": "diary_mutations_undo_and_audit",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/events.py",
+        "src/garmin_ai/event_batches.py",
+        "src/garmin_ai/projection_changes.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "DELETE /events/{event_id}",
+          "GET /events/{event_id}",
+          "POST /entries",
+          "POST /events",
+          "POST /events/undo",
+          "PUT /entries/{event_id}",
+          "PUT /events/{event_id}"
+        ],
+        "tools": [
+          "entries_create",
+          "events_create",
+          "events_delete",
+          "events_update"
+        ],
+        "tables": [
+          "audit_log"
+        ],
+        "universal": [
+          "UT-13",
+          "UT-34"
+        ],
+        "agent": [
+          "AT-37"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_operation_undo.py",
+        "tests/test_event_batches.py",
+        "tests/test_operations_mcp.py",
+        "tests/test_universal_characterization.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Idempotency, optimistic revisions, grouped undo, soft deletion and atomic changes."
+      ],
+      "permissions": [
+        "Owner or scoped diary mutation with audit; revision conflict on stale writes."
+      ],
+      "resource_scenario": "Concurrent retries and grouped undo",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R17",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-11",
+      "capability": "versioned_registry_and_generated_forms",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/definitions.py",
+        "src/garmin_ai/metric_definitions.py",
+        "src/garmin_ai/tracker_forms.py",
+        "src/garmin_ai/tracker_chat_form.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "GET /actions",
+          "GET /actions/events/{event_id}",
+          "GET /definitions",
+          "GET /forms/{action_id}",
+          "GET /tracker-profile",
+          "POST /definitions",
+          "POST /definitions/{definition_id}/activate",
+          "POST /definitions/{definition_id}/retire",
+          "POST /forms/{action_id}/submit",
+          "PUT /definitions/{definition_id}"
+        ],
+        "tools": [
+          "event_definitions",
+          "resource_catalog"
+        ],
+        "tables": [
+          "event_definition_versions",
+          "event_definitions",
+          "metric_definition_versions",
+          "metric_definitions",
+          "tracker_configs"
+        ],
+        "metrics": [
+          "body_battery",
+          "heart_rate_bpm",
+          "hrv_rmssd_ms",
+          "hydration_ml",
+          "recovery_time_minutes",
+          "respiration_rpm",
+          "sleep_score",
+          "spo2_pct",
+          "steps_bucket",
+          "stress_score",
+          "training_readiness_score"
+        ],
+        "universal": [
+          "UT-07",
+          "UT-08",
+          "UT-09",
+          "UT-12",
+          "UT-21",
+          "UT-22",
+          "UT-39",
+          "UT-52"
+        ],
+        "agent": [
+          "AT-11"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_event_definitions.py",
+        "tests/test_metric_definitions.py",
+        "tests/test_tracker_forms.py",
+        "tests/test_tracker_chat_form.py",
+        "tests/test_dynamic_scales.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Versioned event/metric schemas, reserved namespaces, unit and scale validation, generated forms."
+      ],
+      "permissions": [
+        "Definition management controls changes; diary read scope gates discovery and sharing may narrow access."
+      ],
+      "resource_scenario": "Many custom definitions, form rendering and validation",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R18",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-12",
+      "capability": "natural_language_tracker_setup_and_capture",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/tracker_chat_setup.py",
+        "src/garmin_ai/tracker_chat_selection.py",
+        "src/garmin_ai/natural_language.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "POST /natural-language/trackers",
+          "POST /tracker-setups",
+          "POST /tracker-setups/preview",
+          "PUT /tracker-setups/{tracker_id}/settings"
+        ],
+        "universal": [
+          "UT-23",
+          "UT-24",
+          "UT-25"
+        ],
+        "agent": [
+          "AT-01",
+          "AT-02",
+          "AT-03",
+          "AT-04",
+          "AT-05",
+          "AT-08",
+          "AT-09"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_tracker_chat_setup.py",
+        "tests/test_tracker_discovery.py",
+        "tests/test_tracker_temporal_safety.py",
+        "tests/test_natural_language.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Preview and confirmation, exact evidence text and offsets, ambiguity/clarification, deterministic fallbacks."
+      ],
+      "permissions": [
+        "Protect tracker schema and facts by destination; untrusted extraction may only propose or invoke validated commands."
+      ],
+      "resource_scenario": "Bounded tracker setup and validation with ambiguous input",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R19",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-13",
+      "capability": "packs_and_extension_contract",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/scenario_packs.py",
+        "src/garmin_ai/community_packs.py",
+        "src/garmin_ai/pack_export.py",
+        "src/garmin_ai/integrations.py",
+        "src/garmin_ai/extension_tck.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "GET /community-packs",
+          "GET /scenario-packs",
+          "POST /community-packs/import",
+          "POST /community-packs/preview",
+          "POST /tracker-packs/export",
+          "PUT /scenario-packs/{key}"
+        ],
+        "integrations": [
+          "example:garmin-ai-synthetic-adapters-fixture:channel.sample",
+          "example:garmin-ai-synthetic-adapters-fixture:source.sample",
+          "example:garmin-ai-synthetic-model-fixture:model.synthetic"
+        ],
+        "packs": [
+          "caffeine",
+          "general_diary",
+          "migraine",
+          "sleep",
+          "training",
+          "wellbeing"
+        ],
+        "settings": [
+          "GA_PLUGIN_",
+          "GA_PLUGIN_ENV_FILE"
+        ],
+        "universal": [
+          "UT-18",
+          "UT-19",
+          "UT-51"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_scenario_packs.py",
+        "tests/test_community_packs.py",
+        "tests/test_extension_tck.py",
+        "tests/test_integrations.py",
+        "tests/test_synthetic_plugin.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Built-in and portable data-only packs, scoped configured extension instances, declared capabilities and TCK."
+      ],
+      "permissions": [
+        "Owner manages packs and may enable an extension explicitly; installation is separate from activation."
+      ],
+      "resource_scenario": "Core startup and extension selection with failure",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R31",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-14",
+      "capability": "source_plugins_mapping_and_file_import",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/source_contracts.py",
+        "src/garmin_ai/source_runtime.py",
+        "src/garmin_ai/source_metric_mapping.py",
+        "src/garmin_ai/source_metric_projection.py",
+        "src/garmin_ai/file_source.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "import-file"
+        ],
+        "http": [
+          "DELETE /source-metric-mappings/{mapping_id}",
+          "GET /source-metric-mappings",
+          "POST /source-metric-mappings",
+          "POST /source-metric-mappings/preview"
+        ],
+        "tables": [
+          "event_metric_mappings",
+          "metric_observations"
+        ],
+        "jobs": [
+          "source_plugin_poll"
+        ],
+        "agent": [
+          "AT-14",
+          "AT-38"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_source_runtime.py",
+        "tests/test_source_metric_mapping.py",
+        "tests/test_source_metric_plugin.py",
+        "tests/test_file_source.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Source identity, preview/confirmation, revisioned numeric mappings, pagination, corrections and quarantine."
+      ],
+      "permissions": [
+        "Owner/admin confirms mapping changes or the local import preview digest; plugins cannot directly write facts."
+      ],
+      "resource_scenario": "Paginated imports and repeated mapping corrections",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R20",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-15",
+      "capability": "health_and_diary_analytics",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/analytics.py",
+        "src/garmin_ai/generic_analytics.py",
+        "src/garmin_ai/coffee_sleep.py",
+        "src/garmin_ai/sleep_analysis.py",
+        "src/garmin_ai/stress_analysis.py",
+        "src/garmin_ai/hypotheses.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "GET /hypotheses/{identity}",
+          "POST /hypotheses",
+          "POST /hypotheses/{identity}/recheck",
+          "POST /hypotheses/{identity}/stop"
+        ],
+        "tools": [
+          "analysis_coffee_sleep",
+          "analysis_compare_periods",
+          "analysis_event_windows",
+          "analysis_lagged_association",
+          "analysis_migraine_windows",
+          "analysis_running_efficiency",
+          "analysis_sleep",
+          "analysis_stress_by_hour",
+          "generic_analysis",
+          "personal_baseline"
+        ],
+        "universal": [
+          "UT-11",
+          "UT-46"
+        ],
+        "agent": [
+          "AT-13",
+          "AT-15",
+          "AT-16",
+          "AT-18"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_generic_analytics.py",
+        "tests/test_coffee_sleep.py",
+        "tests/test_running_comparability.py",
+        "tests/test_sleep_analysis.py",
+        "tests/test_stress_analysis.py",
+        "tests/test_hypotheses.py",
+        "tests/test_migraine_controls.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Unit/source comparability, period and bootstrap results, migraine controls, sampling/gaps and association boundaries."
+      ],
+      "permissions": [
+        "Read scopes for inputs; write permission for persistent hypotheses; sensitive metrics may require consent."
+      ],
+      "resource_scenario": "Long period/lag/migraine/bootstrap and generic custom-metric analysis",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R21",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-16",
+      "capability": "conversation_context_and_evidence",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/conversation.py",
+        "src/garmin_ai/analysis_dependencies.py",
+        "src/garmin_ai/agent.py",
+        "src/garmin_ai/personal_goals.py",
+        "src/garmin_ai/claims.py",
+        "src/garmin_ai/queries.py"
+      ],
+      "entrypoints": {
+        "tables": [
+          "conversations"
+        ],
+        "http": [
+          "GET /preferences/goals",
+          "PUT /preferences/goals"
+        ],
+        "tools": [
+          "activities",
+          "health_range",
+          "health_snapshot",
+          "insights_list",
+          "metric_series",
+          "timeline"
+        ],
+        "universal": [
+          "UT-06",
+          "UT-31",
+          "UT-32",
+          "UT-47"
+        ],
+        "agent": [
+          "AT-27",
+          "AT-28",
+          "AT-29",
+          "AT-30",
+          "AT-31",
+          "AT-32",
+          "AT-34",
+          "AT-35"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_analysis_conversation.py",
+        "tests/test_analysis_budget.py",
+        "tests/test_personal_goals.py",
+        "tests/test_numeric_claims.py",
+        "tests/test_timestamp_claims.py",
+        "tests/test_metric_evidence_delivery.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Delivered context only, goals revision, numeric claims, evidence provenance, staleness, expiry and forget fence."
+      ],
+      "permissions": [
+        "Owner-only conversation state; provider context scope and revocation apply before dispatch/delivery."
+      ],
+      "resource_scenario": "Evidence budget boundary and long conversation history",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R25",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-17",
+      "capability": "model_provider_adapters_and_gateway",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/llm.py",
+        "src/garmin_ai/integrations.py",
+        "src/garmin_ai/provider_gate.py",
+        "src/garmin_ai/structured_schema.py",
+        "src/garmin_ai/openai_adapter.py",
+        "src/garmin_ai/anthropic_adapter.py"
+      ],
+      "entrypoints": {
+        "integrations": [
+          "model:anthropic",
+          "model:gemini",
+          "model:openai"
+        ],
+        "settings": [
+          "GA_GEMINI_API_KEY",
+          "GA_GEMINI_FALLBACK_ENABLED",
+          "GA_GEMINI_FALLBACK_MODELS",
+          "GA_GEMINI_MODEL",
+          "GA_GEMINI_THINKING_LEVEL",
+          "GA_LLM_ENABLED",
+          "GA_MODEL_REQUEST_TIMEOUT_SECONDS"
+        ],
+        "jobs": [
+          "telegram_provider_notice"
+        ],
+        "agent": [
+          "AT-19",
+          "AT-20",
+          "AT-21",
+          "AT-22",
+          "AT-23",
+          "AT-25",
+          "AT-26"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_gemini_failure_diagnostics.py",
+        "tests/test_anthropic_adapter.py",
+        "tests/test_openai_adapter.py",
+        "tests/test_provider_gate.py",
+        "tests/test_provider_instance_gate.py",
+        "tests/test_model_contract.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Structured output, budgeted tools, usage, typed refusal/truncation, retry/fallback, no secret-bearing error text."
+      ],
+      "permissions": [
+        "Explicit provider/instance/category consent; no unconsented fallback; cancellation and cooldown are bounded."
+      ],
+      "resource_scenario": "Provider timeouts, fallback and voice limit with simulated replies",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R24",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-18",
+      "capability": "telegram_transport_and_owner_diary",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/telegram.py",
+        "src/garmin_ai/telegram_adapter.py",
+        "src/garmin_ai/telegram_history.py",
+        "src/garmin_ai/telegram_format.py",
+        "src/garmin_ai/pairing.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "pair-telegram"
+        ],
+        "http": [
+          "POST /telegram/webhook"
+        ],
+        "jobs": [
+          "telegram_ack",
+          "telegram_control",
+          "telegram_debug_notice",
+          "telegram_failure",
+          "telegram_update"
+        ],
+        "telegram_commands": [
+          "/cancel",
+          "/confirm_tracker",
+          "/conversation",
+          "/debug",
+          "/forget_conversation",
+          "/goals",
+          "/help",
+          "/history",
+          "/newtracker",
+          "/pause",
+          "/preview",
+          "/privacy",
+          "/remove_field",
+          "/resume",
+          "/start",
+          "/status",
+          "/today",
+          "/undo"
+        ],
+        "telegram_actions": [
+          "action-token",
+          "alcohol",
+          "c:",
+          "coffee",
+          "coffee:unspecified",
+          "create:",
+          "end",
+          "h:",
+          "medication",
+          "migraine",
+          "note"
+        ],
+        "settings": [
+          "GA_TELEGRAM_BOT_TOKEN",
+          "GA_TELEGRAM_DISPATCHER_VERSION",
+          "GA_TELEGRAM_USER_ID",
+          "GA_TELEGRAM_WEBHOOK_SECRET"
+        ],
+        "integrations": [
+          "channel:telegram"
+        ],
+        "tables": [
+          "telegram_updates"
+        ],
+        "universal": [
+          "UT-30",
+          "UT-35",
+          "UT-36",
+          "UT-37"
+        ],
+        "agent": [
+          "AT-33"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_telegram_adapter.py",
+        "tests/test_agent_telegram.py",
+        "tests/test_telegram_history.py",
+        "tests/test_telegram_format.py",
+        "tests/test_pairing.py",
+        "tests/test_poll_recovery.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Poll/Webhook ordering, callback ACK, neutral shadow and legacy modes, voice and text, owner history and setup."
+      ],
+      "permissions": [
+        "Authenticated private owner, validated webhook secret and instance-bound/revision-bound callbacks."
+      ],
+      "resource_scenario": "Backlog, callback ACK, voice cap and concurrent control",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R27",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-19",
+      "capability": "neutral_messaging_and_receipts",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/channels.py",
+        "src/garmin_ai/action_tokens.py",
+        "src/garmin_ai/restricted_channel.py",
+        "src/garmin_ai/dialogue.py"
+      ],
+      "entrypoints": {
+        "tables": [
+          "inbound_messages",
+          "message_delivery_receipts",
+          "outbox_messages"
+        ],
+        "universal": [
+          "UT-26",
+          "UT-27",
+          "UT-28",
+          "UT-29",
+          "UT-40"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_channel_contracts.py",
+        "tests/test_headless_channels.py",
+        "tests/test_dialogue.py",
+        "tests/test_hf09_entrypoint_parity.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Inbox, conversations, instance-scoped outbox, leases, action tokens, provider acceptance vs read receipt."
+      ],
+      "permissions": [
+        "Bind channel actor and action to installation, owner and destination; adapter may expose only limited capabilities."
+      ],
+      "resource_scenario": "Ordered drain and retries across restart",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R26",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-20",
+      "capability": "dashboard_demo_and_web_chat",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/dashboard.py",
+        "src/garmin_ai/web_chat.py",
+        "src/garmin_ai/diary_export.py",
+        "src/garmin_ai/resource_catalog.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "GET /chat",
+          "GET /chat-assets/{asset}",
+          "GET /dashboard",
+          "GET /dashboard-assets/{asset}",
+          "GET /web-chat/messages",
+          "POST /web-chat/messages",
+          "POST /web-chat/messages/{outbox_id}/read"
+        ],
+        "web_commands": [
+          "/cancel",
+          "/help",
+          "/history",
+          "/note",
+          "/pause",
+          "/resume"
+        ],
+        "operations": [
+          "scripts/serve_demo.py"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_dashboard.py",
+        "tests/test_dashboard_demo_browser.py",
+        "tests/test_web_chat.py",
+        "tests/test_web_chat_browser.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Local dashboard and demo assets, web command behavior, client message IDs and observed read receipts."
+      ],
+      "permissions": [
+        "Authenticated owner chat; assets and synthetic demo are independently available."
+      ],
+      "resource_scenario": "Browser startup, concurrent chat and refresh/receipt",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R28",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-21",
+      "capability": "http_mcp_wearable_interfaces",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/api.py",
+        "src/garmin_ai/mcp_server.py",
+        "src/garmin_ai/tools.py",
+        "src/garmin_ai/wearable.py",
+        "src/garmin_ai/access.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "GET /tools",
+          "POST /tools/{name}",
+          "POST /wearable/marks"
+        ],
+        "cli": [
+          "mcp"
+        ],
+        "settings": [
+          "GA_API_KEY",
+          "GA_API_TOKENS",
+          "GA_MCP_ENABLE_WRITES"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_api_analytics.py",
+        "tests/test_operations_mcp.py",
+        "tests/test_wearable.py",
+        "tests/test_access_scopes.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Route and tool validation, JSON shapes, stdio protocol, opt-in MCP writes and wearable identity."
+      ],
+      "permissions": [
+        "Bearer scopes, read-only MCP by default, narrow wearable write keys and cancellation before transaction commit."
+      ],
+      "resource_scenario": "Core API/MCP cold startup and control requests under load",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R29",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-22",
+      "capability": "proactive_questions_and_tracker_initiatives",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/proactive.py",
+        "src/garmin_ai/initiative_rules.py",
+        "src/garmin_ai/reconciliation.py"
+      ],
+      "entrypoints": {
+        "jobs": [
+          "agent_insights",
+          "agent_proactive",
+          "channel_initiatives"
+        ],
+        "settings": [
+          "GA_PROACTIVE_ENABLED",
+          "GA_QUESTION_BUDGET",
+          "GA_QUIET_END_HOUR",
+          "GA_QUIET_START_HOUR"
+        ],
+        "tables": [
+          "insights",
+          "pending_questions"
+        ],
+        "universal": [
+          "UT-41",
+          "UT-42",
+          "UT-44",
+          "UT-45"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_proactive.py",
+        "tests/test_initiative_rules.py",
+        "tests/test_notification_policy.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Daily budget, time window and pause/snooze, priority and cooldown, delivery revalidation, stale reminder recovery."
+      ],
+      "permissions": [
+        "Only configured primary or authorized fallback destination; mode and capability checked before claim and send."
+      ],
+      "resource_scenario": "Overlapping periodic jobs and notification backlog",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R30",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-23",
+      "capability": "privacy_access_and_sharing",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/access.py",
+        "src/garmin_ai/share_policy.py",
+        "src/garmin_ai/provider_gate.py",
+        "src/garmin_ai/config.py",
+        "src/garmin_ai/calendar_context.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "DELETE /tracker-sharing-consents/{definition_id}/{destination_kind}/{destination_instance_id}",
+          "GET /context/calendar",
+          "GET /tracker-sharing-consents",
+          "POST /context/calendar/import",
+          "POST /tracker-sharing/consents",
+          "PUT /tracker-sharing-consents"
+        ],
+        "settings": [
+          "GA_CALENDAR_SOURCES",
+          "GA_LLM_CONSENT"
+        ],
+        "universal": [
+          "UT-33",
+          "UT-48",
+          "UT-53"
+        ],
+        "agent": [
+          "AT-12",
+          "AT-24",
+          "AT-36",
+          "AT-39"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_schema_security.py",
+        "tests/test_access_scopes.py",
+        "tests/test_provider_consent.py",
+        "tests/test_calendar_context.py",
+        "tests/test_hf01_channel_consent.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Distinct write/management/read scopes, category consent, destination-scoped share, redaction and revocation fences."
+      ],
+      "permissions": [
+        "Owner control of export/share and provider selection, default deny for private metadata or unsupported actions."
+      ],
+      "resource_scenario": "Revocation during concurrent send and malicious schema input",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R23",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-24",
+      "capability": "persisted_job_lease_and_worker",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/jobs.py",
+        "src/garmin_ai/runtime.py",
+        "src/garmin_ai/db.py",
+        "src/garmin_ai/models.py"
+      ],
+      "entrypoints": {
+        "cli": [
+          "worker"
+        ],
+        "jobs": [
+          "storage_check"
+        ],
+        "tables": [
+          "app_state",
+          "jobs"
+        ],
+        "settings": [
+          "GA_LOCK_DIR"
+        ],
+        "universal": [
+          "UT-17"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_schedule_coalescing.py",
+        "tests/test_operation_recovery.py",
+        "tests/test_agent_telegram.py",
+        "tests/test_release_gate.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Durable job types, deduplication, claim/renew/finish, fencing, heartbeat and bounded scheduling."
+      ],
+      "permissions": [
+        "Single side-effect owner, storage locks/maintenance and worker identity checks before effects."
+      ],
+      "resource_scenario": "Heartbeat, renewal, drain and backlog while heavy tasks run",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R09",
+      "known_limits": [],
+      "approved_deviations": []
+    },
+    {
+      "id": "PAR-25",
+      "capability": "operations_backups_retention_and_release",
+      "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+      "source_modules": [
+        "src/garmin_ai/operations.py",
+        "src/garmin_ai/backup_space.py",
+        "src/garmin_ai/storage_alerts.py",
+        "src/garmin_ai/retention.py",
+        "src/garmin_ai/observability.py",
+        "src/garmin_ai/healthcheck.py"
+      ],
+      "entrypoints": {
+        "http": [
+          "GET /exports/diary",
+          "GET /health/live",
+          "GET /health/ready",
+          "GET /metrics",
+          "GET /operations"
+        ],
+        "cli": [
+          "backup",
+          "backup-space",
+          "erase-all",
+          "export",
+          "migrate",
+          "prune-telegram-text",
+          "restore-db",
+          "resume-storage",
+          "unpack-backup"
+        ],
+        "jobs": [
+          "backup",
+          "telegram_storage_notice"
+        ],
+        "settings": [
+          "GA_APP_IMAGE",
+          "GA_BACKUP_DIR",
+          "GA_BACKUP_KEEP_DAILY",
+          "GA_BACKUP_KEY",
+          "GA_IMAGE",
+          "GA_REQUIRE_TEST_DB",
+          "GA_SMOKE_PYTHON",
+          "GA_TEST_DATABASE_URL",
+          "GA_WORKER_ENV_FILE"
+        ],
+        "migrations": [
+          "4c9e28f110ab",
+          "84a03c619f2e",
+          "95b14d720a3f",
+          "a42d9e18c701",
+          "a637902bf114",
+          "a72d9f4c8e31",
+          "a94c7d2e610f",
+          "b7c4e1a92d60",
+          "b83f0e21c5a7",
+          "b91d02a4c703",
+          "bfccd06bf1c6",
+          "c42f8910e615",
+          "c54f8a72d130",
+          "c71a5e4d290b",
+          "c8f51d3a7e20",
+          "d02c6a7e31f4",
+          "d31e572abc90",
+          "e13b7c8f42a0",
+          "e6b8f0a13c72",
+          "e6f24a9b31d0",
+          "f103aa712b44",
+          "f18d7c0b42a1",
+          "f79a1b2c3d4e"
+        ],
+        "tables": [
+          "alembic_version"
+        ],
+        "operations": [
+          ".github/workflows/ci.yml",
+          ".github/workflows/synthetic-offhost-restore.yml",
+          "compose.gcp.yml",
+          "deploy/gcp/bootstrap.sh",
+          "deploy/gcp/garmin-ai-release-cleanup.service",
+          "deploy/gcp/garmin-ai-release-cleanup.timer",
+          "deploy/gcp/healthcheck.py",
+          "deploy/gcp/install-cleanup.sh",
+          "deploy/gcp/release_cleanup.py",
+          "scripts/build_release_bundle.py",
+          "scripts/collect_python_notices.py",
+          "scripts/release_metadata.py",
+          "scripts/smoke_release_install.sh",
+          "scripts/verify_release_backup.py",
+          "scripts/verify_release_install.py"
+        ],
+        "universal": [
+          "UT-01",
+          "UT-43"
+        ],
+        "agent": [
+          "AT-40"
+        ]
+      },
+      "baseline_tests": [
+        "tests/test_backup_streaming.py",
+        "tests/test_backup_verification.py",
+        "tests/test_backup_space.py",
+        "tests/test_retention.py",
+        "tests/test_release_gate.py",
+        "tests/test_deployment.py",
+        "tests/test_operation_recovery.py"
+      ],
+      "rust_tests": [],
+      "data_contracts": [
+        "Readiness and metrics, backup/export/restore, erasure and resume, migration chain, storage alerts, installation."
+      ],
+      "permissions": [
+        "Admin operations or authenticated local CLI. Destructive commands require exact confirmation and storage fencing."
+      ],
+      "resource_scenario": "Backup during activity, low disk, off-host restore and upgrade",
+      "status": "not_started",
+      "verification": "none",
+      "owner_task": "R32",
+      "known_limits": [],
+      "approved_deviations": []
+    }
+  ]
+}
