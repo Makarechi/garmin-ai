@@ -41,7 +41,9 @@ def cases():
     ):
         report = {**BASE, "payload": payload}
         event = EventInput.model_validate(report)
-        snapshot = json.loads(json.dumps(event_values(event), default=lambda value: value.isoformat()))
+        snapshot = json.loads(
+            json.dumps(event_values(event), default=lambda value: value.isoformat())
+        )
         yield report, snapshot
         yield report, None
         for field, different in (
