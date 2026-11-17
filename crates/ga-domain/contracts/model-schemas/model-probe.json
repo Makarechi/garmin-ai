@@ -1,0 +1,14 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "urgent": {
+      "title": "Urgent",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "urgent"
+  ],
+  "title": "ModelProbe",
+  "type": "object"
+}

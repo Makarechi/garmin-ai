@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "NumericClaim": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "minimum": 1,
+          "title": "Evidence Id",
+          "type": "integer"
+        },
+        "path": {
+          "items": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            ]
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "title": "Path",
+          "type": "array"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "path",
+        "value"
+      ],
+      "title": "NumericClaim",
+      "type": "object"
+    },
+    "ReadCall": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "arguments_json": {
+          "title": "Arguments Json",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "arguments_json"
+      ],
+      "title": "ReadCall",
+      "type": "object"
+    },
+    "TimestampClaim": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "minimum": 1,
+          "title": "Evidence Id",
+          "type": "integer"
+        },
+        "path": {
+          "items": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "maximum": 10000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            ]
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "title": "Path",
+          "type": "array"
+        },
+        "value": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "path",
+        "value"
+      ],
+      "title": "TimestampClaim",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "response_language": {
+      "anyOf": [
+        {
+          "maxLength": 255,
+          "minLength": 2,
+          "pattern": "^[A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8})*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Language"
+    },
+    "calls": {
+      "items": {
+        "$ref": "#/$defs/ReadCall"
+      },
+      "maxItems": 4,
+      "title": "Calls",
+      "type": "array"
+    },
+    "answer": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Answer"
+    },
+    "urgent_safety": {
+      "default": false,
+      "title": "Urgent Safety",
+      "type": "boolean"
+    },
+    "include_current_state_freshness": {
+      "default": false,
+      "title": "Include Current State Freshness",
+      "type": "boolean"
+    },
+    "evidence_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "maxItems": 20,
+      "title": "Evidence Ids",
+      "type": "array"
+    },
+    "numeric_claims": {
+      "items": {
+        "$ref": "#/$defs/NumericClaim"
+      },
+      "maxItems": 20,
+      "title": "Numeric Claims",
+      "type": "array"
+    },
+    "timestamp_claims": {
+      "items": {
+        "$ref": "#/$defs/TimestampClaim"
+      },
+      "maxItems": 20,
+      "title": "Timestamp Claims",
+      "type": "array"
+    }
+  },
+  "title": "AgentStep",
+  "type": "object"
+}
