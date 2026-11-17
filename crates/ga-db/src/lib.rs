@@ -3,6 +3,7 @@ pub mod diary;
 pub mod garmin_owner;
 pub mod jobs;
 pub mod raw_capture;
+pub mod replay;
 pub mod system_definitions;
 pub mod system_metrics;
 
