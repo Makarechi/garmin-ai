@@ -57,3 +57,6 @@ build/
 .state/
 
 /test-results/
+
+# Rust build output
+/target/
