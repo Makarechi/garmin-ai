@@ -103,6 +103,34 @@ pub fn gmt_instant(value: &Value) -> Option<StoredInstant> {
 pub fn summary_fields(document: &Value) -> Result<Map<String, Value>, InvalidGarminSummary> {
     let (fields, timing) = extract_fields(document)?;
     timing?;
+    validate_timezone(&fields)?;
+    Ok(fields)
+}
+
+/// A replay may repair only the fields this revision still owns. Missing
+/// optional fields previously supplied by this revision can be cleared.
+pub fn replay_summary_fields(
+    document: &Value,
+    preserve_timing: bool,
+    owns: impl Fn(&str) -> bool,
+) -> Result<Map<String, Value>, InvalidGarminSummary> {
+    let (mut fields, timing) = extract_fields(document)?;
+    if preserve_timing {
+        fields.remove("start");
+        fields.remove("end");
+    } else {
+        timing?;
+    }
+    validate_timezone(&fields)?;
+    for key in METRIC_FIELDS.iter().map(|(name, _)| *name).chain(["name"]) {
+        if owns(key) && !fields.contains_key(key) {
+            fields.insert(key.to_owned(), Value::Null);
+        }
+    }
+    Ok(fields)
+}
+
+fn validate_timezone(fields: &Map<String, Value>) -> Result<(), InvalidGarminSummary> {
     if fields
         .get("timezone")
         .and_then(Value::as_str)
@@ -110,7 +138,7 @@ pub fn summary_fields(document: &Value) -> Result<Map<String, Value>, InvalidGar
     {
         return Err(InvalidGarminSummary::Timezone);
     }
-    Ok(fields)
+    Ok(())
 }
 
 /// Interpret fields from older retained entries even when their timing was incomplete.

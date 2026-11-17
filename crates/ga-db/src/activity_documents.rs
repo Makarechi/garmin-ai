@@ -1,9 +1,15 @@
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use ga_domain::{
     event_input::known_timezone,
     garmin_health::{HealthReplacement, HealthStatus},
-    garmin_summary::{activity_identity, historical_summary_fields, summary_fields},
+    garmin_summary::{
+        activity_identity, historical_summary_fields, replay_summary_fields, summary_fields,
+    },
     timestamp::StoredInstant,
 };
 use serde_json::{Map, Value, json};
@@ -66,6 +72,14 @@ pub enum ActivitySummaryKind {
 }
 
 impl ActivitySummaryKind {
+    pub(crate) fn for_endpoint(endpoint: &str) -> Option<Self> {
+        match endpoint {
+            "activity" => Some(Self::Single),
+            "activities" => Some(Self::Page),
+            _ => None,
+        }
+    }
+
     pub const fn endpoint(self) -> &'static str {
         match self {
             Self::Single => "activity",
@@ -563,27 +577,54 @@ async fn apply_summaries(
             .await?;
     let document: Value =
         serde_json::from_str(&document).map_err(|_| DocumentError::InvalidSummary)?;
-    let mut entries = match (kind, document) {
-        (ActivitySummaryKind::Single, entry @ Value::Object(_)) => vec![entry],
-        (ActivitySummaryKind::Page, Value::Array(entries)) => entries,
-        _ => return Err(DocumentError::InvalidSummary),
-    }
-    .into_iter()
-    .map(|entry| activity_identity(&entry).map(|id| (id, entry)))
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| DocumentError::InvalidSummary)?;
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
     let mut changed = false;
-    for (id, entry) in entries {
-        if matches!(kind, ActivitySummaryKind::Single) && id != request.source_key {
-            return Err(DocumentError::InvalidSummary);
-        }
-        changed |= apply_summary(txn, request, &id, &entry).await?;
+    for (id, entry) in summary_entries(&document, kind, request.source_key)? {
+        changed |= apply_summary(txn, request, &id, entry).await?;
     }
     if changed {
         supersede_insights(txn).await?;
     }
     Ok(())
+}
+
+pub(crate) async fn replay_activity_summaries(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &ApplyActivity<'_>,
+    kind: ActivitySummaryKind,
+    verified: &Value,
+) -> Result<(), DocumentError> {
+    let mut changed = false;
+    for (id, entry) in summary_entries(verified, kind, request.source_key)? {
+        changed |= replay_summary(txn, request, &id, entry).await?;
+    }
+    if changed {
+        supersede_insights(txn).await?;
+    }
+    Ok(())
+}
+
+fn summary_entries<'a>(
+    document: &'a Value,
+    kind: ActivitySummaryKind,
+    source_key: &str,
+) -> Result<Vec<(String, &'a Value)>, DocumentError> {
+    let entries = match (kind, document) {
+        (ActivitySummaryKind::Single, entry @ Value::Object(_)) => std::slice::from_ref(entry),
+        (ActivitySummaryKind::Page, Value::Array(entries)) => entries,
+        _ => return Err(DocumentError::InvalidSummary),
+    };
+    let mut entries = entries
+        .iter()
+        .map(|entry| {
+            let id = activity_identity(entry).map_err(|_| DocumentError::InvalidSummary)?;
+            if matches!(kind, ActivitySummaryKind::Single) && id != source_key {
+                return Err(DocumentError::InvalidSummary);
+            }
+            Ok((id, entry))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(entries)
 }
 
 async fn apply_summary(
@@ -601,16 +642,7 @@ async fn apply_summary(
         return Ok(false);
     }
     let fields = summary_fields(entry).map_err(|_| DocumentError::InvalidSummary)?;
-    let installed: Option<String> = sqlx::query_scalar(
-        "SELECT to_jsonb(activities)::text FROM activities WHERE id = $1 FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_optional(&mut **txn)
-    .await?;
-    let installed: Option<Value> = installed
-        .map(|installed| serde_json::from_str(&installed))
-        .transpose()
-        .map_err(|_| DocumentError::InvalidRecordedState)?;
+    let installed = installed_summary(txn, id).await?;
     let fallback = installed
         .as_ref()
         .and_then(|value| value["timezone"].as_str())
@@ -642,6 +674,125 @@ async fn apply_summary(
     )
     .await?;
     Ok(changed)
+}
+
+async fn replay_summary(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &ApplyActivity<'_>,
+    id: &str,
+    entry: &Value,
+) -> Result<bool, DocumentError> {
+    let key = format!("activity-version:{id}");
+    lock_legacy_scope(txn, &key)
+        .await
+        .map_err(DocumentError::Access)?;
+    let state = read_state(txn, &key).await?;
+    let older = last_request(&state)?.is_some_and(|latest| latest > request.requested_at);
+    let installed = installed_summary(txn, id).await?;
+    let (mut owners, mut legacy) = summary_owners(txn, id, installed.as_ref(), &state).await?;
+    let source = request.source_id.to_string();
+    let owns = |name: &str| owners.get(name).and_then(Value::as_str) == Some(&source);
+    if older && !owners.values().any(|value| value.as_str() == Some(&source)) {
+        return Ok(false);
+    }
+    if older && installed.is_none() {
+        return Err(DocumentError::InvalidRecordedState);
+    }
+    let clocks = summary_owner_clocks(txn, &owners).await?;
+    let may_replace = |key: &str| {
+        let Some(owner) = owners.get(key).and_then(Value::as_str) else {
+            return true;
+        };
+        owner == source
+            || (!legacy.iter().any(|item| item.as_str() == Some(key))
+                && clocks
+                    .get(owner)
+                    .is_some_and(|at| *at < request.requested_at))
+    };
+    let preserve_timing = installed.is_some() && !(may_replace("start") && may_replace("end"));
+    let mut fields = replay_summary_fields(entry, preserve_timing, owns)
+        .map_err(|_| DocumentError::InvalidSummary)?;
+    let fallback = installed
+        .as_ref()
+        .and_then(|value| value["timezone"].as_str())
+        .unwrap_or(request.timezone);
+    if !known_timezone(
+        fields
+            .get("timezone")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback),
+    ) {
+        return Err(DocumentError::InvalidSummary);
+    }
+    fields.retain(|key, _| (key != "start" && key != "end" || !older) && may_replace(key));
+    owners.extend(fields.keys().map(|key| (key.clone(), json!(source))));
+    let changed = publish_summary_row(txn, id, fallback, &Value::Object(fields)).await?;
+    legacy.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    let requested_at = if older {
+        state["requested_at"].clone()
+    } else {
+        json!(request.requested_at.to_string())
+    };
+    put_state(
+        txn,
+        &key,
+        &json!({
+            "requested_at": requested_at,
+            "owners": owners,
+            "owners_initialized": true,
+            "legacy_owner_fields": legacy,
+        }),
+    )
+    .await?;
+    Ok(changed)
+}
+
+async fn installed_summary(
+    txn: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> Result<Option<Value>, DocumentError> {
+    let installed: Option<String> = sqlx::query_scalar(
+        "SELECT to_jsonb(activities)::text FROM activities WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **txn)
+    .await?;
+    installed
+        .map(|value| serde_json::from_str(&value).map_err(|_| DocumentError::InvalidRecordedState))
+        .transpose()
+}
+
+async fn summary_owner_clocks(
+    txn: &mut Transaction<'_, Postgres>,
+    owners: &Map<String, Value>,
+) -> Result<BTreeMap<String, StoredInstant>, DocumentError> {
+    let sources = owners
+        .values()
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(|reference| reference.parse::<Uuid>().ok())
+                .ok_or(DocumentError::InvalidRecordedState)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if sources.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows: Vec<(Uuid, OffsetDateTime)> = sqlx::query_as(
+        "SELECT raw.id, COALESCE(NULLIF(metadata.value->>'applied_at','')::timestamptz,raw.fetched_at)
+         FROM source_payloads AS raw
+         LEFT JOIN app_state AS metadata ON metadata.key='ingest-meta:' || raw.id::text
+         WHERE raw.id=ANY($1)",
+    )
+    .bind(sources.into_iter().collect::<Vec<_>>())
+    .fetch_all(&mut **txn).await?;
+    rows.into_iter()
+        .map(|(source, at)| {
+            let at =
+                StoredInstant::try_from(at).map_err(|_| DocumentError::InvalidRecordedState)?;
+            Ok((source.to_string(), at))
+        })
+        .collect()
 }
 
 type SummaryOwners = (Map<String, Value>, Vec<Value>);
