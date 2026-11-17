@@ -1,3 +1,5 @@
+mod tools;
+
 use std::{env, io};
 
 use axum::{
@@ -25,6 +27,8 @@ fn router(state: AppState) -> Router {
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
+        .route("/tools", any(tools::list))
+        .route("/tools/{name}", any(tools::execute))
         .fallback(missing)
         .with_state(state)
 }
@@ -33,7 +37,7 @@ async fn liveness(method: Method, headers: HeaderMap) -> Response {
     let response = if method == Method::GET {
         Json(json!({"status": "alive"})).into_response()
     } else {
-        method_not_allowed()
+        method_not_allowed("GET")
     };
     private_cache(response, &headers)
 }
@@ -60,7 +64,7 @@ async fn readiness(method: Method, headers: HeaderMap, State(state): State<AppSt
             }
         }
     } else {
-        method_not_allowed()
+        method_not_allowed("GET")
     };
     private_cache(response, &headers)
 }
@@ -71,7 +75,7 @@ async fn capabilities(
     State(state): State<AppState>,
 ) -> Response {
     let response = if method != Method::GET {
-        method_not_allowed()
+        method_not_allowed("GET")
     } else if let Some(scopes) = state
         .authorization
         .authenticate(headers.get(header::AUTHORIZATION))
@@ -92,10 +96,10 @@ async fn capabilities(
     private_cache(response, &headers)
 }
 
-fn method_not_allowed() -> Response {
+fn method_not_allowed(allowed: &'static str) -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
-        [(header::ALLOW, "GET")],
+        [(header::ALLOW, allowed)],
         Json(json!({"detail": "Method Not Allowed"})),
     )
         .into_response()

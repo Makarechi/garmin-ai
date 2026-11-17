@@ -1,6 +1,7 @@
 mod read_daily;
 mod sleep_timing;
 
+pub use read_daily::DailyHealthReader;
 pub use sleep_timing::sleep_timing_result_hash;
 
 mod freshness;
