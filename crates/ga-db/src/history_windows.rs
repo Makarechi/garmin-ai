@@ -1,3 +1,5 @@
+mod status;
+
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use ga_domain::{event_input::source_calendar_date, sha256_hex, timestamp::StoredInstant};
