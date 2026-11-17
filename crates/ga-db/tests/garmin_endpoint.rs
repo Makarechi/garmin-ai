@@ -4,8 +4,11 @@ use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
     activity_documents::DocumentStatus,
-    garmin_endpoint::{EndpointError, EndpointPreflight, EndpointPublication, PublishEndpoint},
-    jobs::{FailureReason, GarminJobLease},
+    garmin_endpoint::{
+        CaptureEndpoint, EndpointCapture, EndpointError, EndpointPreflight, EndpointPublication,
+        PublishEndpoint,
+    },
+    jobs::{FailureReason, GarminJobLease, JobStoreError},
     raw_capture::LegacyCapture,
 };
 use ga_domain::timestamp::StoredInstant;
@@ -178,9 +181,66 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
         Err(EndpointError::InvalidScope)
     ));
     let recent = initial.unix_microseconds() / 1_000 - 60_000;
-    let original = run
-        .capture(day, json!({"heartRateValues":[[recent,71]]}), initial)
+    let body = serde_json::to_vec(&json!({"heartRateValues":[[recent,71]]}))?;
+    let capture = || CaptureEndpoint {
+        authenticated_fingerprint: ACCOUNT,
+        lease: &lease,
+        requested_at: initial,
+        body: body.clone(),
+    };
+    let limits = PutLimits {
+        max_bytes: 65536,
+        disk_reserve_bytes: 0,
+    };
+    sqlx::raw_sql(
+        "CREATE SEQUENCE synthetic_capture_started;
+         CREATE FUNCTION expire_endpoint_during_capture() RETURNS trigger LANGUAGE plpgsql AS
+          $$ BEGIN
+            PERFORM nextval('synthetic_capture_started');
+            UPDATE jobs SET lease_until=clock_timestamp()-interval '1 second'
+             WHERE kind='garmin_endpoint' AND status='running';
+            RETURN NEW;
+          END $$;
+         CREATE TRIGGER expire_endpoint_capture BEFORE INSERT ON source_payloads
+         FOR EACH ROW EXECUTE FUNCTION expire_endpoint_during_capture();",
+    )
+    .execute(&run.inspect)
+    .await?;
+    assert!(matches!(
+        run.database
+            .capture_garmin_endpoint(capture(), Arc::clone(&run.archive), limits)
+            .await,
+        Err(EndpointError::Job(JobStoreError::LeaseLost))
+    ));
+    let after_capture: (i64, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM source_payloads),
+                (SELECT is_called FROM synthetic_capture_started)",
+    )
+    .fetch_one(&run.inspect)
+    .await?;
+    assert_eq!(after_capture, (0, true));
+    sqlx::query("DROP TRIGGER expire_endpoint_capture ON source_payloads")
+        .execute(&run.inspect)
         .await?;
+    let EndpointCapture::Captured(first) = run
+        .database
+        .capture_garmin_endpoint(capture(), Arc::clone(&run.archive), limits)
+        .await?
+    else {
+        return Err("Expected captured response".into());
+    };
+    assert!(first.newly_recorded);
+    let EndpointCapture::Captured(repeated) = run
+        .database
+        .capture_garmin_endpoint(capture(), Arc::clone(&run.archive), limits)
+        .await?
+    else {
+        return Err("Expected captured response on retry".into());
+    };
+    assert_eq!(repeated.id, first.id);
+    assert_eq!(repeated.archive_key, first.archive_key);
+    assert!(!repeated.newly_recorded);
+    let original = first.id;
     let key = window(day);
     let freshness = format!("freshness:heart_rate:{day}");
     sqlx::raw_sql(
