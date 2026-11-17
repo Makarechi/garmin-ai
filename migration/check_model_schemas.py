@@ -117,6 +117,21 @@ def cases():
         yield name, StaticSchema(schema)
 
 
+def ordered_schema_maps(schema, path=""):
+    for key in ("properties", "$defs"):
+        if key in schema:
+            fields = schema[key]
+            pointer = f"{path}/{key}"
+            yield (pointer, list(fields))
+            for name, value in fields.items():
+                encoded = name.replace("~", "~0").replace("/", "~1")
+                yield from ordered_schema_maps(value, f"{pointer}/{encoded}")
+    if "items" in schema:
+        yield from ordered_schema_maps(schema["items"], f"{path}/items")
+    for index, variant in enumerate(schema.get("anyOf", [])):
+        yield from ordered_schema_maps(variant, f"{path}/anyOf/{index}")
+
+
 def run(binary):
     compilers = {"openai": OpenAISchemaCompiler, "anthropic": AnthropicSchemaCompiler}
     with TemporaryDirectory() as directory:
@@ -130,7 +145,11 @@ def run(binary):
             expected = {"name": name}
             for provider, compiler in compilers.items():
                 try:
-                    expected[provider] = {"schema": compiler().compile(schema)}
+                    compiled = compiler().compile(schema)
+                    expected[provider] = {
+                        "schema": compiled,
+                        "ordered_maps": list(ordered_schema_maps(compiled)),
+                    }
                 except UnsupportedSchema as exc:
                     expected[provider] = {"error": str(exc)}
             manifest.append(expected)

@@ -31,6 +31,29 @@ fn compares_native_wire_schemas() -> Result<(), Box<dyn Error>> {
                         "case {} {name}",
                         case["name"]
                     );
+                    let wire = serde_json::to_vec(&projected)?;
+                    // Parse the actual wire bytes with an ordered representation even if
+                    // the compiler accidentally starts using sorted JSON maps.
+                    let wire = jiter::JsonValue::parse(&wire, false)?;
+                    for entry in case[name]["ordered_maps"]
+                        .as_array()
+                        .ok_or("Missing wire map order")?
+                    {
+                        let pointer = entry[0].as_str().ok_or("Invalid wire map pointer")?;
+                        let jiter::JsonValue::Object(fields) =
+                            lookup(&wire, pointer).ok_or("Missing wire schema map")?
+                        else {
+                            return Err("Expected wire schema map".into());
+                        };
+                        let expected: Vec<_> = entry[1]
+                            .as_array()
+                            .ok_or("Missing wire map keys")?
+                            .iter()
+                            .map(|key| key.as_str().ok_or("Invalid wire map key"))
+                            .collect::<Result<_, _>>()?;
+                        let actual: Vec<_> = fields.iter().map(|(key, _)| key.as_ref()).collect();
+                        assert_eq!(actual, expected, "case {} {name} {pointer}", case["name"]);
+                    }
                 }
                 Err(error) => {
                     assert!(
@@ -43,4 +66,22 @@ fn compares_native_wire_schemas() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn lookup<'a, 'src>(
+    mut node: &'a jiter::JsonValue<'src>,
+    pointer: &str,
+) -> Option<&'a jiter::JsonValue<'src>> {
+    for segment in pointer.strip_prefix('/')?.split('/') {
+        node = match node {
+            jiter::JsonValue::Object(fields) => {
+                let segment = segment.replace("~1", "/").replace("~0", "~");
+                let (_, value) = fields.iter().find(|(name, _)| name.as_ref() == segment)?;
+                value
+            }
+            jiter::JsonValue::Array(values) => values.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(node)
 }
