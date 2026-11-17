@@ -72,7 +72,7 @@ impl EventInput {
     }
 }
 
-fn audited_instant(value: &Value) -> Result<Option<StoredInstant>, ReplayConflict> {
+pub(crate) fn audited_instant(value: &Value) -> Result<Option<StoredInstant>, ReplayConflict> {
     match value {
         Value::Null => Ok(None),
         Value::String(value) => value
@@ -83,7 +83,7 @@ fn audited_instant(value: &Value) -> Result<Option<StoredInstant>, ReplayConflic
     }
 }
 
-fn same_json(left: &Value, right: &Value) -> bool {
+pub(crate) fn same_json(left: &Value, right: &Value) -> bool {
     if left == right {
         return true;
     }
@@ -102,6 +102,12 @@ fn same_json(left: &Value, right: &Value) -> bool {
                     .all(|(key, left)| right.get(key).is_some_and(|right| same_json(left, right)))
         }
         (Value::Number(_) | Value::Bool(_), Value::Number(_) | Value::Bool(_)) => {
+            if let Some(integer) = large_integer(left) {
+                return compare_large_integer(integer, right);
+            }
+            if let Some(integer) = large_integer(right) {
+                return compare_large_integer(integer, left);
+            }
             match (integral(left), integral(right)) {
                 (Some(left), Some(right)) => left == right,
                 (Some(integer), None) => same_mixed(integer, right),
@@ -113,6 +119,21 @@ fn same_json(left: &Value, right: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+fn large_integer(value: &Value) -> Option<&serde_json::Number> {
+    value
+        .as_number()
+        .filter(|number| !number.is_f64() && integral(value).is_none())
+}
+
+fn compare_large_integer(integer: &serde_json::Number, other: &Value) -> bool {
+    let Some(number) = other.as_number().filter(|number| number.is_f64()) else {
+        return other.as_number() == Some(integer);
+    };
+    number
+        .as_f64()
+        .is_some_and(|value| value.fract() == 0.0 && format!("{value:.0}") == integer.to_string())
 }
 
 fn integral(value: &Value) -> Option<i128> {

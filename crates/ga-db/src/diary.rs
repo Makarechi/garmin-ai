@@ -1,3 +1,4 @@
+pub mod custom_entries;
 pub mod custom_registry;
 pub use custom_registry::{
     ActivatedCustomDefinition, CustomRegistryError, ManageCustomDefinition, StoredCustomDefinition,
@@ -16,6 +17,7 @@ use ga_domain::{
     event_input::{EventInput, InvalidEvent},
     event_provenance::InvalidClockUncertainty,
     event_replay::{ReplayConflict, check_idempotency_key},
+    event_schema::CustomEntryError,
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
@@ -58,6 +60,8 @@ pub enum DiaryWriteError {
     NothingToUndo,
     UndoConflict,
     CustomEntry,
+    CustomInput(CustomEntryError),
+    OperationForbidden,
     SelfReference(&'static str),
     LinkedObservations,
     SymptomBounds,
@@ -84,6 +88,8 @@ impl fmt::Display for DiaryWriteError {
             Self::NothingToUndo => "Nothing to undo",
             Self::UndoConflict => "The last operation has already been changed or undone",
             Self::CustomEntry => "Custom entries must use the custom correction endpoint",
+            Self::CustomInput(error) => return error.fmt(formatter),
+            Self::OperationForbidden => "The recorded definition does not allow this operation",
             Self::SelfReference(message) => message,
             Self::LinkedObservations => {
                 "Detach linked medication or symptom observations before changing this migraine"
@@ -282,20 +288,23 @@ async fn existing_replay(
     let Some(id) = id else {
         return Ok(None);
     };
-    let after = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT after::text FROM audit_log WHERE event_id = $1 AND action = 'create' ORDER BY id LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&mut **txn)
-    .await?
-    .flatten()
-    .map(|data| serde_json::from_str::<Value>(&data))
-    .transpose()
-    .map_err(|_| DiaryWriteError::Replay(ReplayConflict::AuditUnavailable))?;
+    let after = creation_audit(txn, id).await?;
     report
-        .verify_creation_replay(after.as_ref())
+        .verify_creation_replay(Some(&after))
         .map_err(DiaryWriteError::Replay)?;
     Ok(Some(load_event(txn, id, true).await?))
+}
+
+async fn creation_audit(
+    txn: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<Value, DiaryWriteError> {
+    let unavailable = DiaryWriteError::Replay(ReplayConflict::AuditUnavailable);
+    let data = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT after::text FROM audit_log WHERE event_id = $1 AND action = 'create' ORDER BY id LIMIT 1",
+    ).bind(id).fetch_optional(&mut **txn).await?.flatten().ok_or(unavailable)?;
+    serde_json::from_str(&data)
+        .map_err(|_| DiaryWriteError::Replay(ReplayConflict::AuditUnavailable))
 }
 
 async fn check_pack(
