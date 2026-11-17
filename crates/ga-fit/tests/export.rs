@@ -9,6 +9,7 @@ use std::{
 
 use ga_fit::{
     ActivityExport, ExportInventory, ExportLimits, FitError, MAX_FIT_BYTES, verify_activity_export,
+    visit_activity_projection,
 };
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
@@ -205,5 +206,92 @@ fn verifies_zip_with_an_exact_limit_synthetic_member() -> Result<(), Box<dyn Err
         ),
         (ActivityExport::Zip, 1, MAX_FIT_BYTES, 1)
     );
+    Ok(())
+}
+
+#[test]
+fn preserves_global_sequence_and_member_indexes_in_the_projection() -> Result<(), Box<dyn Error>> {
+    let chained = [FIT, FIT].concat();
+    let raw = zip(
+        &[
+            ("part1.fit", &chained),
+            ("other.json", b"{}"),
+            ("part2.fit", FIT),
+        ],
+        CompressionMethod::Deflated,
+    )?;
+    let mut positions = Vec::new();
+    let result = visit_activity_projection(
+        Cursor::new(&raw),
+        limits(),
+        || false,
+        |row| {
+            assert_eq!(row.message.payload["heart_rate"], 72);
+            assert_eq!(
+                row.message.payload["_fit"]["message_index"],
+                row.message.message_index
+            );
+            positions.push((
+                row.fit_member_index,
+                row.message.frame_index,
+                row.message.message_index,
+                row.sequence,
+            ));
+            Ok(())
+        },
+    )?;
+    assert_eq!(result.messages, 3);
+    assert_eq!(result.export, verify(&raw, limits())?);
+    assert_eq!(positions, [(0, 0, 0, 0), (0, 1, 1, 1), (1, 0, 0, 2)]);
+    Ok(())
+}
+
+#[test]
+fn refuses_to_verify_projection_candidates_after_a_late_checksum_error()
+-> Result<(), Box<dyn Error>> {
+    let mut invalid = FIT.to_vec();
+    let footer = invalid.len() - 1;
+    invalid[footer] ^= 1;
+    let raw = zip(
+        &[("valid.fit", FIT), ("invalid.fit", &invalid)],
+        CompressionMethod::Stored,
+    )?;
+    let mut staged = Vec::new();
+    let result = visit_activity_projection(
+        Cursor::new(raw),
+        limits(),
+        || false,
+        |row| {
+            staged.push(row.sequence);
+            Ok(())
+        },
+    );
+    assert_eq!(staged, [0, 1]);
+    assert_eq!(result, Err(FitError::FileChecksum));
+    Ok(())
+}
+
+#[test]
+#[ignore = "provide a synthetic ZIP with a 100 MiB FIT member"]
+fn projects_the_exact_ceiling_zip_without_buffering_members() -> Result<(), Box<dyn Error>> {
+    let path = std::env::var_os("GA_TEST_FIT_ZIP_CEILING")
+        .ok_or_else(|| io::Error::other("Set GA_TEST_FIT_ZIP_CEILING to a synthetic ZIP file"))?;
+    let budget = ExportLimits {
+        max_duration: Duration::from_secs(20),
+        ..limits()
+    };
+    let result = visit_activity_projection(
+        File::open(path)?,
+        budget,
+        || false,
+        |row| {
+            assert_eq!(row.fit_member_index, 0);
+            assert_eq!(row.message.message_index, row.sequence);
+            assert_eq!(row.message.payload["enhanced_respiration_rate"], 0);
+            Ok(())
+        },
+    )?;
+    assert_eq!(result.messages, 409_600);
+    assert_eq!(result.export.fit_bytes, MAX_FIT_BYTES);
     Ok(())
 }
