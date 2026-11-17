@@ -11,3 +11,30 @@ uv run python migration/check_system_payloads.py > test-results/system-payloads.
 GA_TEST_SYSTEM_PAYLOADS="$PWD/test-results/system-payloads.ndjson" \
   cargo test --locked -p ga-domain --test event_payload -- --include-ignored
 ```
+
+## Event input and provenance
+
+The event input keeps distinct observed, recorded and ingested times. It validates
+known timezones, the source and status, and the differences between point events
+and reports covering a time interval. Missing medication fields remain unknown
+only for a confirmed reported intake. The audited snapshot mode follows the
+baseline rules used to restore earlier edits.
+
+Date input uses the same speedate 0.17.0 parser as Python's pinned Pydantic Core
+2.50.1. This preserves the handling of compact offsets, longer fractions, numeric
+seconds and milliseconds, and Python's distinct behavior for negative numeric
+values and numeric strings. Stored times are represented as UTC instants at
+microsecond precision. Local times with different offsets remain distinct.
+
+Provenance derives device, Telegram, MCP and API attribution from the authenticated
+actor. Wearable clock uncertainty is available only to an authenticated wearable
+actor and preserves the baseline unknown precision when the uncertainty is nonzero.
+The validation comparison passed for 1,842 generated Python cases on the development
+host and native Linux arm64. Separate Rust cases verify provenance and that an API
+actor cannot claim device attribution through an input field.
+
+```sh
+uv run python migration/check_event_inputs.py > test-results/event-inputs.ndjson
+GA_TEST_EVENT_INPUTS="$PWD/test-results/event-inputs.ndjson" \
+  cargo test --locked -p ga-domain --test event_input -- --include-ignored
+```
