@@ -1,3 +1,4 @@
+pub mod action_tokens;
 pub mod activity_documents;
 pub mod activity_scans;
 pub mod diary;

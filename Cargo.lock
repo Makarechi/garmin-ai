@@ -211,6 +211,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -508,6 +509,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -762,18 +764,23 @@ dependencies = [
 name = "ga-db"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures-util",
  "ga-archive",
  "ga-domain",
  "ga-fit",
+ "getrandom 0.4.3",
+ "hmac",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "sqlx-postgres",
  "tempfile",
  "time",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
