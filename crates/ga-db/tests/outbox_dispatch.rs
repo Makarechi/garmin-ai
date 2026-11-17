@@ -9,7 +9,9 @@ use std::{
 use ga_db::{
     Database,
     delivery::DeliveryState,
-    outbox_claims::{ReplyClaim, ReplyDestination, ReplyDispatchResult, ReplyObservation},
+    outbox_claims::{
+        ReplyClaim, ReplyDestination, ReplyDispatchResult, ReplyObservation, ReplySendOutcome,
+    },
     share_policy::{DestinationKind, ShareCategory, ShareDestination, TrackerShareGrant},
 };
 use ga_domain::{
@@ -90,12 +92,12 @@ async fn retires_dispatch_tokens_and_blocks_stale_or_unapproved_content()
                 .await
                 .ok()?;
             assert_eq!(retry, ReplyDispatchResult::ClaimUnavailable);
-            Some(ReplyObservation {
+            Some(ReplySendOutcome::Observation(ReplyObservation {
                 state: DeliveryState::ProviderAccepted,
                 observed_at: observed,
                 provider_reference: Some("opaque/synthetic-accepted".into()),
                 detail: None,
-            })
+            }))
         })
         .await?;
     assert!(matches!(
@@ -208,12 +210,12 @@ async fn retires_dispatch_tokens_and_blocks_stale_or_unapproved_content()
     let result = database
         .dispatch_outbox_reply(destination(), failed_claim, &[], |_| {
             delivered.fetch_add(1, Ordering::Relaxed);
-            ready(Some(ReplyObservation {
+            ready(Some(ReplySendOutcome::Observation(ReplyObservation {
                 state: DeliveryState::Delivered,
                 observed_at: observed,
                 provider_reference: Some("opaque/synthetic-delivered".into()),
                 detail: Some("synthetic storage failure".into()),
-            }))
+            })))
         })
         .await?;
     assert_eq!(result, ReplyDispatchResult::Uncertain);
@@ -256,6 +258,46 @@ async fn retires_dispatch_tokens_and_blocks_stale_or_unapproved_content()
         delivered.load(Ordering::Relaxed),
         3,
         "dispatched after expiration during token rotation"
+    );
+
+    let queued = queue(&pool, owner, fixture_intent(owner, 1008), None).await?;
+    let queued_claim = claim_for(&pool, &database, destination(), queued).await?;
+    let retry_at = StoredInstant::from_unix_microseconds(
+        queued_claim.lease_until.unix_microseconds() + 20_000_000,
+    )?;
+    assert_eq!(
+        database
+            .dispatch_outbox_reply(destination(), queued_claim, &[], |_| ready(Some(
+                ReplySendOutcome::RetryAt(retry_at)
+            )))
+            .await?,
+        ReplyDispatchResult::Deferred { retry_at }
+    );
+    assert_eq!(state(&pool, queued).await?, "queued");
+    let stored: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT next_attempt_at FROM outbox_messages WHERE id=$1")
+            .bind(queued)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(StoredInstant::try_from(stored)?, retry_at);
+    let before = StoredInstant::from_unix_microseconds(retry_at.unix_microseconds() - 1)?;
+    assert!(
+        database
+            .claim_outbox_reply(destination(), before, 30)
+            .await?
+            .is_none()
+    );
+    let next = database
+        .claim_outbox_reply(destination(), retry_at, 30)
+        .await?
+        .ok_or("Missing eligible deferred reply")?;
+    assert_eq!(next.outbox_id, queued);
+    assert_ne!(next.lease_token, queued_claim.lease_token);
+    assert_eq!(
+        database
+            .dispatch_outbox_reply(destination(), queued_claim, &[], proceed)
+            .await?,
+        ReplyDispatchResult::ClaimUnavailable
     );
     println!(
         "Verified stale-reply rejection, consent fencing, durable token rotation and uncertain-send recovery"

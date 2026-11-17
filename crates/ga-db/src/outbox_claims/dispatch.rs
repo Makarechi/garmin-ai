@@ -24,10 +24,19 @@ pub struct ReplyObservation {
     pub detail: Option<String>,
 }
 
+pub enum ReplySendOutcome {
+    Observation(ReplyObservation),
+    /// The provider explicitly declined the whole request before any acceptance.
+    RetryAt(StoredInstant),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplyDispatchResult {
     ClaimUnavailable,
     Cancelled,
+    Deferred {
+        retry_at: StoredInstant,
+    },
     Recorded {
         evidence_id: Uuid,
         state: DeliveryState,
@@ -71,7 +80,7 @@ enum Dispatch {
 
 impl Database {
     /// Expose one reply to its channel after fresh authorization and durable dispatch fencing.
-    /// The closure performs one send, then returns the actual provider observation when known.
+    /// The closure returns the provider observation or a definitely safe retry time.
     pub async fn dispatch_outbox_reply<F>(
         &self,
         destination: ReplyDestination<'_>,
@@ -80,7 +89,7 @@ impl Database {
         send: impl FnOnce(Value) -> F,
     ) -> Result<ReplyDispatchResult, ReplyDispatchError>
     where
-        F: Future<Output = Option<ReplyObservation>>,
+        F: Future<Output = Option<ReplySendOutcome>>,
     {
         let (mut connection, dispatch) = tokio::time::timeout(DATABASE_DEADLINE, async {
             let options = self.work.connect_options();
@@ -100,7 +109,7 @@ impl Database {
                 clock,
             } => (intent, token, deadline, clock),
         };
-        let observation = tokio::time::timeout_at(deadline, async {
+        let outcome = tokio::time::timeout_at(deadline, async {
             if Instant::now() >= deadline {
                 return None;
             }
@@ -108,24 +117,47 @@ impl Database {
         })
         .await
         .ok()
-        .flatten()
-        .filter(|observation| {
-            !matches!(
-                observation.state,
-                DeliveryState::Queued | DeliveryState::Sending
-            )
-        });
+        .flatten();
         let inferred_clock = || {
             let elapsed = i64::try_from(started.elapsed().as_micros()).unwrap_or(i64::MAX);
             StoredInstant::from_unix_microseconds(wall.unix_microseconds().saturating_add(elapsed))
                 .unwrap_or(wall)
         };
-        let observation = observation.unwrap_or_else(|| ReplyObservation {
-            state: DeliveryState::Uncertain,
-            observed_at: inferred_clock(),
-            provider_reference: None,
-            detail: None,
-        });
+        if let Some(ReplySendOutcome::RetryAt(retry_at)) = outcome {
+            let retry_at = retry_at.max(inferred_clock());
+            let deferred = tokio::time::timeout(
+                DATABASE_DEADLINE,
+                defer(
+                    &mut connection,
+                    destination.owner_id,
+                    claim.outbox_id,
+                    token,
+                    retry_at,
+                ),
+            )
+            .await;
+            return Ok(if matches!(deferred, Ok(Ok(true))) {
+                ReplyDispatchResult::Deferred { retry_at }
+            } else {
+                ReplyDispatchResult::Uncertain
+            });
+        }
+        let observation = match outcome {
+            Some(ReplySendOutcome::Observation(observation))
+                if !matches!(
+                    observation.state,
+                    DeliveryState::Queued | DeliveryState::Sending
+                ) =>
+            {
+                observation
+            }
+            _ => ReplyObservation {
+                state: DeliveryState::Uncertain,
+                observed_at: inferred_clock(),
+                provider_reference: None,
+                detail: None,
+            },
+        };
         let recorded = tokio::time::timeout(
             DATABASE_DEADLINE,
             persist(
@@ -284,6 +316,27 @@ async fn close_claim(
     sqlx::query("UPDATE outbox_messages SET state=$2,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1")
         .bind(id).bind(state).execute(&mut **txn).await?;
     Ok(())
+}
+
+async fn defer(
+    connection: &mut PgConnection,
+    owner: Uuid,
+    outbox: Uuid,
+    token: Uuid,
+    retry_at: StoredInstant,
+) -> Result<bool, sqlx::Error> {
+    let updated = sqlx::query(
+        "UPDATE outbox_messages SET state='queued',next_attempt_at=$4,
+                   lease_token=NULL,lease_until=NULL,updated_at=now()
+         WHERE id=$1 AND owner_id=$2 AND lease_token=$3 AND state='sending'",
+    )
+    .bind(outbox)
+    .bind(owner)
+    .bind(token)
+    .bind(OffsetDateTime::from(retry_at))
+    .execute(connection)
+    .await?;
+    Ok(updated.rows_affected() == 1)
 }
 
 async fn persist(
