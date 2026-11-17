@@ -244,7 +244,7 @@ def report_run(args):
             env=app_env,
         )
         # Readiness probes execute in a separate cgroup. Their RSS is excluded.
-        launch(observer, image, "sleep", "300", env=app_env)
+        launch(observer, image, "sleep", "infinity", env=app_env)
 
         def probe(path):
             url = f"http://{api}:8080{path}"
