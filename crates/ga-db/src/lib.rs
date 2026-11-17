@@ -2,6 +2,7 @@ pub mod action_tokens;
 pub mod activity_documents;
 pub mod activity_scans;
 pub mod channel_ingress;
+pub mod delivery;
 pub mod diary;
 pub mod fit_ingest;
 pub mod fit_staging;
