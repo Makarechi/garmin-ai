@@ -3,6 +3,8 @@ pub mod activity_scans;
 pub mod diary;
 pub mod fit_ingest;
 pub mod fit_staging;
+pub mod garmin_endpoint;
+mod garmin_freshness;
 pub mod garmin_owner;
 pub mod health_analysis;
 mod health_projection;
