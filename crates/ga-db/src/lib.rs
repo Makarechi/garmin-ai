@@ -4,6 +4,7 @@ pub mod activity_scans;
 pub mod channel_ingress;
 pub mod conversation_memory;
 pub mod database_export;
+pub mod database_restore;
 pub mod delivery;
 pub mod diary;
 pub mod fit_ingest;

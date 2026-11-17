@@ -19,7 +19,7 @@ use crate::{
     check_readiness,
 };
 
-const FORMAT: &str = "garmin-ai-jsonl-v1";
+pub(crate) const FORMAT: &str = "garmin-ai-jsonl-v1";
 
 // Dependency order used by the current Python restore. The differential fixture
 // compares this inventory against the pinned SQLAlchemy metadata.
@@ -29,7 +29,7 @@ macro_rules! export_tables {
     };
 }
 
-const TABLES: &[(&str, &str)] = export_tables![
+pub(crate) const TABLES: &[(&str, &str)] = export_tables![
     "activities",
     "app_state",
     "audit_log",
