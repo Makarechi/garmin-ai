@@ -2,6 +2,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::{
     channel::{InboundEnvelope, InboundKind},
+    telegram_control::TelegramControl,
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
@@ -201,6 +202,14 @@ async fn persist(
     let advances_ordering = !matches!(
         &input.event, TelegramPollEvent::Message(envelope) if envelope.kind() == InboundKind::Edit
     );
+    let lane = match &input.event {
+        TelegramPollEvent::Message(envelope)
+            if TelegramControl::from_envelope(envelope).is_some() =>
+        {
+            native_telegram::InboxLane::Control
+        }
+        _ => native_telegram::InboxLane::Diary,
+    };
     let inbound = if selected && !owned_by_legacy {
         save_event(&mut txn, input.event, normalize_callback).await?
     } else {
@@ -209,7 +218,7 @@ async fn persist(
     let new_ordering_epoch = if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
         let epoch =
             record_native_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?;
-        native_telegram::enqueue(&mut txn, receipt.message_id, epoch, input.received_at)
+        native_telegram::enqueue(&mut txn, receipt.message_id, epoch, lane, input.received_at)
             .await
             .map_err(TelegramPollError::Processing)?;
         if advances_ordering {
