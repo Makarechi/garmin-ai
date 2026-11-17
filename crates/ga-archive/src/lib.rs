@@ -8,7 +8,7 @@ use std::{
     ffi::OsStr,
     fmt,
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     os::fd::OwnedFd,
     path::{Component, Path},
 };
@@ -47,6 +47,7 @@ pub enum ArchiveError {
     InvalidRoot,
     InvalidObject,
     ExistingObjectDigestMismatch,
+    ReadCancelled,
     PayloadTooLarge,
     InsufficientSpace,
     StagingEntropy,
@@ -61,6 +62,7 @@ impl fmt::Display for ArchiveError {
             Self::InvalidRoot => "Invalid archive root",
             Self::InvalidObject => "Archive object must be a regular file",
             Self::ExistingObjectDigestMismatch => "Existing archive object has a different digest",
+            Self::ReadCancelled => "Archive verification was cancelled",
             Self::PayloadTooLarge => "Archive input exceeds the byte limit",
             Self::InsufficientSpace => "Available archive space is below the required limit",
             Self::StagingEntropy => "Cannot allocate a private archive staging name",
@@ -110,6 +112,27 @@ impl Archive {
         let (prefix, name) = key.path_parts();
         let directory = fs::openat(&self.root, prefix, DIRECTORY_READ, Mode::empty())?;
         open_regular(&directory, &name)
+    }
+
+    /// Verify a private archived object in bounded chunks and rewind its open handle.
+    pub fn open_verified_reader(
+        &self,
+        key: &ArchiveKey,
+        max_bytes: u64,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<File, ArchiveError> {
+        if cancelled() {
+            return Err(ArchiveError::ReadCancelled);
+        }
+        let mut file = self.open_reader(key)?;
+        let bytes = file.metadata()?.len();
+        if bytes > max_bytes {
+            return Err(ArchiveError::PayloadTooLarge);
+        }
+        let mut buffer = [0; BUFFER_SIZE];
+        verify_digest(&mut file, key, &mut buffer, bytes, cancelled)?;
+        file.rewind()?;
+        Ok(file)
     }
 
     pub fn put_json(&self, payload: &[u8], limits: PutLimits) -> Result<ArchiveKey, ArchiveError> {
@@ -250,13 +273,27 @@ fn verify_existing(
     buffer: &mut [u8],
     expected_bytes: u64,
 ) -> Result<(), ArchiveError> {
-    let file = open_regular(directory, name)?;
+    let mut file = open_regular(directory, name)?;
     if file.metadata()?.len() != expected_bytes {
         return Err(ArchiveError::ExistingObjectDigestMismatch);
     }
+    verify_digest(&mut file, key, buffer, expected_bytes, || false)
+}
+
+fn verify_digest(
+    file: &mut File,
+    key: &ArchiveKey,
+    buffer: &mut [u8],
+    expected_bytes: u64,
+    cancelled: impl Fn() -> bool,
+) -> Result<(), ArchiveError> {
     let mut source = file.take(expected_bytes.saturating_add(1));
     let mut hasher = Sha256::new();
+    let mut observed_bytes = 0;
     loop {
+        if cancelled() {
+            return Err(ArchiveError::ReadCancelled);
+        }
         let count = match source.read(buffer) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
@@ -264,10 +301,11 @@ fn verify_existing(
         if count == 0 {
             break;
         }
+        observed_bytes += count as u64;
         hasher.update(&buffer[..count]);
     }
     let observed: [u8; 32] = hasher.finalize().into();
-    if observed != key.digest {
+    if observed_bytes != expected_bytes || observed != key.digest {
         return Err(ArchiveError::ExistingObjectDigestMismatch);
     }
     Ok(())

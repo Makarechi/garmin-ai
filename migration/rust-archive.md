@@ -9,6 +9,9 @@ The writer checks the byte limit and available disk space as it goes. It syncs t
 private staging file before creating the final directory entry and syncs the directory
 before returning the key. Concurrent writers converge on one file. A matching key
 with different bytes returns an error and preserves the existing object for diagnosis.
+Replay callers can open a verified reader. It checks the byte limit, streams the
+hash from the existing object and rewinds the same open file for processing. A
+size change, hash mismatch or cancellation interrupts verification.
 Stage cleanup holds an exclusive lock on the archive directory and removes regular
 private entries in the Rust staging namespace. Writers hold a shared lock from
 stage creation through publication and cleanup.
@@ -18,11 +21,13 @@ stage creation through publication and cleanup.
 
 - Read an object produced by the pinned Python archive representation and reused its
   exact hash and name on a Rust write.
-- On native Linux arm64, ten checks passed in a container capped at 32 MiB with swap
-  disabled. A single isolated 100 MiB archive stream also passed and matched Python's
+- On native Linux arm64, eleven checks passed in a container capped at 32 MiB with swap
+  disabled. A 100 MiB write followed by a verified read passed and matched Python's
   SHA-256 `2279306afc5fd86754d2e0f92e8af4adecc15bc1aea93c17945569a973a502e9`.
   The container reached its memory ceiling while reclaiming filesystem cache and
   recorded zero out-of-memory events and zero killed processes.
+- A changed object of the same length was rejected. Verification stopped on
+  cancellation and rejected oversized input before reading it.
 - On an 8 MiB writable filesystem, a 12 MiB stream was refused. The original archive
   object stayed readable and the next small write succeeded.
 - An abrupt process exit left one unpublished stage. Cleanup removed that stage,
