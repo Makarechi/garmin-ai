@@ -1,3 +1,6 @@
+mod poller;
+pub use poller::{PollBatch, PollProgress, TelegramLoopError};
+
 use std::{error::Error, fmt, time::Duration};
 
 use reqwest::{

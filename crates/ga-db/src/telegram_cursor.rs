@@ -3,10 +3,10 @@ use std::{error::Error, fmt, time::Duration};
 use ga_domain::timestamp::StoredInstant;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Connection, Postgres, Transaction};
 use time::OffsetDateTime;
 
-use crate::{Database, ReadinessError, check_readiness};
+use crate::{Database, ReadinessError, check_readiness, runtime_lease::RuntimeLease};
 
 const TELEGRAM_INGRESS_LOCK: i64 = 72_104_623;
 const WEEK_MICROS: i64 = 7 * 24 * 60 * 60 * 1_000_000;
@@ -64,46 +64,68 @@ impl Database {
         instance: &str,
         now: StoredInstant,
     ) -> Result<TelegramPollCursor, TelegramCursorError> {
-        let key = state_key("telegram:offset", instance)?;
-        let ordering_key = state_key("telegram:ordering", instance)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = self.work.begin().await?;
-            sqlx::query("SET LOCAL statement_timeout='750ms'")
-                .execute(&mut *txn)
-                .await?;
-            lock_ingress(&mut txn).await?;
-            let mut cursor = TelegramPollCursor {
-                offset: None,
-                reset: false,
-            };
-            if let Some(record) = read_state::<OffsetRecord>(&mut txn, &key).await? {
-                let Some(offset) = record.offset else {
-                    txn.rollback().await?;
-                    return Ok(cursor);
-                };
-                if offset < 1 {
-                    return Err(TelegramCursorError::InvalidState);
-                }
-                let received = match record.received_at {
-                    Some(at) => Some(parse_time(&at)?),
-                    None => read_state::<OrderingRecord>(&mut txn, &ordering_key)
-                        .await?
-                        .map(|record| parse_time(&record.last_received_at))
-                        .transpose()?,
-                };
-                cursor.reset = received.is_none_or(|received| week_elapsed(now, received));
-                if cursor.reset {
-                    write_state(&mut txn, &key, json!({ "offset": null })).await?;
-                } else {
-                    cursor.offset = Some(offset);
-                }
-            }
-            txn.commit().await?;
-            Ok(cursor)
+            let txn = self.work.begin().await?;
+            read_poll_cursor(txn, instance, now).await
         })
         .await
         .map_err(|_| TelegramCursorError::Database)?
     }
+}
+
+impl RuntimeLease {
+    /// Read or reset the poll cursor on the session that holds the runtime lease.
+    pub async fn owned_telegram_poll_cursor(
+        &mut self,
+        instance: &str,
+        now: StoredInstant,
+    ) -> Result<TelegramPollCursor, TelegramCursorError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let txn = self.connection.begin().await?;
+            read_poll_cursor(txn, instance, now).await
+        })
+        .await
+        .map_err(|_| TelegramCursorError::Database)?
+    }
+}
+
+async fn read_poll_cursor(
+    mut txn: Transaction<'_, Postgres>,
+    instance: &str,
+    now: StoredInstant,
+) -> Result<TelegramPollCursor, TelegramCursorError> {
+    let key = state_key("telegram:offset", instance)?;
+    let ordering_key = state_key("telegram:ordering", instance)?;
+    sqlx::query("SET LOCAL statement_timeout='750ms'")
+        .execute(&mut *txn)
+        .await?;
+    lock_ingress(&mut txn).await?;
+    let mut cursor = TelegramPollCursor {
+        offset: None,
+        reset: false,
+    };
+    if let Some(record) = read_state::<OffsetRecord>(&mut txn, &key).await?
+        && let Some(offset) = record.offset
+    {
+        if offset < 1 {
+            return Err(TelegramCursorError::InvalidState);
+        }
+        let received = match record.received_at {
+            Some(at) => Some(parse_time(&at)?),
+            None => read_state::<OrderingRecord>(&mut txn, &ordering_key)
+                .await?
+                .map(|record| parse_time(&record.last_received_at))
+                .transpose()?,
+        };
+        cursor.reset = received.is_none_or(|received| week_elapsed(now, received));
+        if cursor.reset {
+            write_state(&mut txn, &key, json!({ "offset": null })).await?;
+        } else {
+            cursor.offset = Some(offset);
+        }
+    }
+    txn.commit().await?;
+    Ok(cursor)
 }
 
 /// Acknowledge one verified polling update after its accepted mutation has been
