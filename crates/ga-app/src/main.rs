@@ -1,3 +1,4 @@
+mod authorization;
 mod http;
 
 use std::{env, ffi::OsStr, process::ExitCode};
