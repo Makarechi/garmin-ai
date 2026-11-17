@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK};
 
-const CHANNEL_CONSENT_LOCK: i64 = 72104631;
+pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72104631;
 const MODEL_CONSENT_LOCK: i64 = 72104632;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
