@@ -1,7 +1,7 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -15,6 +15,7 @@ pub enum JobStoreError {
     Storage(ReadinessError),
     InvalidLeaseDuration,
     LeaseLost,
+    PublicationTimedOut,
     Database,
 }
 
@@ -24,6 +25,7 @@ impl fmt::Display for JobStoreError {
             Self::Storage(_) => "Job storage is unavailable",
             Self::InvalidLeaseDuration => "Lease duration must be between one second and one day",
             Self::LeaseLost => "Job lease expired or belongs to a different worker",
+            Self::PublicationTimedOut => "Job publication timed out",
             Self::Database => "Job database operation failed",
         })
     }
@@ -183,6 +185,50 @@ impl Database {
         .await?;
         txn.commit().await?;
         Ok(refreshed.rows_affected() == 1)
+    }
+
+    /// Apply local database effects and record completion in the same transaction.
+    /// The callback receives the fenced connection and is only for database work.
+    pub async fn publish_initiative(
+        &self,
+        lease: &InitiativeLease,
+        apply: impl AsyncFnOnce(&mut PgConnection) -> Result<(), JobStoreError>,
+    ) -> Result<(), JobStoreError> {
+        let mut txn = begin(&self.work).await?;
+        let owned = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2
+               AND status = 'running' AND lease_until > clock_timestamp() AND kind = $3
+             FOR UPDATE NOWAIT",
+        )
+        .bind(lease.id)
+        .bind(lease.token)
+        .bind(KIND)
+        .fetch_optional(&mut *txn)
+        .await?;
+        if owned.is_none() {
+            return Err(JobStoreError::LeaseLost);
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), apply(&mut txn))
+            .await
+            .map_err(|_| JobStoreError::PublicationTimedOut)??;
+        let completed = sqlx::query(
+            "WITH instant AS MATERIALIZED (SELECT clock_timestamp() AS now)
+             UPDATE jobs SET status = 'done', last_error = NULL,
+                             lease_until = NULL, lease_token = NULL, completed_at = instant.now
+             FROM instant WHERE id = $1 AND lease_token = $2 AND status = 'running'
+                          AND lease_until > instant.now AND kind = $3",
+        )
+        .bind(lease.id)
+        .bind(lease.token)
+        .bind(KIND)
+        .execute(&mut *txn)
+        .await?;
+        if completed.rows_affected() != 1 {
+            return Err(JobStoreError::LeaseLost);
+        }
+        txn.commit().await?;
+        Ok(())
     }
 
     pub async fn finish_initiative(
