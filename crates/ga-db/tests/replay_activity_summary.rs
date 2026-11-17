@@ -51,6 +51,11 @@ async fn restores_only_fields_still_owned_by_the_verified_activity_source()
             max_json_bytes: 524_288,
             max_fit_bytes: 0,
         };
+        if case.name == "unchanged_repeat" {
+            sqlx::query("UPDATE insights SET status='candidate'")
+                .execute(&inspect)
+                .await?;
+        }
         if case.name == "forced" {
             sqlx::raw_sql(
                 "CREATE SEQUENCE synthetic_summary_replay_attempt;
@@ -98,6 +103,19 @@ async fn restores_only_fields_still_owned_by_the_verified_activity_source()
             _ => return Err("Unexpected synthetic summary replay outcome".into()),
         };
         assert_eq!(status, case.status, "{}", case.name);
+        if case.name.starts_with("unchanged") {
+            let actual: String = sqlx::query_scalar(
+                "SELECT status FROM insights WHERE dedup_key='synthetic-activity-insight'",
+            )
+            .fetch_one(&inspect)
+            .await?;
+            let expected = if case.name == "unchanged_single" {
+                "superseded"
+            } else {
+                "candidate"
+            };
+            assert_eq!(actual, expected, "{}", case.name);
+        }
     }
     Ok(())
 }

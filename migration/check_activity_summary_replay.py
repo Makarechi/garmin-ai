@@ -19,7 +19,7 @@ from garmin_ai import replay
 from garmin_ai.archive import LocalArchive
 from garmin_ai.events import serialize
 from garmin_ai.ingest import ingest
-from garmin_ai.models import Activity, AppState, SourcePayload
+from garmin_ai.models import Activity, AppState, Insight, SourcePayload
 
 
 def summary(identity, second=0, **fields):
@@ -127,8 +127,9 @@ def seed(engine, archive):
         )
         session.execute(update(Activity).where(Activity.id.in_(["10", "11"])).values(calories=0))
         cases = {
-            "retained_page": page,
             "unchanged_single": unchanged,
+            "unchanged_repeat": unchanged,
+            "retained_page": page,
             "retained_after_empty": first_page,
             "empty_attempt": empty,
             "invalid_page": malformed,
@@ -137,8 +138,18 @@ def seed(engine, archive):
             "forced": forced,
         }
         for name, row in cases.items():
-            if name != "unchanged_single":
+            if not name.startswith("unchanged"):
                 row.parser_version = 8
+        session.add(
+            Insight(
+                category="activity",
+                statement="synthetic activity insight",
+                evidence={},
+                sample_size=1,
+                status="candidate",
+                dedup_key="synthetic-activity-insight",
+            )
+        )
         return {name: str(row.id) for name, row in cases.items()}
 
 
@@ -193,6 +204,9 @@ def run(binary):
             py_refs = seed(python, python_archive)
             native_refs = seed(native, native_archive)
             for name, identity in py_refs.items():
+                if name == "unchanged_repeat":
+                    with Session(python) as session, session.begin():
+                        session.execute(update(Insight).values(status="candidate"))
                 try:
                     replay.run_replay(
                         python,
@@ -202,6 +216,12 @@ def run(binary):
                     )
                 except RuntimeError:
                     assert name in {"missing_timezone", "invalid_page"}, name
+                if name.startswith("unchanged"):
+                    with Session(python) as session:
+                        expected_insight = (
+                            "superseded" if name == "unchanged_single" else "candidate"
+                        )
+                        assert session.scalar(select(Insight.status)) == expected_insight
             expected = snapshot(python, py_refs)
             assert expected["activities"]["1"]["ascent_m"] is None
             assert expected["activities"]["1"]["distance_m"] == 420

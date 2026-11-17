@@ -6,9 +6,11 @@ It restores still-owned fields, clears owned optional values omitted by
 the saved response and preserves legacy field ownership when a historical
 application time has been lost. The page and its metadata commit together.
 
-Eight synthetic TimescaleDB cases matched the pinned Python activity
+Nine synthetic TimescaleDB cases matched the pinned Python activity
 rows, field owners, raw status and replay outcomes. Cases covered a
 drifted database copy, retained fields, missing historical timezone,
 empty pages, a single invalid item and a forced write failure followed
-by a successful retry. The existing live activity summary test also
+by a successful retry. Repairing drift under the installed parser retires
+dependent insights. Replaying matching data keeps a new insight current.
+The existing live activity summary test also
 passed in a 32 MiB Linux ARM64 container with no swap.

@@ -593,8 +593,12 @@ pub(crate) async fn replay_activity_summaries(
     kind: ActivitySummaryKind,
     verified: &Value,
 ) -> Result<(), DocumentError> {
+    let mut changed = false;
     for (id, entry) in summary_entries(verified, kind, request.source_key)? {
-        replay_summary(txn, request, &id, entry).await?;
+        changed |= replay_summary(txn, request, &id, entry).await?;
+    }
+    if changed {
+        supersede_insights(txn).await?;
     }
     Ok(())
 }
@@ -677,7 +681,7 @@ async fn replay_summary(
     request: &ApplyActivity<'_>,
     id: &str,
     entry: &Value,
-) -> Result<(), DocumentError> {
+) -> Result<bool, DocumentError> {
     let key = format!("activity-version:{id}");
     lock_legacy_scope(txn, &key)
         .await
@@ -689,7 +693,7 @@ async fn replay_summary(
     let source = request.source_id.to_string();
     let owns = |name: &str| owners.get(name).and_then(Value::as_str) == Some(&source);
     if older && !owners.values().any(|value| value.as_str() == Some(&source)) {
-        return Ok(());
+        return Ok(false);
     }
     if older && installed.is_none() {
         return Err(DocumentError::InvalidRecordedState);
@@ -722,7 +726,7 @@ async fn replay_summary(
     }
     fields.retain(|key, _| (key != "start" && key != "end" || !older) && may_replace(key));
     owners.extend(fields.keys().map(|key| (key.clone(), json!(source))));
-    publish_summary_row(txn, id, fallback, &Value::Object(fields)).await?;
+    let changed = publish_summary_row(txn, id, fallback, &Value::Object(fields)).await?;
     legacy.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
     let requested_at = if older {
         state["requested_at"].clone()
@@ -740,7 +744,7 @@ async fn replay_summary(
         }),
     )
     .await?;
-    Ok(())
+    Ok(changed)
 }
 
 async fn installed_summary(
