@@ -229,6 +229,34 @@ async fn retires_dispatch_tokens_and_blocks_stale_or_unapproved_content()
         StoredInstant::from_unix_microseconds(failed_claim.lease_until.unix_microseconds() + 1)?;
     assert_eq!(database.recover_expired_outbox(past_claim).await?, 1);
     assert_eq!(state(&pool, failed_write).await?, "uncertain");
+    let expiring = queue(&pool, owner, fixture_intent(owner, 1007), None).await?;
+    let expiring_claim = claim_for(&pool, &database, destination(), expiring).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION synthetic_rotation_delay() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.id='00000000-0000-0000-0000-0000000003ef' AND NEW.lease_token IS NOT NULL
+                 AND NEW.lease_token IS DISTINCT FROM OLD.lease_token THEN
+               PERFORM pg_sleep(0.35);
+           END IF;
+           RETURN NEW;
+         END $$;
+         CREATE TRIGGER synthetic_rotation_delay BEFORE UPDATE ON outbox_messages
+                FOR EACH ROW EXECUTE FUNCTION synthetic_rotation_delay();",
+    )
+    .execute(&pool)
+    .await?;
+    let expires =
+        StoredInstant::from_unix_microseconds(clock(&pool).await?.unix_microseconds() + 200_000)?;
+    sqlx::query("UPDATE outbox_messages SET intent=jsonb_set(intent,'{expires_at}',to_jsonb($2::text)) WHERE id=$1")
+        .bind(expiring).bind(expires.to_string()).execute(&pool).await?;
+    let _ = database
+        .dispatch_outbox_reply(destination(), expiring_claim, &[], proceed)
+        .await?;
+    assert_eq!(
+        delivered.load(Ordering::Relaxed),
+        3,
+        "dispatched after expiration during token rotation"
+    );
     println!(
         "Verified stale-reply rejection, consent fencing, durable token rotation and uncertain-send recovery"
     );

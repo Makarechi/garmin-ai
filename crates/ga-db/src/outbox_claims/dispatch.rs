@@ -217,6 +217,7 @@ async fn prepare(
         txn.commit().await?;
         return Ok(Dispatch::Cancelled);
     };
+    let started = Instant::now();
     let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *txn)
         .await?;
@@ -245,7 +246,6 @@ async fn prepare(
         txn.rollback().await?;
         return Ok(Dispatch::Unavailable);
     };
-    let started = Instant::now();
     let remaining = Duration::try_from(expiry.map_or(until, |expiry| until.min(expiry)) - now)
         .map_err(|_| ReplyDispatchError::Database)?;
     let wall = StoredInstant::try_from(now).map_err(|_| ReplyDispatchError::Database)?;
