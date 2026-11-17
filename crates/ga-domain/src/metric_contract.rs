@@ -214,14 +214,21 @@ pub fn metric_unit_dimension(unit: &str) -> Option<&'static str> {
 
 fn digits(value: &str) -> bool {
     !value.is_empty()
-        && value.chars().all(|character| {
-            let codepoint = u32::from(character);
-            let ranges = unicode_decimal::DECIMAL_RANGES;
-            let index = ranges.partition_point(|&(_, last)| last < codepoint);
-            ranges
-                .get(index)
-                .is_some_and(|&(first, _)| first <= codepoint)
-        })
+        && value
+            .chars()
+            .all(|character| decimal_value(character).is_some())
+}
+
+pub(crate) fn decimal_value(character: char) -> Option<u8> {
+    let codepoint = u32::from(character);
+    let ranges = unicode_decimal::DECIMAL_RANGES;
+    let index = ranges.partition_point(|&(_, last)| last < codepoint);
+    let &(first, _) = ranges
+        .get(index)
+        .filter(|&&(first, _)| first <= codepoint)?;
+    // Unicode decimal digits occur in consecutive runs of ten. Some adjacent
+    // alphabets are grouped into one range in the existing table.
+    Some(((codepoint - first) % 10) as u8)
 }
 
 fn bounded_text(value: &Value, length: usize) -> Option<&str> {
