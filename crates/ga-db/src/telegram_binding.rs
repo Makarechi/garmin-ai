@@ -1,5 +1,6 @@
 use std::{error::Error, fmt, time::Duration};
 
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
@@ -54,38 +55,47 @@ impl Database {
             check_readiness(&mut txn)
                 .await
                 .map_err(TelegramBindingError::Storage)?;
-            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
-                .bind(CHANNEL_BINDING_LOCK)
-                .fetch_one(&mut *txn)
-                .await?;
-            if !locked {
-                return Err(TelegramBindingError::Busy);
-            }
-            let owners: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM people LIMIT 2")
-                .fetch_all(&mut *txn)
-                .await?;
-            let owner = match owners.as_slice() {
-                [] => return Err(TelegramBindingError::Missing),
-                [owner] => *owner,
-                _ => return Err(TelegramBindingError::Mismatch),
-            };
-            let chat: Option<String> = sqlx::query_scalar(
-                "SELECT external_id FROM channel_bindings
-                 WHERE owner_id=$1 AND channel='telegram' AND channel_instance_id=$2
-                   AND confirmed_at IS NOT NULL",
-            )
-            .bind(owner)
-            .bind(instance)
-            .fetch_optional(&mut *txn)
-            .await?;
-            let chat = chat.ok_or(TelegramBindingError::Missing)?;
-            if chat != expected_chat.to_string() {
-                return Err(TelegramBindingError::Mismatch);
-            }
+            let owner = confirmed_pairing(&mut txn, instance, expected_chat).await?;
             txn.commit().await?;
             Ok(owner)
         })
         .await
         .map_err(|_| TelegramBindingError::Database)?
     }
+}
+
+pub(crate) async fn confirmed_pairing(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+    expected_chat: i64,
+) -> Result<Uuid, TelegramBindingError> {
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
+        .bind(CHANNEL_BINDING_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !locked {
+        return Err(TelegramBindingError::Busy);
+    }
+    let owners: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM people LIMIT 2")
+        .fetch_all(&mut **txn)
+        .await?;
+    let owner = match owners.as_slice() {
+        [] => return Err(TelegramBindingError::Missing),
+        [owner] => *owner,
+        _ => return Err(TelegramBindingError::Mismatch),
+    };
+    let chat: Option<String> = sqlx::query_scalar(
+        "SELECT external_id FROM channel_bindings
+         WHERE owner_id=$1 AND channel='telegram' AND channel_instance_id=$2
+           AND confirmed_at IS NOT NULL",
+    )
+    .bind(owner)
+    .bind(instance)
+    .fetch_optional(&mut **txn)
+    .await?;
+    let chat = chat.ok_or(TelegramBindingError::Missing)?;
+    if chat != expected_chat.to_string() {
+        return Err(TelegramBindingError::Mismatch);
+    }
+    Ok(owner)
 }

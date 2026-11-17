@@ -1,7 +1,12 @@
 use std::{env, error::Error, fs, str::FromStr};
 
-use ga_app::{telegram_input::TelegramBinding, telegram_webhook::TelegramWebhook};
-use ga_db::Database;
+use ga_app::telegram_webhook::TelegramWebhook;
+use ga_db::{
+    Database,
+    channel_ingress::telegram_poll::{TelegramPollError, TelegramPollEvent, TelegramPollInput},
+    telegram_binding::TelegramBindingError,
+};
+use ga_domain::timestamp::StoredInstant;
 use reqwest::Client;
 use serde_json::Value;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
@@ -34,14 +39,20 @@ async fn matches_webhook_auth_replays_and_storage_backpressure() -> Result<(), B
         .await?;
     let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
     let fixture: Value = serde_json::from_slice(&fs::read(env::var("GA_TEST_TELEGRAM_WEBHOOK")?)?)?;
-    let binding = TelegramBinding {
-        owner_id,
-        external_owner_id: fixture["chat"].as_i64().ok_or("Missing fixture chat")?,
-        instance_id: "primary",
-    };
-    assert!(TelegramWebhook::new(database.clone(), binding, "short").is_none());
+    let chat = fixture["chat"]
+        .as_i64()
+        .ok_or("Missing fixture chat")?
+        .to_string();
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         VALUES(gen_random_uuid(),$1,'telegram','primary',$2,'fixture')",
+    )
+    .bind(owner_id)
+    .bind(&chat)
+    .execute(&pool)
+    .await?;
     let receiver =
-        TelegramWebhook::new(database, binding, SECRET).ok_or("Invalid webhook configuration")?;
+        TelegramWebhook::from_settings(Some(database.clone()), Some(SECRET), Some(&chat), None);
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let endpoint = format!("http://{}/telegram/webhook", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, receiver.router()).await });
@@ -125,6 +136,33 @@ async fn matches_webhook_auth_replays_and_storage_backpressure() -> Result<(), B
             .await?;
     assert!(!offset);
     server.abort();
+
+    let paired = database.confirmed_telegram_owner("primary", 42).await?;
+    sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE channel_bindings SET external_id='43' WHERE owner_id=$1")
+        .bind(paired)
+        .execute(&pool)
+        .await?;
+    let stale = database
+        .persist_telegram_webhook_event(
+            TelegramPollInput {
+                owner_id: paired,
+                instance_id: "primary",
+                update_id: 466,
+                received_at: StoredInstant::from_unix_microseconds(1_794_916_800_000_000)?,
+                event: TelegramPollEvent::Ignore,
+                callback_id: None,
+            },
+            42,
+            |_| None,
+        )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(TelegramPollError::Pairing(TelegramBindingError::Mismatch))
+    ));
     println!(
         "{} paired webhook responses matched, with no poll offset changes",
         cases.len()

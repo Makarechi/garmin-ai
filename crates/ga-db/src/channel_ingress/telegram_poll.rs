@@ -20,6 +20,7 @@ use crate::{
         telegram_ack::{TelegramAckTarget, enqueue_telegram_ack},
     },
     runtime_lease::RuntimeLease,
+    telegram_binding::{TelegramBindingError, confirmed_pairing},
     telegram_cursor::{
         TelegramCursorError, advance_telegram_poll_cursor, lock_ingress, record_telegram_ordering,
     },
@@ -54,6 +55,7 @@ pub struct TelegramPollReceipt {
 pub enum TelegramPollError {
     InvalidBinding,
     InvalidSelection,
+    Pairing(TelegramBindingError),
     ChannelDisabled,
     Busy,
     Ingress(IngressError),
@@ -68,6 +70,7 @@ impl fmt::Display for TelegramPollError {
             Self::InvalidBinding => {
                 f.write_str("Telegram update does not match the polling binding")
             }
+            Self::Pairing(error) => error.fmt(f),
             Self::InvalidSelection => f.write_str("Saved Telegram channel selection is invalid"),
             Self::ChannelDisabled => f.write_str("Telegram channel is disabled by onboarding"),
             Self::Busy => f.write_str("Telegram channel selection is changing"),
@@ -138,12 +141,19 @@ impl Database {
     pub async fn persist_telegram_webhook_event(
         &self,
         input: TelegramPollInput<'_>,
+        expected_chat: i64,
         normalize_callback: impl FnOnce(&Value) -> Option<InboundEnvelope>,
     ) -> Result<TelegramPollReceipt, TelegramPollError> {
         validate_binding(&input)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
             let txn = self.work.begin().await?;
-            persist(txn, input, normalize_callback, DeliveryMode::Webhook).await
+            persist(
+                txn,
+                input,
+                normalize_callback,
+                DeliveryMode::Webhook(expected_chat),
+            )
+            .await
         })
         .await
         .map_err(|_| TelegramPollError::Database)?
@@ -153,7 +163,7 @@ impl Database {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeliveryMode {
     Polling,
-    Webhook,
+    Webhook(i64),
 }
 
 async fn persist(
@@ -169,8 +179,16 @@ async fn persist(
         .await
         .map_err(IngressError::Storage)?;
     let selected = selection(&mut txn, input.instance_id).await?;
-    if !selected && mode == DeliveryMode::Webhook {
-        return Err(TelegramPollError::ChannelDisabled);
+    if let DeliveryMode::Webhook(expected_chat) = mode {
+        if !selected {
+            return Err(TelegramPollError::ChannelDisabled);
+        }
+        let owner = confirmed_pairing(&mut txn, input.instance_id, expected_chat)
+            .await
+            .map_err(TelegramPollError::Pairing)?;
+        if owner != input.owner_id {
+            return Err(TelegramPollError::Pairing(TelegramBindingError::Mismatch));
+        }
     }
     lock_ingress(&mut txn).await?;
     // Edits replace a revision without advancing the last new message timestamp.
