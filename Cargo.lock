@@ -604,6 +604,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ga-fit"
+version = "0.1.0"
+dependencies = [
+ "crc",
+]
+
+[[package]]
 name = "ga-garmin"
 version = "0.1.0"
 dependencies = [
