@@ -1,6 +1,7 @@
 pub mod activity_documents;
 pub mod diary;
 pub mod garmin_owner;
+pub mod health_analysis;
 pub mod jobs;
 pub mod raw_capture;
 pub mod replay;

@@ -1,0 +1,198 @@
+use std::{error::Error, fmt};
+
+use ga_domain::statistics::{block_mean_difference, describe, standardized_difference};
+use serde_json::{Value, json};
+use sqlx::{PgPool, Postgres, Transaction};
+use time::{Date, Month};
+
+use crate::{Database, ReadinessError, check_readiness};
+
+const MAX_RANGE_DAYS: i64 = 3660;
+
+#[derive(Clone, Copy, Debug)]
+pub enum HealthAnalysisError {
+    UnknownMetric,
+    DateRange,
+    Overlap,
+    Storage(ReadinessError),
+    Database,
+}
+
+impl fmt::Display for HealthAnalysisError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnknownMetric => "Unknown daily metric",
+            Self::DateRange => "Date range must be ordered and at most 3660 days",
+            Self::Overlap => "Comparison periods must not overlap",
+            Self::Storage(_) => "Health analysis storage is unavailable",
+            Self::Database => "Daily metrics could not be read",
+        })
+    }
+}
+
+impl Error for HealthAnalysisError {}
+
+impl From<sqlx::Error> for HealthAnalysisError {
+    fn from(_: sqlx::Error) -> Self {
+        Self::Database
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct HealthPeriod {
+    start: Date,
+    end: Date,
+}
+
+impl HealthPeriod {
+    pub fn new(start: Date, end: Date) -> Result<Self, HealthAnalysisError> {
+        let earliest = Date::from_calendar_date(1, Month::March, 2)
+            .map_err(|_| HealthAnalysisError::DateRange)?;
+        let latest = Date::from_calendar_date(9999, Month::November, 1)
+            .map_err(|_| HealthAnalysisError::DateRange)?;
+        if start < earliest
+            || end > latest
+            || !(0..=MAX_RANGE_DAYS).contains(&(end - start).whole_days())
+        {
+            return Err(HealthAnalysisError::DateRange);
+        }
+        Ok(Self { start, end })
+    }
+
+    fn days(self) -> i64 {
+        (self.end - self.start).whole_days() + 1
+    }
+}
+
+impl Database {
+    pub async fn personal_health_baseline(
+        &self,
+        metric: &str,
+        period: HealthPeriod,
+    ) -> Result<Value, HealthAnalysisError> {
+        let (metric, query) = daily_metric(metric)?;
+        let mut txn = begin_daily_analysis(&self.work).await?;
+        let values = observed_values(&mut txn, query, period).await?;
+        txn.commit().await?;
+        let description = describe(values.iter().map(|(_, value)| Some(*value)));
+        Ok(period_document(metric, period, &values, description))
+    }
+
+    pub async fn compare_health_periods(
+        &self,
+        metric: &str,
+        first: HealthPeriod,
+        second: HealthPeriod,
+    ) -> Result<Value, HealthAnalysisError> {
+        if first.start.max(second.start) <= first.end.min(second.end) {
+            return Err(HealthAnalysisError::Overlap);
+        }
+        let (metric, query) = daily_metric(metric)?;
+        let mut txn = begin_daily_analysis(&self.work).await?;
+        let first_values = observed_values(&mut txn, query, first).await?;
+        let second_values = observed_values(&mut txn, query, second).await?;
+        txn.commit().await?;
+        let first_description = describe(first_values.iter().map(|(_, value)| Some(*value)));
+        let second_description = describe(second_values.iter().map(|(_, value)| Some(*value)));
+        let first_samples: Vec<_> = first_values.iter().map(|(_, value)| *value).collect();
+        let second_samples: Vec<_> = second_values.iter().map(|(_, value)| *value).collect();
+        let estimate = block_mean_difference(&first_samples, &second_samples);
+        Ok(json!({
+            "metric": metric,
+            "a": period_document(metric, first, &first_values, first_description),
+            "b": period_document(metric, second, &second_values, second_description),
+            "difference": estimate.difference, "ci95": estimate.ci95, "method": estimate.method,
+            "standardized_difference": standardized_difference(estimate.difference, first_description, second_description),
+            "limitations": [
+                "Observational association; not evidence of causation",
+                "Missing days can bias estimates; blocks follow observations, not calendar gaps",
+                "No adjustment for multiple comparisons or unmeasured confounders",
+            ],
+        }))
+    }
+}
+
+async fn begin_daily_analysis(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, HealthAnalysisError> {
+    let mut txn = pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout = '750ms'")
+        .execute(&mut *txn)
+        .await?;
+    check_readiness(&mut txn)
+        .await
+        .map_err(HealthAnalysisError::Storage)?;
+    Ok(txn)
+}
+
+async fn observed_values(
+    txn: &mut Transaction<'_, Postgres>,
+    query: &'static str,
+    period: HealthPeriod,
+) -> Result<Vec<(Date, f64)>, HealthAnalysisError> {
+    Ok(sqlx::query_as(query)
+        .bind(period.start)
+        .bind(period.end)
+        .bind(period.days())
+        .fetch_all(&mut **txn)
+        .await?)
+}
+
+fn period_document(
+    metric: &str,
+    period: HealthPeriod,
+    values: &[(Date, f64)],
+    stats: ga_domain::statistics::Description,
+) -> Value {
+    let days: Vec<_> = values.iter().map(|(day, _)| day.to_string()).collect();
+    json!({
+        "metric": metric, "start": period.start.to_string(), "end": period.end.to_string(),
+        "n": stats.n, "mean": stats.mean, "median": stats.median, "sd": stats.sd,
+        "min": stats.min, "max": stats.max, "observed_dates": days,
+        "missing_days": period.days() - values.len() as i64,
+        "method": "observed daily values; missing days are not zero",
+    })
+}
+
+fn daily_metric(metric: &str) -> Result<(&'static str, &'static str), HealthAnalysisError> {
+    macro_rules! select_daily_metric {
+        ($($column:literal),+ $(,)?) => {
+            match metric {
+                $($column => Ok(($column, concat!(
+                    "SELECT day, ", $column, "::double precision FROM health_days ",
+                    "WHERE day BETWEEN $1 AND $2 AND ", $column, " IS NOT NULL ",
+                    "ORDER BY day LIMIT $3"
+                ))),)+
+                _ => Err(HealthAnalysisError::UnknownMetric),
+            }
+        };
+    }
+    select_daily_metric!(
+        "hydration_ml",
+        "sleep_score",
+        "sleep_seconds",
+        "deep_seconds",
+        "rem_seconds",
+        "light_seconds",
+        "awake_seconds",
+        "hrv_nightly_avg",
+        "hrv_weekly_avg",
+        "hrv_baseline_low",
+        "hrv_baseline_high",
+        "resting_hr",
+        "body_battery_high",
+        "body_battery_low",
+        "body_battery_charged",
+        "body_battery_drained",
+        "stress_avg",
+        "stress_max",
+        "steps",
+        "active_calories",
+        "intensity_minutes",
+        "training_readiness_score",
+        "recovery_time_minutes",
+        "vo2max",
+    )
+}
