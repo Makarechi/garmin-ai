@@ -192,6 +192,19 @@ impl DailyHealthReader {
     }
 }
 
+async fn owner_timezone(
+    txn: &mut Transaction<'_, Postgres>,
+    configured: &str,
+) -> Result<String, HealthAnalysisError> {
+    let selected: Option<String> = sqlx::query_scalar(
+        "SELECT timezone FROM people
+         WHERE EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding')",
+    )
+    .fetch_optional(&mut **txn)
+    .await?;
+    Ok(selected.unwrap_or_else(|| configured.to_owned()))
+}
+
 async fn begin_verified_analysis(
     pool: &PgPool,
 ) -> Result<Transaction<'static, Postgres>, HealthAnalysisError> {
