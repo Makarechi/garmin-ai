@@ -14,6 +14,7 @@ pub mod identity;
 pub mod language_tags;
 pub mod legacy_json;
 pub mod legacy_metrics;
+pub mod model_response;
 pub mod source_contract;
 pub mod statistics;
 pub mod text_offsets;
