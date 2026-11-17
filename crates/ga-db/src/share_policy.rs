@@ -1,3 +1,7 @@
+mod consent_writes;
+
+pub use consent_writes::TrackerShareGrant;
+
 use std::{error::Error, fmt, future::Future, time::Duration};
 
 use serde::Deserialize;
@@ -88,6 +92,9 @@ pub struct ShareRequirement<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum SharePolicyError {
     InvalidDestination,
+    InvalidConsent,
+    Forbidden,
+    DefinitionMissing,
     Storage(ReadinessError),
     Busy,
     Database,
@@ -97,6 +104,9 @@ impl fmt::Display for SharePolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::InvalidDestination => "Invalid tracker sharing destination",
+            Self::InvalidConsent => "Tracker sharing consent is invalid",
+            Self::Forbidden => "Integration consent management permission required",
+            Self::DefinitionMissing => "Tracker definition not found",
             Self::Storage(_) => "Tracker sharing storage is unavailable",
             Self::Busy => "Tracker sharing consent is being updated",
             Self::Database => "Tracker sharing consent could not be verified",
