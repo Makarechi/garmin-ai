@@ -1,5 +1,9 @@
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
+mod resume;
+
+pub use resume::ModelResume;
+
 use ga_domain::{
     model_gate::{ModelGateIdentity, ModelGateState, PRIMARY_GEMINI_STATE},
     timestamp::StoredInstant,
@@ -15,6 +19,8 @@ use crate::{Database, ReadinessError, check_readiness};
 pub enum ModelGateError {
     Storage(ReadinessError),
     Busy,
+    UnsafeResume,
+    LeaseLost,
     Database,
 }
 
@@ -23,6 +29,8 @@ impl fmt::Display for ModelGateError {
         f.write_str(match self {
             Self::Storage(_) => "Model state storage is unavailable",
             Self::Busy => "A request for this model integration is already in progress",
+            Self::UnsafeResume => "Earlier model request cannot be safely resumed",
+            Self::LeaseLost => "The model job claim expired or belongs to another worker",
             Self::Database => "Saved model state could not be accessed",
         })
     }
