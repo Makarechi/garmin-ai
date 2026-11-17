@@ -3,7 +3,9 @@
 import argparse
 import json
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
+from unicodedata import unidata_version
 from unittest.mock import patch
 
 from capture_reference import isolated_engine
@@ -48,6 +50,15 @@ def capture(output):
         ),
         ("numeric_narrative", EVIDENCE, {"answer": "Synthetic 78", "evidence_ids": [1]}),
         ("numeric_unicode_narrative", EVIDENCE, {"answer": "Synthetic Ⅳ", "evidence_ids": [1]}),
+        ("numeric_ideograph", EVIDENCE, {"answer": "Synthetic 四", "evidence_ids": [1]}),
+        ("numeric_ideograph_scale", EVIDENCE, {"answer": "Synthetic 万", "evidence_ids": [1]}),
+        ("numeric_ideograph_financial", EVIDENCE, {"answer": "Synthetic 壹", "evidence_ids": [1]}),
+        (
+            "numeric_ideograph_supplementary",
+            EVIDENCE,
+            {"answer": "Synthetic 𠄡", "evidence_ids": [1]},
+        ),
+        ("supported_ideographic_text", EVIDENCE, {"answer": "合成結果", "evidence_ids": [1]}),
         (
             "safety_precedes_tool",
             None,
@@ -77,8 +88,8 @@ def capture(output):
             }
             result = known.get(actual, "verified")
             if result == "verified":
-                assert name in {"supported", "numeric_only"} and (
-                    "Synthetic" in actual or "78" in actual
+                assert name in {"supported", "numeric_only", "supported_ideographic_text"} and (
+                    "Synthetic" in actual or "78" in actual or "合成結果" in actual
                 ), name
             results.append(
                 {
@@ -94,10 +105,36 @@ def capture(output):
     output.write_text(json.dumps(results, ensure_ascii=False))
 
 
+def numeric_ranges(output):
+    if unidata_version != "17.0.0":
+        raise ValueError("Use the pinned Python Unicode data")
+    points = [point for point in range(0x110000) if chr(point).isnumeric()]
+    ranges = []
+    for point in points:
+        if ranges and point == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], point)
+        else:
+            ranges.append((point, point))
+    digest = sha256(b"".join(point.to_bytes(4, "big") for point in points)).hexdigest()
+    output.write_text(
+        "// Generated from the pinned Python str.isnumeric() (Unicode 17.0.0).\n"
+        "// Rebuild with migration/check_analysis_step.py --numeric-ranges.\n"
+        "const NUMERIC_RANGES: &[(u32, u32)] = &[\n"
+        + "".join(f"    (0x{start:x}, 0x{end:x}),\n" for start, end in ranges)
+        + "];\n"
+        + f'#[cfg(test)]\nconst NUMERIC_DIGEST: &str = "{digest}";\n'
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
-    capture(parser.parse_args().output)
+    parser.add_argument("--numeric-ranges", action="store_true")
+    options = parser.parse_args()
+    if options.numeric_ranges:
+        numeric_ranges(options.output)
+    else:
+        capture(options.output)
 
 
 if __name__ == "__main__":

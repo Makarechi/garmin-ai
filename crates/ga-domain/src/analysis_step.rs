@@ -1,5 +1,7 @@
 //! Validate one model step before executing tools or composing an answer.
 
+mod numeric;
+
 use std::{collections::BTreeSet, error::Error, fmt, sync::OnceLock};
 
 use jsonschema::Validator;
@@ -136,7 +138,7 @@ impl<'a> AnalysisStep<'a> {
         {
             return Err(AnalysisStepError::MissingEvidence);
         }
-        if narrative.is_some_and(|answer| answer.chars().any(char::is_numeric)) {
+        if narrative.is_some_and(|answer| answer.chars().any(numeric::is_numeric)) {
             return Err(AnalysisStepError::UnverifiedNarrative);
         }
         let numbers = verified_numbers(numbers, evidence, &self.selected)
