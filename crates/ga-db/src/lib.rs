@@ -1,9 +1,9 @@
+pub mod jobs;
+
 use std::{str::FromStr, time::Duration};
 
-use sqlx::{
-    ConnectOptions, PgPool, Postgres, Transaction,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{ConnectOptions, Transaction};
+use sqlx_postgres::{PgConnectOptions, PgPool, PgPoolOptions, Postgres};
 
 const SCHEMA_REVISION: &str = "c54f8a72d130";
 const STORAGE_LIFECYCLE_LOCK: i64 = 72104622;
@@ -11,7 +11,8 @@ const OWNER_ENROLLMENT_LOCK: i64 = 72104625;
 
 #[derive(Clone)]
 pub struct Database {
-    pool: PgPool,
+    control: PgPool,
+    work: PgPool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,12 +36,10 @@ impl Database {
         let options = PgConnectOptions::from_str(&format!("postgresql://{address}"))?
             .disable_statement_logging()
             .application_name("garmin-ai-rust");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .min_connections(0)
-            .acquire_timeout(Duration::from_millis(750))
-            .connect_lazy_with(options);
-        Ok(Self { pool })
+        Ok(Self {
+            control: small_pool(options.clone()),
+            work: small_pool(options),
+        })
     }
 
     pub async fn readiness(&self) -> Result<(), ReadinessError> {
@@ -50,7 +49,7 @@ impl Database {
     }
 
     async fn readiness_transaction(&self) -> Result<(), ReadinessError> {
-        let mut txn = self.pool.begin_with("BEGIN READ ONLY").await?;
+        let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
             .await?;
@@ -58,6 +57,14 @@ impl Database {
         txn.rollback().await?;
         readiness
     }
+}
+
+fn small_pool(options: PgConnectOptions) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(2)
+        .min_connections(0)
+        .acquire_timeout(Duration::from_millis(750))
+        .connect_lazy_with(options)
 }
 
 async fn check_readiness(txn: &mut Transaction<'_, Postgres>) -> Result<(), ReadinessError> {
