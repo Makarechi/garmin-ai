@@ -1,5 +1,5 @@
 WITH scoped AS NOT MATERIALIZED (
-    SELECT job.id
+    SELECT job.id,raw.endpoint
     FROM jobs AS job
     JOIN source_payloads AS raw ON raw.id = CASE
         WHEN pg_input_is_valid(job.payload->>'raw_ref','uuid')
@@ -17,7 +17,7 @@ WITH scoped AS NOT MATERIALIZED (
         completed_at=$3,lease_until=NULL,lease_token=NULL
     FROM exhausted WHERE jobs.id=exhausted.id
 ), candidate AS (
-    SELECT job.id FROM jobs AS job JOIN scoped USING (id)
+    SELECT job.id,scoped.endpoint FROM jobs AS job JOIN scoped USING (id)
     WHERE job.attempts<$2
       AND ((job.status='pending' AND job.run_at<=$3)
            OR (job.status='running' AND job.lease_until<$3))
@@ -27,4 +27,4 @@ WITH scoped AS NOT MATERIALIZED (
 UPDATE jobs SET status='running',attempts=attempts+1,lease_token=$4,
                 lease_until=$3+$5*interval '1 second'
 FROM candidate WHERE jobs.id=candidate.id
-RETURNING jobs.id,jobs.attempts,jobs.payload::text
+RETURNING jobs.id,jobs.attempts,jobs.payload::text,candidate.endpoint

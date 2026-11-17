@@ -1,4 +1,5 @@
 mod calendar;
+mod dispatch;
 mod input;
 mod intraday;
 mod queue;
@@ -8,6 +9,7 @@ pub use calendar::{
     CalendarReplayError, CalendarReplayOutcome, HealthReplayJobResult, RunHealthReplay,
 };
 pub(crate) use calendar::{HEALTH_CALENDAR_ENDPOINTS, HEALTH_INTRADAY_ENDPOINTS};
+pub use dispatch::{ReplayJobOutcome, ReplayJobResult, ReplayWorkerError, RunReplayJob};
 pub use input::{
     GARMIN_PARSER_VERSION, PreparedReplay, ReadReplayInput, ReplayContent, ReplayInput,
     ReplayInputError, ReplayReplacement, ReplaySkip,

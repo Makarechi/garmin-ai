@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-const ENDPOINT: &str = "activity_fit";
+pub(crate) const ENDPOINT: &str = "activity_fit";
 const PARSER_VERSION: i32 = 9;
 const ZIP_END: &[u8] = b"PK\x05\x06";
 const ZIP_END_BYTES: usize = 22;

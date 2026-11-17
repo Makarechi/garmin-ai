@@ -99,7 +99,7 @@ impl From<JobStoreError> for CalendarReplayError {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum ReplayScope {
+pub(super) enum ReplayScope {
     Calendar,
     Intraday,
     ActivityDocument,
@@ -107,11 +107,8 @@ enum ReplayScope {
 }
 
 impl ReplayScope {
-    fn require_endpoint(
-        endpoint: &str,
-        required: Option<Self>,
-    ) -> Result<Self, CalendarReplayError> {
-        let scope = if HEALTH_CALENDAR_ENDPOINTS.contains(&endpoint) {
+    pub(super) fn for_endpoint(endpoint: &str) -> Result<Self, CalendarReplayError> {
+        Ok(if HEALTH_CALENDAR_ENDPOINTS.contains(&endpoint) {
             Self::Calendar
         } else if HEALTH_INTRADAY_ENDPOINTS.contains(&endpoint) {
             Self::Intraday
@@ -121,7 +118,14 @@ impl ReplayScope {
             Self::ActivitySummary
         } else {
             return Err(CalendarReplayError::OtherEndpoint);
-        };
+        })
+    }
+
+    fn require_endpoint(
+        endpoint: &str,
+        required: Option<Self>,
+    ) -> Result<Self, CalendarReplayError> {
+        let scope = Self::for_endpoint(endpoint)?;
         if required.map_or(
             matches!(scope, Self::Calendar | Self::Intraday),
             |required| required == scope,
@@ -223,6 +227,17 @@ impl Database {
         archive: Arc<Archive>,
         cancelled: impl Fn() -> bool + Clone + Send + 'static,
     ) -> Result<HealthReplayJobResult, CalendarReplayError> {
+        self.run_json_replay_job(options, None, archive, cancelled)
+            .await
+    }
+
+    pub(super) async fn run_json_replay_job(
+        &self,
+        options: RunHealthReplay<'_>,
+        required: Option<ReplayScope>,
+        archive: Arc<Archive>,
+        cancelled: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<HealthReplayJobResult, CalendarReplayError> {
         let mut txn = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
@@ -231,7 +246,7 @@ impl Database {
         let replay = if let Some((source_id, fingerprint)) = options.lease.source() {
             replay_json_in(
                 &mut txn,
-                None,
+                required,
                 ReadReplayInput {
                     authenticated_fingerprint: &fingerprint,
                     source_id,
