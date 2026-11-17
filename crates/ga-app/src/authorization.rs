@@ -1,4 +1,4 @@
-use std::{env, io};
+use std::{env, ffi::OsString, io};
 
 use axum::http::HeaderValue;
 use ga_domain::access::{Scope, Scopes};
@@ -24,8 +24,9 @@ struct Token {
 impl Authorization {
     pub(crate) fn configured() -> io::Result<Self> {
         let [file_legacy, file_scoped] = read_settings_file()?;
-        let legacy = env_value("GA_API_KEY")?.or(file_legacy);
-        let scoped = env_value("GA_API_TOKENS")?.or(file_scoped);
+        let [process_legacy, process_scoped] = read_environment()?;
+        let legacy = process_legacy.or(file_legacy);
+        let scoped = process_scoped.or(file_scoped);
         Self::parse(legacy.as_deref(), scoped.as_deref()).ok_or_else(invalid_credentials)
     }
 
@@ -129,21 +130,34 @@ fn read_settings_file() -> io::Result<[Option<String>; 2]> {
         Err(_) => return Err(invalid_credentials()),
     };
     for (name, value) in entries.filter_map(Result::ok) {
-        if name.eq_ignore_ascii_case("GA_API_KEY") {
-            result[0] = Some(value);
-        } else if name.eq_ignore_ascii_case("GA_API_TOKENS") {
-            result[1] = Some(value);
+        if let Some(index) = credential_setting(&name) {
+            result[index] = Some(value);
         }
     }
     Ok(result)
 }
 
-fn env_value(name: &str) -> io::Result<Option<String>> {
-    match env::var(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(invalid_credentials()),
+fn read_environment() -> io::Result<[Option<String>; 2]> {
+    let mut result = [None, None];
+    for (name, value) in env::vars_os() {
+        if let Some(index) = name.to_str().and_then(credential_setting) {
+            result[index] = Some(value);
+        }
     }
+    let [legacy, scoped] = result;
+    let read = |value: Option<OsString>| {
+        value
+            .map(OsString::into_string)
+            .transpose()
+            .map_err(|_| invalid_credentials())
+    };
+    Ok([read(legacy)?, read(scoped)?])
+}
+
+fn credential_setting(name: &str) -> Option<usize> {
+    ["GA_API_KEY", "GA_API_TOKENS"]
+        .iter()
+        .position(|setting| name.eq_ignore_ascii_case(setting))
 }
 
 fn invalid_credentials() -> io::Error {

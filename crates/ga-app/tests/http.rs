@@ -149,7 +149,7 @@ fn scoped_credentials_and_dotenv_priority_are_applied() -> Result<(), Box<dyn st
         root.path().join(".env"),
         format!("GA_API_KEY={old}\nGA_API_TOKENS='[{{\"key\":\"{default}\"}}]'\n"),
     )?;
-    let server = Server::configured(&[("GA_API_KEY", new)], Some(root.path()))?;
+    let server = Server::configured(&[("ga_api_key", new)], Some(root.path()))?;
     for (key, status, expected) in [
         (
             old,
@@ -177,6 +177,29 @@ fn scoped_credentials_and_dotenv_priority_are_applied() -> Result<(), Box<dyn st
         assert!(head.contains("cache-control: no-store"));
         assert_eq!(serde_json::from_str::<serde_json::Value>(body)?, expected);
     }
+    let rotated = "synthetic-rotated-editor-token-xxyyzz";
+    let scopes = serde_json::json!([
+        {"key":rotated,"scopes":["read:diary","write:diary"]}
+    ])
+    .to_string();
+    let server = Server::configured(&[("gA_aPi_ToKeNs", &scopes)], Some(root.path()))?;
+    let raw = server.request(
+        "GET",
+        "/capabilities",
+        &format!("Authorization: Bearer {default}\r\n"),
+    )?;
+    assert!(parts(&raw)?.0.starts_with("HTTP/1.1 401 "));
+    let raw = server.request(
+        "GET",
+        "/capabilities",
+        &format!("Authorization: Bearer {rotated}\r\n"),
+    )?;
+    let (head, body) = parts(&raw)?;
+    assert!(head.starts_with("HTTP/1.1 200 "));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body)?,
+        serde_json::json!({"read_diary":true,"write_diary":true,"manage_definitions":false})
+    );
     Ok(())
 }
 
