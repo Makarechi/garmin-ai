@@ -49,3 +49,24 @@ replay, long analytics, simulated voice and provider latency, backup/restore and
 overlap with interactive work. Capture comparable output and final state for each scenario
 alongside timing and resource metrics. Validate operating-system reserve and storage saturation
 on a representative small host before assigning release limits.
+
+## FIT projection under concurrent service activity
+
+Run the same command with `--fit-records 5000` or `--fit-records 50000` to add the synthetic FIT
+workload. Each size runs against a fresh database, with the API and normal worker still running.
+A dedicated application container takes the same 384 MiB memory ceiling as the worker. Its
+fixture generates two valid FIT members with timestamps, heart rate and a deliberately unknown
+field. It writes the ZIP through the real baseline `store_fit` path, commits the projection and
+checks its row count, boundaries, field provenance, archive digest and stored bytes. A stable
+digest over every committed projection row enables comparison with later implementations.
+
+| Records | Uncompressed FIT bytes | ZIP bytes | Time to parse and commit | Workload peak |
+| ---: | ---: | ---: | ---: | ---: |
+| [5,000](evidence/python-fit-5000-linux-arm64.json) | 40,062 | 24,359 | 0.369 s | 83.10 MiB |
+| [50,000](evidence/python-fit-50000-linux-arm64.json) | 400,062 | 239,839 | 3.727 s | 161.57 MiB |
+
+The API liveness probe stayed available during the sampled overlap (19.28–20.26 ms for the
+50,000-record case). The workload peak includes generation, normalization, commit, projection
+verification and its charged file cache. This comparison uses the baseline writer directly.
+It leaves out Garmin transport and the worker queue, and does not cover the 100 MiB input
+ceiling, developer-field data, or a long-running deployment.

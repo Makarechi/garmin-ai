@@ -93,8 +93,8 @@ def sample(container, *, user=None):
 def report_run(args):
     started = time.monotonic()
     prefix = f"garmin-benchmark-{secrets.token_hex(5)}"
-    db, api, worker, migrate, observer = (
-        f"{prefix}-{role}" for role in ("db", "api", "worker", "migrate", "observer")
+    db, api, worker, migrate, observer, workload = (
+        f"{prefix}-{role}" for role in ("db", "api", "worker", "migrate", "observer", "workload")
     )
     password = secrets.token_urlsafe(24)
     app_env = {
@@ -132,7 +132,7 @@ def report_run(args):
     if not engine.startswith("2 "):
         raise RuntimeError("The startup benchmark requires cgroup v2")
 
-    def launch(name, image, *command, limits=(), env=None):
+    def launch(name, image, *command, limits=(), env=None, mounts=()):
         env_flags = [flag for key in env or {} for flag in ("-e", key)]
         cleanup.callback(docker, "rm", "-fv", name, check=False)
         docker(
@@ -145,6 +145,7 @@ def report_run(args):
             "--network",
             prefix,
             *limits,
+            *mounts,
             *env_flags,
             image,
             *command,
@@ -272,6 +273,52 @@ def report_run(args):
                 }
             )
             time.sleep(args.interval)
+
+        fit_result = None
+        if args.fit_records:
+            workload_path = Path(__file__).with_name("fit_workload.py").resolve()
+            fit_command = (
+                f"python /fit-workload.py {args.fit_records} > /tmp/result.json; "
+                "touch /tmp/finished; exec sleep 300"
+            )
+            launch(
+                workload,
+                image,
+                "sh",
+                "-ec",
+                fit_command,
+                limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
+                env=app_env,
+                mounts=("--mount", f"type=bind,src={workload_path},dst=/fit-workload.py,readonly"),
+            )
+            fit_samples = []
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
+                finished = docker("exec", workload, "test", "-f", "/tmp/finished", check=False)
+                if not finished.returncode:
+                    break
+                state = docker("inspect", workload, "--format", "{{.State.Status}}").stdout.strip()
+                if state != "running":
+                    raise RuntimeError("Synthetic FIT workload exited before committing")
+                live = probe("/health/live")
+                fit_samples.append(
+                    {
+                        "elapsed_seconds": elapsed(),
+                        "health_live_ms": float(live.stdout) if not live.returncode else None,
+                        "database": sample(db, user="postgres"),
+                        "api": sample(api),
+                        "worker": sample(worker),
+                        "workload": sample(workload),
+                    }
+                )
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("Synthetic FIT workload exceeded the measurement deadline")
+            fit_result = {
+                **json.loads(docker("exec", workload, "cat", "/tmp/result.json").stdout),
+                "final_memory": sample(workload),
+                "samples": fit_samples,
+            }
         revision = docker(
             "exec",
             db,
@@ -306,6 +353,7 @@ def report_run(args):
             "lifecycle": lifecycle,
             "migration": migration_sample,
             "idle_samples": samples,
+            **({"fit_workload": fit_result} if fit_result else {}),
         }
 
 
@@ -317,6 +365,7 @@ def main():
     parser.add_argument("--cpu", default="0", help="Shared Docker CPU affinity")
     parser.add_argument("--samples", default=8, type=int, choices=range(1, 61), metavar="1..60")
     parser.add_argument("--interval", default=2, type=float, choices=(0.5, 1, 2, 5))
+    parser.add_argument("--fit-records", type=int, choices=(5000, 50000))
     args = parser.parse_args()
     print(json.dumps(report_run(args), indent=2))
 
