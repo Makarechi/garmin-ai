@@ -1,3 +1,4 @@
+pub mod garmin_owner;
 pub mod jobs;
 
 use std::{str::FromStr, time::Duration};
