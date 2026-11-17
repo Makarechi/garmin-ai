@@ -621,9 +621,11 @@ dependencies = [
 name = "ga-db"
 version = "0.1.0"
 dependencies = [
+ "ga-archive",
  "ga-domain",
  "sqlx",
  "sqlx-postgres",
+ "tempfile",
  "time",
  "tokio",
  "uuid",

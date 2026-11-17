@@ -1,5 +1,6 @@
 use std::{error::Error, fmt, time::Duration};
 
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
@@ -80,8 +81,21 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(OwnerVerificationError::Storage)?;
-        let rows = sqlx::query_as::<_, BindingRow>(
-            "SELECT people.id, connection.external_id, legacy.key IS NOT NULL,
+        let owner = verify_owner_in_transaction(&mut txn, authenticated_fingerprint).await;
+        txn.rollback().await?;
+        owner
+    }
+}
+
+pub(crate) async fn verify_owner_in_transaction(
+    txn: &mut Transaction<'_, Postgres>,
+    authenticated_fingerprint: &str,
+) -> Result<GarminOwner, OwnerVerificationError> {
+    if !is_fingerprint(authenticated_fingerprint) {
+        return Err(OwnerVerificationError::InvalidFingerprint);
+    }
+    let rows = sqlx::query_as::<_, BindingRow>(
+        "SELECT people.id, connection.external_id, legacy.key IS NOT NULL,
                     CASE WHEN jsonb_typeof(legacy.value->'fingerprint') = 'string'
                          THEN legacy.value->>'fingerprint' END
              FROM people
@@ -89,14 +103,12 @@ impl Database {
                  AND connection.provider = 'garmin' AND connection.namespace = $1
              LEFT JOIN app_state AS legacy ON legacy.key = $2
              LIMIT 2",
-        )
-        .bind(EXISTING_NAMESPACE)
-        .bind(LEGACY_BINDING_KEY)
-        .fetch_all(&mut *txn)
-        .await?;
-        txn.rollback().await?;
-        verify_binding(&rows, authenticated_fingerprint)
-    }
+    )
+    .bind(EXISTING_NAMESPACE)
+    .bind(LEGACY_BINDING_KEY)
+    .fetch_all(&mut **txn)
+    .await?;
+    verify_binding(&rows, authenticated_fingerprint)
 }
 
 fn verify_binding(

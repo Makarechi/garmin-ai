@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ga-archive = { path = "../ga-archive" }
 ga-domain = { path = "../ga-domain" }
 sqlx = { version = "=0.9.0", default-features = false, features = [
     "postgres",
@@ -15,11 +16,12 @@ sqlx = { version = "=0.9.0", default-features = false, features = [
 ] }
 sqlx-postgres = { version = "=0.9.0", default-features = false, features = ["time", "uuid"] }
 time = { version = "0.3.55", default-features = false }
-tokio = { version = "1.54.1", features = ["time"] }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
 uuid = { version = "1.29.3", features = ["v4"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "process", "rt"] }

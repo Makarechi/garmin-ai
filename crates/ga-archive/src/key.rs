@@ -26,8 +26,12 @@ pub struct ArchiveKey {
 }
 
 impl ArchiveKey {
+    pub fn digest_hex(&self) -> String {
+        hex::encode(self.digest)
+    }
+
     pub(crate) fn path_parts(&self) -> (String, String) {
-        let digest = hex::encode(self.digest);
+        let digest = self.digest_hex();
         let prefix = digest[..2].to_owned();
         (prefix, format!("{digest}.{}", self.kind.extension()))
     }
