@@ -3,6 +3,7 @@ pub mod diary;
 pub mod fit_staging;
 pub mod garmin_owner;
 pub mod health_analysis;
+mod health_projection;
 pub mod jobs;
 pub mod raw_capture;
 pub mod replay;

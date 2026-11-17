@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use ga_domain::{
     event_input::known_timezone,
+    garmin_health::HealthStatus,
     garmin_summary::{activity_identity, historical_summary_fields, summary_fields},
     timestamp::StoredInstant,
 };
@@ -11,7 +12,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    Database,
+    Database, health_projection,
     raw_capture::{CaptureError, GARMIN_LEGACY_SOURCE, lock_legacy_scope},
 };
 
@@ -71,28 +72,46 @@ pub struct ApplyActivitySummary<'a> {
     pub timezone: &'a str,
 }
 
-#[derive(Clone, Copy)]
-enum Projection {
-    Document(ActivityDocument),
-    Summary(ActivitySummaryKind),
+pub struct ApplyHealthPayload<'a> {
+    pub account_fingerprint: &'a str,
+    pub endpoint: &'a str,
+    pub calendar_key: &'a str,
+    pub source_id: Uuid,
+    pub requested_at: StoredInstant,
+    pub timezone: &'a str,
 }
 
-impl Projection {
-    fn endpoint(self) -> &'static str {
+#[derive(Clone, Copy)]
+enum Projection<'a> {
+    Document(ActivityDocument),
+    Summary(ActivitySummaryKind),
+    Health(&'a str),
+}
+
+impl<'a> Projection<'a> {
+    fn endpoint(self) -> &'a str {
         match self {
             Self::Document(document) => document.endpoint(),
             Self::Summary(kind) => kind.endpoint(),
+            Self::Health(endpoint) => endpoint,
         }
+    }
+
+    fn shared(self) -> bool {
+        matches!(
+            self,
+            Self::Summary(_) | Self::Health("daily" | "heart_rate" | "body_battery")
+        )
     }
 }
 
-struct ApplyActivity<'a> {
-    account_fingerprint: &'a str,
-    source_key: &'a str,
-    projection: Projection,
-    source_id: Uuid,
-    requested_at: StoredInstant,
-    timezone: &'a str,
+pub(crate) struct ApplyActivity<'a> {
+    pub(crate) account_fingerprint: &'a str,
+    pub(crate) source_key: &'a str,
+    projection: Projection<'a>,
+    pub(crate) source_id: Uuid,
+    pub(crate) requested_at: StoredInstant,
+    pub(crate) timezone: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,12 +124,26 @@ pub enum DocumentStatus {
     Error,
 }
 
+impl DocumentStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Archived => "archived",
+            Self::Normalized => "normalized",
+            Self::Empty => "empty",
+            Self::Unchanged => "unchanged",
+            Self::Stale => "stale",
+            Self::Error => "error",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DocumentError {
     Access(CaptureError),
     SourceMissing,
     InvalidRecordedState,
     InvalidSummary,
+    InvalidHealthPayload,
     Database,
 }
 
@@ -123,6 +156,7 @@ impl fmt::Display for DocumentError {
                 "Recorded activity document state could not be interpreted"
             }
             Self::InvalidSummary => "Captured Garmin activity summary is invalid",
+            Self::InvalidHealthPayload => "Captured Garmin health payload is invalid",
             Self::Database => "Activity document state could not be stored",
         })
     }
@@ -169,6 +203,26 @@ impl Database {
         .await
     }
 
+    /// Apply one retained daily or intraday response using its original source identity.
+    pub async fn apply_health_payload(
+        &self,
+        request: ApplyHealthPayload<'_>,
+    ) -> Result<DocumentStatus, DocumentError> {
+        if matches!(request.endpoint, "activity" | "activities")
+            || request.endpoint.starts_with("activity_")
+        {
+            return Err(DocumentError::InvalidHealthPayload);
+        }
+        self.apply_activity(ApplyActivity {
+            account_fingerprint: request.account_fingerprint,
+            source_key: request.calendar_key,
+            projection: Projection::Health(request.endpoint),
+            source_id: request.source_id,
+            requested_at: request.requested_at,
+            timezone: request.timezone,
+        })
+        .await
+    }
     async fn apply_activity(
         &self,
         request: ApplyActivity<'_>,
@@ -221,22 +275,25 @@ impl Database {
             "completeness": "unverified",
         });
 
-        if !unchanged || matches!(request.projection, Projection::Summary(_)) {
+        let mut outcome = None;
+        if !unchanged || request.projection.shared() {
             let mut effects = txn.begin().await?;
-            let applied = apply_effects(&mut effects, &request, empty, &status, parser).await;
-            if applied.is_err() {
-                effects.rollback().await?;
-                raw_status(&mut txn, request.source_id, "error", parser).await?;
-                metadata.insert("timezone".to_owned(), json!(request.timezone));
-                metadata.insert("failed_parser_version".to_owned(), json!(PARSER_VERSION));
-                put_state(&mut txn, &meta_key, &Value::Object(metadata)).await?;
-                let mut attempt = attempt;
-                attempt["parser_version"] = json!(PARSER_VERSION);
-                state.insert("status".to_owned(), json!("error"));
-                state.insert("latest_attempt".to_owned(), attempt);
-                put_state(&mut txn, &state_key, &Value::Object(state)).await?;
-                txn.commit().await?;
-                return Ok(DocumentStatus::Error);
+            match apply_effects(&mut effects, &request, empty, &status, parser, unchanged).await {
+                Ok(status) => outcome = Some(status),
+                Err(_) => {
+                    effects.rollback().await?;
+                    raw_status(&mut txn, request.source_id, "error", parser).await?;
+                    metadata.insert("timezone".to_owned(), json!(request.timezone));
+                    metadata.insert("failed_parser_version".to_owned(), json!(PARSER_VERSION));
+                    put_state(&mut txn, &meta_key, &Value::Object(metadata)).await?;
+                    let mut attempt = attempt;
+                    attempt["parser_version"] = json!(PARSER_VERSION);
+                    state.insert("status".to_owned(), json!("error"));
+                    state.insert("latest_attempt".to_owned(), attempt);
+                    put_state(&mut txn, &state_key, &Value::Object(state)).await?;
+                    txn.commit().await?;
+                    return Ok(DocumentStatus::Error);
+                }
             }
             effects.commit().await?;
             if !unchanged {
@@ -252,12 +309,9 @@ impl Database {
             .await?;
         let fetched =
             StoredInstant::try_from(now).map_err(|_| DocumentError::InvalidRecordedState)?;
-        let raw_outcome = if unchanged {
-            status.as_str()
-        } else if empty {
-            "empty"
-        } else {
-            nonempty_status(request.projection)
+        let raw_outcome = match outcome {
+            Some(outcome) => outcome.label(),
+            None => status.as_str(),
         };
         let mut value = attempt;
         value["fetched_at"] = json!(fetched.to_string());
@@ -274,16 +328,11 @@ impl Database {
         }
         put_state(&mut txn, &state_key, &value).await?;
         txn.commit().await?;
-        Ok(if unchanged {
-            DocumentStatus::Unchanged
-        } else if empty {
-            DocumentStatus::Empty
+        if unchanged {
+            Ok(DocumentStatus::Unchanged)
         } else {
-            match request.projection {
-                Projection::Document(_) => DocumentStatus::Archived,
-                Projection::Summary(_) => DocumentStatus::Normalized,
-            }
-        })
+            outcome.ok_or(DocumentError::InvalidRecordedState)
+        }
     }
 }
 
@@ -350,13 +399,6 @@ async fn raw_status(
     Ok(())
 }
 
-fn nonempty_status(projection: Projection) -> &'static str {
-    match projection {
-        Projection::Document(_) => "archived",
-        Projection::Summary(_) => "normalized",
-    }
-}
-
 async fn apply_document(
     txn: &mut Transaction<'_, Postgres>,
     request: &ApplyActivity<'_>,
@@ -407,32 +449,36 @@ async fn apply_effects(
     empty: bool,
     previous_status: &str,
     previous_parser: i32,
-) -> Result<(), DocumentError> {
-    if !empty {
+    unchanged: bool,
+) -> Result<DocumentStatus, DocumentError> {
+    let outcome = if empty {
+        DocumentStatus::Empty
+    } else {
         match request.projection {
             Projection::Document(document) => {
-                apply_document(txn, request, document.endpoint()).await?
+                apply_document(txn, request, document.endpoint()).await?;
+                DocumentStatus::Archived
             }
-            Projection::Summary(kind) => apply_summaries(txn, request, kind).await?,
+            Projection::Summary(kind) => {
+                apply_summaries(txn, request, kind).await?;
+                DocumentStatus::Normalized
+            }
+            Projection::Health(endpoint) => {
+                match health_projection::publish(txn, request, endpoint, unchanged).await? {
+                    HealthStatus::Normalized => DocumentStatus::Normalized,
+                    HealthStatus::Archived => DocumentStatus::Archived,
+                    HealthStatus::Empty => DocumentStatus::Empty,
+                }
+            }
         }
-    }
-    raw_status(
-        txn,
-        request.source_id,
-        if empty {
-            "empty"
-        } else {
-            nonempty_status(request.projection)
-        },
-        PARSER_VERSION,
-    )
-    .await?;
+    };
+    raw_status(txn, request.source_id, outcome.label(), PARSER_VERSION).await?;
     if previous_parser != PARSER_VERSION
         && (previous_parser > 0 || matches!(previous_status, "error" | "stale"))
     {
         invalidate_replay_outputs(txn).await?;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 async fn apply_summaries(
@@ -667,7 +713,9 @@ async fn publish_summary_row(
     Ok(result.rows_affected() != 0)
 }
 
-async fn supersede_insights(txn: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+pub(crate) async fn supersede_insights(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE insights SET status = 'superseded'
          WHERE status IN ('candidate', 'accepted', 'delivered', 'uncertain')",
