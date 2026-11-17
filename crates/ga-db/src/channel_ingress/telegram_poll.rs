@@ -257,7 +257,7 @@ async fn persist(
     })
 }
 
-async fn selection(
+pub(crate) async fn selection(
     txn: &mut Transaction<'_, Postgres>,
     instance: &str,
 ) -> Result<bool, TelegramPollError> {
