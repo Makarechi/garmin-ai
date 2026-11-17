@@ -363,7 +363,7 @@ pub(crate) fn finite_number(
     }
 }
 
-fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
+pub(crate) fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
     let text = text.trim();
     if !text.contains('_') {
         return Some(Cow::Borrowed(text));
@@ -381,6 +381,6 @@ fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
     Some(Cow::Owned(text.replace('_', "")))
 }
 
-fn python_whitespace(character: char) -> bool {
+pub(crate) fn python_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{001c}'..='\u{001f}')
 }

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, error::Error, fmt, sync::LazyLock};
 
-use ga_domain::event_contract::metric_definition_hash;
+use ga_domain::{event_contract::metric_definition_hash, metric_contract::UserMetricContract};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
@@ -9,12 +9,16 @@ use uuid::Uuid;
 use crate::{Database, ReadinessError, check_readiness};
 
 const METRIC_REGISTRY_LOCK: i64 = 72104629;
+const DIARY_WRITER_LOCK: i64 = 72104619;
 
 #[derive(Debug)]
 pub enum MetricRegistryError {
     Unavailable(ReadinessError),
     InvalidCatalog,
     InvalidRecordedVersion,
+    Forbidden,
+    OwnerMissing,
+    Busy,
     Database,
 }
 
@@ -24,6 +28,9 @@ impl fmt::Display for MetricRegistryError {
             Self::Unavailable(_) => "Metric storage is unavailable",
             Self::InvalidCatalog => "The built-in metric registry is invalid",
             Self::InvalidRecordedVersion => "The stored metric definition is invalid",
+            Self::Forbidden => "Metric definition management permission is required",
+            Self::OwnerMissing => "Metric owner could not be verified",
+            Self::Busy => "Metric registry writes are busy",
             Self::Database => "The metric registry could not be saved",
         })
     }
@@ -38,10 +45,12 @@ impl From<sqlx::Error> for MetricRegistryError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SystemMetricVersion {
+pub struct MetricVersion {
     pub id: Uuid,
     pub version: i32,
 }
+
+pub type SystemMetricVersion = MetricVersion;
 
 #[derive(Deserialize)]
 struct CatalogEntry {
@@ -65,6 +74,42 @@ static METRICS: LazyLock<Option<Catalog>> = LazyLock::new(|| {
 });
 
 impl Database {
+    /// Store a verified user metric, keeping old versions available to their observations.
+    pub async fn register_user_metric(
+        &self,
+        owner: Uuid,
+        authorized: bool,
+        contract: &UserMetricContract,
+    ) -> Result<MetricVersion, MetricRegistryError> {
+        if !authorized {
+            return Err(MetricRegistryError::Forbidden);
+        }
+        let mut txn = self.work.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(MetricRegistryError::Unavailable)?;
+        let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(DIARY_WRITER_LOCK)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !held {
+            return Err(MetricRegistryError::Busy);
+        }
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM people WHERE id = $1)")
+            .bind(owner)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !exists {
+            return Err(MetricRegistryError::OwnerMissing);
+        }
+        let version = register_user_metric_in(&mut txn, owner, contract).await?;
+        txn.commit().await?;
+        Ok(version)
+    }
+
     /// Ensure the immutable built-in contracts without altering prior observations.
     pub async fn ensure_system_metrics(
         &self,
@@ -94,34 +139,73 @@ pub(crate) async fn ensure_system_metrics_in(
         .await?;
     let mut versions = BTreeMap::new();
     for (key, entry) in catalog {
-        versions.insert(key.as_str(), ensure_metric(txn, key, entry).await?);
+        let version = ensure_metric(
+            txn,
+            "system",
+            None,
+            &format!("system.{key}"),
+            &entry.contract,
+            &entry.hash,
+        )
+        .await?;
+        versions.insert(key.as_str(), version);
     }
     Ok(versions)
 }
 
+pub(crate) async fn register_user_metric_in(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    contract: &UserMetricContract,
+) -> Result<MetricVersion, MetricRegistryError> {
+    ensure_metric(
+        txn,
+        "user",
+        Some(owner),
+        contract.key(),
+        contract.contract(),
+        contract.hash(),
+    )
+    .await
+}
+
 async fn ensure_metric(
     txn: &mut Transaction<'_, Postgres>,
+    namespace: &str,
+    owner: Option<Uuid>,
     key: &str,
-    entry: &CatalogEntry,
-) -> Result<SystemMetricVersion, MetricRegistryError> {
-    let key = format!("system.{key}");
-    let existing = sqlx::query_as::<_, (Uuid, String, i32, Option<Uuid>, Option<String>)>(
-        "SELECT metric.id, metric.namespace, metric.current_version, current.id, current.schema_hash
+    contract: &Value,
+    hash: &str,
+) -> Result<MetricVersion, MetricRegistryError> {
+    type Definition = (
+        Uuid,
+        String,
+        Option<Uuid>,
+        i32,
+        Option<Uuid>,
+        Option<String>,
+    );
+    let existing = sqlx::query_as::<_, Definition>(
+        "SELECT metric.id, metric.namespace, metric.owner_id, metric.current_version, current.id, current.schema_hash
          FROM metric_definitions AS metric
          LEFT JOIN metric_definition_versions AS current
            ON current.definition_id = metric.id AND current.version = metric.current_version
          WHERE metric.key = $1 FOR UPDATE OF metric",
     )
-    .bind(&key)
+    .bind(key)
     .fetch_optional(&mut **txn)
     .await?;
     let (definition, version) = match existing {
-        Some((_, namespace, version, Some(id), Some(hash)))
-            if namespace == "system" && hash == entry.hash =>
+        Some((_, recorded_namespace, recorded_owner, version, Some(id), Some(recorded_hash)))
+            if recorded_namespace == namespace
+                && recorded_owner == owner
+                && recorded_hash == hash =>
         {
-            return Ok(SystemMetricVersion { id, version });
+            return Ok(MetricVersion { id, version });
         }
-        Some((definition, namespace, version, Some(_), Some(_))) if namespace == "system" => {
+        Some((definition, recorded_namespace, recorded_owner, version, Some(_), Some(_)))
+            if recorded_namespace == namespace && recorded_owner == owner =>
+        {
             let version = version
                 .checked_add(1)
                 .ok_or(MetricRegistryError::InvalidRecordedVersion)?;
@@ -136,10 +220,12 @@ async fn ensure_metric(
         None => {
             let definition = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO metric_definitions(id, namespace, key, status, current_version)
-                 VALUES ($1, 'system', $2, 'active', 1)",
+                "INSERT INTO metric_definitions(id, namespace, owner_id, key, status, current_version)
+                 VALUES ($1, $2, $3, $4, 'active', 1)",
             )
             .bind(definition)
+            .bind(namespace)
+            .bind(owner)
             .bind(key)
             .execute(&mut **txn)
             .await?;
@@ -163,9 +249,9 @@ async fn ensure_metric(
     .bind(id)
     .bind(definition)
     .bind(version)
-    .bind(&entry.hash)
-    .bind(entry.contract.to_string())
+    .bind(hash)
+    .bind(contract.to_string())
     .execute(&mut **txn)
     .await?;
-    Ok(SystemMetricVersion { id, version })
+    Ok(MetricVersion { id, version })
 }
