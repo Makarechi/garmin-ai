@@ -10,7 +10,7 @@ pub use input::{
 };
 pub use queue::{ReplaySchedule, ScheduleReplay};
 pub use status::ReplayStatus;
-pub(crate) use status::{REPLAY_MUTATION_LOCK, projection_pending};
+pub(crate) use status::{REPLAY_MUTATION_LOCK, projection_pending, replay_status_in};
 
 use std::{error::Error, fmt, time::Duration};
 
