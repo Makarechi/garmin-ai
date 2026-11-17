@@ -21,3 +21,28 @@ container was limited to 32 MiB and had no swap. Peak cgroup memory reached that
 limit with file cache reclaim and zero OOM events. This measurement covers
 framing and checksums only. The ZIP, decoded values, database staging and atomic
 projection publication remain part of the following ingestion steps.
+
+## ZIP activity exports
+
+The reader walks the seekable ZIP central directory in archive order using the
+pinned `zip` 9.6.1 iterable API. It validates member headers and rejects unsafe
+paths and symbolic links without ever extracting a filename to disk. It checks
+the configured entry count, input bytes, aggregate declared FIT bytes, actual
+expanded FIT bytes and processing deadline. It streams one FIT member at a time,
+checks both layers of checksums and reports member and sequence positions. A
+failure anywhere in the export invalidates the earlier candidate positions.
+
+This step accepts Stored and Deflate members. A different compression method
+returns an explicit unsupported result. Additional formats in Python's ZIP reader
+need independently bounded decoder configuration before they can be enabled. A
+nested ZIP is not read as a second archive.
+[Python ZIP formats](https://docs.python.org/3.15/library/zipfile.html)
+[ZIP iterable API](https://docs.rs/zip/9.6.1/zip/unstable/read/struct.ZipIterable.html)
+
+Five native Linux arm64 tests passed in a 32 MiB container without swap. They
+include unsafe paths and symbolic links, false size metadata, both checksum
+layers, multiple members and sequences, a deadline and cancellation. The exact
+100 MiB FIT member compressed to a 407,262-byte ZIP. All five tests ran in 0.27 s
+with 7,589,888 bytes of peak cgroup memory and zero OOM events. This measures ZIP
+admission, expansion and checksum validation. It does not measure the later
+FIT field decoding or database work.

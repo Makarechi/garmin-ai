@@ -1,3 +1,9 @@
+mod export;
+
+pub use export::{
+    ActivityExport, ExportFrame, ExportInventory, ExportLimits, verify_activity_export,
+};
+
 use std::{
     error::Error,
     fmt,
@@ -29,7 +35,13 @@ pub struct FitInventory {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FitError {
     Cancelled,
+    DeadlineExceeded,
     LimitExceeded,
+    InvalidZip,
+    UnsafeZipMember,
+    UnsupportedZipCompression,
+    TooManyZipMembers,
+    NoFitMembers,
     InvalidHeader,
     HeaderChecksum,
     Truncated,
@@ -41,6 +53,14 @@ impl fmt::Display for FitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Cancelled => "FIT verification was cancelled",
+            Self::DeadlineExceeded => "FIT verification exceeded its deadline",
+            Self::InvalidZip => "Activity ZIP structure or checksum is invalid",
+            Self::UnsafeZipMember => "Activity ZIP contains an unsafe member",
+            Self::UnsupportedZipCompression => {
+                "Activity ZIP uses an unsupported compression method"
+            }
+            Self::TooManyZipMembers => "Activity ZIP exceeds the member limit",
+            Self::NoFitMembers => "Activity ZIP contains no FIT files",
             Self::LimitExceeded => "FIT input exceeds the byte limit",
             Self::InvalidHeader => "FIT input has an invalid header",
             Self::HeaderChecksum => "FIT header checksum mismatched",
