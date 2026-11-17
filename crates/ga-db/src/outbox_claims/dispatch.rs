@@ -9,10 +9,13 @@ use uuid::Uuid;
 
 use super::{Candidate, ReplyClaim, ReplyDestination, valid_fence};
 use crate::{
-    Database, OWNER_ENROLLMENT_LOCK, ReadinessError, STORAGE_LIFECYCLE_LOCK, check_readiness,
+    Database, OWNER_ENROLLMENT_LOCK, ReadinessError, STORAGE_LIFECYCLE_LOCK,
+    channel_ingress::telegram_poll::{CHANNEL_SELECTION_LOCK, TelegramPollError, selection},
+    check_readiness,
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{CHANNEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed},
+    telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
 };
 
 const DATABASE_DEADLINE: Duration = Duration::from_millis(1500);
@@ -91,10 +94,55 @@ impl Database {
     where
         F: Future<Output = Option<ReplySendOutcome>>,
     {
+        if destination.channel == "telegram" {
+            return Ok(ReplyDispatchResult::ClaimUnavailable);
+        }
+        self.dispatch_reply(destination, claim, requirements, None, send)
+            .await
+    }
+
+    /// Deliver to the configured Telegram chat under its current pairing and
+    /// onboarding screen for the full duration of provider network I/O.
+    pub async fn dispatch_telegram_outbox_reply<F>(
+        &self,
+        destination: ReplyDestination<'_>,
+        expected_chat: i64,
+        claim: ReplyClaim,
+        requirements: &[ShareRequirement<'_>],
+        send: impl FnOnce(Value) -> F,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError>
+    where
+        F: Future<Output = Option<ReplySendOutcome>>,
+    {
+        if destination.channel != "telegram" {
+            return Ok(ReplyDispatchResult::ClaimUnavailable);
+        }
+        self.dispatch_reply(destination, claim, requirements, Some(expected_chat), send)
+            .await
+    }
+
+    async fn dispatch_reply<F>(
+        &self,
+        destination: ReplyDestination<'_>,
+        claim: ReplyClaim,
+        requirements: &[ShareRequirement<'_>],
+        expected_chat: Option<i64>,
+        send: impl FnOnce(Value) -> F,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError>
+    where
+        F: Future<Output = Option<ReplySendOutcome>>,
+    {
         let (mut connection, dispatch) = tokio::time::timeout(DATABASE_DEADLINE, async {
             let options = self.work.connect_options();
             let mut connection = PgConnection::connect_with(options.as_ref()).await?;
-            let prepared = prepare(&mut connection, &destination, claim, requirements).await?;
+            let prepared = prepare(
+                &mut connection,
+                &destination,
+                claim,
+                requirements,
+                expected_chat,
+            )
+            .await?;
             Ok::<_, ReplyDispatchError>((connection, prepared))
         })
         .await
@@ -186,6 +234,7 @@ async fn prepare(
     destination: &ReplyDestination<'_>,
     claim: ReplyClaim,
     requirements: &[ShareRequirement<'_>],
+    expected_chat: Option<i64>,
 ) -> Result<Dispatch, ReplyDispatchError> {
     for lock in [
         STORAGE_LIFECYCLE_LOCK,
@@ -193,12 +242,11 @@ async fn prepare(
         REPLAY_MUTATION_LOCK,
         CHANNEL_CONSENT_LOCK,
     ] {
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
-            .bind(lock)
-            .fetch_one(&mut *connection)
-            .await?;
-        if !acquired {
-            return Err(ReplyDispatchError::Busy);
+        acquire_shared(connection, lock).await?;
+    }
+    if expected_chat.is_some() {
+        for lock in [CHANNEL_SELECTION_LOCK, CHANNEL_BINDING_LOCK] {
+            acquire_shared(connection, lock).await?;
         }
     }
     let mut txn = connection.begin().await?;
@@ -231,6 +279,13 @@ async fn prepare(
         txn.rollback().await?;
         return Ok(Dispatch::Unavailable);
     };
+    if let Some(chat) = expected_chat
+        && !telegram_authorized(&mut txn, destination, chat).await?
+    {
+        close_claim(&mut txn, claim.outbox_id, "cancelled").await?;
+        txn.commit().await?;
+        return Ok(Dispatch::Cancelled);
+    }
     let share_target = format!("{}:{}", destination.channel, destination.instance_id);
     let ready = match serde_json::from_str::<Value>(&raw) {
         Ok(intent)
@@ -288,6 +343,46 @@ async fn prepare(
         deadline: started + remaining,
         clock: (wall, started),
     })
+}
+
+async fn acquire_shared(
+    connection: &mut PgConnection,
+    lock: i64,
+) -> Result<(), ReplyDispatchError> {
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
+        .bind(lock)
+        .fetch_one(connection)
+        .await?;
+    if acquired {
+        Ok(())
+    } else {
+        Err(ReplyDispatchError::Busy)
+    }
+}
+
+async fn telegram_authorized(
+    txn: &mut Transaction<'_, Postgres>,
+    destination: &ReplyDestination<'_>,
+    expected_chat: i64,
+) -> Result<bool, ReplyDispatchError> {
+    let selected = selection(txn, destination.instance_id)
+        .await
+        .map_err(|error| {
+            if matches!(error, TelegramPollError::Busy) {
+                ReplyDispatchError::Busy
+            } else {
+                ReplyDispatchError::Database
+            }
+        })?;
+    if !selected {
+        return Ok(false);
+    }
+    match confirmed_pairing(txn, destination.instance_id, expected_chat).await {
+        Ok(owner) => Ok(owner == destination.owner_id),
+        Err(TelegramBindingError::Missing | TelegramBindingError::Mismatch) => Ok(false),
+        Err(TelegramBindingError::Busy) => Err(ReplyDispatchError::Busy),
+        Err(_) => Err(ReplyDispatchError::Database),
+    }
 }
 
 fn matches_intent(intent: &Value, destination: &ReplyDestination<'_>, row: &Candidate) -> bool {
