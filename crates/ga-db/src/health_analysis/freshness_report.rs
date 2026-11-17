@@ -73,18 +73,12 @@ impl Database {
     ) -> Result<Value, HealthAnalysisError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = begin_daily_analysis(&self.work).await?;
-            let selected: Option<String> = if owner_preferences {
-                sqlx::query_scalar(
-                    "SELECT timezone FROM people
-                    WHERE EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding')",
-                )
-                .fetch_optional(&mut *txn)
-                .await?
+            let timezone = if owner_preferences {
+                super::owner_timezone(&mut txn, configured_timezone).await?
             } else {
-                None
+                configured_timezone.to_owned()
             };
-            let timezone = selected.as_deref().unwrap_or(configured_timezone);
-            let (today, midnight) = freshness_day(at, timezone)?;
+            let (today, midnight) = freshness_day(at, &timezone)?;
             let report = read_report(&mut txn, at, today, midnight).await?;
             txn.commit().await?;
             Ok(report)

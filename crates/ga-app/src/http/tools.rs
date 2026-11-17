@@ -8,7 +8,8 @@ use axum::{
 use ga_db::{
     diary::DiaryReadError,
     health_analysis::{
-        ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod, TimelineError,
+        ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod, NapPolicy,
+        TimelineError,
     },
 };
 use ga_domain::{
@@ -36,10 +37,11 @@ enum ReadTool {
     Freshness,
     Baseline,
     ComparePeriods,
+    Sleep,
 }
 
 impl ReadTool {
-    const IMPLEMENTED: [Self; 10] = [
+    const IMPLEMENTED: [Self; 11] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -49,6 +51,7 @@ impl ReadTool {
         Self::Freshness,
         Self::Baseline,
         Self::ComparePeriods,
+        Self::Sleep,
         Self::DeviceHistory,
     ];
 
@@ -64,6 +67,7 @@ impl ReadTool {
             Self::Freshness => "data_freshness",
             Self::Baseline => "personal_baseline",
             Self::ComparePeriods => "analysis_compare_periods",
+            Self::Sleep => "analysis_sleep",
         }
     }
 
@@ -140,6 +144,16 @@ impl ReadTool {
                 json!({"metric":{"type":"string","title":"Metric"},"a_start":date("A Start"),"a_end":date("A End"),
                        "b_start":date("B Start"),"b_end":date("B End")}),
                 &["metric", "a_start", "a_end", "b_start", "b_end"][..],
+            ),
+            Self::Sleep => (
+                "Main sleep timestamps in rows[].main_interval, stages and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. timing_only=true requires start=end and nap_policy=separate; it returns exactly one verified main sleep interval without waiting for unrelated history replay. For a multi-day pattern or summary use timing_only=false. Missing nap logs are unknown; no recovery or prediction claims.",
+                "analysis_sleepArgs",
+                json!({
+                    "start":date("Start"),"end":date("End"),
+                    "nap_policy":{"type":"string","enum":["separate","include_confirmed"],"title":"Nap Policy","default":"separate"},
+                    "timing_only":{"type":"boolean","title":"Timing Only","default":false}
+                }),
+                &["start", "end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
@@ -262,6 +276,21 @@ async fn execute_read_tool(
             Err(error) => health_failure(error),
         };
     }
+    if matches!(tool, ReadTool::Sleep) && arguments.get("timing_only") == Some(&Value::Bool(true)) {
+        let Some((start, end, NapPolicy::Separate, true)) = sleep_input(&arguments) else {
+            return invalid_arguments();
+        };
+        if start != end {
+            return invalid_arguments();
+        }
+        return match database
+            .owner_main_sleep_timing(start, &state.configured_timezone)
+            .await
+        {
+            Ok(value) => Json(value).into_response(),
+            Err(error) => health_failure(error),
+        };
+    }
     let reader = match database.verified_health_reader().await {
         Ok(reader) => reader,
         Err(error) => return health_failure(error),
@@ -283,6 +312,23 @@ async fn execute_read_tool(
             match HealthPeriod::new(start, end) {
                 Ok(period) => reader.range(period).await,
                 Err(error) => Err(error),
+            }
+        }
+        ReadTool::Sleep => {
+            let Some((start, end, policy, timing_only)) = sleep_input(&arguments) else {
+                return invalid_arguments();
+            };
+            if timing_only {
+                if start != end || policy != NapPolicy::Separate {
+                    return invalid_arguments();
+                }
+                reader
+                    .owner_main_sleep_timing(start, &state.configured_timezone)
+                    .await
+            } else {
+                reader
+                    .owner_sleep_analysis(start, end, &state.configured_timezone, policy)
+                    .await
             }
         }
         ReadTool::Baseline if arguments.len() == 3 => {
@@ -554,6 +600,29 @@ async fn arguments(body: Body) -> Result<Map<String, Value>, BodyError> {
     }
 }
 
+fn sleep_input(arguments: &Map<String, Value>) -> Option<(Date, Date, NapPolicy, bool)> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "start" | "end" | "nap_policy" | "timing_only"))
+    {
+        return None;
+    }
+    let start = date_input(arguments.get("start")?)?;
+    let end = date_input(arguments.get("end")?)?;
+    let policy = match arguments
+        .get("nap_policy")
+        .map_or(Some("separate"), Value::as_str)?
+    {
+        "separate" => NapPolicy::Separate,
+        "include_confirmed" => NapPolicy::IncludeConfirmed,
+        _ => return None,
+    };
+    let timing_only = arguments
+        .get("timing_only")
+        .map_or(Some(false), bool_input)?;
+    Some((start, end, policy, timing_only))
+}
+
 fn date_input(value: &Value) -> Option<Date> {
     let bytes = match value {
         Value::String(text) => text.as_bytes(),
@@ -621,7 +690,10 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         HealthAnalysisError::CalendarBoundary
         | HealthAnalysisError::DateRange
         | HealthAnalysisError::UnknownMetric
-        | HealthAnalysisError::Overlap => invalid_arguments(),
+        | HealthAnalysisError::Overlap
+        | HealthAnalysisError::SleepRange
+        | HealthAnalysisError::SleepNapLimit
+        | HealthAnalysisError::SleepSessionLimit => invalid_arguments(),
         _ => storage_unavailable(),
     }
 }

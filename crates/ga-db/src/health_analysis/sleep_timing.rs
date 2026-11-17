@@ -11,7 +11,7 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{HealthAnalysisError, begin_daily_analysis};
+use super::{DailyHealthReader, HealthAnalysisError, begin_daily_analysis, owner_timezone};
 use crate::{Database, activity_documents::PARSER_VERSION};
 
 impl Database {
@@ -22,18 +22,54 @@ impl Database {
         day: Date,
         timezone: &str,
     ) -> Result<Value, HealthAnalysisError> {
+        self.read_main_sleep_timing(day, timezone, false).await
+    }
+
+    pub async fn owner_main_sleep_timing(
+        &self,
+        day: Date,
+        configured_timezone: &str,
+    ) -> Result<Value, HealthAnalysisError> {
+        self.read_main_sleep_timing(day, configured_timezone, true)
+            .await
+    }
+
+    async fn read_main_sleep_timing(
+        &self,
+        day: Date,
+        timezone: &str,
+        from_owner: bool,
+    ) -> Result<Value, HealthAnalysisError> {
         if !(1..=9999).contains(&day.year()) {
             return Err(HealthAnalysisError::DateRange);
         }
         let read = async {
             let mut txn = begin_daily_analysis(&self.control).await?;
-            let document = main_sleep_timing_in(&mut txn, day, timezone).await?;
+            let timezone = if from_owner {
+                owner_timezone(&mut txn, timezone).await?
+            } else {
+                timezone.to_owned()
+            };
+            let document = main_sleep_timing_in(&mut txn, day, &timezone).await?;
             txn.rollback().await?;
             Ok(document)
         };
         tokio::time::timeout(Duration::from_millis(1500), read)
             .await
             .map_err(|_| HealthAnalysisError::Database)?
+    }
+}
+
+impl DailyHealthReader {
+    pub async fn owner_main_sleep_timing(
+        mut self,
+        day: Date,
+        configured_timezone: &str,
+    ) -> Result<Value, HealthAnalysisError> {
+        let timezone = owner_timezone(&mut self.0, configured_timezone).await?;
+        let value = main_sleep_timing_in(&mut self.0, day, &timezone).await?;
+        self.0.commit().await?;
+        Ok(value)
     }
 }
 

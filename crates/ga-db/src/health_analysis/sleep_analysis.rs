@@ -10,7 +10,7 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{DailyHealthReader, HealthAnalysisError, HealthPeriod};
+use super::{DailyHealthReader, HealthAnalysisError, HealthPeriod, owner_timezone};
 use crate::Database;
 
 const FIELDS: [&str; 6] = [
@@ -97,6 +97,17 @@ impl Database {
 }
 
 impl DailyHealthReader {
+    pub async fn owner_sleep_analysis(
+        mut self,
+        start: Date,
+        end: Date,
+        configured_timezone: &str,
+        policy: NapPolicy,
+    ) -> Result<Value, HealthAnalysisError> {
+        let timezone = owner_timezone(&mut self.0, configured_timezone).await?;
+        self.sleep_analysis(start, end, &timezone, policy).await
+    }
+
     pub async fn sleep_analysis(
         mut self,
         start: Date,

@@ -13,6 +13,7 @@ import httpx
 from capture_reference import isolated_engine
 from check_activity_reads import seed as seed_activities
 from check_device_history import seed as seed_devices
+from check_sleep_timing import seed as seed_verified_sleep
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -44,6 +45,7 @@ TOOLS = {
     "data_freshness",
     "personal_baseline",
     "analysis_compare_periods",
+    "analysis_sleep",
 }
 SNAPSHOT = "/tools/health_snapshot"
 RANGE = "/tools/health_range"
@@ -53,6 +55,8 @@ EVENTS = "/tools/events"
 TIMELINE = "/tools/timeline"
 DEVICES = "/tools/device_history"
 FRESHNESS = "/tools/data_freshness"
+SLEEP = "/tools/analysis_sleep"
+TIMING = {"start": "2026-10-25", "end": "2026-10-25", "timing_only": True}
 SETUP_ZONE = "Pacific/Kiritimati"
 
 
@@ -315,6 +319,26 @@ def period_cases():
         yield ("GET", route, "health", None)
 
 
+def sleep_cases():
+    yield ("GET", "/tools", "both", None)
+    for arguments in (
+        TIMING,
+        {**TIMING, "timing_only": "true"},
+        {**TIMING, "start": "2026-10-24"},
+        {**TIMING, "nap_policy": "include_confirmed"},
+        {**TIMING, "unexpected": "field"},
+        {**TIMING, "start": "2026-10-24", "end": "2026-10-24"},
+        {"start": "2026-10-24", "end": "2026-10-26"},
+        {"start": "2026-10-24", "end": "2026-10-26", "nap_policy": "include_confirmed"},
+        {"start": "2026-10-24", "end": "2026-10-26", "nap_policy": "wrong"},
+        {"start": "2026-10-24", "end": "2026-11-24"},
+        {},
+    ):
+        yield ("POST", SLEEP, "both", {"arguments": arguments})
+    for scope in ("health", "diary", None):
+        yield ("POST", SLEEP, scope, {"arguments": TIMING})
+
+
 def compare(python, native, cases):
     count = 0
     for method, route, credential, body in cases:
@@ -363,6 +387,12 @@ def run(binary):
         seed_timeline(engine)
         seed_devices(engine)
         seed_freshness(engine)
+        with (
+            Session(engine) as session,
+            session.begin(),
+            patch("check_sleep_timing.CASES", ("verified",)),
+        ):
+            seed_verified_sleep(session)
         settings = Settings(api_tokens=SCOPED, api_key="", timezone="UTC")
         with TestClient(create_app(settings, engine=engine)) as python:
             with subprocess.Popen(
@@ -384,6 +414,7 @@ def run(binary):
                         count += compare(python, native, diary_cases())
                         count += compare(python, native, history_cases())
                         count += compare(python, native, period_cases())
+                        count += compare(python, native, sleep_cases())
                         with Session(engine) as session, session.begin():
                             session.execute(
                                 text("UPDATE people SET timezone=:zone"), {"zone": SETUP_ZONE}
@@ -419,6 +450,20 @@ def run(binary):
                                 ("POST", DEVICES, "health", {}),
                                 ("POST", "/tools/personal_baseline", "health", {}),
                                 ("POST", "/tools/analysis_compare_periods", "health", {}),
+                                ("POST", SLEEP, "both", {"arguments": TIMING}),
+                                (
+                                    "POST",
+                                    SLEEP,
+                                    "both",
+                                    {"arguments": {**TIMING, "timing_only": "true"}},
+                                ),
+                                (
+                                    "POST",
+                                    SLEEP,
+                                    "both",
+                                    {"arguments": {**TIMING, "timing_only": False}},
+                                ),
+                                ("POST", SLEEP, "health", {"arguments": TIMING}),
                                 ("POST", DEVICES, "diary", {}),
                                 ("POST", FRESHNESS, "health", {}),
                                 (
