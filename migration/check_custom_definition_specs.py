@@ -109,6 +109,20 @@ def examples():
     variant["fields"]["sample"]["metric_semantics"] = "event_count"
     yield variant
 
+    for literals in [
+        {"const": 2**64},
+        {"const": -(2**63) - 1},
+        {"enum": [None, 2**169, -(2**170)]},
+        {"enum": [None, 2**169, 1.0]},
+        {"const": float(2**64)},
+        {"const": True},
+        {"anyOf": [{"const": 2**169}, {"type": "null"}]},
+    ]:
+        variant = copy.deepcopy(BASE)
+        variant["schema"]["properties"]["sample"] = literals
+        variant["fields"]["sample"]["metric_semantics"] = "event_count"
+        yield variant
+
 
 def expected(document):
     try:

@@ -311,7 +311,10 @@ fn integer_or_null(schema: &Value, definitions: &Value) -> bool {
             literals.is_some_and(|literals| {
                 !literals.is_empty()
                     && literals.iter().all(|value| {
-                        value.is_null() || value.as_i64().is_some() || value.as_u64().is_some()
+                        value.is_null()
+                            || value
+                                .as_number()
+                                .is_some_and(|number| !number.as_str().contains(['.', 'e', 'E']))
                     })
             })
         }
