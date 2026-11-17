@@ -103,6 +103,41 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
         result(&inspect, capture.id).await?,
         (1, "done".into(), 9, Some(40))
     );
+    assert_eq!(recorded_timezone(&inspect, capture.id).await?, "UTC");
+
+    sqlx::query("UPDATE people SET timezone='America/Los_Angeles'")
+        .execute(&inspect)
+        .await?;
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{}')")
+        .execute(&inspect)
+        .await?;
+    let preferred = database
+        .capture_legacy_json(
+            LegacyCapture {
+                authenticated_fingerprint: ACCOUNT,
+                endpoint: "daily",
+                source_key: "2026-10-22",
+                fetched_at: now.try_into()?,
+                body: br#"{"totalSteps":50}"#.to_vec(),
+            },
+            archive.clone(),
+            PutLimits {
+                max_bytes: 10_000,
+                disk_reserve_bytes: 0,
+            },
+        )
+        .await?;
+    let output = command(&url, &data).arg("--once").output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8(output.stdout)?.contains("Archive replay completed"));
+    assert_eq!(
+        recorded_timezone(&inspect, preferred.id).await?,
+        "America/Los_Angeles"
+    );
     let again = command(&url, &data).arg("--once").output()?;
     assert!(again.status.success());
     assert!(String::from_utf8(again.stdout)?.contains("No archive replay is due"));
@@ -130,6 +165,7 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
         result(&inspect, capture.id).await?,
         (2, "done".into(), 9, Some(40))
     );
+    assert_eq!(recorded_timezone(&inspect, capture.id).await?, "UTC");
     // A completed record with malformed repair metadata cannot stop another planning pass.
     let final_pass = command(&url, &data).arg("--once").output()?;
     assert!(final_pass.status.success());
@@ -199,4 +235,13 @@ async fn result(pool: &PgPool, raw: Uuid) -> Result<(i32, String, i32, Option<i3
          FROM source_payloads AS raw JOIN jobs AS job ON job.dedup_key=concat('raw-replay:',raw.id,':9')
          WHERE raw.id=$1")
         .bind(raw).fetch_one(pool).await
+}
+
+async fn recorded_timezone(pool: &PgPool, raw: Uuid) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT value->>'timezone' FROM app_state WHERE key=concat('ingest-meta:',$1::uuid)",
+    )
+    .bind(raw)
+    .fetch_one(pool)
+    .await
 }

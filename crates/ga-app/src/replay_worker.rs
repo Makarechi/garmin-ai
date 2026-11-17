@@ -121,6 +121,11 @@ pub async fn run(once: bool) -> Result<(), ReplayServiceError> {
         .acquire_runtime_lease()
         .await
         .map_err(ReplayServiceError::Lease)?;
+    let timezone = singleton
+        .owner_timezone()
+        .await
+        .map_err(ReplayServiceError::Lease)?
+        .unwrap_or(config.timezone);
     #[cfg(unix)]
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
         .map_err(|_| ReplayServiceError::Shutdown)?;
@@ -138,7 +143,7 @@ pub async fn run(once: bool) -> Result<(), ReplayServiceError> {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
         result = verify_runtime(&mut singleton) => result,
-        result = process_archive(&database, archive, &config.timezone, once) => result,
+        result = process_archive(&database, archive, &timezone, once) => result,
     }
 }
 

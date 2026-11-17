@@ -59,6 +59,21 @@ impl Database {
 }
 
 impl RuntimeLease {
+    /// Recorded onboarding preferences take precedence over bootstrap configuration.
+    pub async fn owner_timezone(&mut self) -> Result<Option<String>, RuntimeLeaseError> {
+        let result = tokio::time::timeout(
+            DATABASE_DEADLINE,
+            sqlx::query_scalar(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
+                         THEN (SELECT timezone FROM people) END",
+            )
+            .fetch_one(&mut self.connection),
+        )
+        .await
+        .map_err(|_| RuntimeLeaseError::Database)??;
+        Ok(result)
+    }
+
     pub async fn check(&mut self) -> Result<(), RuntimeLeaseError> {
         tokio::time::timeout(DATABASE_DEADLINE, self.connection.ping())
             .await
