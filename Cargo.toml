@@ -6,6 +6,7 @@ members = [
     "crates/ga-domain",
     "crates/ga-fit",
     "crates/ga-garmin",
+    "crates/ga-model",
 ]
 resolver = "3"
 
