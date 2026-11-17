@@ -26,6 +26,7 @@ from sqlalchemy.orm import aliased
 from garmin_ai.models import AppState, Job, TelegramUpdate
 
 GARMIN_JOB_KINDS = {"garmin_endpoint", "garmin_activities", "garmin_fit"}
+NATIVE_TELEGRAM_JOB_KINDS = ("telegram_native_ack", "telegram_native_inbound")
 
 
 def compact_pending_periodic_fetches(session, now: datetime) -> int:
@@ -239,7 +240,11 @@ def claim(
     expired = and_(Job.status == "running", Job.lease_until < now)
     exhausted = session.scalars(
         select(Job.id)
-        .where(Job.attempts >= 8, or_(expired, Job.status == "pending"))
+        .where(
+            Job.kind.not_in(NATIVE_TELEGRAM_JOB_KINDS),
+            Job.attempts >= 8,
+            or_(expired, Job.status == "pending"),
+        )
         .with_for_update(skip_locked=True)
         .limit(100)
     ).all()
@@ -434,6 +439,7 @@ def claim(
             ),
             Job.kind != "backup" if not backups_enabled else True,
             or_(~Job.kind.in_(["backup", "storage_check"]), ~other_storage_running),
+            Job.kind.not_in(NATIVE_TELEGRAM_JOB_KINDS),
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "telegram_debug_notice", ~controls_pending),

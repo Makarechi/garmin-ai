@@ -18,7 +18,8 @@ from garmin_ai.channels import (
 )
 from garmin_ai.config import Settings
 from garmin_ai.dialogue import queue_intent
-from garmin_ai.models import AppState, InboundMessage, OutboxMessage, Person, TelegramUpdate
+from garmin_ai.jobs import claim
+from garmin_ai.models import AppState, InboundMessage, Job, OutboxMessage, Person, TelegramUpdate
 from garmin_ai.telegram import handle_button, process_message, save_update, scenario_keyboard
 from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
@@ -172,6 +173,53 @@ def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     set_update_status(db, 11, "processed")
     assert db.get(TelegramUpdate, 11).status == "processed"
     assert neutral.status == "processed"
+
+
+@pytest.mark.parametrize("dispatcher", ["neutral-shadow-v1", "legacy-v1"])
+def test_legacy_ingress_leaves_native_ownership_in_place(db, dispatcher):
+    item = update()
+    stored, created = record_neutral_ingress(db, item, 42, datetime.now(UTC))
+    assert created
+    stored.legacy_telegram_update_id = None
+    db.add(
+        Job(
+            kind="telegram_native_inbound",
+            payload={"inbound_message_id": str(stored.id)},
+            dedup_key=f"telegram:inbound:native:{stored.id}",
+            run_at=datetime.now(UTC),
+            status="completed",
+        )
+    )
+    db.flush()
+
+    assert save_update(db, item, 42, dispatcher_version=dispatcher)
+    assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == 0
+    assert db.scalar(select(func.count()).select_from(Job)) == 1
+    assert stored.legacy_telegram_update_id is None
+    assert db.get(AppState, "telegram:ordering") is None
+
+    other = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    assert save_update(db, item, 42, dispatcher_version=dispatcher, channel_instance=other)
+    assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == 1
+
+
+@pytest.mark.parametrize("kind", ["telegram_native_inbound", "telegram_native_ack"])
+def test_legacy_worker_leaves_native_jobs_and_their_retry_limit_to_rust(db, kind):
+    now = datetime.now(UTC)
+    for attempts in (0, 8):
+        db.add(
+            Job(
+                kind=kind,
+                payload={},
+                dedup_key=f"fixture:{attempts}",
+                run_at=now,
+                attempts=attempts,
+            )
+        )
+    db.flush()
+    assert claim(db, now=now, kinds=[kind]) is None
+    assert claim(db, now=now) is None
+    assert db.scalars(select(Job.status).order_by(Job.attempts)).all() == ["pending", "pending"]
 
 
 def test_edited_message_is_retained_as_neutral_revision_without_legacy_replay(db):
