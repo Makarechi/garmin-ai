@@ -1,3 +1,7 @@
+mod diary;
+
+pub use diary::TelegramDiaryCommitError;
+
 use std::time::Duration;
 
 use ga_domain::timestamp::StoredInstant;

@@ -2,6 +2,7 @@ use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation},
     event_input::EventSource,
 };
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{CreateSystemEvent, DiaryWriteError, StoredSystemEvent};
@@ -23,6 +24,16 @@ impl Database {
         &self,
         request: CreateAgentLogBatch<'_>,
     ) -> Result<Vec<StoredSystemEvent>, DiaryWriteError> {
+        let mut txn = self.begin_diary_write(request.owner_id).await?;
+        let rows = Self::create_agent_log_batch_in(&mut txn, request).await?;
+        txn.commit().await?;
+        Ok(rows)
+    }
+
+    pub(crate) async fn create_agent_log_batch_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: CreateAgentLogBatch<'_>,
+    ) -> Result<Vec<StoredSystemEvent>, DiaryWriteError> {
         if request.command.intent() != AgentIntent::Log || request.idempotency_prefix.is_empty() {
             return Err(DiaryWriteError::InvalidBatch);
         }
@@ -36,7 +47,6 @@ impl Database {
             .filter(|index| parents[*index].is_none())
             .chain(links.iter().map(|link| link.child_index));
         let mut stored: Vec<Option<StoredSystemEvent>> = (0..events.len()).map(|_| None).collect();
-        let mut txn = self.begin_diary_write(request.owner_id).await?;
         for index in order {
             let parent = parents[index]
                 .map(|parent| {
@@ -51,7 +61,7 @@ impl Database {
                 .map_err(DiaryWriteError::Input)?;
             let key = format!("{}:{index}", request.idempotency_prefix);
             let entry = Self::create_system_event_in(
-                &mut txn,
+                txn,
                 CreateSystemEvent {
                     owner_id: request.owner_id,
                     authenticated_actor: request.authenticated_actor,
@@ -64,11 +74,9 @@ impl Database {
             .await?;
             stored[index] = Some(entry);
         }
-        let entries = stored
+        stored
             .into_iter()
             .collect::<Option<Vec<_>>>()
-            .ok_or(DiaryWriteError::InvalidBatch)?;
-        txn.commit().await?;
-        Ok(entries)
+            .ok_or(DiaryWriteError::InvalidBatch)
     }
 }

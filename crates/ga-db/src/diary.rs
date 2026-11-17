@@ -245,9 +245,17 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(DiaryWriteError::Storage)?;
+        Self::require_diary_owner(&mut txn, owner).await?;
+        Ok(txn)
+    }
+
+    pub(crate) async fn require_diary_owner(
+        txn: &mut Transaction<'_, Postgres>,
+        owner: Uuid,
+    ) -> Result<(), DiaryWriteError> {
         let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(MUTATION_LOCK)
-            .fetch_one(&mut *txn)
+            .fetch_one(&mut **txn)
             .await?;
         if !locked {
             return Err(DiaryWriteError::Busy);
@@ -255,12 +263,12 @@ impl Database {
         let matches: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM people WHERE id = $1)")
                 .bind(owner)
-                .fetch_one(&mut *txn)
+                .fetch_one(&mut **txn)
                 .await?;
         if !matches {
             return Err(DiaryWriteError::UnknownOwner);
         }
-        Ok(txn)
+        Ok(())
     }
 }
 
