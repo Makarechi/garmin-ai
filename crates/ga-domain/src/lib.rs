@@ -1,3 +1,4 @@
+pub mod event_payload;
 pub mod identity;
 pub mod legacy_json;
 pub mod text_offsets;
