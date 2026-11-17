@@ -1,4 +1,4 @@
-# Initial differential cases (R03, part 1)
+# Initial differential cases (R03)
 
 The [inputs](contracts/initial-cases.json) and
 [reference observation](contracts/python-initial-observation.json) pin a small compatibility
@@ -14,6 +14,10 @@ MCP stdio server, PostgreSQL side effects and content-addressed archive.
 - MCP starts as a fresh stdio process, lists read tools, reads the stored note, rejects invalid
   input and refuses a write with writes disabled. Structured results agree with text results.
 - CLI cases capture exit status, stdout and stderr for inventory and validation failures.
+- The replay case interrupts the database transaction after the archive file is written. No
+  source or daily projection is committed. After reopening the pool, the same input reuses the
+  retained archive bytes. A→B→A requests reuse A's original source identity. A subsequent
+  offline parser replay skips the superseded input and preserves A as current.
 
 ## Reproduce
 
@@ -48,6 +52,5 @@ permission errors, archive keys and content bytes retain their values. The Rust 
 emit the same format and use the same explicit requirements for generated values.
 
 Two separate Python captures matched the committed observation exactly. The mutation tests
-reject missing-to-zero conversion, duplicate facts, wrong revisions and wrong hashes. R03 still
-needs archive replay and interruption cases, broader state comparisons and the Rust capture
-adapter when its runtime is available.
+reject missing-to-zero conversion, duplicate facts, wrong revisions and wrong hashes. Subsequent work adds broader state comparisons and the Rust capture adapter when its
+runtime is available.

@@ -11,6 +11,13 @@
     "timezone": "Europe/Bratislava",
     "payload": {"type": "note", "description": "Synthetic café ☕ diary"}
   },
+  "replay": {
+    "day": "2026-10-24",
+    "first_fetch": "2026-10-25T01:30:00+00:00",
+    "timezone": "Europe/Bratislava",
+    "interrupted_steps": 10,
+    "committed_steps": [10, 20, 10]
+  },
   "cli_cases": [
     {"name": "inventory", "args": ["inventory"]},
     {"name": "missing_confirmation", "args": ["erase-all"]},
