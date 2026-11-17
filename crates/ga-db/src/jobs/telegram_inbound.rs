@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     Database,
-    channel_ingress::native_telegram::KIND,
+    channel_ingress::native_telegram::{InboxLane, KIND},
     telegram_cursor::{TelegramCursorError, lock_ingress},
 };
 
@@ -67,6 +67,28 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary)
+            .await
+    }
+
+    /// Claim short owner controls independently of long diary or provider work.
+    pub async fn claim_telegram_control(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Control)
+            .await
+    }
+
+    async fn claim_telegram_lane(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+        lane: InboxLane,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
         if !(1..=86_400).contains(&lease_seconds) {
             return Err(JobStoreError::InvalidLeaseDuration);
         }
@@ -76,7 +98,12 @@ impl Database {
             return Err(JobStoreError::InvalidRecordedState);
         }
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = begin(&self.work).await?;
+            let pool = if lane == InboxLane::Control {
+                &self.control
+            } else {
+                &self.work
+            };
+            let mut txn = begin(pool).await?;
             if !try_ingress_lock(&mut txn).await? {
                 return Ok(None);
             }
@@ -106,6 +133,7 @@ impl Database {
                        ON j.dedup_key=concat('telegram:inbound:native:',i.id)
                        AND j.payload->>'inbound_message_id'=i.id::text
                      WHERE j.kind=$1 AND j.status IN ('pending','running')
+                       AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
                      ORDER BY coalesce((j.payload->>'ordering_epoch')::bigint,0),
@@ -126,6 +154,7 @@ impl Database {
             .bind(lease_seconds as i32)
             .bind(token)
             .bind(ATTEMPT_LIMIT)
+            .bind(lane.label())
             .fetch_optional(&mut *txn)
             .await?;
             let mut result =

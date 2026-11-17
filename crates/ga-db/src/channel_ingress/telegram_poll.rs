@@ -2,6 +2,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::{
     channel::{InboundEnvelope, InboundKind},
+    telegram_control::TelegramControl,
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
@@ -32,6 +33,7 @@ pub(crate) const CHANNEL_SELECTION_LOCK: i64 = 72_104_621;
 pub enum TelegramPollEvent<'a> {
     Ignore,
     Message(&'a InboundEnvelope),
+    OwnerControl(&'a InboundEnvelope),
     Callback(ChannelCallback<'a>),
 }
 
@@ -247,6 +249,11 @@ async fn persist(
     let advances_ordering = !matches!(
         &input.event, TelegramPollEvent::Message(envelope) if envelope.kind() == InboundKind::Edit
     );
+    let lane = if matches!(input.event, TelegramPollEvent::OwnerControl(_)) {
+        native_telegram::InboxLane::Control
+    } else {
+        native_telegram::InboxLane::Diary
+    };
     let inbound = if selected && !owned_by_legacy {
         save_event(&mut txn, input.event, normalize_callback).await?
     } else {
@@ -255,7 +262,7 @@ async fn persist(
     let new_ordering_epoch = if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
         let epoch =
             record_native_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?;
-        native_telegram::enqueue(&mut txn, receipt.message_id, epoch, input.received_at)
+        native_telegram::enqueue(&mut txn, receipt.message_id, epoch, lane, input.received_at)
             .await
             .map_err(TelegramPollError::Processing)?;
         if advances_ordering {
@@ -361,7 +368,9 @@ async fn save_event(
     let mut event_txn = txn.begin().await?;
     let result = match event {
         TelegramPollEvent::Ignore => Ok(None),
-        TelegramPollEvent::Message(envelope) => ingest(&mut event_txn, envelope).await.map(Some),
+        TelegramPollEvent::Message(envelope) | TelegramPollEvent::OwnerControl(envelope) => {
+            ingest(&mut event_txn, envelope).await.map(Some)
+        }
         TelegramPollEvent::Callback(callback) => {
             resolve_and_ingest(&mut event_txn, &callback, normalize_callback)
                 .await
@@ -396,13 +405,15 @@ fn validate_binding(input: &TelegramPollInput<'_>) -> Result<(), TelegramPollErr
     let event_id = input.update_id.to_string();
     let valid = match &input.event {
         TelegramPollEvent::Ignore => true,
-        TelegramPollEvent::Message(envelope) => {
+        TelegramPollEvent::Message(envelope) | TelegramPollEvent::OwnerControl(envelope) => {
             envelope.owner_id() == input.owner_id
                 && envelope.channel().channel() == "telegram"
                 && envelope.channel().instance_id() == input.instance_id
                 && envelope.external_event_id() == event_id
                 && envelope.received_at() == OffsetDateTime::from(input.received_at)
                 && envelope.kind() != InboundKind::Action
+                && (!matches!(input.event, TelegramPollEvent::OwnerControl(_))
+                    || TelegramControl::from_envelope(envelope).is_some())
         }
         TelegramPollEvent::Callback(callback) => {
             callback.owner_id == input.owner_id

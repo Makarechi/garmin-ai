@@ -13,6 +13,21 @@ use super::IngressError;
 
 pub(crate) const KIND: &str = "telegram_native_inbound";
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum InboxLane {
+    Diary,
+    Control,
+}
+
+impl InboxLane {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Diary => "diary",
+            Self::Control => "control",
+        }
+    }
+}
+
 /// Python may have accepted an update without creating a neutral shadow row.
 /// Match its two possible storage keys and the stored channel namespace.
 pub(super) async fn legacy_owns(
@@ -46,6 +61,7 @@ pub(super) async fn enqueue(
     txn: &mut Transaction<'_, Postgres>,
     message_id: Uuid,
     epoch: i64,
+    lane: InboxLane,
     received_at: StoredInstant,
 ) -> Result<(), JobStoreError> {
     let dedup_key = format!("telegram:inbound:native:{message_id}");
@@ -55,7 +71,7 @@ pub(super) async fn enqueue(
     )
     .bind(Uuid::new_v4())
     .bind(KIND)
-    .bind(json!({"inbound_message_id":message_id.to_string(),"ordering_epoch":epoch}).to_string())
+    .bind(json!({"inbound_message_id":message_id.to_string(),"ordering_epoch":epoch,"lane":lane.label()}).to_string())
     .bind(dedup_key)
     .bind(OffsetDateTime::from(received_at))
     .execute(&mut **txn)

@@ -24,6 +24,7 @@ pub mod model_response;
 pub mod model_schema;
 pub mod source_contract;
 pub mod statistics;
+pub mod telegram_control;
 pub mod text_offsets;
 pub mod timestamp;
 
