@@ -25,7 +25,7 @@ impl Database {
     }
 }
 
-async fn onboarding_allows_model(
+pub(crate) async fn onboarding_allows_model(
     txn: &mut Transaction<'_, Postgres>,
     categories: ModelCategories,
 ) -> Result<bool, sqlx::Error> {

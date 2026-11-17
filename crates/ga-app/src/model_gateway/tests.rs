@@ -16,6 +16,7 @@ enum Responses {
     InvalidThenStall,
     Success,
     RevokeAfterInvalid,
+    CheckSettingsFence,
     UnavailableThenSuccess,
     Quota,
 }
@@ -66,6 +67,26 @@ impl Sender for Mock {
             (Responses::RevokeAfterInvalid, true) => update_preferences(&self.pool, false)
                 .await
                 .map_err(|_| ModelTransportError::InvalidConfiguration)?,
+            (Responses::CheckSettingsFence, _) => {
+                let mut change = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|_| ModelTransportError::InvalidConfiguration)?;
+                let writable: bool =
+                    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(72104621)")
+                        .fetch_one(&mut *change)
+                        .await
+                        .map_err(|_| ModelTransportError::InvalidConfiguration)?;
+                assert!(
+                    !writable,
+                    "owner settings were writable during model transport"
+                );
+                change
+                    .rollback()
+                    .await
+                    .map_err(|_| ModelTransportError::InvalidConfiguration)?;
+            }
             (Responses::Quota, _) => {
                 return Err(ModelTransportError::Unavailable {
                     reason: ModelUnavailability::RateLimited,
@@ -433,6 +454,80 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
         assert_eq!(mock.attempts(), [PRIMARY]);
     }
     println!("Verified the model gateway for Gemini fallback, OpenAI, and Anthropic");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "uses disposable TimescaleDB to test concurrent model consent edits"]
+async fn keeps_saved_onboarding_consent_live_until_transport_finishes() -> Result<(), Box<dyn Error>>
+{
+    let url = env::var("GA_TEST_DATABASE_URL")?;
+    let address = url
+        .strip_prefix("postgresql+psycopg://")
+        .ok_or("Expected fixture URL")?;
+    let options =
+        PgConnectOptions::from_str(&format!("postgresql://{address}"))?.disable_statement_logging();
+    let expected = options
+        .get_database()
+        .filter(|name| name.ends_with("_test"))
+        .ok_or("Expected disposable DB")?;
+    let pool = PgPool::connect_with(options.clone()).await?;
+    let actual: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(actual, expected);
+    update_preferences(&pool, true).await?;
+    let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    let gateway = ModelGateway::gemini(
+        database,
+        SelectedModel {
+            instance_id: "model:gemini:primary",
+            primary_model: PRIMARY,
+            deadline: Duration::from_secs(2),
+        },
+        GeminiOptions {
+            key: "synthetic-gemini",
+            fallback_enabled: false,
+            fallback_models: &[],
+            consent_models: &[],
+            thinking_level: "",
+            notify_quota: false,
+        },
+    )?;
+    let grant = "2026-01-01T00:00:00Z".parse()?;
+    let policy = || current_policy(&gateway, &[], grant);
+    let send = Mock::new(&pool, Responses::CheckSettingsFence);
+    gateway
+        .execute_with(input(), &policy, &[], None, &send)
+        .await?;
+    assert_eq!(send.attempts(), [PRIMARY]);
+
+    let mut change = pool.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout='750ms'")
+        .execute(&mut *change)
+        .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104621)")
+        .execute(&mut *change)
+        .await?;
+    assert!(matches!(
+        gateway
+            .execute_with(input(), &policy, &[], None, &send)
+            .await,
+        Err(GatewayError::Attempt(FallbackError::Cooldown {
+            reason: ModelGateReason::Busy,
+            ..
+        }))
+    ));
+    sqlx::query("UPDATE app_state SET value='{\"model_categories\":[]}'::jsonb WHERE key='preferences:onboarding'")
+        .execute(&mut *change).await?;
+    change.commit().await?;
+    assert!(matches!(
+        gateway
+            .execute_with(input(), &policy, &[], None, &send)
+            .await,
+        Err(GatewayError::Attempt(FallbackError::ConsentRequired))
+    ));
+    assert_eq!(send.attempts(), [PRIMARY]);
     Ok(())
 }
 
