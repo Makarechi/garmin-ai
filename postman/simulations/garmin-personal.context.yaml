@@ -1,0 +1,37 @@
+purpose:
+  stands_in_for: The Garmin Personal API using synthetic credentials and responses.
+  unblocks: Local verification of native authorization, raw transfer and rate limit handling.
+assumptions:
+  - id: exchange
+    status: supported
+    claim: The published authentication contract exchanges an API key by POST for a short-lived JWT that authorizes subsequent reads.
+    reason: Garmin documents both credential forms and the exchange endpoint.
+    verification: Compared the authentication documentation with the local transport. The local-development run recorded one successful exchange and subsequent accepted requests.
+    source: https://developer.garmin.com/gc-developer-program/personal/personal-api/
+    updated_at: '2026-11-17'
+  - id: download-and-raw-body
+    status: supported
+    claim: The client preserves both the unfamiliar JSON field and the original binary bytes in the modeled successful reads.
+    reason: The probe asserted byte equality for each modeled payload.
+    verification: The local-development run observed 200 for settings and the activity download with byte-for-byte assertions.
+    source: crates/ga-garmin/src/tests.rs; postman/mocks/garmin-personal/default.js
+    updated_at: '2026-11-17'
+  - id: rate-limit-behavior
+    status: supported
+    claim: The client honors the synthetic Retry-After and suppresses the next shared-client request during cooldown.
+    reason: The probe observed the expected error and the simulation received no follow-up traffic.
+    verification: The local-development run observed 403 and 429, and the client reported a cooldown on the next settings read.
+    source: crates/ga-garmin/src/tests.rs; postman/mocks/garmin-personal/default.js
+    updated_at: '2026-11-17'
+  - id: identity-continuity
+    status: unknown
+    claim: The Personal API account corresponds to the owner of retained legacy data.
+    reason: Profile settings alone do not establish stable account identity across these APIs.
+    verification: The documented model was inspected. An authorized paired live lookup is still needed.
+    source: https://developer.garmin.com/gc-developer-program/personal/swagger-docs/
+    updated_at: '2026-11-17'
+fingerprints:
+  - id: local-development
+    date: '2026-11-17'
+    commit: 0024b40f7fda403f5db540588c310698fd8fb2ad plus uncommitted Garmin client and simulation
+    cli: '1.76.0'

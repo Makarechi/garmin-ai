@@ -1,0 +1,8 @@
+simulation: garmin-personal
+routing: path
+mocks:
+  - name: garmin-personal
+    routeKey: garmin-personal
+    origin:
+      - personal.connectapi.garmin.com
+    path: postman/mocks/garmin-personal

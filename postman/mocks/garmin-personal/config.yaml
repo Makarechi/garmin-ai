@@ -1,0 +1,11 @@
+version: 1
+id: 59861121-5368-4ff9-bfd9-2e5bd1d15a3d
+name: garmin-personal
+slug: garmin-personal
+protocol: http
+interceptRequests: true
+port: 4501
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true
