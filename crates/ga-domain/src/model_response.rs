@@ -1,4 +1,7 @@
 mod encoding;
+mod gemini;
+
+pub use gemini::GeminiResponseSchema;
 
 use std::{error::Error, fmt};
 
@@ -63,14 +66,7 @@ impl StructuredResponseSchema {
             .should_validate_formats(false)
             .build(wire)
             .map_err(|_| ModelResponseError::InvalidSchema)?;
-        let application = jsonschema::draft202012::options()
-            .should_validate_formats(true)
-            .with_format("uuid", |text| uuid::Uuid::parse_str(text).is_ok())
-            .with_format("date-time", |text| {
-                crate::event_time::parse_aware_datetime(&Value::String(text.to_owned())).is_some()
-            })
-            .build(application)
-            .map_err(|_| ModelResponseError::InvalidSchema)?;
+        let application = application_validator(application)?;
         Ok(Self { wire, application })
     }
 
@@ -80,15 +76,7 @@ impl StructuredResponseSchema {
         provider: StructuredProvider,
         body: &[u8],
     ) -> Result<StructuredModelOutput, ModelResponseError> {
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(ModelResponseError::TooLarge);
-        }
-        let document = encoding::decode_text(body).ok_or(ModelResponseError::InvalidEnvelope)?;
-        let envelope: Value =
-            serde_json::from_str(&document).map_err(|_| ModelResponseError::InvalidEnvelope)?;
-        if !envelope.is_object() {
-            return Err(ModelResponseError::InvalidEnvelope);
-        }
+        let envelope = decode_envelope(body)?;
         let text = match provider {
             StructuredProvider::OpenAi => openai_text(&envelope)?,
             StructuredProvider::Anthropic => anthropic_text(&envelope)?,
@@ -110,6 +98,30 @@ impl StructuredResponseSchema {
         };
         Ok(StructuredModelOutput { value, usage })
     }
+}
+
+fn application_validator(application: &Value) -> Result<Validator, ModelResponseError> {
+    jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .with_format("uuid", |text| uuid::Uuid::parse_str(text).is_ok())
+        .with_format("date-time", |text| {
+            crate::event_time::parse_aware_datetime(&Value::String(text.to_owned())).is_some()
+        })
+        .build(application)
+        .map_err(|_| ModelResponseError::InvalidSchema)
+}
+
+fn decode_envelope(body: &[u8]) -> Result<Value, ModelResponseError> {
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(ModelResponseError::TooLarge);
+    }
+    let document = encoding::decode_text(body).ok_or(ModelResponseError::InvalidEnvelope)?;
+    let envelope: Value =
+        serde_json::from_str(&document).map_err(|_| ModelResponseError::InvalidEnvelope)?;
+    if !envelope.is_object() {
+        return Err(ModelResponseError::InvalidEnvelope);
+    }
+    Ok(envelope)
 }
 
 fn openai_text(envelope: &Value) -> Result<&str, ModelResponseError> {
