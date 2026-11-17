@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt, fmt::Write};
 
 use jiter::JsonValue;
 
@@ -48,6 +48,27 @@ pub fn encode(input: &[u8], layout: Utf8Layout, max_bytes: usize) -> Result<Vec<
     let mut out = Vec::with_capacity(input.len());
     write_value(&mut out, &value, layout)?;
     Ok(out)
+}
+
+/// Match Python's ensure_ascii option for protocols that hash escaped text.
+pub fn encode_ascii(
+    input: &[u8],
+    layout: Utf8Layout,
+    max_bytes: usize,
+) -> Result<String, JsonError> {
+    let encoded = encode(input, layout, max_bytes)?;
+    let utf8 = str::from_utf8(&encoded).map_err(|_| JsonError::InvalidJson)?;
+    let mut ascii = String::with_capacity(utf8.len());
+    for character in utf8.chars() {
+        if character < '\u{007f}' {
+            ascii.push(character);
+        } else {
+            for unit in character.encode_utf16(&mut [0; 2]) {
+                write!(ascii, "\\u{unit:04x}").map_err(|_| JsonError::InvalidJson)?;
+            }
+        }
+    }
+    Ok(ascii)
 }
 
 pub(crate) fn write_value(

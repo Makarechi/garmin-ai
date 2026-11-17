@@ -1,3 +1,7 @@
+mod sleep_timing;
+
+pub use sleep_timing::sleep_timing_result_hash;
+
 use std::{error::Error, fmt};
 
 use ga_domain::statistics::{block_mean_difference, describe, standardized_difference};
