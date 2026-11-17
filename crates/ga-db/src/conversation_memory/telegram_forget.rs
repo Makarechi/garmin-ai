@@ -25,7 +25,7 @@ impl Database {
     }
 }
 
-async fn forget_in(
+pub(crate) async fn forget_in(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
 ) -> Result<Uuid, MemoryError> {
