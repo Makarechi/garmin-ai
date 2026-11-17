@@ -1,3 +1,7 @@
+mod publication;
+
+pub use publication::{ActivityPagePreflight, ActivityPageResult, PublishActivityPage};
+
 use std::{error::Error, fmt};
 
 use ga_domain::{event_input::source_calendar_date, timestamp::StoredInstant};
@@ -37,6 +41,9 @@ pub enum ActivityScanError {
     Owner(OwnerVerificationError),
     InvalidHorizon,
     InvalidState,
+    Busy,
+    Job(crate::jobs::JobStoreError),
+    Document(crate::activity_documents::DocumentError),
     Database,
 }
 
@@ -47,7 +54,10 @@ impl fmt::Display for ActivityScanError {
             Self::Owner(_) => "Garmin activity scan owner could not be verified",
             Self::InvalidHorizon => "Activity scan horizon or timezone is invalid",
             Self::InvalidState => "Saved activity scan state is invalid",
-            Self::Database => "Activity scan could not be scheduled",
+            Self::Busy => "Activity scan publication is busy",
+            Self::Job(_) => "Activity scan job lease is unavailable",
+            Self::Document(_) => "Activity summaries could not be published",
+            Self::Database => "Activity scan could not be stored",
         })
     }
 }
@@ -87,15 +97,7 @@ impl Database {
         if !locked {
             return Ok(ActivityScansStarted::Busy);
         }
-        let enabled: bool = sqlx::query_scalar(
-            "SELECT NOT EXISTS (SELECT 1 FROM module_configs WHERE owner_id=$1)
-             OR EXISTS (SELECT 1 FROM module_configs WHERE owner_id=$1 AND pack_key='training'
-                        AND collection_enabled)",
-        )
-        .bind(owner.owner_id())
-        .fetch_one(&mut *txn)
-        .await?;
-        if !enabled {
+        if !collection_enabled(&mut txn, owner.owner_id()).await? {
             return Ok(ActivityScansStarted::CollectionDisabled);
         }
 
@@ -136,6 +138,20 @@ impl Database {
         txn.commit().await?;
         Ok(ActivityScansStarted::Scheduled { pages })
     }
+}
+
+async fn collection_enabled(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+) -> Result<bool, ActivityScanError> {
+    Ok(sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM module_configs WHERE owner_id=$1)
+             OR EXISTS (SELECT 1 FROM module_configs WHERE owner_id=$1 AND pack_key='training'
+                        AND collection_enabled)",
+    )
+    .bind(owner)
+    .fetch_one(&mut **txn)
+    .await?)
 }
 
 async fn scan_is_due(
@@ -179,5 +195,15 @@ async fn enqueue_page(
     .bind(OffsetDateTime::from(now))
     .fetch_optional(&mut **txn)
     .await?;
-    result.ok_or(ActivityScanError::InvalidState)
+    if let Some(id) = result {
+        return Ok(id);
+    }
+    sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE dedup_key=$1 AND kind='garmin_activities' AND payload=$2::jsonb",
+    )
+    .bind(dedup)
+    .bind(payload.to_string())
+    .fetch_optional(&mut **txn)
+    .await?
+    .ok_or(ActivityScanError::InvalidState)
 }
