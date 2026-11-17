@@ -1,9 +1,11 @@
 mod export;
+mod value;
 mod wire;
 
 pub use export::{
     ActivityExport, ExportFrame, ExportInventory, ExportLimits, verify_activity_export,
 };
+pub use value::RawFitValue;
 
 pub use wire::{ByteOrder, FitWireMessage, WireField, WireInventory, visit_fit_wire};
 

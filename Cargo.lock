@@ -683,6 +683,7 @@ name = "ga-fit"
 version = "0.1.0"
 dependencies = [
  "crc",
+ "serde_json",
  "zip",
 ]
 
