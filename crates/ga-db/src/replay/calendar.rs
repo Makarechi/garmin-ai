@@ -19,8 +19,8 @@ use super::{
 use crate::{
     Database,
     activity_documents::{
-        ApplyActivity, DocumentError, DocumentStatus, Projection, invalidate_replay_outputs,
-        put_state, raw_status, read_state,
+        ActivityDocument, ApplyActivity, DocumentError, DocumentStatus, Projection, apply_document,
+        invalidate_replay_outputs, put_state, raw_status, read_state,
     },
     health_projection::{rebuild_calendar, rebuild_intraday_view},
     jobs::{FailureReason, JobOutcome, JobStoreError, RecordedJobStatus, ReplayJobLease},
@@ -101,16 +101,29 @@ impl From<JobStoreError> for CalendarReplayError {
 enum ReplayScope {
     Calendar,
     Intraday,
+    ActivityDocument,
 }
 
 impl ReplayScope {
-    fn for_endpoint(endpoint: &str) -> Option<Self> {
-        if HEALTH_CALENDAR_ENDPOINTS.contains(&endpoint) {
-            Some(Self::Calendar)
+    fn require_endpoint(
+        endpoint: &str,
+        required: Option<Self>,
+    ) -> Result<Self, CalendarReplayError> {
+        let scope = if HEALTH_CALENDAR_ENDPOINTS.contains(&endpoint) {
+            Self::Calendar
         } else if HEALTH_INTRADAY_ENDPOINTS.contains(&endpoint) {
-            Some(Self::Intraday)
+            Self::Intraday
+        } else if ActivityDocument::for_endpoint(endpoint).is_some() {
+            Self::ActivityDocument
         } else {
-            None
+            return Err(CalendarReplayError::OtherEndpoint);
+        };
+        if required.map_or(scope != Self::ActivityDocument, |required| {
+            required == scope
+        }) {
+            Ok(scope)
+        } else {
+            Err(CalendarReplayError::OtherEndpoint)
         }
     }
 }
@@ -147,7 +160,7 @@ impl Database {
         archive: Arc<Archive>,
         cancelled: impl Fn() -> bool + Clone + Send + 'static,
     ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
-        self.replay_health(ReplayScope::Calendar, request, archive, cancelled)
+        self.replay_json(ReplayScope::Calendar, request, archive, cancelled)
             .await
     }
 
@@ -158,11 +171,22 @@ impl Database {
         archive: Arc<Archive>,
         cancelled: impl Fn() -> bool + Clone + Send + 'static,
     ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
-        self.replay_health(ReplayScope::Intraday, request, archive, cancelled)
+        self.replay_json(ReplayScope::Intraday, request, archive, cancelled)
             .await
     }
 
-    async fn replay_health(
+    /// Restore an activity detail, lap, zone or weather document from its verified archive.
+    pub async fn replay_activity_document(
+        &self,
+        request: ReadReplayInput<'_>,
+        archive: Arc<Archive>,
+        cancelled: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
+        self.replay_json(ReplayScope::ActivityDocument, request, archive, cancelled)
+            .await
+    }
+
+    async fn replay_json(
         &self,
         scope: ReplayScope,
         request: ReadReplayInput<'_>,
@@ -171,7 +195,7 @@ impl Database {
     ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
         require_parser(request.target_parser_version)?;
         let mut txn = self.work.begin().await?;
-        let outcome = replay_health_in(&mut txn, Some(scope), request, archive, cancelled).await?;
+        let outcome = replay_json_in(&mut txn, Some(scope), request, archive, cancelled).await?;
         txn.commit().await?;
         Ok(outcome)
     }
@@ -189,7 +213,7 @@ impl Database {
             .await?;
         options.lease.assert_live(&mut txn).await?;
         let replay = if let Some((source_id, fingerprint)) = options.lease.source() {
-            replay_health_in(
+            replay_json_in(
                 &mut txn,
                 None,
                 ReadReplayInput {
@@ -227,7 +251,7 @@ impl Database {
     }
 }
 
-async fn replay_health_in(
+async fn replay_json_in(
     txn: &mut Transaction<'_, Postgres>,
     required: Option<ReplayScope>,
     request: ReadReplayInput<'_>,
@@ -252,11 +276,7 @@ async fn replay_health_in(
             .fetch_optional(&mut **txn)
             .await?;
     if let Some(endpoint) = registered {
-        let scope =
-            ReplayScope::for_endpoint(&endpoint).ok_or(CalendarReplayError::OtherEndpoint)?;
-        if required.is_some_and(|required| required != scope) {
-            return Err(CalendarReplayError::OtherEndpoint);
-        }
+        ReplayScope::require_endpoint(&endpoint, required)?;
     }
     let input = read_input(txn, request, Arc::clone(&archive), cancelled.clone()).await;
     let mut source_ref = None;
@@ -270,8 +290,7 @@ async fn replay_health_in(
         }
         Ok(PreparedReplay::Ready(input)) => {
             let endpoint = input.source.endpoint.as_str();
-            let scope =
-                ReplayScope::for_endpoint(endpoint).ok_or(CalendarReplayError::OtherEndpoint)?;
+            let scope = ReplayScope::require_endpoint(endpoint, required)?;
             let ReplayContent::Json {
                 payload,
                 timezone,
@@ -293,10 +312,13 @@ async fn replay_health_in(
                 })
                 .transpose()?;
             source_ref = Some(input.source.id);
+            let projection = ActivityDocument::for_endpoint(endpoint)
+                .map(Projection::Document)
+                .unwrap_or(Projection::Health(endpoint, proof.as_ref()));
             let applied = ApplyActivity {
                 account_fingerprint: request.authenticated_fingerprint,
                 source_key: &input.source.source_key,
-                projection: Projection::Health(endpoint, proof.as_ref()),
+                projection,
                 source_id: input.source.id,
                 requested_at: input.requested_at,
                 timezone: &timezone,
@@ -306,7 +328,7 @@ async fn replay_health_in(
                 byte_limit: request.max_json_bytes,
                 cancelled: cancelled.clone(),
             };
-            let (status, failure) = apply_health(
+            let (status, failure) = apply_json_projection(
                 txn,
                 &input.source,
                 &applied,
@@ -426,7 +448,7 @@ fn stored_clock(value: &Value) -> Result<Option<StoredInstant>, CalendarReplayEr
         .ok_or(CalendarReplayError::InvalidState)
 }
 
-async fn apply_health<C>(
+async fn apply_json_projection<C>(
     txn: &mut Transaction<'_, Postgres>,
     source: &ReplaySource,
     request: &ApplyActivity<'_>,
@@ -500,7 +522,21 @@ where
                 preceding,
             )
             .await
+            .map(|status| status.label())
             .map_err(CalendarReplayError::Publication),
+            ReplayScope::ActivityDocument => {
+                if payload.is_null()
+                    || payload.as_object().is_some_and(serde_json::Map::is_empty)
+                    || payload.as_array().is_some_and(Vec::is_empty)
+                {
+                    Ok(DocumentStatus::Empty.label())
+                } else {
+                    apply_document(&mut candidate, request, endpoint, Some(payload))
+                        .await
+                        .map(|()| DocumentStatus::Archived.label())
+                        .map_err(CalendarReplayError::Publication)
+                }
+            }
             ReplayScope::Intraday if unchanged => {
                 let mut projection =
                     normalize_health_payload(endpoint, request.source_key, payload)
@@ -516,30 +552,30 @@ where
                     preceding,
                 )
                 .await
+                .map(|status| status.label())
                 .map_err(CalendarReplayError::Publication)
             }
-            ReplayScope::Intraday => {
-                intraday::rebuild(
-                    &mut candidate,
-                    intraday::Rebuild {
-                        source,
-                        request,
-                        payload,
-                        proof,
-                        archive: reader.archive,
-                        byte_limit: reader.byte_limit,
-                        cancelled: reader.cancelled,
-                        parser_changed,
-                        retained: watermark.retained,
-                        preceding,
-                    },
-                )
-                .await
-            }
+            ReplayScope::Intraday => intraday::rebuild(
+                &mut candidate,
+                intraday::Rebuild {
+                    source,
+                    request,
+                    payload,
+                    proof,
+                    archive: reader.archive,
+                    byte_limit: reader.byte_limit,
+                    cancelled: reader.cancelled,
+                    parser_changed,
+                    retained: watermark.retained,
+                    preceding,
+                },
+            )
+            .await
+            .map(|status| status.label()),
         };
         match rebuilt {
             Ok(new) => {
-                status = new.label().to_owned();
+                status = new.to_owned();
                 raw_status(&mut candidate, source.id, &status, GARMIN_PARSER_VERSION).await?;
                 candidate.commit().await?;
             }
