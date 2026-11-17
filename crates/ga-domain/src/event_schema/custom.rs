@@ -256,7 +256,7 @@ fn literals(node: &Node) -> impl Iterator<Item = &Value> {
     )
 }
 
-fn field_name(name: &str) -> bool {
+pub(super) fn field_name(name: &str) -> bool {
     let mut chars = name.bytes();
     name.len() <= 63
         && chars.next().is_some_and(|byte| byte.is_ascii_lowercase())
