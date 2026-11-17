@@ -37,7 +37,7 @@ def definition(local, global_number, fields, developer=None):
 
 
 def fit_member(start_record, count, *, with_developer=False):
-    # Record field 99 is deliberately unknown. Keep it alongside known fields.
+    # Record field 99 exercises the respiration field and its profile component.
     field_list = [(253, 4, 0x86), (3, 1, 0x02), (99, 2, 0x84)]
     timestamp = int((START - FIT_EPOCH).total_seconds())
     body = bytearray()
@@ -183,7 +183,7 @@ def ingest_fit(records, *, with_developer=False, lease_probe=False):
                 raise RuntimeError("The archived ZIP does not match the input bytes")
             fields = first_record.payload["_fit"]["fields"]
             if not any(field["field_number"] == 99 and field["raw_value"] == 0 for field in fields):
-                raise RuntimeError("The unknown FIT field did not survive ingestion")
+                raise RuntimeError("The raw respiration FIT field did not survive ingestion")
             if with_developer:
                 dev = next(field for field in fields if field["developer"])
                 if dev["name"] != "devscore" or dev["units"] != "score" or dev["raw_value"] != 200:
