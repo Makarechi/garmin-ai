@@ -1,5 +1,5 @@
 mod dispatch;
-pub use dispatch::{ReplyDispatchError, ReplyDispatchResult, ReplyObservation};
+pub use dispatch::{ReplyDispatchError, ReplyDispatchResult, ReplyObservation, ReplySendOutcome};
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
