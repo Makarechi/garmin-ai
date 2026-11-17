@@ -16,6 +16,7 @@ pub mod legacy_json;
 pub mod legacy_metrics;
 pub mod model_gate;
 pub mod model_response;
+pub mod model_schema;
 pub mod source_contract;
 pub mod statistics;
 pub mod text_offsets;
