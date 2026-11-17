@@ -266,5 +266,105 @@ async fn claims_preserve_epochs_and_fence_superseded_work() -> Result<(), Box<dy
             ("900".into(), "processed".into(), "done".into()),
         ]
     );
+
+    let pending = binding
+        .accept_polled_update(
+            &mut runtime,
+            &json!({"update_id":700,"message":message(5,"pending before next gap")}),
+            after(22)?,
+            false,
+        )
+        .await?
+        .inbound
+        .ok_or("Missing older work ahead of a reset edit")?;
+    let edit_at: StoredInstant = "2026-11-25T20:00:00Z".parse()?;
+    let second_edit_at: StoredInstant = "2026-12-03T20:00:00Z".parse()?;
+    let pending_lease = restarted
+        .claim_telegram_inbound(target, edit_at, 86_400)
+        .await?
+        .ok_or("Missing lease before accepting a reset edit")?;
+    assert_eq!(pending_lease.message_id(), pending.message_id);
+    let initial_edit = binding
+        .accept_polled_update(
+            &mut runtime,
+            &json!({"update_id":5,"edited_message":message(1,"first update is an edit")}),
+            edit_at,
+            false,
+        )
+        .await?;
+    assert!(initial_edit.new_ordering_epoch.is_none());
+    assert!(
+        restarted
+            .claim_telegram_inbound(target, edit_at, 2)
+            .await?
+            .is_none(),
+        "a reset edit must wait for the older active delivery"
+    );
+    restarted
+        .finish_telegram_inbound(&pending_lease, edit_at, TelegramInboundState::Processed)
+        .await?;
+    let first_edit_lease = restarted
+        .claim_telegram_inbound(target, second_edit_at, 86_400)
+        .await?
+        .ok_or("Missing first reset edit")?;
+    assert_eq!(
+        Some(first_edit_lease.message_id()),
+        initial_edit.inbound.map(|row| row.message_id)
+    );
+
+    let second_edit = binding
+        .accept_polled_update(
+            &mut runtime,
+            &json!({"update_id":3,"edited_message":message(3,"another gap followed by an edit")}),
+            second_edit_at,
+            false,
+        )
+        .await?;
+    assert!(second_edit.new_ordering_epoch.is_none());
+    assert!(
+        restarted
+            .claim_telegram_inbound(target, second_edit_at, 2)
+            .await?
+            .is_none(),
+        "a second edit-only reset must also wait for existing work"
+    );
+    let shared_order: String = sqlx::query_scalar(
+        "SELECT value->>'last_received_at' FROM app_state WHERE key='telegram:ordering'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(shared_order, after(22)?.to_string());
+    restarted
+        .finish_telegram_inbound(
+            &first_edit_lease,
+            second_edit_at,
+            TelegramInboundState::Processed,
+        )
+        .await?;
+    let second_edit_lease = restarted
+        .claim_telegram_inbound(target, second_edit_at, 2)
+        .await?
+        .ok_or("Missing second reset edit")?;
+    assert_eq!(
+        Some(second_edit_lease.message_id()),
+        second_edit.inbound.map(|row| row.message_id)
+    );
+    restarted
+        .finish_telegram_inbound(
+            &second_edit_lease,
+            second_edit_at,
+            TelegramInboundState::Processed,
+        )
+        .await?;
+    let epochs: Vec<i64> = sqlx::query_scalar(
+        "SELECT (j.payload->>'ordering_epoch')::bigint FROM jobs j JOIN inbound_messages i
+         ON j.dedup_key=concat('telegram:inbound:native:',i.id)
+         WHERE i.external_event_id IN ('700','5','3') ORDER BY i.external_event_id::bigint DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(epochs.len(), 3);
+    assert_eq!(epochs[1], epochs[0] + 1);
+    assert_eq!(epochs[2], epochs[1] + 1);
     Ok(())
 }

@@ -21,8 +21,8 @@ use crate::{
     },
     runtime_lease::RuntimeLease,
     telegram_cursor::{
-        TelegramCursorError, advance_telegram_poll_cursor, lock_ingress, record_telegram_ordering,
-        telegram_ordering_epoch,
+        TelegramCursorError, advance_telegram_poll_cursor, lock_ingress,
+        record_native_telegram_ordering, record_telegram_ordering,
     },
 };
 
@@ -188,21 +188,20 @@ async fn persist(
     } else {
         None
     };
-    let new_ordering_epoch = if advances_ordering && inbound.is_some_and(|receipt| receipt.created)
-    {
-        Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
-    } else {
-        None
-    };
-    if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
-        let epoch = match new_ordering_epoch {
-            Some(epoch) => epoch,
-            None => telegram_ordering_epoch(&mut txn, input.instance_id).await?,
-        };
+    let new_ordering_epoch = if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
+        let epoch =
+            record_native_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?;
         native_telegram::enqueue(&mut txn, receipt.message_id, epoch, input.received_at)
             .await
             .map_err(TelegramPollError::Processing)?;
-    }
+        if advances_ordering {
+            Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let acknowledgement_queued =
         if let Some(callback_id) = input.callback_id.filter(|_| selected && !owned_by_legacy) {
             let target = TelegramAckTarget {
