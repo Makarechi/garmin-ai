@@ -72,6 +72,23 @@ impl Database {
         })
     }
 
+    /// Read physical database size for the backup staging estimate.
+    pub async fn backup_database_bytes(&self) -> Result<u64, ReadinessError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SET LOCAL statement_timeout='750ms'")
+                .execute(&mut *txn)
+                .await?;
+            let size: i64 = sqlx::query_scalar("SELECT pg_database_size(current_database())")
+                .fetch_one(&mut *txn)
+                .await?;
+            txn.commit().await?;
+            u64::try_from(size).map_err(|_| ReadinessError::Unavailable)
+        })
+        .await
+        .map_err(|_| ReadinessError::Unavailable)?
+    }
+
     pub async fn readiness(&self) -> Result<(), ReadinessError> {
         tokio::time::timeout(Duration::from_millis(1500), self.readiness_transaction())
             .await

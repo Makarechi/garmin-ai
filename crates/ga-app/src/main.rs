@@ -1,8 +1,9 @@
 mod authorization;
+mod backup_space;
 mod http;
 mod replay_worker;
 
-use std::{env, ffi::OsStr, process::ExitCode};
+use std::{env, ffi::OsStr, path::PathBuf, process::ExitCode};
 
 use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 
@@ -26,6 +27,8 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Estimate local staging and destination capacity for an encrypted backup
+    BackupSpace { path: PathBuf },
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
@@ -67,6 +70,12 @@ fn main() -> ExitCode {
         Some(Command::Serve { host, port }) => {
             if http::serve(&host, port).is_err() {
                 eprintln!("Could not run the HTTP server.");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::BackupSpace { path }) => {
+            if let Err(error) = backup_space::run(&path) {
+                eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
         }
