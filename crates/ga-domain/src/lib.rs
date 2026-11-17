@@ -5,6 +5,7 @@ pub mod event_provenance;
 pub mod event_replay;
 pub mod event_schema;
 mod event_time;
+pub mod file_import;
 pub mod garmin_health;
 pub mod garmin_summary;
 pub mod identity;
