@@ -19,8 +19,9 @@ use super::{
 use crate::{
     Database,
     activity_documents::{
-        ActivityDocument, ApplyActivity, DocumentError, DocumentStatus, Projection, apply_document,
-        invalidate_replay_outputs, put_state, raw_status, read_state,
+        ActivityDocument, ActivitySummaryKind, ApplyActivity, DocumentError, DocumentStatus,
+        Projection, apply_document, invalidate_replay_outputs, put_state, raw_status, read_state,
+        replay_activity_summaries,
     },
     health_projection::{rebuild_calendar, rebuild_intraday_view},
     jobs::{FailureReason, JobOutcome, JobStoreError, RecordedJobStatus, ReplayJobLease},
@@ -102,6 +103,7 @@ enum ReplayScope {
     Calendar,
     Intraday,
     ActivityDocument,
+    ActivitySummary,
 }
 
 impl ReplayScope {
@@ -115,12 +117,15 @@ impl ReplayScope {
             Self::Intraday
         } else if ActivityDocument::for_endpoint(endpoint).is_some() {
             Self::ActivityDocument
+        } else if ActivitySummaryKind::for_endpoint(endpoint).is_some() {
+            Self::ActivitySummary
         } else {
             return Err(CalendarReplayError::OtherEndpoint);
         };
-        if required.map_or(scope != Self::ActivityDocument, |required| {
-            required == scope
-        }) {
+        if required.map_or(
+            matches!(scope, Self::Calendar | Self::Intraday),
+            |required| required == scope,
+        ) {
             Ok(scope)
         } else {
             Err(CalendarReplayError::OtherEndpoint)
@@ -183,6 +188,17 @@ impl Database {
         cancelled: impl Fn() -> bool + Clone + Send + 'static,
     ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
         self.replay_json(ReplayScope::ActivityDocument, request, archive, cancelled)
+            .await
+    }
+
+    /// Restore a single Garmin activity or a retained page from its verified archive.
+    pub async fn replay_activity_summary(
+        &self,
+        request: ReadReplayInput<'_>,
+        archive: Arc<Archive>,
+        cancelled: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<CalendarReplayOutcome, CalendarReplayError> {
+        self.replay_json(ReplayScope::ActivitySummary, request, archive, cancelled)
             .await
     }
 
@@ -314,6 +330,7 @@ async fn replay_json_in(
             source_ref = Some(input.source.id);
             let projection = ActivityDocument::for_endpoint(endpoint)
                 .map(Projection::Document)
+                .or_else(|| ActivitySummaryKind::for_endpoint(endpoint).map(Projection::Summary))
                 .unwrap_or(Projection::Health(endpoint, proof.as_ref()));
             let applied = ApplyActivity {
                 account_fingerprint: request.authenticated_fingerprint,
@@ -502,7 +519,10 @@ where
         "completeness": if proof.is_some() { "adapter_attested" } else { "unverified" },
     });
     let mut status = source.status.clone();
-    if !unchanged || matches!(endpoint, "daily" | "body_battery" | "heart_rate") {
+    if !unchanged
+        || scope_mode == ReplayScope::ActivitySummary
+        || matches!(endpoint, "daily" | "body_battery" | "heart_rate")
+    {
         let mut candidate = txn.begin().await?;
         let preceding = if watermark.owns_attempt {
             watermark.current["source_ref"].as_str()
@@ -524,18 +544,8 @@ where
             .await
             .map(|status| status.label())
             .map_err(CalendarReplayError::Publication),
-            ReplayScope::ActivityDocument => {
-                if payload.is_null()
-                    || payload.as_object().is_some_and(serde_json::Map::is_empty)
-                    || payload.as_array().is_some_and(Vec::is_empty)
-                {
-                    Ok(DocumentStatus::Empty.label())
-                } else {
-                    apply_document(&mut candidate, request, endpoint, Some(payload))
-                        .await
-                        .map(|()| DocumentStatus::Archived.label())
-                        .map_err(CalendarReplayError::Publication)
-                }
+            ReplayScope::ActivityDocument | ReplayScope::ActivitySummary => {
+                replay_activity_projection(&mut candidate, request, payload).await
             }
             ReplayScope::Intraday if unchanged => {
                 let mut projection =
@@ -582,7 +592,9 @@ where
             Err(error) => {
                 let failure = match error {
                     CalendarReplayError::Publication(
-                        DocumentError::InvalidHealthPayload | DocumentError::InvalidRecordedState,
+                        DocumentError::InvalidHealthPayload
+                        | DocumentError::InvalidRecordedState
+                        | DocumentError::InvalidSummary,
                     ) => "ValueError",
                     CalendarReplayError::Preparation(error) => permanent_preflight_error(error)?,
                     error => return Err(error),
@@ -662,6 +674,30 @@ where
         _ => return Err(CalendarReplayError::InvalidState),
     };
     Ok((status, None))
+}
+
+async fn replay_activity_projection(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &ApplyActivity<'_>,
+    payload: &Value,
+) -> Result<&'static str, CalendarReplayError> {
+    if payload.is_null()
+        || payload.as_object().is_some_and(serde_json::Map::is_empty)
+        || payload.as_array().is_some_and(Vec::is_empty)
+    {
+        return Ok(DocumentStatus::Empty.label());
+    }
+    match request.projection {
+        Projection::Document(kind) => {
+            apply_document(txn, request, kind.endpoint(), Some(payload)).await?;
+            Ok(DocumentStatus::Archived.label())
+        }
+        Projection::Summary(kind) => {
+            replay_activity_summaries(txn, request, kind, payload).await?;
+            Ok(DocumentStatus::Normalized.label())
+        }
+        Projection::Health(..) => Err(CalendarReplayError::OtherEndpoint),
+    }
 }
 
 async fn database_now(
