@@ -89,7 +89,7 @@ impl<'binding> TelegramBinding<'binding> {
     ) -> Result<bool, TelegramPollError> {
         let update = PreparedUpdate::new(self, wire, received_at)?;
         let receipt = database
-            .persist_telegram_webhook_event(update.input(), |action| {
+            .persist_telegram_webhook_event(update.input(), self.external_owner_id, |action| {
                 // A webhook receipt does not establish when the button was pressed.
                 update.normalize_callback(action, false)
             })

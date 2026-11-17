@@ -15,6 +15,8 @@ use ga_domain::access::Scope;
 use serde_json::json;
 use tokio::{net::TcpListener, signal};
 
+use ga_app::telegram_webhook::TelegramWebhook;
+
 use crate::authorization::Authorization;
 
 #[derive(Clone)]
@@ -169,6 +171,7 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
                 .last()
         })
         .unwrap_or_else(|| "Europe/Bratislava".into());
+    let webhook = TelegramWebhook::configured(database.clone()).router();
     println!("Listening on http://{}", listener.local_addr()?);
     axum::serve(
         listener,
@@ -176,7 +179,8 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
             database,
             authorization,
             configured_timezone: configured_timezone.into(),
-        }),
+        })
+        .merge(webhook),
     )
     .with_graceful_shutdown(shutdown)
     .await
