@@ -7,6 +7,7 @@ DOMAIN_DEPENDENCIES = {
     "jiff",
     "jiter",
     "jsonschema",
+    "num-bigint",
     "serde_json",
     "sha2",
     "speedate",

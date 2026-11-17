@@ -1,3 +1,6 @@
+mod custom;
+pub use custom::{CustomSchemaError, validate_custom_schema};
+
 use std::{error::Error, fmt};
 
 use serde_json::Value;
