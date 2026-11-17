@@ -128,6 +128,7 @@ def command_line():
         stdout, stderr = StringIO(), StringIO()
         with (
             patch("sys.argv", ["garmin-ai", *args]),
+            patch.object(cli, "Settings", lambda: Settings(_env_file=None)),
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
