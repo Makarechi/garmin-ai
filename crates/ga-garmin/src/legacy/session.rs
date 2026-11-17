@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{
     Engine,
@@ -7,7 +7,7 @@ use base64::{
 use ga_archive::GarminTokenFile;
 use ga_domain::identity::GarminProfileId;
 use reqwest::{
-    Client, RequestBuilder, Url,
+    Client, RequestBuilder, Response, Url,
     header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL},
 };
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,8 @@ use super::{
     DI_PATH, Hosts, MAX_AUTH_BYTES, MAX_PROFILE_BYTES, PROFILE_PATH, endpoint, native_headers,
 };
 use crate::{
-    GarminError, TransportConfig, build_http, read_bounded, send, sensitive_header, successful,
+    GarminError, Schedule, TransportConfig, build_http, read_bounded, send, sensitive_header,
+    successful,
 };
 
 const DI_CLIENT_IDS: [&str; 4] = [
@@ -66,6 +67,7 @@ struct TokenClaims {
 pub(super) struct Native {
     pub(super) http: Client,
     pub(super) hosts: Hosts,
+    pub(super) pacing: Duration,
 }
 
 impl LegacySession {
@@ -173,7 +175,11 @@ impl Native {
         let http = build_http(config, https)?
             .build()
             .map_err(|_| GarminError::InvalidConfiguration)?;
-        Ok(Self { http, hosts })
+        Ok(Self {
+            http,
+            hosts,
+            pacing: config.pacing,
+        })
     }
 
     pub(super) async fn login(
@@ -181,9 +187,11 @@ impl Native {
         ticket: &str,
         service: &str,
     ) -> Result<LegacySession, GarminError> {
+        let mut schedule = Schedule::new();
         for client in DI_CLIENT_IDS {
             let result = self
                 .grant(
+                    &mut schedule,
                     client,
                     &[
                         ("client_id", client),
@@ -196,7 +204,7 @@ impl Native {
             match result {
                 Ok(grant) => {
                     let tokens = Tokens::from_grant(grant, None, client)?;
-                    let profile = self.profile(&tokens).await?;
+                    let profile = self.profile(&mut schedule, &tokens).await?;
                     return Ok(LegacySession { profile, tokens });
                 }
                 Err(
@@ -216,6 +224,17 @@ impl Native {
         expected_fingerprint: &str,
         policy: RestorePolicy,
     ) -> Result<LegacySession, GarminError> {
+        self.restore_scheduled(store, expected_fingerprint, policy, &mut Schedule::new())
+            .await
+    }
+
+    pub(super) async fn restore_scheduled(
+        &self,
+        store: &GarminTokenFile,
+        expected_fingerprint: &str,
+        policy: RestorePolicy,
+        schedule: &mut Schedule,
+    ) -> Result<LegacySession, GarminError> {
         let guard = store.try_lock().map_err(|_| GarminError::TokenStorage)?;
         let bytes = guard
             .read()
@@ -228,13 +247,13 @@ impl Native {
         }
         let mut rotated = policy == RestorePolicy::Refresh || tokens.expires_soon();
         if rotated {
-            tokens = self.refresh(tokens).await?;
+            tokens = self.refresh(schedule, tokens).await?;
         }
-        let profile = match self.profile(&tokens).await {
+        let profile = match self.profile(schedule, &tokens).await {
             Err(GarminError::Unauthorized) if !rotated => {
-                tokens = self.refresh(tokens).await?;
+                tokens = self.refresh(schedule, tokens).await?;
                 rotated = true;
-                self.profile(&tokens).await?
+                self.profile(schedule, &tokens).await?
             }
             outcome => outcome?,
         };
@@ -250,13 +269,18 @@ impl Native {
         Ok(session)
     }
 
-    async fn refresh(&self, tokens: Tokens) -> Result<Tokens, GarminError> {
+    async fn refresh(
+        &self,
+        schedule: &mut Schedule,
+        tokens: Tokens,
+    ) -> Result<Tokens, GarminError> {
         let refresh = tokens
             .di_refresh_token
             .filter(|value| !value.is_empty())
             .ok_or(GarminError::AuthenticationRequired)?;
         let grant = self
             .grant(
+                schedule,
                 &tokens.di_client_id,
                 &[
                     ("grant_type", "refresh_token"),
@@ -276,6 +300,7 @@ impl Native {
 
     async fn grant(
         &self,
+        schedule: &mut Schedule,
         client: &str,
         fields: &[(&str, &str)],
     ) -> Result<TokenGrant, GarminError> {
@@ -285,15 +310,19 @@ impl Native {
             .header(ACCEPT, "application/json")
             .header(CACHE_CONTROL, "no-cache")
             .form(fields);
-        fetch_json(request, MAX_AUTH_BYTES).await
+        decode_json(schedule.send(self.pacing, request).await?, MAX_AUTH_BYTES).await
     }
 
-    async fn profile(&self, tokens: &Tokens) -> Result<Profile, GarminError> {
+    async fn profile(
+        &self,
+        schedule: &mut Schedule,
+        tokens: &Tokens,
+    ) -> Result<Profile, GarminError> {
         let bearer = sensitive_header("Bearer", &tokens.di_token)?;
         let request = native_headers(self.http.get(endpoint(&self.hosts.api, PROFILE_PATH)?))
             .header(AUTHORIZATION, bearer)
             .header(ACCEPT, "application/json");
-        let response = successful(send(request).await?)?;
+        let response = successful(schedule.send(self.pacing, request).await?)?;
         let raw = read_bounded(response, MAX_PROFILE_BYTES).await?;
         let id = GarminProfileId::from_profile_json(&raw, MAX_PROFILE_BYTES as usize)
             .map_err(|_| GarminError::ProfileUnavailable)?;
@@ -311,7 +340,14 @@ pub(super) async fn fetch_json<T: serde::de::DeserializeOwned>(
     request: RequestBuilder,
     limit: u64,
 ) -> Result<T, GarminError> {
-    let response = successful(send(request).await?)?;
+    decode_json(send(request).await?, limit).await
+}
+
+async fn decode_json<T: serde::de::DeserializeOwned>(
+    response: Response,
+    limit: u64,
+) -> Result<T, GarminError> {
+    let response = successful(response)?;
     let body = read_bounded(response, limit).await?;
     serde_json::from_slice(&body).map_err(|_| GarminError::InvalidJson)
 }

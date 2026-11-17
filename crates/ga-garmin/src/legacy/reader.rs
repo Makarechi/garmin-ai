@@ -1,4 +1,4 @@
-use std::{num::NonZeroU64, sync::Arc, time::Duration};
+use std::{num::NonZeroU64, sync::Arc};
 
 use ga_archive::GarminTokenFile;
 use reqwest::{Response, StatusCode, Url};
@@ -20,7 +20,6 @@ struct Inner {
     native: Native,
     store: GarminTokenFile,
     expected_fingerprint: String,
-    pacing: Duration,
     state: Mutex<State>,
 }
 
@@ -45,19 +44,21 @@ impl LegacyReader {
         hosts: Hosts,
     ) -> Result<Self, GarminError> {
         let native = Native::new(hosts, config)?;
+        let mut schedule = Schedule::new();
         let session = native
-            .restore(&store, expected_fingerprint, RestorePolicy::IfNeeded)
+            .restore_scheduled(
+                &store,
+                expected_fingerprint,
+                RestorePolicy::IfNeeded,
+                &mut schedule,
+            )
             .await?;
         Ok(Self {
             inner: Arc::new(Inner {
                 native,
                 store,
                 expected_fingerprint: expected_fingerprint.to_owned(),
-                pacing: config.pacing,
-                state: Mutex::new(State {
-                    session,
-                    schedule: Schedule::new(),
-                }),
+                state: Mutex::new(State { session, schedule }),
             }),
         })
     }
@@ -103,7 +104,10 @@ impl LegacyReader {
             let base = &self.inner.native.hosts.api;
             let url = url(base, state.session.display_name())?;
             let request = state.session.authorized_read(client, url, accept)?;
-            let response = state.schedule.send(self.inner.pacing, request).await?;
+            let response = state
+                .schedule
+                .send(self.inner.native.pacing, request)
+                .await?;
             if response.status() == StatusCode::UNAUTHORIZED && !rotated {
                 self.refresh(&mut state).await?;
                 rotated = true;
@@ -114,19 +118,16 @@ impl LegacyReader {
     }
 
     async fn refresh(&self, state: &mut State) -> Result<(), GarminError> {
-        let result = self
+        state.session = self
             .inner
             .native
-            .restore(
+            .restore_scheduled(
                 &self.inner.store,
                 &self.inner.expected_fingerprint,
                 RestorePolicy::Refresh,
+                &mut state.schedule,
             )
-            .await;
-        if let Err(GarminError::RateLimited { retry_after }) = result {
-            state.schedule.cooldown(retry_after);
-        }
-        state.session = result?;
+            .await?;
         Ok(())
     }
 }
