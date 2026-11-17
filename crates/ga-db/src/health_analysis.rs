@@ -3,6 +3,8 @@ mod sleep_timing;
 
 pub use sleep_timing::sleep_timing_result_hash;
 
+mod freshness;
+
 use std::{error::Error, fmt};
 
 use ga_domain::statistics::{block_mean_difference, describe, standardized_difference};
@@ -28,6 +30,7 @@ pub enum HealthAnalysisError {
     Storage(ReadinessError),
     ReplayPending,
     Database,
+    InvalidTimezone,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -40,6 +43,7 @@ impl fmt::Display for HealthAnalysisError {
             Self::Storage(_) => "Health analysis storage is unavailable",
             Self::ReplayPending => "Garmin projections are being rebuilt",
             Self::Database => "Daily metrics could not be read",
+            Self::InvalidTimezone => "The analysis timezone is invalid",
         })
     }
 }
