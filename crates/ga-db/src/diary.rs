@@ -9,6 +9,7 @@ mod reads;
 mod revisions;
 mod undo;
 
+pub(crate) use reads::owner_events_in;
 pub use reads::{DiaryReadError, ModelDiaryPage, ModelDiaryQuery};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
