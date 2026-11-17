@@ -1,3 +1,4 @@
+mod read_daily;
 mod sleep_timing;
 
 pub use sleep_timing::sleep_timing_result_hash;
@@ -22,6 +23,7 @@ const MAX_RANGE_DAYS: i64 = 3660;
 pub enum HealthAnalysisError {
     UnknownMetric,
     DateRange,
+    CalendarBoundary,
     Overlap,
     Storage(ReadinessError),
     ReplayPending,
@@ -33,6 +35,7 @@ impl fmt::Display for HealthAnalysisError {
         f.write_str(match self {
             Self::UnknownMetric => "Unknown daily metric",
             Self::DateRange => "Date range must be ordered and at most 3660 days",
+            Self::CalendarBoundary => "Dates must allow bounded analysis-window expansion",
             Self::Overlap => "Comparison periods must not overlap",
             Self::Storage(_) => "Health analysis storage is unavailable",
             Self::ReplayPending => "Garmin projections are being rebuilt",
@@ -61,10 +64,10 @@ impl HealthPeriod {
             .map_err(|_| HealthAnalysisError::DateRange)?;
         let latest = Date::from_calendar_date(9999, Month::November, 1)
             .map_err(|_| HealthAnalysisError::DateRange)?;
-        if start < earliest
-            || end > latest
-            || !(0..=MAX_RANGE_DAYS).contains(&(end - start).whole_days())
-        {
+        if start < earliest || end > latest {
+            return Err(HealthAnalysisError::CalendarBoundary);
+        }
+        if !(0..=MAX_RANGE_DAYS).contains(&(end - start).whole_days()) {
             return Err(HealthAnalysisError::DateRange);
         }
         Ok(Self { start, end })
