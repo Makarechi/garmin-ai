@@ -2,13 +2,15 @@ use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
 
 const ATTEMPT_LIMIT: i32 = 8;
 const KIND: &str = "channel_initiatives";
+const STORAGE_QUEUE_LOCK: i64 = 72104624;
+const GARMIN_KINDS: &[&str] = &["garmin_endpoint", "garmin_activities", "garmin_fit"];
 
 #[derive(Debug)]
 pub enum JobStoreError {
@@ -16,6 +18,7 @@ pub enum JobStoreError {
     InvalidLeaseDuration,
     LeaseLost,
     PublicationTimedOut,
+    InvalidRecordedState,
     Database,
 }
 
@@ -26,6 +29,7 @@ impl fmt::Display for JobStoreError {
             Self::InvalidLeaseDuration => "Lease duration must be between one second and one day",
             Self::LeaseLost => "Job lease expired or belongs to a different worker",
             Self::PublicationTimedOut => "Job publication timed out",
+            Self::InvalidRecordedState => "Recorded job state is invalid",
             Self::Database => "Job database operation failed",
         })
     }
@@ -62,6 +66,9 @@ pub enum FailureReason {
     ProviderCooldown,
     RuntimeError,
     ProviderRequestInvalid,
+    GarminCollectionDisabled,
+    GarminAuthenticationRequired,
+    InvalidGarminWork,
 }
 
 impl FailureReason {
@@ -71,6 +78,9 @@ impl FailureReason {
             Self::ProviderCooldown => "ProviderCooldown",
             Self::RuntimeError => "RuntimeError",
             Self::ProviderRequestInvalid => "ProviderRequestInvalid",
+            Self::GarminCollectionDisabled => "GarminCollectionDisabled",
+            Self::GarminAuthenticationRequired => "AuthenticationRequired",
+            Self::InvalidGarminWork => "ValueError",
         }
     }
 
@@ -80,12 +90,67 @@ impl FailureReason {
 }
 
 #[derive(Clone, Copy)]
-pub enum InitiativeOutcome {
+pub enum JobOutcome {
     Completed,
     Failed {
         reason: FailureReason,
         retry_at: Option<StoredInstant>,
     },
+}
+
+pub type InitiativeOutcome = JobOutcome;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GarminJobKind {
+    Endpoint,
+    Activities,
+    Fit,
+}
+
+impl GarminJobKind {
+    fn stored(value: &str) -> Result<Self, JobStoreError> {
+        match value {
+            "garmin_endpoint" => Ok(Self::Endpoint),
+            "garmin_activities" => Ok(Self::Activities),
+            "garmin_fit" => Ok(Self::Fit),
+            _ => Err(JobStoreError::InvalidRecordedState),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Endpoint => "garmin_endpoint",
+            Self::Activities => "garmin_activities",
+            Self::Fit => "garmin_fit",
+        }
+    }
+}
+
+pub struct GarminJobLease {
+    id: Uuid,
+    token: Uuid,
+    seconds: i32,
+    attempt: i32,
+    kind: GarminJobKind,
+    payload: String,
+}
+
+impl GarminJobLease {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn attempt(&self) -> i32 {
+        self.attempt
+    }
+
+    pub fn kind(&self) -> GarminJobKind {
+        self.kind
+    }
+
+    pub fn payload_json(&self) -> &str {
+        &self.payload
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,7 +194,7 @@ impl Database {
         let seconds = lease_seconds as i32;
         let now = OffsetDateTime::from(now);
         let mut txn = begin(&self.work).await?;
-        fail_exhausted(&mut txn, now).await?;
+        fail_exhausted(&mut txn, now, Some(&[KIND])).await?;
         let token = Uuid::new_v4();
         let row = sqlx::query_as::<_, (Uuid, i32)>(
             "WITH eligible AS (
@@ -164,9 +229,139 @@ impl Database {
         }))
     }
 
+    /// Claim the next existing Garmin job with the baseline storage and pacing gates.
+    pub async fn claim_garmin_job(
+        &self,
+        now: StoredInstant,
+        owner_local_date: Date,
+        lease_seconds: u32,
+        backups_enabled: bool,
+    ) -> Result<Option<GarminJobLease>, JobStoreError> {
+        if !(1..=86_400).contains(&lease_seconds) {
+            return Err(JobStoreError::InvalidLeaseDuration);
+        }
+        let seconds = lease_seconds as i32;
+        let mut txn = begin(&self.work).await?;
+        let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(STORAGE_QUEUE_LOCK)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !admitted {
+            return Ok(None);
+        }
+        fail_exhausted(&mut txn, now.into(), None).await?;
+        if garmin_paused(&mut txn, now).await? {
+            txn.commit().await?;
+            return Ok(None);
+        }
+        let token = Uuid::new_v4();
+        let claimed = sqlx::query_as::<_, (Uuid, i32, String, String)>(
+            "WITH day AS (
+                SELECT to_char($6::date, 'YYYY-MM-DD') AS today,
+                       to_char($6::date - 1, 'YYYY-MM-DD') AS yesterday,
+                       to_char($6::date - 30, 'YYYY-MM-DD') AS recent
+             ), eligible AS (
+                SELECT job.id FROM jobs AS job CROSS JOIN day
+                WHERE job.kind = ANY($1::text[]) AND job.attempts < $2
+                  AND ((job.status = 'pending' AND job.run_at <= $3)
+                    OR (job.status = 'running' AND job.lease_until < $3))
+                  AND (NOT $7 OR NOT EXISTS (
+                    SELECT 1 FROM jobs AS backup
+                    WHERE backup.kind = 'backup' AND (
+                        backup.status = 'running'
+                        OR (backup.status = 'pending' AND backup.attempts < $2 AND backup.run_at <= $3
+                           AND coalesce(
+                               (backup.payload->>'sync_wait_until')::timestamptz,
+                               backup.run_at + interval '30 minutes'
+                           ) <= $3)
+                    )
+                  ))
+                ORDER BY CASE
+                  WHEN job.payload->'backfill' IS DISTINCT FROM 'true'::jsonb
+                      AND ((job.kind = 'garmin_endpoint' AND job.payload->>'key' = day.today
+                           AND job.payload->>'endpoint' IN ('heart_rate', 'stress'))
+                        OR (job.run_at >= $3 - interval '1 day'
+                           AND (job.kind = 'garmin_activities'
+                             OR (job.kind = 'garmin_endpoint' AND left(job.dedup_key, 9) = 'activity:')
+                             OR (job.kind = 'garmin_fit' AND left(job.dedup_key, 4) = 'fit:'))))
+                    THEN 0
+                  WHEN job.kind = 'garmin_endpoint' AND job.payload->>'endpoint' = 'stress'
+                    AND job.payload->>'key' >= day.recent AND job.payload->>'key' < day.today
+                    THEN 1
+                  WHEN job.kind = 'garmin_endpoint' AND job.payload->'backfill' IS DISTINCT FROM 'true'::jsonb
+                    AND job.payload->>'key' = day.today THEN 2
+                  WHEN job.kind = 'garmin_endpoint' AND job.payload->>'endpoint' = 'heart_rate'
+                    AND job.payload->>'key' >= day.recent AND job.payload->>'key' < day.today
+                    THEN 3
+                  WHEN job.kind = 'garmin_endpoint' AND job.payload->'backfill' IS DISTINCT FROM 'true'::jsonb
+                    AND job.payload->>'key' = day.yesterday THEN 4
+                  ELSE 5 END,
+                  CASE WHEN job.kind = 'garmin_endpoint' AND job.payload->>'endpoint' IN ('heart_rate', 'stress')
+                    AND job.payload->>'key' >= day.recent AND job.payload->>'key' < day.today
+                    THEN job.payload->>'key' ELSE '' END DESC,
+                  (job.payload->'backfill' IS NOT DISTINCT FROM 'true'::jsonb), job.run_at, job.id
+                FOR UPDATE OF job SKIP LOCKED LIMIT 1
+             )
+             UPDATE jobs SET status = 'running',
+                 lease_until = $3 + $4 * interval '1 second', lease_token = $5,
+                 attempts = attempts + 1
+             FROM eligible WHERE jobs.id = eligible.id
+             RETURNING jobs.id, jobs.attempts, jobs.kind, jobs.payload::text",
+        )
+        .bind(GARMIN_KINDS)
+        .bind(ATTEMPT_LIMIT)
+        .bind(OffsetDateTime::from(now))
+        .bind(seconds)
+        .bind(token)
+        .bind(owner_local_date)
+        .bind(backups_enabled)
+        .fetch_optional(&mut *txn)
+        .await?;
+        let lease = match claimed {
+            Some((id, attempt, kind, payload)) => Some(GarminJobLease {
+                id,
+                token,
+                seconds,
+                attempt,
+                kind: GarminJobKind::stored(&kind)?,
+                payload,
+            }),
+            None => None,
+        };
+        txn.commit().await?;
+        Ok(lease)
+    }
+
     pub async fn renew_initiative(
         &self,
         lease: &InitiativeLease,
+        now: StoredInstant,
+    ) -> Result<bool, JobStoreError> {
+        self.renew_job(lease.id, lease.token, lease.seconds, KIND, now)
+            .await
+    }
+
+    pub async fn renew_garmin_job(
+        &self,
+        lease: &GarminJobLease,
+        now: StoredInstant,
+    ) -> Result<bool, JobStoreError> {
+        self.renew_job(
+            lease.id,
+            lease.token,
+            lease.seconds,
+            lease.kind.label(),
+            now,
+        )
+        .await
+    }
+
+    async fn renew_job(
+        &self,
+        id: Uuid,
+        token: Uuid,
+        seconds: i32,
+        kind: &str,
         now: StoredInstant,
     ) -> Result<bool, JobStoreError> {
         let mut txn = begin(&self.control).await?;
@@ -176,11 +371,11 @@ impl Database {
              WHERE id = $1 AND lease_token = $2 AND status = 'running'
                AND lease_until > $3 AND kind = $5",
         )
-        .bind(lease.id)
-        .bind(lease.token)
+        .bind(id)
+        .bind(token)
         .bind(OffsetDateTime::from(now))
-        .bind(lease.seconds)
-        .bind(KIND)
+        .bind(seconds)
+        .bind(kind)
         .execute(&mut *txn)
         .await?;
         txn.commit().await?;
@@ -237,9 +432,31 @@ impl Database {
         now: StoredInstant,
         outcome: InitiativeOutcome,
     ) -> Result<RecordedJobStatus, JobStoreError> {
+        self.finish_job(lease.id, lease.token, KIND, now, outcome)
+            .await
+    }
+
+    pub async fn finish_garmin_job(
+        &self,
+        lease: &GarminJobLease,
+        now: StoredInstant,
+        outcome: JobOutcome,
+    ) -> Result<RecordedJobStatus, JobStoreError> {
+        self.finish_job(lease.id, lease.token, lease.kind.label(), now, outcome)
+            .await
+    }
+
+    async fn finish_job(
+        &self,
+        id: Uuid,
+        token: Uuid,
+        kind: &str,
+        now: StoredInstant,
+        outcome: JobOutcome,
+    ) -> Result<RecordedJobStatus, JobStoreError> {
         let (error, retry, refund, terminal) = match outcome {
-            InitiativeOutcome::Completed => (None, None, 0, false),
-            InitiativeOutcome::Failed { reason, retry_at } => (
+            JobOutcome::Completed => (None, None, 0, false),
+            JobOutcome::Failed { reason, retry_at } => (
                 Some(reason.label()),
                 retry_at.map(OffsetDateTime::from),
                 reason.refund(),
@@ -279,14 +496,14 @@ impl Database {
                  completed_at = CASE WHEN owned.final_status != 'pending' THEN $3 ELSE NULL END
              FROM owned WHERE jobs.id = owned.id RETURNING jobs.status",
         )
-        .bind(lease.id)
-        .bind(lease.token)
+        .bind(id)
+        .bind(token)
         .bind(OffsetDateTime::from(now))
         .bind(retry)
         .bind(error)
         .bind(refund)
         .bind(ATTEMPT_LIMIT)
-        .bind(KIND)
+        .bind(kind)
         .bind(terminal)
         .fetch_optional(&mut *txn)
         .await?;
@@ -315,11 +532,12 @@ async fn begin(pool: &PgPool) -> Result<Transaction<'_, Postgres>, JobStoreError
 async fn fail_exhausted(
     txn: &mut Transaction<'_, Postgres>,
     now: OffsetDateTime,
+    kinds: Option<&[&str]>,
 ) -> Result<(), JobStoreError> {
     sqlx::query(
         "WITH exhausted AS (
             SELECT id FROM jobs
-            WHERE kind = $1 AND attempts >= $2
+            WHERE ($1::text[] IS NULL OR kind = ANY($1::text[])) AND attempts >= $2
               AND (status = 'pending' OR (status = 'running' AND lease_until < $3))
             ORDER BY run_at, id
             FOR UPDATE SKIP LOCKED LIMIT 100
@@ -328,10 +546,35 @@ async fn fail_exhausted(
             completed_at = $3, lease_until = NULL, lease_token = NULL
          FROM exhausted WHERE jobs.id = exhausted.id",
     )
-    .bind(KIND)
+    .bind(kinds)
     .bind(ATTEMPT_LIMIT)
     .bind(now)
     .execute(&mut **txn)
     .await?;
     Ok(())
+}
+
+async fn garmin_paused(
+    txn: &mut Transaction<'_, Postgres>,
+    now: StoredInstant,
+) -> Result<bool, JobStoreError> {
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT value->>'status', nullif(value->>'blocked_until', '') FROM app_state
+         WHERE key = 'integration:garmin'",
+    )
+    .fetch_optional(&mut **txn)
+    .await?;
+    let Some((status, blocked_until)) = row else {
+        return Ok(false);
+    };
+    if status.as_deref() == Some("reauth_required") {
+        return Ok(true);
+    }
+    let Some(blocked_until) = blocked_until else {
+        return Ok(false);
+    };
+    let blocked: StoredInstant = blocked_until
+        .parse()
+        .map_err(|_| JobStoreError::InvalidRecordedState)?;
+    Ok(blocked > now)
 }
