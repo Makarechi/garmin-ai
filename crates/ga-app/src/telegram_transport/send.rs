@@ -1,3 +1,5 @@
+mod dispatch;
+
 use std::time::Duration;
 
 use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};

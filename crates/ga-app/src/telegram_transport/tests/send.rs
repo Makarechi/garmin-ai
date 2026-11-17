@@ -180,3 +180,5 @@ fn accepted(message: i64, chat: i64) -> String {
     json!({"ok":true, "result":{"message_id":message,"chat":{"id":chat,"type":"private"}}})
         .to_string()
 }
+
+mod dispatch;
