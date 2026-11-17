@@ -190,7 +190,9 @@ fn parse_time(value: &str) -> Result<StoredInstant, TelegramCursorError> {
     value.parse().map_err(|_| TelegramCursorError::InvalidState)
 }
 
-async fn lock_ingress(txn: &mut Transaction<'_, Postgres>) -> Result<(), TelegramCursorError> {
+pub(crate) async fn lock_ingress(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), TelegramCursorError> {
     check_readiness(txn)
         .await
         .map_err(TelegramCursorError::Storage)?;

@@ -4,6 +4,12 @@ use ga_db::{
     Database,
     channel_ingress::{ChannelCallback, InboundReceipt, IngressError},
 };
+use ga_db::{
+    channel_ingress::telegram_poll::{
+        TelegramPollError, TelegramPollEvent, TelegramPollInput, TelegramPollReceipt,
+    },
+    runtime_lease::RuntimeLease,
+};
 use ga_domain::{channel::InboundEnvelope, timestamp::StoredInstant};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -58,6 +64,65 @@ pub struct AuthenticatedTelegramUpdate<'wire, 'binding> {
 }
 
 impl<'binding> TelegramBinding<'binding> {
+    /// Accept one verified response from getUpdates. The offset advances for
+    /// ignored updates, while an inbox or state-write failure preserves it.
+    pub async fn accept_polled_update(
+        self,
+        lease: &mut RuntimeLease,
+        wire: &Value,
+        received_at: StoredInstant,
+        callback_time_known: bool,
+    ) -> Result<TelegramPollReceipt, TelegramPollError> {
+        let update_id = wire["update_id"]
+            .as_i64()
+            .filter(|id| (1..i64::MAX).contains(id))
+            .ok_or(TelegramPollError::InvalidBinding)?;
+        let authorized = self.authenticate(wire).ok();
+        let event_id = update_id.to_string();
+        let normalized = authorized
+            .as_ref()
+            .filter(|update| !matches!(update.kind, InputKind::Callback(_)))
+            .and_then(|update| {
+                update
+                    .normalize(received_at, CallbackResolution::Unavailable)
+                    .ok()
+            });
+        let event = if let Some(callback) = authorized
+            .as_ref()
+            .and_then(|update| update.callback_context(&event_id, received_at))
+        {
+            TelegramPollEvent::Callback(callback)
+        } else if let Some(envelope) = &normalized {
+            TelegramPollEvent::Message(envelope)
+        } else {
+            TelegramPollEvent::Ignore
+        };
+        lease
+            .persist_telegram_poll_event(
+                TelegramPollInput {
+                    owner_id: self.owner_id,
+                    instance_id: self.instance_id,
+                    update_id,
+                    received_at,
+                    event,
+                },
+                |action| {
+                    authorized.as_ref().and_then(|update| {
+                        update
+                            .normalize(
+                                received_at,
+                                CallbackResolution::Verified {
+                                    action,
+                                    time_known: callback_time_known,
+                                },
+                            )
+                            .ok()
+                    })
+                },
+            )
+            .await
+    }
+
     pub fn authenticate<'wire>(
         self,
         wire: &'wire Value,
@@ -116,30 +181,35 @@ impl AuthenticatedTelegramUpdate<'_, '_> {
         received_at: StoredInstant,
         time_known: bool,
     ) -> Result<InboundReceipt, IngressError> {
-        let token = self
-            .callback_data()
-            .ok_or(IngressError::ActionUnavailable)?;
         let event_id = self.update_id.to_string();
+        let callback = self
+            .callback_context(&event_id, received_at)
+            .ok_or(IngressError::ActionUnavailable)?;
         database
-            .ingest_channel_callback(
-                ChannelCallback {
-                    owner_id: self.binding.owner_id,
-                    conversation_id: self.conversation_id(),
-                    channel: "telegram",
-                    instance_id: self.binding.instance_id,
-                    event_id: &event_id,
-                    token,
+            .ingest_channel_callback(callback, |action| {
+                self.normalize(
                     received_at,
-                },
-                |action| {
-                    self.normalize(
-                        received_at,
-                        CallbackResolution::Verified { action, time_known },
-                    )
-                    .ok()
-                },
-            )
+                    CallbackResolution::Verified { action, time_known },
+                )
+                .ok()
+            })
             .await
+    }
+
+    fn callback_context<'event>(
+        &'event self,
+        event_id: &'event str,
+        received_at: StoredInstant,
+    ) -> Option<ChannelCallback<'event>> {
+        Some(ChannelCallback {
+            owner_id: self.binding.owner_id,
+            conversation_id: self.conversation_id(),
+            channel: "telegram",
+            instance_id: self.binding.instance_id,
+            event_id,
+            token: self.callback_data()?,
+            received_at,
+        })
     }
 
     fn conversation_id(&self) -> Uuid {
