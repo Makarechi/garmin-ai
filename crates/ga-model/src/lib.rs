@@ -1,3 +1,5 @@
+pub mod fallback;
+
 use std::{
     error::Error,
     fmt,
