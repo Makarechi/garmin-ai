@@ -30,6 +30,9 @@ def capture(output):
         ("ordinary_in_slash_case", "/TODAY", False),
         ("mentioned_bot_suffix", "/today@synthetic_bot", False),
         ("history", "/history", False),
+        ("photo_caption", "/today", False),
+        ("document_caption", "/pause", False),
+        ("photo_text", "/today", False),
     ]
     engine = isolated_engine()
     cases = []
@@ -45,6 +48,14 @@ def capture(output):
                 if voice:
                     message.update(
                         caption=text, voice={"file_id": "synthetic-audio", "duration": 3}
+                    )
+                elif name == "photo_caption":
+                    message.update(caption=text, photo=[{"file_id": "synthetic-photo"}])
+                elif name == "document_caption":
+                    message.update(caption=text, document={"file_id": "synthetic-document"})
+                elif name == "photo_text":
+                    message.update(
+                        text=text, caption="/help", photo=[{"file_id": "synthetic-photo"}]
                     )
                 else:
                     message["text"] = text

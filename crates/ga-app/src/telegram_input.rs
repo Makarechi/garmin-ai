@@ -10,7 +10,11 @@ use ga_db::{
     },
     runtime_lease::RuntimeLease,
 };
-use ga_domain::{channel::InboundEnvelope, timestamp::StoredInstant};
+use ga_domain::{
+    channel::{InboundEnvelope, InboundKind},
+    telegram_control::TelegramControl,
+    timestamp::StoredInstant,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -182,7 +186,19 @@ impl<'wire, 'binding> PreparedUpdate<'wire, 'binding> {
         {
             TelegramPollEvent::Callback(callback)
         } else if let Some(envelope) = &self.normalized_message {
-            TelegramPollEvent::Message(envelope)
+            // The neutral envelope retains a non-voice caption, while the
+            // command lane is eligible only for message text or voice captions.
+            let eligible = self.owner_update.as_ref().is_some_and(|update| {
+                envelope.kind() == InboundKind::Voice
+                    || update.message["text"]
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty())
+            });
+            if eligible && TelegramControl::from_envelope(envelope).is_some() {
+                TelegramPollEvent::OwnerControl(envelope)
+            } else {
+                TelegramPollEvent::Message(envelope)
+            }
         } else {
             TelegramPollEvent::Ignore
         };
