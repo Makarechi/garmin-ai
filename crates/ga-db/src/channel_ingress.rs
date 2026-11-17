@@ -1,3 +1,7 @@
+mod callback;
+pub mod telegram_poll;
+pub use callback::ChannelCallback;
+
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::channel::{InboundEnvelope, InboundKind};
@@ -21,6 +25,8 @@ pub enum IngressError {
     ForeignConversation,
     MissingRevision,
     OldRevision,
+    ActionUnavailable,
+    InvalidEnvelope,
     Database,
 }
 
@@ -32,6 +38,8 @@ impl fmt::Display for IngressError {
             Self::ForeignConversation => "Conversation belongs to another channel binding",
             Self::MissingRevision => "Edited message has no earlier revision",
             Self::OldRevision => "Edited message revision is not newer",
+            Self::ActionUnavailable => "Channel action is unavailable or already used",
+            Self::InvalidEnvelope => "Resolved action does not match the authenticated envelope",
             Self::Database => "Inbound message could not be stored",
         })
     }
@@ -52,20 +60,7 @@ impl Database {
         envelope: &InboundEnvelope,
     ) -> Result<InboundReceipt, IngressError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = self.work.begin().await?;
-            sqlx::query("SET LOCAL statement_timeout = '750ms'")
-                .execute(&mut *txn)
-                .await?;
-            check_readiness(&mut txn)
-                .await
-                .map_err(IngressError::Storage)?;
-            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-                .bind(REPLAY_MUTATION_LOCK)
-                .fetch_one(&mut *txn)
-                .await?;
-            if !locked {
-                return Err(IngressError::Busy);
-            }
+            let mut txn = self.begin_ingress().await?;
             let receipt = ingest(&mut txn, envelope).await?;
             txn.commit().await?;
             Ok(receipt)
@@ -73,6 +68,28 @@ impl Database {
         .await
         .map_err(|_| IngressError::Database)?
     }
+    async fn begin_ingress(&self) -> Result<Transaction<'static, Postgres>, IngressError> {
+        let mut txn = self.work.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(IngressError::Storage)?;
+        lock_mutations(&mut txn).await?;
+        Ok(txn)
+    }
+}
+
+async fn lock_mutations(txn: &mut Transaction<'_, Postgres>) -> Result<(), IngressError> {
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(REPLAY_MUTATION_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !locked {
+        return Err(IngressError::Busy);
+    }
+    Ok(())
 }
 
 async fn ingest(
