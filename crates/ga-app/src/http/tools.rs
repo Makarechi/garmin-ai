@@ -34,10 +34,12 @@ enum ReadTool {
     Timeline,
     DeviceHistory,
     Freshness,
+    Baseline,
+    ComparePeriods,
 }
 
 impl ReadTool {
-    const IMPLEMENTED: [Self; 8] = [
+    const IMPLEMENTED: [Self; 10] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -45,6 +47,8 @@ impl ReadTool {
         Self::Events,
         Self::Timeline,
         Self::Freshness,
+        Self::Baseline,
+        Self::ComparePeriods,
         Self::DeviceHistory,
     ];
 
@@ -58,6 +62,8 @@ impl ReadTool {
             Self::Timeline => "timeline",
             Self::DeviceHistory => "device_history",
             Self::Freshness => "data_freshness",
+            Self::Baseline => "personal_baseline",
+            Self::ComparePeriods => "analysis_compare_periods",
         }
     }
 
@@ -121,6 +127,19 @@ impl ReadTool {
                     "limit": {"default":100,"title":"Limit","type":"integer"},
                 }),
                 &["start", "end"][..],
+            ),
+            Self::Baseline => (
+                "Compute a personal baseline from available daily values with sample size and missing days.",
+                "personal_baselineArgs",
+                json!({"metric":{"type":"string","title":"Metric"},"start":date("Start"),"end":date("End")}),
+                &["metric", "start", "end"][..],
+            ),
+            Self::ComparePeriods => (
+                "Compare non-overlapping daily periods with block-bootstrap uncertainty when enough observations exist.",
+                "analysis_compare_periodsArgs",
+                json!({"metric":{"type":"string","title":"Metric"},"a_start":date("A Start"),"a_end":date("A End"),
+                       "b_start":date("B Start"),"b_end":date("B End")}),
+                &["metric", "a_start", "a_end", "b_start", "b_end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
@@ -264,6 +283,37 @@ async fn execute_read_tool(
             match HealthPeriod::new(start, end) {
                 Ok(period) => reader.range(period).await,
                 Err(error) => Err(error),
+            }
+        }
+        ReadTool::Baseline if arguments.len() == 3 => {
+            let (Some(metric), Some(start), Some(end)) = (
+                arguments.get("metric").and_then(Value::as_str),
+                arguments.get("start").and_then(date_input),
+                arguments.get("end").and_then(date_input),
+            ) else {
+                return invalid_arguments();
+            };
+            match HealthPeriod::new(start, end) {
+                Ok(period) => reader.personal_baseline(metric, period).await,
+                Err(error) => Err(error),
+            }
+        }
+        ReadTool::ComparePeriods if arguments.len() == 5 => {
+            let (Some(metric), Some(a_start), Some(a_end), Some(b_start), Some(b_end)) = (
+                arguments.get("metric").and_then(Value::as_str),
+                arguments.get("a_start").and_then(date_input),
+                arguments.get("a_end").and_then(date_input),
+                arguments.get("b_start").and_then(date_input),
+                arguments.get("b_end").and_then(date_input),
+            ) else {
+                return invalid_arguments();
+            };
+            match (
+                HealthPeriod::new(a_start, a_end),
+                HealthPeriod::new(b_start, b_end),
+            ) {
+                (Ok(first), Ok(second)) => reader.compare_periods(metric, first, second).await,
+                (Err(error), _) | (_, Err(error)) => Err(error),
             }
         }
         ReadTool::Activities => {
@@ -568,9 +618,10 @@ fn health_failure(error: HealthAnalysisError) -> Response {
             Json(json!({"detail": REPLAY_NOTICE})),
         )
             .into_response(),
-        HealthAnalysisError::CalendarBoundary | HealthAnalysisError::DateRange => {
-            invalid_arguments()
-        }
+        HealthAnalysisError::CalendarBoundary
+        | HealthAnalysisError::DateRange
+        | HealthAnalysisError::UnknownMetric
+        | HealthAnalysisError::Overlap => invalid_arguments(),
         _ => storage_unavailable(),
     }
 }
