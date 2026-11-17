@@ -378,3 +378,56 @@ fn disk_full_aborts_and_preserves_existing_archive() -> Result<(), Box<dyn std::
     assert_eq!(fs::read(root.join(next.to_string()))?, b"retry");
     Ok(())
 }
+
+#[test]
+fn read_only_archive_leaves_existing_entries_and_permissions_intact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_scratch, root) = directory()?;
+    assert!(Archive::open_read_only(&root).is_err());
+    assert!(!root.exists());
+    let writable = Archive::open(&root)?;
+    let key = writable.put_reader(b"synthetic".as_slice(), ArchiveKind::Binary, SMALL)?;
+    let readonly = Archive::open_read_only(&root)?;
+    let mut body = Vec::new();
+    readonly
+        .open_verified_reader(&key, 9, || false)?
+        .read_to_end(&mut body)?;
+    assert_eq!(body, b"synthetic");
+    assert!(matches!(
+        readonly.put_reader(b"discard".as_slice(), ArchiveKind::Binary, SMALL),
+        Err(ArchiveError::ReadOnly)
+    ));
+    assert!(matches!(
+        readonly.put_json(b"{}", SMALL),
+        Err(ArchiveError::ReadOnly)
+    ));
+    assert!(matches!(
+        readonly.remove_orphaned_staging(),
+        Err(ArchiveError::ReadOnly)
+    ));
+    assert_eq!(permission_bits(&root)?, 0o700);
+    fs::set_permissions(&root, Permissions::from_mode(0o750))?;
+    assert!(matches!(
+        Archive::open_read_only(&root),
+        Err(ArchiveError::InvalidRoot)
+    ));
+    assert_eq!(permission_bits(&root)?, 0o750);
+    let redirected = root.join("redirected");
+    symlink(&root, &redirected)?;
+    assert!(Archive::open_read_only(&redirected).is_err());
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the fixture path on a read-only Linux mount"]
+fn verifies_existing_archive_on_read_only_mount() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(std::env::var("GA_TEST_ARCHIVE_READ_ONLY_DIR")?);
+    let key: ArchiveKey = std::env::var("GA_TEST_ARCHIVE_READ_ONLY_KEY")?.parse()?;
+    let archive = Archive::open_read_only(&root)?;
+    let mut data = Vec::new();
+    archive
+        .open_verified_reader(&key, 9, || false)?
+        .read_to_end(&mut data)?;
+    assert_eq!(data, b"synthetic");
+    Ok(())
+}

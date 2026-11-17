@@ -9,6 +9,10 @@ The writer checks the byte limit and available disk space as it goes. It syncs t
 private staging file before creating the final directory entry and syncs the directory
 before returning the key. Concurrent writers converge on one file. A matching key
 with different bytes returns an error and preserves the existing object for diagnosis.
+A read-only archive handle opens an existing private directory without
+creation, permission changes or cleanup. It supports mounted copies used for
+offline inspection. The handle rejects writes and orphan cleanup.
+
 Replay callers can open a verified reader. It checks the byte limit, streams the
 hash from the existing object and rewinds the same open file for processing. A
 size change, hash mismatch or cancellation interrupts verification.
@@ -26,6 +30,8 @@ stage creation through publication and cleanup.
   SHA-256 `2279306afc5fd86754d2e0f92e8af4adecc15bc1aea93c17945569a973a502e9`.
   The container reached its memory ceiling while reclaiming filesystem cache and
   recorded zero out-of-memory events and zero killed processes.
+- A read-only Linux mount supported verified reads. The read-only handle
+  refused writes or cleanup and rejected redirected and non-private roots.
 - A changed object of the same length was rejected. Verification stopped on
   cancellation and rejected oversized input before reading it.
 - On an 8 MiB writable filesystem, a 12 MiB stream was refused. The original archive
