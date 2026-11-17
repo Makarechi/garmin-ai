@@ -1,9 +1,10 @@
 use futures_util::TryStreamExt;
 use ga_domain::{legacy_metrics::legacy_metric_contracts, timestamp::StoredInstant};
 use serde_json::{Value, json};
+use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 
-use super::{HealthAnalysisError, HealthPeriod, begin_daily_analysis};
+use super::{HealthAnalysisError, HealthPeriod, begin_daily_analysis, begin_verified_analysis};
 use crate::Database;
 
 const METRICS: &[&str] = &[
@@ -37,24 +38,45 @@ const METRICS: &[&str] = &[
 const DAILY_ROWS: &str = "SELECT row_to_json(health_days)::text, updated_at FROM health_days
      WHERE day BETWEEN $1 AND $2 ORDER BY day";
 
+pub struct DailyHealthReader(Transaction<'static, Postgres>);
+
 impl Database {
-    /// Return recorded summaries for this inclusive calendar range.
+    pub async fn verified_health_reader(&self) -> Result<DailyHealthReader, HealthAnalysisError> {
+        begin_verified_analysis(&self.work)
+            .await
+            .map(DailyHealthReader)
+    }
+
     pub async fn read_health_range(
         &self,
         period: HealthPeriod,
     ) -> Result<Value, HealthAnalysisError> {
-        let mut txn = begin_daily_analysis(&self.work).await?;
+        DailyHealthReader(begin_daily_analysis(&self.work).await?)
+            .range(period)
+            .await
+    }
+
+    pub async fn read_health_snapshot(&self, day: Date) -> Result<Value, HealthAnalysisError> {
+        DailyHealthReader(begin_daily_analysis(&self.work).await?)
+            .snapshot(day)
+            .await
+    }
+}
+
+impl DailyHealthReader {
+    /// Return recorded summaries for this inclusive calendar range.
+    pub async fn range(mut self, period: HealthPeriod) -> Result<Value, HealthAnalysisError> {
         let mut rows = Vec::new();
         {
             let mut stream = sqlx::query_as::<_, (String, OffsetDateTime)>(DAILY_ROWS)
                 .bind(period.start)
                 .bind(period.end)
-                .fetch(&mut *txn);
+                .fetch(&mut *self.0);
             while let Some((document, updated_at)) = stream.try_next().await? {
                 rows.push(health_day(&document, updated_at)?);
             }
         }
-        txn.commit().await?;
+        self.0.commit().await?;
         let mut response = json!({
             "start": period.start.to_string(),
             "end": period.end.to_string(),
@@ -66,17 +88,16 @@ impl Database {
     }
 
     /// Show the stored calendar day, including missing metrics and the separate hydration contract.
-    pub async fn read_health_snapshot(&self, day: Date) -> Result<Value, HealthAnalysisError> {
+    pub async fn snapshot(mut self, day: Date) -> Result<Value, HealthAnalysisError> {
         if !(1..=9999).contains(&day.year()) {
             return Err(HealthAnalysisError::DateRange);
         }
-        let mut txn = begin_daily_analysis(&self.work).await?;
         let row = sqlx::query_as::<_, (String, OffsetDateTime)>(DAILY_ROWS)
             .bind(day)
             .bind(day)
-            .fetch_optional(&mut *txn)
+            .fetch_optional(&mut *self.0)
             .await?;
-        txn.commit().await?;
+        self.0.commit().await?;
         let values = row
             .map(|(document, updated_at)| health_day(&document, updated_at))
             .transpose()?;
