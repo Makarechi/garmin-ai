@@ -7,6 +7,7 @@ mod event_time;
 pub mod garmin_summary;
 pub mod identity;
 pub mod legacy_json;
+pub mod statistics;
 pub mod text_offsets;
 pub mod timestamp;
 
