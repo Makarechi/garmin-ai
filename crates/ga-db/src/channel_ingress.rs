@@ -1,5 +1,5 @@
 mod callback;
-mod native_telegram;
+pub(crate) mod native_telegram;
 pub mod telegram_poll;
 pub use callback::ChannelCallback;
 

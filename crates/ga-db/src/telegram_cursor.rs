@@ -193,6 +193,18 @@ pub async fn record_telegram_ordering(
     Ok(epoch)
 }
 
+pub(crate) async fn telegram_ordering_epoch(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+) -> Result<i64, TelegramCursorError> {
+    let key = state_key("telegram:ordering", instance)?;
+    match read_state::<OrderingRecord>(txn, &key).await? {
+        Some(record) if record.epoch >= 0 => Ok(record.epoch),
+        Some(_) => Err(TelegramCursorError::InvalidState),
+        None => Ok(0),
+    }
+}
+
 fn state_key(key: &str, instance: &str) -> Result<String, TelegramCursorError> {
     if !(1..=200).contains(&instance.chars().count()) || instance.contains('\0') {
         return Err(TelegramCursorError::InvalidInput);
