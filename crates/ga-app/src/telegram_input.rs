@@ -97,6 +97,13 @@ impl<'binding> TelegramBinding<'binding> {
         } else {
             TelegramPollEvent::Ignore
         };
+        let callback_id = authorized
+            .as_ref()
+            .and_then(|update| match update.kind {
+                InputKind::Callback(callback) => callback["id"].as_str(),
+                _ => None,
+            })
+            .filter(|id| (1..=1000).contains(&id.len()) && !id.contains('\0'));
         lease
             .persist_telegram_poll_event(
                 TelegramPollInput {
@@ -105,6 +112,7 @@ impl<'binding> TelegramBinding<'binding> {
                     update_id,
                     received_at,
                     event,
+                    callback_id,
                 },
                 |action| {
                     authorized.as_ref().and_then(|update| {
