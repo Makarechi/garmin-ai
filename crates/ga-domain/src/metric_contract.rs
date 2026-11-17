@@ -1,7 +1,8 @@
+mod unicode_decimal;
+
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use serde_json::{Map, Value, json};
-use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::{
     event_contract::metric_definition_hash,
@@ -213,9 +214,14 @@ pub fn metric_unit_dimension(unit: &str) -> Option<&'static str> {
 
 fn digits(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|character| get_general_category(character) == GeneralCategory::DecimalNumber)
+        && value.chars().all(|character| {
+            let codepoint = u32::from(character);
+            let ranges = unicode_decimal::DECIMAL_RANGES;
+            let index = ranges.partition_point(|&(_, last)| last < codepoint);
+            ranges
+                .get(index)
+                .is_some_and(|&(first, _)| first <= codepoint)
+        })
 }
 
 fn bounded_text(value: &Value, length: usize) -> Option<&str> {
