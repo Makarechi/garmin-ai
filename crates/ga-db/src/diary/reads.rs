@@ -91,9 +91,9 @@ impl Database {
             if !(1..=1000).contains(&limit) {
                 return Err(DiaryReadError::Limit);
             }
-            let response = read_events(&mut txn, start, end, kind.as_deref(), limit, None).await?;
+            let response = owner_events_in(&mut txn, start, end, kind.as_deref(), limit).await?;
             txn.commit().await?;
-            Ok(response.value)
+            Ok(response)
         })
         .await
         .map_err(|_| DiaryReadError::Database)?
@@ -162,6 +162,16 @@ impl Database {
             .map_err(DiaryReadError::Storage)?;
         Ok(txn)
     }
+}
+
+pub(crate) async fn owner_events_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    kind: Option<&str>,
+    limit: u16,
+) -> Result<Value, DiaryReadError> {
+    Ok(read_events(txn, start, end, kind, limit, None).await?.value)
 }
 
 fn check_range(start: OffsetDateTime, end: OffsetDateTime) -> Result<(), DiaryReadError> {

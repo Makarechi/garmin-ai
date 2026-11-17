@@ -8,9 +8,11 @@ pub use sleep_timing::sleep_timing_result_hash;
 
 mod freshness;
 mod temporal;
+mod timeline;
 
 pub(crate) use temporal::PRE_EVENT_FEATURE_VERSION;
 pub use temporal::{TemporalFeatures, TemporalPurpose};
+pub use timeline::TimelineError;
 
 use std::{error::Error, fmt};
 
