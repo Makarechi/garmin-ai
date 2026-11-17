@@ -15,6 +15,10 @@ const LEGACY_TIME: DateTimeConfig = DateTimeConfig {
 };
 
 pub(crate) fn aware(value: &Value) -> Option<StoredInstant> {
+    as_stored_instant(parse_aware_datetime(value)?)
+}
+
+pub(crate) fn parse_aware_datetime(value: &Value) -> Option<DateTime> {
     let parsed = match value {
         Value::String(text) => DateTime::parse_bytes_with_config(text.as_bytes(), &LEGACY_TIME),
         Value::Number(number) => match number.as_i64() {
@@ -27,6 +31,10 @@ pub(crate) fn aware(value: &Value) -> Option<StoredInstant> {
     if parsed.date.year == 0 || parsed.time.tz_offset.is_none() {
         return None;
     }
+    Some(parsed)
+}
+
+pub(crate) fn as_stored_instant(parsed: DateTime) -> Option<StoredInstant> {
     let microseconds = parsed.timestamp_tz() * 1_000_000 + i64::from(parsed.time.microsecond);
     StoredInstant::from_unix_microseconds(microseconds).ok()
 }

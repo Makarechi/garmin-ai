@@ -50,7 +50,7 @@ pub fn encode(input: &[u8], layout: Utf8Layout, max_bytes: usize) -> Result<Vec<
     Ok(out)
 }
 
-fn write_value(
+pub(crate) fn write_value(
     out: &mut Vec<u8>,
     value: &JsonValue<'_>,
     layout: Utf8Layout,

@@ -327,7 +327,7 @@ fn rating(value: Value) -> Option<Value> {
     (0..=10).contains(&rating).then_some(Value::from(rating))
 }
 
-fn boolean(value: Value) -> Option<Value> {
+pub(crate) fn boolean(value: Value) -> Option<Value> {
     let converted = match value {
         Value::Bool(value) => value,
         Value::String(value) => match value.to_ascii_lowercase().as_str() {
@@ -363,7 +363,7 @@ pub(crate) fn finite_number(
     }
 }
 
-fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
+pub(crate) fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
     let text = text.trim();
     if !text.contains('_') {
         return Some(Cow::Borrowed(text));
