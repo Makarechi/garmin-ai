@@ -118,6 +118,8 @@ def run(binary):
                 (START, START - timedelta(minutes=1), None, 1),
                 (START, START + timedelta(hours=1), None, 0),
                 (datetime(1, 3, 1, tzinfo=UTC), datetime(1, 3, 2, tzinfo=UTC), None, 1),
+                (START, START - timedelta(days=1), None, 1),
+                (START, START + timedelta(days=3662), None, 1),
             ]:
                 compare("list", list_activities, start=start, end=end, kind=kind, limit=limit)
 
@@ -147,7 +149,7 @@ def run(binary):
 
         assert [row["id"] for row in expected[0]["rows"]] == ["run", "trainer"]
         assert expected[0]["truncated"]
-        assert {part["kind"] for part in expected[10]["parts"]} == NON_SAMPLE_FIT_KINDS | {
+        assert {part["kind"] for part in expected[12]["parts"]} == NON_SAMPLE_FIT_KINDS | {
             "activity_weather",
             "activity_splits",
         }

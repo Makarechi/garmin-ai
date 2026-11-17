@@ -14,6 +14,7 @@ use crate::Database;
 #[derive(Clone, Copy, Debug)]
 pub enum ActivityReadError {
     Range,
+    CalendarRange,
     Limit,
     Pagination,
     Missing,
@@ -24,6 +25,7 @@ impl fmt::Display for ActivityReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Range => f.write_str("Timestamp range must be ordered and bounded"),
+            Self::CalendarRange => f.write_str("Date range must be ordered and at most 3661 days"),
             Self::Limit => f.write_str("Invalid activity limit"),
             Self::Pagination => f.write_str("Invalid activity pagination"),
             Self::Missing => f.write_str("Activity not found"),
@@ -76,6 +78,9 @@ impl Database {
         let start = OffsetDateTime::from(start);
         let end = OffsetDateTime::from(end);
         check_calendar_bounds(start.date(), end.date())?;
+        if !(0..=MAX_RANGE_DAYS + 1).contains(&(end.date() - start.date()).whole_days()) {
+            return Err(ActivityReadError::CalendarRange);
+        }
         if start >= end || end - start > time::Duration::days(MAX_RANGE_DAYS) {
             return Err(ActivityReadError::Range);
         }

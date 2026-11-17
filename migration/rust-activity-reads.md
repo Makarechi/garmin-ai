@@ -7,7 +7,7 @@ while raw samples and unrecognized FIT families require explicit opt-in.
 The database determines whether another part exists without sending that
 part's payload. The summary and page share one verified read snapshot.
 
-Twenty-three ARM64 Linux requests matched pinned Python on disposable
+Twenty-five ARM64 Linux requests matched pinned Python on disposable
 TimescaleDB. The fixture checks every default FIT allowlist entry, unknown
 families and raw samples, boundary clocks, invalid ranges and page sizes,
 missing activities, Unicode, optional fields, and negative zero. A page
