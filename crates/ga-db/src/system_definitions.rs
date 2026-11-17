@@ -96,6 +96,11 @@ fn topology(label: &str) -> Result<EventTopology, DefinitionStoreError> {
     }
 }
 
+pub(crate) fn known_system_event(kind: &str) -> Result<bool, DefinitionStoreError> {
+    let catalog = CATALOG.as_ref().map_err(|error| *error)?;
+    Ok(catalog.iter().any(|entry| entry.kind == kind))
+}
+
 impl Database {
     /// Initialize the built-in definitions in the existing versioned store.
     pub async fn install_system_definitions(
