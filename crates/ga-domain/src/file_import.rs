@@ -1,6 +1,8 @@
 mod csv;
+mod mapping;
 
 pub use csv::{CsvRows, read_csv_rows};
+pub use mapping::{FileFormat, FileMapping, MAX_MAPPING_BYTES};
 
 use std::{error::Error, fmt};
 
@@ -12,6 +14,7 @@ pub enum ImportFileError {
     Size,
     Utf8,
     InvalidFormat,
+    InvalidMapping,
     Headers,
     RowWidth,
     RowCount,
@@ -23,6 +26,7 @@ impl fmt::Display for ImportFileError {
             Self::Size => "File or mapping exceeds the local size limit",
             Self::Utf8 => "File must use UTF-8",
             Self::InvalidFormat => "Invalid CSV or JSON file",
+            Self::InvalidMapping => "Invalid mapping file",
             Self::Headers => "CSV headers must be unique",
             Self::RowWidth => "CSV rows must match the header width",
             Self::RowCount => "File must contain 1 to 500 object rows",
