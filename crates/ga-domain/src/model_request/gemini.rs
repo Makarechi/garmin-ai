@@ -1,3 +1,5 @@
+mod fingerprint;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
