@@ -52,6 +52,21 @@ def capture(output):
             }
             pairs = [
                 ("ordinary", "в полдень", report(draft("2026-10-24T12:00:00+02:00")), None),
+                (
+                    "point_end_is_removed",
+                    "synthetic wellbeing report",
+                    report(
+                        draft(
+                            "2026-10-24T12:00:00+02:00",
+                            end="2026-10-24T10:00:00+00:00",
+                            payload={"type": "wellbeing_observation", "energy": 6},
+                        )
+                    ),
+                    None,
+                ),
+                ("unicode_clock_digits", "0٢:1٥+02:00", report(original), None),
+                ("unicode_conflicting_occurrences", "02:15+02:00 и 0٢:1٥", report(original), None),
+                ("unicode_offset_is_inconclusive", "02:15+٠٢:٠٠", report(original), None),
                 ("wrong_zone_offset", "в 12:00", report(draft("2026-10-24T12:00:00+01:00")), None),
                 ("spring_gap", "02:15+01:00", report(draft("2026-03-29T02:15:00+01:00")), None),
                 ("no_fold_offset", "в 02:15", report(original), None),

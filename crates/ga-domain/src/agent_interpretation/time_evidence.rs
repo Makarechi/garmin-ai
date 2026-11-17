@@ -1,11 +1,12 @@
-use std::{error::Error, fmt, sync::OnceLock};
+mod clock_text;
 
-use fancy_regex::Regex;
 use jiff::{Timestamp, tz::AmbiguousOffset};
+use std::{error::Error, fmt};
 use time::{Duration, OffsetDateTime};
 
 use super::{AgentIntent, AgentInterpretation};
 use crate::timestamp::StoredInstant;
+use clock_text::has_explicit_offset;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimeClarification {
@@ -47,7 +48,8 @@ impl AgentInterpretation {
                 && !(self.intent == AgentIntent::Acknowledge
                     && event.payload().kind() == "symptom_observation");
             let check_start = !correction || changed("start");
-            let check_end = !correction || changed("end") || self.intent == AgentIntent::Close;
+            let check_end = event.end().is_some()
+                && (!correction || changed("end") || self.intent == AgentIntent::Close);
             let timezone = if correction && !changed("timezone") {
                 target_timezone.ok_or(TimeClarification::MissingTargetTimezone)?
             } else {
@@ -90,47 +92,4 @@ impl AgentInterpretation {
         }
         Ok(())
     }
-}
-
-fn has_explicit_offset(text: &str, at: OffsetDateTime) -> bool {
-    static CLOCK: OnceLock<Option<Regex>> = OnceLock::new();
-    let Some(pattern) = CLOCK.get_or_init(|| Regex::new(
-        r"(?i)(?<![\d:+-])(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?::[0-5]\d(?:\.\d+)?)?\s*(?:(?:UTC|GMT)\s*)?(?P<offset>[+-]\d{2}:?\d{2})?"
-    ).ok()) else { return false; };
-    let offset = at.offset().whole_seconds();
-    if offset % 60 != 0 {
-        return false;
-    }
-    let magnitude = offset.unsigned_abs() / 60;
-    let sign = if offset < 0 { '-' } else { '+' };
-    let plain = format!("{sign}{:02}{:02}", magnitude / 60, magnitude % 60);
-    let colon = format!("{sign}{:02}:{:02}", magnitude / 60, magnitude % 60);
-    let mut found = false;
-    for entry in pattern.captures_iter(text) {
-        let Ok(parts) = entry else {
-            return false;
-        };
-        let (Some(hour), Some(minute)) = (
-            parts
-                .name("hour")
-                .and_then(|hour| hour.as_str().parse::<u8>().ok()),
-            parts
-                .name("minute")
-                .and_then(|minute| minute.as_str().parse::<u8>().ok()),
-        ) else {
-            // An unrecognized numeric spelling cannot establish unique evidence.
-            return false;
-        };
-        if (hour, minute) != (at.hour(), at.minute()) {
-            continue;
-        }
-        let Some(explicit) = parts.name("offset") else {
-            return false;
-        };
-        if explicit.as_str() != plain && explicit.as_str() != colon {
-            return false;
-        }
-        found = true;
-    }
-    found
 }
