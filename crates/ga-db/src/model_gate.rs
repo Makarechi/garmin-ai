@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
+mod onboarding;
+
 use ga_domain::{
     model_gate::{ModelGateIdentity, ModelGateState, PRIMARY_GEMINI_STATE},
     timestamp::StoredInstant,
