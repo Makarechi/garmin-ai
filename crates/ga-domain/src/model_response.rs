@@ -100,7 +100,7 @@ impl StructuredResponseSchema {
     }
 }
 
-fn application_validator(application: &Value) -> Result<Validator, ModelResponseError> {
+pub(crate) fn application_validator(application: &Value) -> Result<Validator, ModelResponseError> {
     jsonschema::draft202012::options()
         .should_validate_formats(true)
         .with_format("uuid", |text| uuid::Uuid::parse_str(text).is_ok())

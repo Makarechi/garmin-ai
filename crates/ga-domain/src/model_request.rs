@@ -24,7 +24,7 @@ pub enum ApprovedModelSchema {
 }
 
 impl ApprovedModelSchema {
-    fn document(self) -> &'static [u8] {
+    pub(crate) fn document(self) -> &'static [u8] {
         match self {
             Self::AgentStep => include_bytes!("../contracts/model-schemas/agent-step.json"),
             Self::Interpretation => {
