@@ -83,6 +83,7 @@ pub(crate) async fn projection_pending(
     .bind(Option::<Uuid>::None)
     .bind(Option::<i64>::None)
     .bind(Option::<&[Uuid]>::None)
+    .bind(false)
     .fetch_one(&mut **txn)
     .await
 }
