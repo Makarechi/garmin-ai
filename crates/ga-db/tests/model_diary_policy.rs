@@ -9,6 +9,7 @@ use ga_domain::timestamp::StoredInstant;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 struct Case {
@@ -19,6 +20,7 @@ struct Case {
     kind: Option<String>,
     limit: u16,
     expected: Value,
+    tracker_versions: Vec<String>,
     channel_versions: Vec<String>,
 }
 
@@ -40,11 +42,15 @@ async fn model_sees_only_allowed_page_rows() -> Result<(), Box<dyn Error>> {
         .fetch_one(&inspect)
         .await?;
     assert_eq!(&actual, target);
+    let owner_id = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+        .fetch_one(&inspect)
+        .await?;
     let db = Database::connect_lazy(&url).map_err(|_| "Invalid fixture configuration")?;
     let cases: Vec<Case> = serde_json::from_slice(&fs::read(env::var("GA_TEST_MODEL_DIARY")?)?)?;
     for (index, case) in cases.into_iter().enumerate() {
         let document = db
             .list_model_events(ModelDiaryQuery {
+                owner_id,
                 start: case.start.parse()?,
                 end: case.end.parse()?,
                 kind: case.kind.as_deref(),
@@ -58,6 +64,12 @@ async fn model_sees_only_allowed_page_rows() -> Result<(), Box<dyn Error>> {
             })
             .await?;
         assert_eq!(document.value, case.expected, "case {index}");
+        let tracker_versions: Vec<_> = document
+            .tracker_versions
+            .iter()
+            .map(|version| version.to_string())
+            .collect();
+        assert_eq!(tracker_versions, case.tracker_versions, "case {index}");
         let versions: Vec<_> = document
             .channel_versions
             .iter()
@@ -67,16 +79,31 @@ async fn model_sees_only_allowed_page_rows() -> Result<(), Box<dyn Error>> {
         assert!(!document.value.to_string().contains("synthetic quote"));
     }
 
+    let start: StoredInstant = "2026-10-25T09:00:00+00:00".parse()?;
+    let end: StoredInstant = "2026-10-25T10:00:00+00:00".parse()?;
+    assert!(matches!(
+        db.list_model_events(ModelDiaryQuery {
+            owner_id: Uuid::nil(),
+            start,
+            end,
+            kind: None,
+            limit: 10,
+            model: ShareDestination::new(DestinationKind::Model, "model:primary")?,
+            channel: None,
+        })
+        .await,
+        Err(DiaryReadError::Owner)
+    ));
+
     sqlx::query(
         "UPDATE app_state SET value=jsonb_build_object('model_categories','[\"health\"]'::jsonb)
          WHERE key='preferences:onboarding'",
     )
     .execute(&inspect)
     .await?;
-    let start: StoredInstant = "2026-10-25T09:00:00+00:00".parse()?;
-    let end: StoredInstant = "2026-10-25T10:00:00+00:00".parse()?;
     assert!(matches!(
         db.list_model_events(ModelDiaryQuery {
+            owner_id,
             start,
             end,
             kind: None,

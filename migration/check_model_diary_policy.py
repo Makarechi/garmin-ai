@@ -178,6 +178,13 @@ def run(binary):
                         "kind": kind,
                         "limit": limit,
                         "expected": expected,
+                        "tracker_versions": sorted(
+                            {
+                                row["definition_version_id"]
+                                for row in expected["rows"]
+                                if row["kind"].startswith("user.")
+                            }
+                        ),
                         "channel_versions": sorted(
                             session.info.get("channel_share_requirements", {})
                         ),
@@ -186,6 +193,10 @@ def run(binary):
         assert cases[8]["expected"]["truncated"]
         assert len(cases[8]["expected"]["rows"]) == 1
         assert cases[9]["expected"] == cases[10]["expected"]
+        assert cases[0]["tracker_versions"] == [str(PRIVATE), str(SENSITIVE)]
+        assert cases[0]["channel_versions"] == []
+        assert cases[1]["tracker_versions"] == [str(SENSITIVE)]
+        assert cases[3]["tracker_versions"] == [str(PRIVATE)]
         assert cases[2]["channel_versions"] == [str(PRIVATE), str(SENSITIVE)]
         with TemporaryDirectory() as directory:
             path = Path(directory) / "model-diary.json"
