@@ -243,6 +243,13 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
     let original = first.id;
     let key = window(day);
     let freshness = format!("freshness:heart_rate:{day}");
+    let original_lease: OffsetDateTime = sqlx::query_scalar(
+        "UPDATE jobs SET lease_until=clock_timestamp()+interval '15 seconds'
+         WHERE id=$1 RETURNING lease_until",
+    )
+    .bind(lease.id())
+    .fetch_one(&run.inspect)
+    .await?;
     sqlx::raw_sql(
         "CREATE SEQUENCE synthetic_endpoint_attempts;
          CREATE FUNCTION stop_endpoint_window() RETURNS trigger LANGUAGE plpgsql AS
@@ -262,15 +269,17 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
             .await,
         Err(EndpointError::Database)
     ));
-    let facts: (i64, bool, String) = sqlx::query_as(
+    let facts: (i64, bool, String, OffsetDateTime) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM measurements),
                 (SELECT is_called FROM synthetic_endpoint_attempts),
-                (SELECT status FROM source_payloads WHERE id=$1)",
+                (SELECT status FROM source_payloads WHERE id=$1),
+                (SELECT lease_until FROM jobs WHERE id=$2)",
     )
     .bind(original)
+    .bind(lease.id())
     .fetch_one(&run.inspect)
     .await?;
-    assert_eq!(facts, (0, true, "pending".to_owned()));
+    assert_eq!(facts, (0, true, "pending".to_owned(), original_lease));
     assert_eq!(run.state(&key).await?["status"], "pending");
     sqlx::query("DROP TRIGGER stop_endpoint_window ON app_state")
         .execute(&run.inspect)

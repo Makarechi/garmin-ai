@@ -1,7 +1,7 @@
 use std::num::{NonZeroU16, NonZeroU64};
 
 use reqwest::Url;
-use time::Date;
+use time::{Date, format_description::well_known::Iso8601};
 
 use super::endpoint;
 use crate::GarminError;
@@ -49,6 +49,51 @@ pub enum LegacyRead {
 }
 
 impl LegacyRead {
+    /// Interpret a date, device, or activity endpoint saved by the scheduler.
+    pub fn queued_endpoint(name: &str, key: &str) -> Result<Self, GarminError> {
+        let daily = match name {
+            "daily" => DailyEndpoint::Summary,
+            "steps" => DailyEndpoint::Steps,
+            "heart_rate" => DailyEndpoint::HeartRate,
+            "sleep" => DailyEndpoint::Sleep,
+            "hrv" => DailyEndpoint::Hrv,
+            "stress" => DailyEndpoint::Stress,
+            "body_battery" => DailyEndpoint::BodyBattery,
+            "body_battery_events" => DailyEndpoint::BodyBatteryEvents,
+            "respiration" => DailyEndpoint::Respiration,
+            "spo2" => DailyEndpoint::Spo2,
+            "readiness" => DailyEndpoint::Readiness,
+            "training_status" => DailyEndpoint::TrainingStatus,
+            "max_metrics" => DailyEndpoint::MaxMetrics,
+            "endurance" => DailyEndpoint::Endurance,
+            "hill" => DailyEndpoint::Hill,
+            "hydration" => DailyEndpoint::Hydration,
+            "body_composition" => DailyEndpoint::BodyComposition,
+            "intensity" => DailyEndpoint::Intensity,
+            "resting_hr" => DailyEndpoint::RestingHeartRate,
+            "all_day_events" => DailyEndpoint::AllDayEvents,
+            "devices" if key == "global" => return Ok(Self::Devices),
+            _ => {
+                let activity = match name {
+                    "activity" => ActivityEndpoint::Summary,
+                    "activity_details" => ActivityEndpoint::Details,
+                    "activity_splits" => ActivityEndpoint::Splits,
+                    "activity_typed_splits" => ActivityEndpoint::TypedSplits,
+                    "activity_zones" => ActivityEndpoint::Zones,
+                    "activity_weather" => ActivityEndpoint::Weather,
+                    _ => return Err(GarminError::InvalidRequest),
+                };
+                let identity = key.parse().map_err(|_| GarminError::InvalidRequest)?;
+                return Ok(Self::Activity(activity, identity));
+            }
+        };
+        let day = Date::parse(key, &Iso8601::DATE)
+            .ok()
+            .filter(|day| (1..=9999).contains(&day.year()))
+            .ok_or(GarminError::InvalidRequest)?;
+        Ok(Self::Daily(daily, day))
+    }
+
     pub(super) fn url(self, base: &Url, display_name: Option<&str>) -> Result<Url, GarminError> {
         match self {
             Self::Daily(resource, day) => resource.url(base, day, display_name),
