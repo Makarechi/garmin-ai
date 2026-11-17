@@ -19,6 +19,7 @@ pub mod model_gate;
 pub mod outbox_claims;
 pub mod outbox_enqueue;
 pub mod personal_goals;
+pub mod proactive_control;
 pub mod raw_capture;
 pub mod replay;
 pub mod runtime_lease;

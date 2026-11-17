@@ -43,6 +43,15 @@ async fn persists_partial_acceptance_and_defers_only_unaccepted_sends() -> Resul
         instance_id: "primary",
         external_owner_id: 42,
     };
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         VALUES(gen_random_uuid(),$1,'telegram','primary','42','fixture')",
+    ).bind(owner_id).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO app_state(key,value) VALUES('proactive:enabled','{\"enabled\":false}')",
+    )
+    .execute(&pool)
+    .await?;
     let conversation = Uuid::from_u128(2501);
     sqlx::query(
         "INSERT INTO conversations(id,owner_id,channel,channel_instance_id,memory_epoch,state,share_owner_memory)
@@ -66,6 +75,16 @@ async fn persists_partial_acceptance_and_defers_only_unaccepted_sends() -> Resul
             .await?
             .ok_or("Missing outbox claim")?;
         assert_eq!(claim.outbox_id, outbox_id);
+        if number == 2510 {
+            assert_eq!(
+                database
+                    .dispatch_outbox_reply(destination(), claim, &[], |_| async {
+                        panic!("Telegram cannot bypass its saved binding check")
+                    })
+                    .await?,
+                ReplyDispatchResult::ClaimUnavailable,
+            );
+        }
         let (listener, transport) = bind().await?;
         let server = async {
             let (mut first, _) = listener.accept().await?;
@@ -73,6 +92,18 @@ async fn persists_partial_acceptance_and_defers_only_unaccepted_sends() -> Resul
                 request(&mut first).await?["fields"]["text"],
                 "synthetic first"
             );
+            if number == 2510 {
+                let mut settings = pool.begin().await?;
+                for lock in [72_104_621_i64, 72_104_627] {
+                    let writeable: bool =
+                        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                            .bind(lock)
+                            .fetch_one(&mut *settings)
+                            .await?;
+                    assert!(!writeable, "Telegram policy was mutable during transport");
+                }
+                settings.rollback().await?;
+            }
             if second {
                 respond(&mut first, "200 OK", &[], &accepted(701, 42)).await?;
                 let (mut next, _) = listener.accept().await?;
@@ -191,6 +222,45 @@ async fn persists_partial_acceptance_and_defers_only_unaccepted_sends() -> Resul
             .await
             .is_err()
     );
+    for (number, disable) in [(2514, true), (2515, false)] {
+        let pending = Uuid::from_u128(number);
+        seed(&pool, binding, conversation, pending, false).await?;
+        let claim = database
+            .claim_outbox_reply(destination(), clock(&pool).await?, 120)
+            .await?
+            .ok_or("Missing stale-policy test claim")?;
+        assert_eq!(claim.outbox_id, pending);
+        if disable {
+            sqlx::query(
+                "INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"channel\":null,\"fallback_channels\":[]}')",
+            ).execute(&pool).await?;
+        } else {
+            sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+                .execute(&pool)
+                .await?;
+            sqlx::query("UPDATE channel_bindings SET external_id='43' WHERE owner_id=$1")
+                .bind(owner_id)
+                .execute(&pool)
+                .await?;
+        }
+        let (listener, transport) = bind().await?;
+        assert_eq!(
+            transport
+                .dispatch_claimed_reply(&database, binding, claim, &[])
+                .await?,
+            ReplyDispatchResult::Cancelled,
+        );
+        assert!(
+            timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM outbox_messages WHERE id=$1")
+            .bind(pending)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(state, "cancelled");
+    }
     println!(
         "Verified durable acceptance, partial evidence, 429 deferral and unsupported media without live calls"
     );

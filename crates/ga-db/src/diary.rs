@@ -231,7 +231,7 @@ impl Database {
         Ok(written)
     }
 
-    async fn begin_diary_write(
+    pub(crate) async fn begin_diary_write(
         &self,
         owner: Uuid,
     ) -> Result<Transaction<'static, Postgres>, DiaryWriteError> {

@@ -1,5 +1,6 @@
 mod replay;
 pub mod telegram_ack;
+pub mod telegram_inbound;
 
 pub use replay::ReplayJobLease;
 

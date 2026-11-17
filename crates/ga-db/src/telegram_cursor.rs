@@ -159,38 +159,88 @@ pub async fn record_telegram_ordering(
 ) -> Result<i64, TelegramCursorError> {
     let key = state_key("telegram:ordering", instance)?;
     lock_ingress(txn).await?;
-    let (mut epoch, previous) = match read_state::<OrderingRecord>(txn, &key).await? {
-        Some(record) if record.epoch >= 0 => {
-            (record.epoch, Some(parse_time(&record.last_received_at)?))
-        }
-        Some(_) => return Err(TelegramCursorError::InvalidState),
-        None if instance == "primary" => {
-            let previous: Option<OffsetDateTime> =
-                sqlx::query_scalar("SELECT max(received_at) FROM telegram_updates")
-                    .fetch_one(&mut **txn)
-                    .await?;
-            let previous = previous
-                .map(StoredInstant::try_from)
-                .transpose()
-                .map_err(|_| TelegramCursorError::InvalidState)?;
-            (0, previous)
-        }
-        None => (0, None),
+    let (epoch, previous) = last_ordering(txn, instance, &key).await?;
+    let epoch = delivery_epoch(epoch, previous, received_at)?;
+    save_ordering(txn, &key, epoch, received_at).await?;
+    Ok(epoch)
+}
+
+/// Sequence every newly accepted native delivery, including edits. Keep this
+/// clock separate from the legacy timestamp for newly received owner messages.
+pub(crate) async fn record_native_telegram_ordering(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+    received_at: StoredInstant,
+) -> Result<i64, TelegramCursorError> {
+    let native_key = state_key("telegram:native-ordering", instance)?;
+    let shared_key = state_key("telegram:ordering", instance)?;
+    lock_ingress(txn).await?;
+    let (epoch, previous) = match read_state::<OrderingRecord>(txn, &native_key).await? {
+        Some(record) => ordering_record(record)?,
+        None => last_ordering(txn, instance, &shared_key).await?,
     };
-    if previous.is_some_and(|previous| week_elapsed(received_at, previous)) {
-        epoch = epoch
-            .checked_add(1)
-            .ok_or(TelegramCursorError::InvalidState)?;
+    let epoch = delivery_epoch(epoch, previous, received_at)?;
+    let last = previous.map_or(received_at, |prior| prior.max(received_at));
+    save_ordering(txn, &native_key, epoch, last).await?;
+    Ok(epoch)
+}
+
+async fn last_ordering(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+    key: &str,
+) -> Result<(i64, Option<StoredInstant>), TelegramCursorError> {
+    if let Some(record) = read_state::<OrderingRecord>(txn, key).await? {
+        return ordering_record(record);
     }
+    if instance != "primary" {
+        return Ok((0, None));
+    }
+    let previous: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT max(received_at) FROM telegram_updates")
+            .fetch_one(&mut **txn)
+            .await?;
+    let previous = previous
+        .map(StoredInstant::try_from)
+        .transpose()
+        .map_err(|_| TelegramCursorError::InvalidState)?;
+    Ok((0, previous))
+}
+
+fn ordering_record(
+    record: OrderingRecord,
+) -> Result<(i64, Option<StoredInstant>), TelegramCursorError> {
+    if record.epoch < 0 {
+        return Err(TelegramCursorError::InvalidState);
+    }
+    Ok((record.epoch, Some(parse_time(&record.last_received_at)?)))
+}
+
+fn delivery_epoch(
+    epoch: i64,
+    previous: Option<StoredInstant>,
+    received_at: StoredInstant,
+) -> Result<i64, TelegramCursorError> {
+    if previous.is_some_and(|previous| week_elapsed(received_at, previous)) {
+        return epoch
+            .checked_add(1)
+            .ok_or(TelegramCursorError::InvalidState);
+    }
+    Ok(epoch)
+}
+
+async fn save_ordering(
+    txn: &mut Transaction<'_, Postgres>,
+    key: &str,
+    epoch: i64,
+    last_received_at: StoredInstant,
+) -> Result<(), TelegramCursorError> {
     write_state(
         txn,
-        &key,
-        json!({
-            "epoch": epoch, "last_received_at": received_at.to_string(),
-        }),
+        key,
+        json!({"epoch": epoch, "last_received_at": last_received_at.to_string()}),
     )
-    .await?;
-    Ok(epoch)
+    .await
 }
 
 fn state_key(key: &str, instance: &str) -> Result<String, TelegramCursorError> {
