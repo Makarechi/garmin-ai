@@ -1,9 +1,9 @@
-use std::{error::Error, fmt, fmt::Write};
+use std::{error::Error, fmt};
 
 use serde_json::Value;
 
 use crate::{
-    legacy_json::{Utf8Layout, encode},
+    legacy_json::{Utf8Layout, encode_ascii},
     sha256_hex,
 };
 
@@ -62,20 +62,7 @@ pub fn metric_definition_hash(contract: &Value) -> Result<String, InvalidContrac
 
 pub(crate) fn python_ascii_json(value: &Value) -> Result<String, InvalidContract> {
     let serialized = serde_json::to_vec(value).map_err(|_| InvalidContract)?;
-    let compact =
-        encode(&serialized, Utf8Layout::Compact, serialized.len()).map_err(|_| InvalidContract)?;
-    let compact = str::from_utf8(&compact).map_err(|_| InvalidContract)?;
-    let mut ascii = String::with_capacity(compact.len());
-    for character in compact.chars() {
-        if character < '\u{007f}' {
-            ascii.push(character);
-        } else {
-            for unit in character.encode_utf16(&mut [0; 2]) {
-                write!(ascii, "\\u{unit:04x}").map_err(|_| InvalidContract)?;
-            }
-        }
-    }
-    Ok(ascii)
+    encode_ascii(&serialized, Utf8Layout::Compact, serialized.len()).map_err(|_| InvalidContract)
 }
 
 #[cfg(test)]
