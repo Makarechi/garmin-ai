@@ -44,7 +44,7 @@ impl Database {
     }
 }
 
-async fn resolve_and_ingest(
+pub(super) async fn resolve_and_ingest(
     txn: &mut Transaction<'_, Postgres>,
     callback: &ChannelCallback<'_>,
     normalize: impl FnOnce(&Value) -> Option<InboundEnvelope>,

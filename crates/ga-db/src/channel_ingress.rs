@@ -1,4 +1,5 @@
 mod callback;
+pub mod telegram_poll;
 pub use callback::ChannelCallback;
 
 use std::{error::Error, fmt, time::Duration};
@@ -75,15 +76,20 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(IngressError::Storage)?;
-        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(REPLAY_MUTATION_LOCK)
-            .fetch_one(&mut *txn)
-            .await?;
-        if !locked {
-            return Err(IngressError::Busy);
-        }
+        lock_mutations(&mut txn).await?;
         Ok(txn)
     }
+}
+
+async fn lock_mutations(txn: &mut Transaction<'_, Postgres>) -> Result<(), IngressError> {
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(REPLAY_MUTATION_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !locked {
+        return Err(IngressError::Busy);
+    }
+    Ok(())
 }
 
 async fn ingest(
