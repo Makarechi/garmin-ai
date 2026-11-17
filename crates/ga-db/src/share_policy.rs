@@ -20,7 +20,7 @@ use crate::{
 
 pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72104631;
 const MODEL_CONSENT_LOCK: i64 = 72104632;
-const OWNER_ONBOARDING_LOCK: i64 = 72104621;
+pub(crate) const OWNER_ONBOARDING_LOCK: i64 = 72104621;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]

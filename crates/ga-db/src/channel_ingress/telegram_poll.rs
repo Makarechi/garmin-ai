@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-const CHANNEL_SELECTION_LOCK: i64 = 72_104_621;
+pub(crate) const CHANNEL_SELECTION_LOCK: i64 = 72_104_621;
 
 pub enum TelegramPollEvent<'a> {
     Ignore,
@@ -264,7 +264,7 @@ async fn persist(
     })
 }
 
-async fn selection(
+pub(crate) async fn selection(
     txn: &mut Transaction<'_, Postgres>,
     instance: &str,
 ) -> Result<bool, TelegramPollError> {

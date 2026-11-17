@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
 
-const CHANNEL_BINDING_LOCK: i64 = 72_104_627;
+pub(crate) const CHANNEL_BINDING_LOCK: i64 = 72_104_627;
 
 #[derive(Debug)]
 pub enum TelegramBindingError {

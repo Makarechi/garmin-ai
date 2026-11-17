@@ -45,4 +45,5 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
 }
 
 pub mod analysis_claims;
+pub mod analysis_step;
 pub mod metric_contract;
