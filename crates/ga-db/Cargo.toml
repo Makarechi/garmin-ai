@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 ga-archive = { path = "../ga-archive" }
 ga-domain = { path = "../ga-domain" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 sqlx = { version = "=0.9.0", default-features = false, features = [
     "postgres",
     "runtime-tokio",

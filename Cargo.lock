@@ -623,6 +623,8 @@ version = "0.1.0"
 dependencies = [
  "ga-archive",
  "ga-domain",
+ "serde",
+ "serde_json",
  "sqlx",
  "sqlx-postgres",
  "tempfile",
