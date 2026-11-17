@@ -40,7 +40,28 @@ pub fn definition_hash(contract: &Value) -> Result<String, InvalidContract> {
             }
         }
     }
-    let serialized = serde_json::to_vec(&normalized).map_err(|_| InvalidContract)?;
+    Ok(sha256_hex(python_ascii_json(&normalized)?.as_bytes()))
+}
+
+/// Hash a metric definition in the stored contract format.
+pub fn metric_definition_hash(contract: &Value) -> Result<String, InvalidContract> {
+    let mut normalized = contract.clone();
+    let object = normalized.as_object_mut().ok_or(InvalidContract)?;
+    if object.get("category_domain") == Some(&Value::Null) {
+        object.remove("category_domain");
+    }
+    if let Some(methods) = object.get_mut("allowed_methods") {
+        let methods = methods.as_array_mut().ok_or(InvalidContract)?;
+        if methods.iter().any(|method| !method.is_string()) {
+            return Err(InvalidContract);
+        }
+        methods.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    }
+    Ok(sha256_hex(python_ascii_json(&normalized)?.as_bytes()))
+}
+
+pub(crate) fn python_ascii_json(value: &Value) -> Result<String, InvalidContract> {
+    let serialized = serde_json::to_vec(value).map_err(|_| InvalidContract)?;
     let compact =
         encode(&serialized, Utf8Layout::Compact, serialized.len()).map_err(|_| InvalidContract)?;
     let compact = str::from_utf8(&compact).map_err(|_| InvalidContract)?;
@@ -54,7 +75,7 @@ pub fn definition_hash(contract: &Value) -> Result<String, InvalidContract> {
             }
         }
     }
-    Ok(sha256_hex(ascii.as_bytes()))
+    Ok(ascii)
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ pub mod garmin_owner;
 pub mod jobs;
 pub mod raw_capture;
 pub mod system_definitions;
+pub mod system_metrics;
 
 use std::{str::FromStr, time::Duration};
 
