@@ -1,4 +1,5 @@
 pub mod activity_documents;
+pub mod activity_scans;
 pub mod diary;
 pub mod fit_ingest;
 pub mod fit_staging;

@@ -1,3 +1,4 @@
+pub mod activity_scan;
 pub mod event_contract;
 pub mod event_input;
 pub mod event_payload;
