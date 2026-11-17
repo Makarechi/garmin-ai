@@ -18,6 +18,7 @@ use crate::{
         ActivitySummaryKind, ApplyActivitySummary, DocumentError, DocumentStatus, put_state,
     },
     check_readiness,
+    garmin_freshness::record_freshness,
     garmin_owner::verify_owner_in_transaction,
     jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome},
     raw_capture::{GARMIN_LEGACY_SOURCE, lock_legacy_scope},
@@ -254,6 +255,7 @@ impl Database {
             Some(_) => {
                 record_freshness(
                     &mut txn,
+                    "activities",
                     &page.source_key(),
                     "fetch_error",
                     requested_at,
@@ -362,6 +364,7 @@ async fn publish_page(
     };
     record_freshness(
         txn,
+        "activities",
         &source_key,
         status.label(),
         request.requested_at,
@@ -377,42 +380,6 @@ async fn publish_page(
         advance(txn, page, state, values, request).await?;
     }
     Ok(ActivityPageResult::Published(status))
-}
-
-async fn record_freshness(
-    txn: &mut Transaction<'_, Postgres>,
-    source_key: &str,
-    status: &str,
-    requested_at: StoredInstant,
-    source_id: Option<Uuid>,
-) -> Result<(), ActivityScanError> {
-    let fetched = status != "fetch_error";
-    let normalized = fetched && !matches!(status, "stale" | "error");
-    sqlx::query(
-        "INSERT INTO app_state(key,value)
-         VALUES($1,jsonb_build_object('fetched_at',$2::text,
-             'success_at', CASE WHEN $7 THEN $2::text END,
-             'normalized_at', CASE WHEN $3 THEN $2::text END,
-             'status',$4::text,'source_key',$5::text,'source_ref',$6::text))
-         ON CONFLICT(key) DO UPDATE SET updated_at=now(),
-           value=excluded.value || jsonb_build_object(
-                 'success_at', CASE WHEN $7 THEN to_jsonb($2::text) ELSE app_state.value->'success_at' END,
-                 'normalized_at', CASE WHEN $3 THEN to_jsonb($2::text) ELSE app_state.value->'normalized_at' END)
-         WHERE COALESCE(NULLIF(app_state.value->>'fetched_at',''),
-                        NULLIF(app_state.value->>'success_at',''))::timestamptz <= $2::timestamptz
-            OR COALESCE(NULLIF(app_state.value->>'fetched_at',''),
-                        NULLIF(app_state.value->>'success_at','')) IS NULL",
-    )
-    .bind(format!("freshness:activities:{source_key}"))
-    .bind(requested_at.to_string())
-    .bind(normalized)
-    .bind(status)
-    .bind(source_key)
-    .bind(source_id.map(|id| id.to_string()))
-    .bind(fetched)
-    .execute(&mut **txn)
-    .await?;
-    Ok(())
 }
 
 async fn advance(

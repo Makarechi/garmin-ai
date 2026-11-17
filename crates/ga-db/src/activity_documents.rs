@@ -95,7 +95,7 @@ pub struct ApplyHealthPayload<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum Projection<'a> {
+pub(crate) enum Projection<'a> {
     Document(ActivityDocument),
     Summary(ActivitySummaryKind),
     Health(&'a str, Option<&'a HealthReplacement>),
@@ -128,7 +128,7 @@ impl<'a> Projection<'a> {
 pub(crate) struct ApplyActivity<'a> {
     pub(crate) account_fingerprint: &'a str,
     pub(crate) source_key: &'a str,
-    projection: Projection<'a>,
+    pub(crate) projection: Projection<'a>,
     pub(crate) source_id: Uuid,
     pub(crate) requested_at: StoredInstant,
     pub(crate) timezone: &'a str,
