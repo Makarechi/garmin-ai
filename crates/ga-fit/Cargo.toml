@@ -1,0 +1,13 @@
+[package]
+name = "ga-fit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc = "3.4.0"
+
+[lints]
+workspace = true
