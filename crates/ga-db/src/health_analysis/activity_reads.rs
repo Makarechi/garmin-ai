@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use self::nonsample::NON_SAMPLE_FIT;
-use super::{HealthAnalysisError, MAX_RANGE_DAYS, begin_verified_analysis, check_calendar_bounds};
+use super::{DailyHealthReader, HealthAnalysisError, MAX_RANGE_DAYS, check_calendar_bounds};
 use crate::Database;
 
 #[derive(Clone, Copy, Debug)]
@@ -75,45 +75,12 @@ impl Database {
         kind: Option<&str>,
         limit: u16,
     ) -> Result<Value, ActivityReadError> {
-        let start = OffsetDateTime::from(start);
-        let end = OffsetDateTime::from(end);
-        check_calendar_bounds(start.date(), end.date())?;
-        if !(0..=MAX_RANGE_DAYS + 1).contains(&(end.date() - start.date()).whole_days()) {
-            return Err(ActivityReadError::CalendarRange);
-        }
-        if start >= end || end - start > time::Duration::days(MAX_RANGE_DAYS) {
-            return Err(ActivityReadError::Range);
-        }
-        if !(1..=1000).contains(&limit) {
-            return Err(ActivityReadError::Limit);
-        }
+        let (start, end) = activity_range(start, end, limit)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = begin_verified_analysis(&self.work).await?;
-            let mut rows = Vec::new();
-            let truncated = {
-                let mut results = sqlx::query_as::<_, ActivityRow>(
-                    r#"SELECT row_to_json(activity)::text, start, "end", updated_at
-                       FROM activities AS activity WHERE start >= $1 AND start < $2
-                           AND ($3::text IS NULL OR kind = $3)
-                       ORDER BY start LIMIT $4"#,
-                )
-                .bind(start)
-                .bind(end)
-                .bind(kind.filter(|kind| !kind.is_empty()))
-                .bind(i64::from(limit) + 1)
-                .fetch(&mut *txn);
-                let mut truncated = false;
-                while let Some(row) = results.try_next().await? {
-                    if rows.len() == usize::from(limit) {
-                        truncated = true;
-                        break;
-                    }
-                    rows.push(activity(row)?);
-                }
-                truncated
-            };
-            txn.commit().await?;
-            Ok(page("rows", rows, truncated))
+            self.verified_health_reader()
+                .await?
+                .activity_summaries_in(start, end, kind, limit)
+                .await
         })
         .await
         .map_err(|_| HealthAnalysisError::Database)?
@@ -127,52 +94,155 @@ impl Database {
         offset: u32,
         limit: u16,
     ) -> Result<Value, ActivityReadError> {
-        if offset > 1_000_000 || !(1..=2000).contains(&limit) {
-            return Err(ActivityReadError::Pagination);
-        }
+        check_pagination(offset, limit)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = begin_verified_analysis(&self.work).await?;
-            let row = sqlx::query_as::<_, ActivityRow>(
-                r#"SELECT row_to_json(activity)::text, start, "end", updated_at
-                   FROM activities AS activity WHERE id=$1"#,
-            )
-            .bind(activity_id)
-            .fetch_optional(&mut *txn)
-            .await?
-            .ok_or(ActivityReadError::Missing)?;
-            let summary = activity(row)?;
-            let mut parts = Vec::new();
-            let truncated = {
-                let mut results = sqlx::query_scalar::<_, Option<String>>(include_str!(
-                    "activity_reads/parts.sql"
-                ))
-                .bind(activity_id)
-                .bind(include_samples)
-                .bind(i64::from(offset))
-                .bind(i64::from(limit))
-                .bind(NON_SAMPLE_FIT)
-                .fetch(&mut *txn);
-                let mut truncated = false;
-                while let Some(document) = results.try_next().await? {
-                    match document {
-                        Some(document) => parts.push(
-                            serde_json::from_str(&document)
-                                .map_err(|_| HealthAnalysisError::Database)?,
-                        ),
-                        None => truncated = true,
-                    }
-                }
-                truncated
-            };
-            txn.commit().await?;
-            let mut response = page("parts", parts, truncated);
-            response["activity"] = summary;
-            response["next_offset"] = json!(truncated.then(|| offset + u32::from(limit)));
-            Ok(response)
+            self.verified_health_reader()
+                .await?
+                .activity_details_in(activity_id, include_samples, offset, limit)
+                .await
         })
         .await
         .map_err(|_| HealthAnalysisError::Database)?
     }
+}
+
+impl DailyHealthReader {
+    pub async fn activity_summaries(
+        self,
+        start: StoredInstant,
+        end: StoredInstant,
+        kind: Option<&str>,
+        limit: u16,
+    ) -> Result<Value, ActivityReadError> {
+        let (start, end) = activity_range(start, end, limit)?;
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            self.activity_summaries_in(start, end, kind, limit),
+        )
+        .await
+        .map_err(|_| HealthAnalysisError::Database)?
+    }
+
+    async fn activity_summaries_in(
+        mut self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        kind: Option<&str>,
+        limit: u16,
+    ) -> Result<Value, ActivityReadError> {
+        let mut rows = Vec::new();
+        let truncated = {
+            let mut results = sqlx::query_as::<_, ActivityRow>(
+                r#"SELECT row_to_json(activity)::text, start, "end", updated_at
+                   FROM activities AS activity WHERE start >= $1 AND start < $2
+                       AND ($3::text IS NULL OR kind = $3)
+                   ORDER BY start LIMIT $4"#,
+            )
+            .bind(start)
+            .bind(end)
+            .bind(kind.filter(|kind| !kind.is_empty()))
+            .bind(i64::from(limit) + 1)
+            .fetch(&mut *self.0);
+            let mut truncated = false;
+            while let Some(row) = results.try_next().await? {
+                if rows.len() == usize::from(limit) {
+                    truncated = true;
+                    break;
+                }
+                rows.push(activity(row)?);
+            }
+            truncated
+        };
+        self.0.commit().await?;
+        Ok(page("rows", rows, truncated))
+    }
+
+    pub async fn activity_details(
+        self,
+        activity_id: &str,
+        include_samples: bool,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Value, ActivityReadError> {
+        check_pagination(offset, limit)?;
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            self.activity_details_in(activity_id, include_samples, offset, limit),
+        )
+        .await
+        .map_err(|_| HealthAnalysisError::Database)?
+    }
+
+    async fn activity_details_in(
+        mut self,
+        activity_id: &str,
+        include_samples: bool,
+        offset: u32,
+        limit: u16,
+    ) -> Result<Value, ActivityReadError> {
+        let row = sqlx::query_as::<_, ActivityRow>(
+            r#"SELECT row_to_json(activity)::text, start, "end", updated_at
+                   FROM activities AS activity WHERE id=$1"#,
+        )
+        .bind(activity_id)
+        .fetch_optional(&mut *self.0)
+        .await?
+        .ok_or(ActivityReadError::Missing)?;
+        let summary = activity(row)?;
+        let mut parts = Vec::new();
+        let truncated = {
+            let mut results =
+                sqlx::query_scalar::<_, Option<String>>(include_str!("activity_reads/parts.sql"))
+                    .bind(activity_id)
+                    .bind(include_samples)
+                    .bind(i64::from(offset))
+                    .bind(i64::from(limit))
+                    .bind(NON_SAMPLE_FIT)
+                    .fetch(&mut *self.0);
+            let mut truncated = false;
+            while let Some(document) = results.try_next().await? {
+                match document {
+                    Some(document) => parts.push(
+                        serde_json::from_str(&document)
+                            .map_err(|_| HealthAnalysisError::Database)?,
+                    ),
+                    None => truncated = true,
+                }
+            }
+            truncated
+        };
+        self.0.commit().await?;
+        let mut response = page("parts", parts, truncated);
+        response["activity"] = summary;
+        response["next_offset"] = json!(truncated.then(|| offset + u32::from(limit)));
+        Ok(response)
+    }
+}
+
+fn activity_range(
+    start: StoredInstant,
+    end: StoredInstant,
+    limit: u16,
+) -> Result<(OffsetDateTime, OffsetDateTime), ActivityReadError> {
+    let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
+    check_calendar_bounds(start.date(), end.date())?;
+    if !(0..=MAX_RANGE_DAYS + 1).contains(&(end.date() - start.date()).whole_days()) {
+        return Err(ActivityReadError::CalendarRange);
+    }
+    if start >= end || end - start > time::Duration::days(MAX_RANGE_DAYS) {
+        return Err(ActivityReadError::Range);
+    }
+    if !(1..=1000).contains(&limit) {
+        return Err(ActivityReadError::Limit);
+    }
+    Ok((start, end))
+}
+
+fn check_pagination(offset: u32, limit: u16) -> Result<(), ActivityReadError> {
+    if offset > 1_000_000 || !(1..=2000).contains(&limit) {
+        return Err(ActivityReadError::Pagination);
+    }
+    Ok(())
 }
 
 fn page(key: &str, values: Vec<Value>, truncated: bool) -> Value {

@@ -18,6 +18,11 @@ impl fmt::Display for InvalidStoredInstant {
 impl Error for InvalidStoredInstant {}
 
 impl StoredInstant {
+    /// Interpret a timestamp using the legacy typed application input contract.
+    pub fn from_legacy_input(value: &serde_json::Value) -> Option<Self> {
+        crate::event_time::aware(value)
+    }
+
     pub fn from_unix_microseconds(value: i64) -> Result<Self, InvalidStoredInstant> {
         let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000)
             .map_err(|_| InvalidStoredInstant)?;

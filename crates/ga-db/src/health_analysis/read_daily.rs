@@ -38,7 +38,7 @@ const METRICS: &[&str] = &[
 const DAILY_ROWS: &str = "SELECT row_to_json(health_days)::text, updated_at FROM health_days
      WHERE day BETWEEN $1 AND $2 ORDER BY day";
 
-pub struct DailyHealthReader(Transaction<'static, Postgres>);
+pub struct DailyHealthReader(pub(super) Transaction<'static, Postgres>);
 
 impl Database {
     pub async fn verified_health_reader(&self) -> Result<DailyHealthReader, HealthAnalysisError> {
