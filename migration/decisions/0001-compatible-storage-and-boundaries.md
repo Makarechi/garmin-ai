@@ -1,7 +1,7 @@
 # Compatible storage and application boundaries
 
-Status — accepted as the implementation direction for the pinned Python baseline. Release budgets
-remain open until R02 covers the required workloads.
+Status — accepted as the implementation direction for the pinned Python baseline. Working
+resource budgets and their release verification are in [ADR 0002](0002-constrained-host-acceptance.md).
 
 ## Application and data
 

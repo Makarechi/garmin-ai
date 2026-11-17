@@ -7,11 +7,13 @@ order in the approved migration plan. Recheck the current main SHA before extend
 | Task | State | Evidence and next action |
 | --- | --- | --- |
 | R00 | Merged in #215 | 4,369 collected tests. Local container run passed 4,288, skipped 81, and separately passed 54 extension cases. Baseline CI recorded one timing failure in the Telegram check-in test; #215 passed all checks and clean review. |
-| R01 | Inventory captured | Review #216. The checker assigns 459 surfaces to 25 areas and checks both acceptance manifests. Update the mapping as Rust test evidence lands. |
-| R02 | In progress | #217 covers cold startup and idle. Working branches capture two scales of FIT projection and the Garmin day and history paths. Complete the remaining workloads, representative host measurements and budgets. |
-| R03 | In progress | #218 supplies a differential comparator and Python CLI, HTTP, MCP, archive and SQL observations. A follow-up has two matching captures of offline replay after interrupted ingest. Extend supporting scenarios and compare with the Rust implementation as its entrypoints land. |
-| R04 | In progress | Storage/boundary and initial digest decisions are recorded. Finalize dependency direction, target platforms, resource goals, evidence gates and any changes to baseline behavior before R05. |
-| R05–R40 | Pending | Start the workspace and first native primitives when their prerequisites are reviewed. Pull Garmin authentication and FIT feasibility forward once their stated dependencies allow it. |
+| R01 | Merged in #216 | The checker assigns 459 surfaces to 25 areas and checks both acceptance manifests. Update the mapping as Rust test evidence lands. |
+| R02 | Container baseline merged in #217 and #222 | Startup, sync, replay, FIT, analytics, voice, backup and concurrent controls are measured. Confirm the operating-system reserve and full process mix on the representative host in R37. |
+| R03 | Harness merged in #218 and #220 | Differential CLI, HTTP, MCP, archive and SQL observations include replay after interruption and A→B→A. Extend the cases and candidate coverage with each ported path. |
+| R04 | Initial decisions merged in #219 | Storage, dependency directions, rollout gates and legacy digests are recorded. Working constrained-host budgets appear in ADR 0002. Revisit them with the representative-host evidence. |
+| R05 | Workspace and liveness merged in #221 and #223 | Native Linux CI, advisory checks and HTTP liveness are available. The domain boundary guard is in review with the first domain crate. |
+| R06–R08 | In review | JSON compatibility, identity/time/text offsets, database readiness and filesystem archive changes are in #224–#227. |
+| R09–R40 | Pending | Continue durable runtime, Garmin authentication and the FIT comparison as prerequisites land. |
 
 A local pass, an automated check, a clean review and production acceptance are different
 observations. The evidence follows the precise application revision, data, platform and
