@@ -1,4 +1,7 @@
+pub mod identity;
 pub mod legacy_json;
+pub mod text_offsets;
+pub mod timestamp;
 
 use sha2::{Digest, Sha256};
 
