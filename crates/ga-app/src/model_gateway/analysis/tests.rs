@@ -1,0 +1,172 @@
+use std::{
+    error::Error,
+    future::ready,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+use serde_json::json;
+
+use super::*;
+
+struct Reader {
+    current: AtomicBool,
+    reads: AtomicUsize,
+    revoke_after_read: bool,
+    result: Value,
+    tracker_version: Option<Uuid>,
+}
+
+impl AnalysisReadTools for Reader {
+    async fn context_current(&self) -> bool {
+        self.current.load(Ordering::SeqCst)
+    }
+
+    async fn read(&self, name: &str, arguments: &Map<String, Value>) -> Option<AnalysisToolRead> {
+        assert_eq!(name, "personal_baseline");
+        assert!(arguments.is_empty());
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.revoke_after_read {
+            self.current.store(false, Ordering::SeqCst);
+        }
+        Some(AnalysisToolRead {
+            value: self.result.clone(),
+            tracker_versions: self.tracker_version.into_iter().collect(),
+        })
+    }
+}
+
+fn request<'a>(tools: &'a [OfferedReadTool<'a>], empty: &'a Value) -> AnalysisQuestion<'a> {
+    AnalysisQuestion {
+        now: "2026-11-17T14:00:00+01:00",
+        timezone: "Europe/Bratislava",
+        text: "Synthetic вопрос",
+        locale: "en",
+        conversation: empty,
+        quality_context: empty,
+        personal_goals: empty,
+        replay_notice: None,
+        tools,
+    }
+}
+
+#[tokio::test]
+async fn shares_the_interpretation_budget_and_executes_only_offered_reads()
+-> Result<(), Box<dyn Error>> {
+    let reader = Reader {
+        current: AtomicBool::new(true),
+        reads: AtomicUsize::new(0),
+        revoke_after_read: false,
+        result: json!({"mean":78.5}),
+        tracker_version: Some(Uuid::from_u128(42)),
+    };
+    let empty = json!({});
+    let description = json!({"name":"personal_baseline"});
+    let menu = [OfferedReadTool {
+        name: "personal_baseline",
+        description: &description,
+    }];
+    let mut prompts = Vec::new();
+    let mut sent_requirements = Vec::new();
+    let mut replies = [
+        json!({"calls":[
+            {"name":"delete_entry","arguments_json":"{}"},
+            {"name":"personal_baseline","arguments_json":"[]"},
+            {"name":"personal_baseline","arguments_json":"{}"},
+        ]}),
+        json!({"evidence_ids":[3],"numeric_claims":[{"evidence_id":3,"path":["mean"],"value":78.5}]}),
+    ].into_iter();
+    let now = Instant::now();
+    let mut budget = AnalysisBudget::new(now);
+    budget.record_model_call(
+        AnalysisStage::Interpretation,
+        "extract",
+        "synthetic question",
+        now,
+    )?;
+    let result = answer_with(
+        request(&menu, &empty),
+        &mut budget,
+        &reader,
+        |prompt, versions| {
+            prompts.push(prompt);
+            sent_requirements.push(versions);
+            ready(replies.next().ok_or(AnalysisError::InvalidDocument))
+        },
+    )
+    .await?;
+    let AnalysisResult::Answer {
+        numbers,
+        used_evidence,
+        tracker_versions,
+        ..
+    } = result
+    else {
+        return Err("Expected verified answer".into());
+    };
+    assert_eq!(numbers, ["Evidence 3: personal_baseline /mean: 78.5"]);
+    assert_eq!(used_evidence.len(), 1);
+    assert_eq!(tracker_versions, BTreeSet::from([Uuid::from_u128(42)]));
+    assert_eq!(sent_requirements, [BTreeSet::new(), tracker_versions]);
+    assert!(!prompts[1].contains(&Uuid::from_u128(42).to_string()));
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[0].starts_with(r#"{"now": "2026-11-17T14:00:00+01:00", "timezone": "Europe/Bratislava", "question": "Synthetic вопрос""#));
+    let first: Value = serde_json::from_str(&prompts[0])?;
+    assert_eq!(first["remaining_tool_rounds"], 4);
+    let second: Value = serde_json::from_str(&prompts[1])?;
+    assert_eq!(
+        second["evidence"][0]["result"]["error"],
+        "Invalid tool arguments; inspect schema and retry"
+    );
+    assert_eq!(second["evidence"][2]["result"]["mean"], 78.5);
+    assert_eq!(second["remaining_tool_calls"], 9);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stops_before_a_second_model_call_after_context_revocation_or_oversized_evidence()
+-> Result<(), Box<dyn Error>> {
+    let empty = json!({});
+    let description = json!({"name":"personal_baseline"});
+    let menu = [OfferedReadTool {
+        name: "personal_baseline",
+        description: &description,
+    }];
+    for revoked in [true, false] {
+        let reader = Reader {
+            current: AtomicBool::new(true),
+            reads: AtomicUsize::new(0),
+            revoke_after_read: revoked,
+            tracker_version: None,
+            result: if revoked {
+                json!({"value":42})
+            } else {
+                json!({"value":"x".repeat(100_000)})
+            },
+        };
+        let mut calls = 0;
+        let result = answer_with(
+            request(&menu, &empty),
+            &mut AnalysisBudget::new(Instant::now()),
+            &reader,
+            |_, _| {
+                calls += 1;
+                ready(Ok(
+                    json!({"calls":[{"name":"personal_baseline","arguments_json":"{}"}]}),
+                ))
+            },
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+        if revoked {
+            assert!(matches!(result, Err(AnalysisError::EvidenceChanged)));
+        } else {
+            assert!(matches!(
+                result,
+                Err(AnalysisError::Budget(AnalysisBudgetError::Limit))
+            ));
+        }
+    }
+    Ok(())
+}
