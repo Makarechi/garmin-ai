@@ -1,6 +1,7 @@
 //! Scoped analytic context for neutral conversations.
 
 mod confirmed;
+mod telegram_forget;
 pub use confirmed::ConfirmedAnalysis;
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
@@ -94,11 +95,7 @@ impl Database {
     ) -> Result<Uuid, MemoryError> {
         tokio::time::timeout(DEADLINE, async {
             let mut txn = self.begin_memory().await?;
-            let epoch = sqlx::query_scalar(
-                "UPDATE conversations SET state='{}',memory_epoch=gen_random_uuid(),updated_at=now()
-                 WHERE id=$1 AND owner_id=$2 RETURNING memory_epoch",
-            ).bind(binding.conversation_id).bind(binding.owner_id)
-              .fetch_optional(&mut *txn).await?.ok_or(MemoryError::NotFound)?;
+            let epoch = clear_conversation(&mut txn, binding).await?;
             txn.commit().await?;
             Ok(epoch)
         })
@@ -154,6 +151,21 @@ impl Database {
         }
         Ok(txn)
     }
+}
+
+async fn clear_conversation(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+) -> Result<Uuid, MemoryError> {
+    sqlx::query_scalar(
+        "UPDATE conversations SET state='{}',memory_epoch=gen_random_uuid(),updated_at=now()
+         WHERE id=$1 AND owner_id=$2 RETURNING memory_epoch",
+    )
+    .bind(binding.conversation_id)
+    .bind(binding.owner_id)
+    .fetch_optional(&mut **txn)
+    .await?
+    .ok_or(MemoryError::NotFound)
 }
 
 type ConversationRow = (Uuid, Uuid, bool, Option<String>);
