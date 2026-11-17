@@ -4,6 +4,10 @@ mod sleep_timing;
 pub use sleep_timing::sleep_timing_result_hash;
 
 mod freshness;
+mod temporal;
+
+pub(crate) use temporal::PRE_EVENT_FEATURE_VERSION;
+pub use temporal::{TemporalFeatures, TemporalPurpose};
 
 use std::{error::Error, fmt};
 
@@ -31,6 +35,8 @@ pub enum HealthAnalysisError {
     ReplayPending,
     Database,
     InvalidTimezone,
+    InvalidKnowledgeCutoff,
+    TemporalVersionLimit,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -44,6 +50,10 @@ impl fmt::Display for HealthAnalysisError {
             Self::ReplayPending => "Garmin projections are being rebuilt",
             Self::Database => "Daily metrics could not be read",
             Self::InvalidTimezone => "The analysis timezone is invalid",
+            Self::InvalidKnowledgeCutoff => "As-known cutoff cannot follow the event",
+            Self::TemporalVersionLimit => {
+                "Temporal context exceeds 100000 versions; narrow the activity range"
+            }
         })
     }
 }
