@@ -39,11 +39,17 @@ fn request<'a>(fingerprint: &'a str, body: &str, fetched_at: StoredInstant) -> L
     }
 }
 
-async fn add_pack(connection: &PgPool, id: Uuid, pack: &str) -> Result<(), sqlx::Error> {
+async fn set_collection(
+    connection: &PgPool,
+    id: Uuid,
+    pack: &str,
+    enabled: bool,
+) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO module_configs (id, owner_id, pack_key, tracking_enabled,
                      collection_enabled, reminders_enabled, visible, llm_enabled, settings, revision)
-                 VALUES ($1, $2, $3, false, true, false, false, false, '{}'::jsonb, 1)")
-        .bind(Uuid::new_v4()).bind(id).bind(pack).execute(connection).await?;
+                 VALUES ($1, $2, $3, false, $4, false, false, false, '{}'::jsonb, 1)
+                 ON CONFLICT (owner_id, pack_key) DO UPDATE SET collection_enabled = excluded.collection_enabled")
+        .bind(Uuid::new_v4()).bind(id).bind(pack).bind(enabled).execute(connection).await?;
     Ok(())
 }
 
@@ -70,18 +76,20 @@ async fn real_postgres_capture_preserves_pending_rows_and_checks_consent()
     let owner: Uuid = sqlx::query_scalar("SELECT id FROM people")
         .fetch_one(&inspect)
         .await?;
-    let (rows, packs, binding): (i64, i64, bool) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM source_payloads), (SELECT count(*) FROM module_configs),
+    let (rows, binding): (i64, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM source_payloads),
              EXISTS (SELECT 1 FROM app_state WHERE key = 'account:garmin')",
     )
     .fetch_one(&inspect)
     .await?;
-    assert_eq!((rows, packs, binding), (0, 0, false));
+    assert_eq!((rows, binding), (0, false));
     let good = "a".repeat(64);
     let other = "b".repeat(64);
     sqlx::query("INSERT INTO app_state (key, value) VALUES ('account:garmin', jsonb_build_object('fingerprint', $1::text))")
         .bind(&good).execute(&inspect).await?;
-    add_pack(&inspect, owner, "training").await?;
+    // The readiness probe may have initialized the default pack settings.
+    set_collection(&inspect, owner, "training", true).await?;
+    set_collection(&inspect, owner, "wellbeing", false).await?;
 
     let root = tempfile::tempdir()?;
     let root_path = root.path().canonicalize()?.join("raw");
@@ -105,7 +113,7 @@ async fn real_postgres_capture_preserves_pending_rows_and_checks_consent()
         Err(CaptureError::CollectionDisabled)
     ));
     assert_eq!(std::fs::read_dir(&root_path)?.count(), 0);
-    add_pack(&inspect, owner, "wellbeing").await?;
+    set_collection(&inspect, owner, "wellbeing", true).await?;
 
     let too_small = PutLimits {
         max_bytes: 4,
