@@ -31,6 +31,15 @@ impl StoredInstant {
         at.checked_to_offset(offset)
     }
 
+    /// Interpret a typed timestamp while retaining its legacy JSON display form.
+    pub fn legacy_input_with_json(value: &serde_json::Value) -> Option<(Self, String)> {
+        let parsed = crate::event_time::parse_aware_datetime(value)?;
+        Some((
+            crate::event_time::as_stored_instant(parsed)?,
+            parsed.to_string(),
+        ))
+    }
+
     pub fn from_unix_microseconds(value: i64) -> Result<Self, InvalidStoredInstant> {
         let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000)
             .map_err(|_| InvalidStoredInstant)?;

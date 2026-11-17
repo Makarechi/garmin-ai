@@ -21,7 +21,7 @@ use time::{Date, Month, OffsetDateTime};
 
 use super::{AppState, method_not_allowed, private_cache};
 
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const REPLAY_NOTICE: &str = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже.";
 
 #[derive(Clone, Copy)]
@@ -537,23 +537,23 @@ fn date_input(value: &Value) -> Option<Date> {
     .ok()
 }
 
-fn detail(status: StatusCode, detail: &'static str) -> Response {
+pub(super) fn detail(status: StatusCode, detail: &'static str) -> Response {
     (status, Json(json!({"detail": detail}))).into_response()
 }
 
-fn unauthorized() -> Response {
+pub(super) fn unauthorized() -> Response {
     detail(StatusCode::UNAUTHORIZED, "Authentication required")
 }
 
-fn forbidden() -> Response {
+pub(super) fn forbidden() -> Response {
     detail(StatusCode::FORBIDDEN, "Insufficient scope")
 }
 
-fn invalid_arguments() -> Response {
+pub(super) fn invalid_arguments() -> Response {
     detail(StatusCode::UNPROCESSABLE_ENTITY, "Invalid arguments")
 }
 
-fn storage_unavailable() -> Response {
+pub(super) fn storage_unavailable() -> Response {
     detail(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database unavailable or identity is not ready",

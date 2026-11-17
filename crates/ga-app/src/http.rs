@@ -1,4 +1,5 @@
 mod tools;
+mod tracker_sharing;
 
 use std::{env, io, sync::Arc};
 
@@ -30,6 +31,15 @@ fn router(state: AppState) -> Router {
         .route("/capabilities", any(capabilities))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
+        .route(
+            "/tracker-sharing-consents",
+            any(tracker_sharing::collection),
+        )
+        .route("/tracker-sharing/consents", any(tracker_sharing::create))
+        .route(
+            "/tracker-sharing-consents/{definition}/{kind}/{instance}",
+            any(tracker_sharing::revoke),
+        )
         .fallback(missing)
         .with_state(state)
 }

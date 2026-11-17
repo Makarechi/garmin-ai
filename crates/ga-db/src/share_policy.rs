@@ -1,5 +1,7 @@
+mod consent_records;
 mod consent_writes;
 
+pub use consent_records::TrackerShareConsent;
 pub use consent_writes::TrackerShareGrant;
 
 use std::{error::Error, fmt, future::Future, time::Duration};

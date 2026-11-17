@@ -1,23 +1,23 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::time::Duration;
 
 use ga_domain::{
     access::{Scope, Scopes},
     timestamp::StoredInstant,
 };
-use serde::Deserialize;
-use serde_json::json;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{DestinationKind, ShareCategory, ShareDestination, SharePolicyError, try_shared_lock};
+use super::{
+    DestinationKind, ShareCategory, ShareDestination, SharePolicyError, TrackerShareConsent,
+    consent_records::consent_document, try_shared_lock,
+};
 use crate::{Database, check_readiness, replay::REPLAY_MUTATION_LOCK};
 
 const DELIVERY_POLICY_LOCK: i64 = 72104621;
 const CONTEXT_DELIVERY_LOCK: i64 = 72104643;
 const PRIMARY_CHANNEL: &str = "telegram:primary";
 const PENDING_KEY: &str = "analysis:conversation:pending";
-const POLICY_REVISION: u8 = 1;
 
 pub struct TrackerShareGrant<'a> {
     pub definition_id: Uuid,
@@ -26,28 +26,40 @@ pub struct TrackerShareGrant<'a> {
     pub granted_at: StoredInstant,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SavedConsent {
-    definition_id: String,
-    destination_kind: DestinationKind,
-    destination_instance_id: String,
-    categories: Vec<ShareCategory>,
-    granted_at: String,
-    #[serde(default = "legacy_policy_revision")]
-    policy_revision: u8,
-}
-
-fn legacy_policy_revision() -> u8 {
-    1
-}
-
 impl Database {
     /// Grant or narrow a tracker consent and retire any affected derived context atomically.
     pub async fn grant_tracker_share(
         &self,
         scopes: Scopes,
         grant: TrackerShareGrant<'_>,
+    ) -> Result<(), SharePolicyError> {
+        let granted_at = grant.granted_at.to_string().replace("+00:00", "Z");
+        self.write_tracker_share(scopes, grant, &granted_at).await
+    }
+
+    pub async fn store_tracker_share(
+        &self,
+        scopes: Scopes,
+        consent: &TrackerShareConsent,
+    ) -> Result<(), SharePolicyError> {
+        self.write_tracker_share(
+            scopes,
+            TrackerShareGrant {
+                definition_id: consent.definition_id,
+                destination: consent.destination(),
+                categories: &consent.categories,
+                granted_at: consent.granted_at,
+            },
+            &consent.granted_at_json,
+        )
+        .await
+    }
+
+    async fn write_tracker_share(
+        &self,
+        scopes: Scopes,
+        grant: TrackerShareGrant<'_>,
+        granted_at: &str,
     ) -> Result<(), SharePolicyError> {
         require_permission(scopes)?;
         if grant.categories.is_empty() {
@@ -77,15 +89,8 @@ impl Database {
                     .fetch_optional(&mut *txn)
                     .await?;
             if let Some(previous) = previous {
-                let record: SavedConsent = serde_json::from_str(&previous)
-                    .map_err(|_| SharePolicyError::InvalidConsent)?;
-                if record.definition_id.parse::<Uuid>().ok() != Some(grant.definition_id)
-                    || record.destination_kind != grant.destination.kind()
-                    || record.destination_instance_id != grant.destination.instance()
-                    || record.policy_revision != POLICY_REVISION
-                    || record.granted_at.parse::<StoredInstant>().is_err()
-                    || record.categories.is_empty()
-                {
+                let record = TrackerShareConsent::parse(previous.as_bytes())?;
+                if !record.matches(grant.definition_id, grant.destination) {
                     return Err(SharePolicyError::InvalidConsent);
                 }
                 let retire = |important: &[ShareCategory]| {
@@ -105,20 +110,12 @@ impl Database {
                     forget_context(&mut txn, grant.definition_id, grant.destination).await?;
                 }
             }
-            let categories: BTreeSet<_> = grant
-                .categories
-                .iter()
-                .map(|category| category.label())
-                .collect();
-            let granted_at = grant.granted_at.to_string().replace("+00:00", "Z");
-            let record = json!({
-                "definition_id": grant.definition_id.to_string(),
-                "destination_kind": grant.destination.kind().label(),
-                "destination_instance_id": grant.destination.instance(),
-                "categories": categories,
-                "granted_at": granted_at,
-                "policy_revision": POLICY_REVISION,
-            });
+            let record = consent_document(
+                grant.definition_id,
+                grant.destination,
+                grant.categories,
+                granted_at,
+            );
             sqlx::query(
                 "INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()",
@@ -178,7 +175,7 @@ impl Database {
     }
 }
 
-fn require_permission(scopes: Scopes) -> Result<(), SharePolicyError> {
+pub(super) fn require_permission(scopes: Scopes) -> Result<(), SharePolicyError> {
     if scopes.permits(&[Scope::ManageIntegrations]) {
         Ok(())
     } else {
@@ -186,7 +183,7 @@ fn require_permission(scopes: Scopes) -> Result<(), SharePolicyError> {
     }
 }
 
-fn consent_key(definition_id: Uuid, destination: ShareDestination<'_>) -> String {
+pub(super) fn consent_key(definition_id: Uuid, destination: ShareDestination<'_>) -> String {
     format!(
         "tracker-consent:{definition_id}:{}:{}",
         destination.kind().label(),
