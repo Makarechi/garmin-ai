@@ -6,8 +6,11 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{REPLAY_MUTATION_LOCK, ReplaySelectionError, source_page};
-use crate::{Database, check_readiness, garmin_owner::verify_owner_in_transaction};
+use super::{GARMIN_PARSER_VERSION, REPLAY_MUTATION_LOCK, ReplaySelectionError, source_page};
+use crate::{
+    Database, check_readiness,
+    garmin_owner::{stored_garmin_fingerprint, verify_owner_in_transaction},
+};
 
 const MAX_QUEUE: i64 = 100;
 const MAX_SCHEDULE: i64 = 25;
@@ -24,6 +27,13 @@ pub struct ReplaySchedule {
     pub queued: usize,
     pub repaired: usize,
     pub scan_incomplete: bool,
+    postponed: bool,
+}
+
+impl ReplaySchedule {
+    pub fn plan_again_soon(self) -> bool {
+        self.scan_incomplete || self.postponed
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -59,53 +69,100 @@ impl Database {
         if target < 1 {
             return Err(ReplaySelectionError::InvalidVersion);
         }
-        let mut txn = self.work.begin().await?;
-        sqlx::query("SET LOCAL statement_timeout = '750ms'")
-            .execute(&mut *txn)
-            .await?;
-        check_readiness(&mut txn)
-            .await
-            .map_err(ReplaySelectionError::Unavailable)?;
+        let mut txn = begin_planning(self).await?;
         verify_owner_in_transaction(&mut txn, request.authenticated_fingerprint)
             .await
             .map_err(ReplaySelectionError::Owner)?;
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(REPLAY_MUTATION_LOCK)
-            .fetch_one(&mut *txn)
-            .await?;
-        if !acquired {
-            return Ok(ReplaySchedule::default());
-        }
-
-        let queued: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE kind = 'raw_replay' AND status IN ('pending','running')
-               AND (payload->>'target_version')::int = $1",
-        )
-        .bind(target)
-        .fetch_one(&mut *txn)
-        .await?;
-        let capacity = usize::try_from((MAX_QUEUE - queued).clamp(0, MAX_SCHEDULE))
-            .map_err(|_| ReplaySelectionError::Database)?;
-        if capacity == 0 {
-            return Ok(ReplaySchedule::default());
-        }
-
-        let (repaired, mut scan_incomplete) =
-            repair::repair_jobs(&mut txn, &request, capacity).await?;
-        let mut queued = 0;
-        if capacity > repaired {
-            let (sources, source_incomplete) =
-                schedule_sources(&mut txn, &request, capacity - repaired).await?;
-            queued = sources;
-            scan_incomplete |= source_incomplete;
-        }
+        let result = schedule_in(&mut txn, request).await?;
         txn.commit().await?;
-        Ok(ReplaySchedule {
-            queued,
-            repaired,
-            scan_incomplete,
-        })
+        Ok(result)
     }
+
+    /// Schedule archive maintenance from the already enrolled identity without Garmin access.
+    pub async fn schedule_bound_replay(
+        &self,
+        now: StoredInstant,
+    ) -> Result<ReplaySchedule, ReplaySelectionError> {
+        let mut txn = begin_planning(self).await?;
+        let Some(fingerprint) = stored_garmin_fingerprint(&mut txn)
+            .await
+            .map_err(ReplaySelectionError::Owner)?
+        else {
+            return Ok(ReplaySchedule::default());
+        };
+        let result = schedule_in(
+            &mut txn,
+            ScheduleReplay {
+                authenticated_fingerprint: &fingerprint,
+                target_parser_version: GARMIN_PARSER_VERSION,
+                now,
+            },
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(result)
+    }
+}
+
+async fn begin_planning(
+    db: &Database,
+) -> Result<Transaction<'static, Postgres>, ReplaySelectionError> {
+    let mut txn = db.work.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout = '750ms'")
+        .execute(&mut *txn)
+        .await?;
+    check_readiness(&mut txn)
+        .await
+        .map_err(ReplaySelectionError::Unavailable)?;
+    Ok(txn)
+}
+
+async fn schedule_in(
+    txn: &mut Transaction<'_, Postgres>,
+    request: ScheduleReplay<'_>,
+) -> Result<ReplaySchedule, ReplaySelectionError> {
+    let target = request.target_parser_version;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(REPLAY_MUTATION_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !acquired {
+        return Ok(ReplaySchedule {
+            postponed: true,
+            ..ReplaySchedule::default()
+        });
+    }
+
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind = 'raw_replay' AND status IN ('pending','running')
+           AND payload->>'target_version' = $1::int::text",
+    )
+    .bind(target)
+    .fetch_one(&mut **txn)
+    .await?;
+    let capacity = usize::try_from((MAX_QUEUE - queued).clamp(0, MAX_SCHEDULE))
+        .map_err(|_| ReplaySelectionError::Database)?;
+    if capacity == 0 {
+        return Ok(ReplaySchedule {
+            postponed: true,
+            ..ReplaySchedule::default()
+        });
+    }
+
+    let (repaired, mut scan_incomplete) = repair::repair_jobs(txn, &request, capacity).await?;
+    let mut queued = 0;
+    if capacity > repaired {
+        let (sources, source_incomplete) =
+            schedule_sources(txn, &request, capacity - repaired).await?;
+        queued = sources;
+        scan_incomplete |= source_incomplete;
+    }
+    Ok(ReplaySchedule {
+        queued,
+        repaired,
+        scan_incomplete,
+        postponed: queued + repaired >= capacity,
+    })
 }
 
 async fn schedule_sources(
