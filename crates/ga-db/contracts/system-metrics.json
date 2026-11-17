@@ -1,0 +1,333 @@
+{
+  "body_battery": {
+    "contract": {
+      "aggregation": "mean",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "time_weighted",
+        "max_gap_seconds": 900,
+        "minimum_ratio": 0.8
+      },
+      "dimension": "ordinal",
+      "key": "system.body_battery",
+      "labels": {
+        "en": "body battery"
+      },
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "score",
+      "value_kind": "physical_number"
+    },
+    "hash": "fd8d8efaa15eccc78f44e2e2442ee5abda4f7d0b7dcfe683789589bd221e7e6e"
+  },
+  "heart_rate_bpm": {
+    "contract": {
+      "aggregation": "mean",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "time_weighted",
+        "max_gap_seconds": 300,
+        "minimum_ratio": 0.8
+      },
+      "dimension": "frequency",
+      "key": "system.heart_rate_bpm",
+      "labels": {
+        "en": "heart rate bpm"
+      },
+      "maximum": 300.0,
+      "minimum": 1.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "bpm",
+      "value_kind": "physical_number"
+    },
+    "hash": "975ef95d280e19fd5a800f77e5e50117f9e742f3994bcd31829bf2e94ec95964"
+  },
+  "hrv_rmssd_ms": {
+    "contract": {
+      "aggregation": "mean",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "time_weighted",
+        "max_gap_seconds": 300,
+        "minimum_ratio": 0.8
+      },
+      "dimension": "duration",
+      "key": "system.hrv_rmssd_ms",
+      "labels": {
+        "en": "hrv rmssd ms"
+      },
+      "maximum": 1000000000.0,
+      "minimum": 0.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "ms",
+      "value_kind": "physical_number"
+    },
+    "hash": "84c43791b49d0489216f100dbdac3d83dfaf411198c0a756838b813dc5a13cb4"
+  },
+  "hydration_ml": {
+    "contract": {
+      "aggregation": "latest",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "all_values",
+        "max_gap_seconds": null,
+        "minimum_ratio": null
+      },
+      "dimension": "volume",
+      "key": "system.hydration_ml",
+      "labels": {
+        "en": "hydration ml"
+      },
+      "maximum": 1000000000.0,
+      "minimum": 0.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "point",
+      "unit": "ml",
+      "value_kind": "physical_number"
+    },
+    "hash": "dbddf9529a3c6fee859bf663a00f759f8e515d0468ae9d2301c0dd759fc6da1c"
+  },
+  "recovery_time_minutes": {
+    "contract": {
+      "aggregation": "latest",
+      "allowed_methods": [
+        "latest",
+        "max",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "sparse",
+        "max_gap_seconds": null,
+        "minimum_ratio": null
+      },
+      "dimension": "duration",
+      "key": "system.recovery_time_minutes",
+      "labels": {
+        "en": "recovery time"
+      },
+      "maximum": 1000000.0,
+      "minimum": 0.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "point",
+      "unit": "minutes",
+      "value_kind": "physical_number"
+    },
+    "hash": "3cdb019ce2948bc0494475a55593305fccdea2fae58500f4dd46d9b66e9f54a2"
+  },
+  "respiration_rpm": {
+    "contract": {
+      "aggregation": "mean",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "time_weighted",
+        "max_gap_seconds": 300,
+        "minimum_ratio": 0.8
+      },
+      "dimension": "frequency",
+      "key": "system.respiration_rpm",
+      "labels": {
+        "en": "respiration rpm"
+      },
+      "maximum": 100.0,
+      "minimum": 1.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "rpm",
+      "value_kind": "physical_number"
+    },
+    "hash": "89c41a8402ea3f50a394251509db4920f13d9e040754dcb5e04bd327bf13b7e0"
+  },
+  "sleep_score": {
+    "contract": {
+      "aggregation": "latest",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "median"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "sparse",
+        "max_gap_seconds": null,
+        "minimum_ratio": null
+      },
+      "dimension": "ordinal",
+      "key": "system.sleep_score",
+      "labels": {
+        "en": "sleep score"
+      },
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "scale_id": "system.garmin_score_0_100",
+      "scale_version": 1,
+      "time_semantics": "interval",
+      "unit": "score",
+      "value_kind": "ordinal"
+    },
+    "hash": "a98b1f6fdde82ae5e9bdf7708c99d652a6162d84aeb1412ab2b38182c9a56c0a"
+  },
+  "spo2_pct": {
+    "contract": {
+      "aggregation": "mean",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "time_weighted",
+        "max_gap_seconds": 3600,
+        "minimum_ratio": 0.8
+      },
+      "dimension": "ratio",
+      "key": "system.spo2_pct",
+      "labels": {
+        "en": "spo2 pct"
+      },
+      "maximum": 100.0,
+      "minimum": 1.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "%",
+      "value_kind": "physical_number"
+    },
+    "hash": "8376d232e017061e36b72781b646c208732ecb64ea50cf41fc6dfb9557992e7b"
+  },
+  "steps_bucket": {
+    "contract": {
+      "aggregation": "sum",
+      "allowed_methods": [
+        "sum"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "all_values",
+        "max_gap_seconds": null,
+        "minimum_ratio": null
+      },
+      "dimension": "count",
+      "key": "system.steps_bucket",
+      "labels": {
+        "en": "steps bucket"
+      },
+      "maximum": 1000000000.0,
+      "minimum": 0.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "steps",
+      "value_kind": "increment"
+    },
+    "hash": "8448668368d3ec96ef8ca73a10dcedb9954781c293939a25c7ac1f37c397b0dc"
+  },
+  "stress_score": {
+    "contract": {
+      "aggregation": "mean",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "max",
+        "mean",
+        "min"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "time_weighted",
+        "max_gap_seconds": 300,
+        "minimum_ratio": 0.8
+      },
+      "dimension": "ordinal",
+      "key": "system.stress_score",
+      "labels": {
+        "en": "stress score"
+      },
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "scale_id": null,
+      "scale_version": null,
+      "time_semantics": "interval",
+      "unit": "score",
+      "value_kind": "physical_number"
+    },
+    "hash": "0e34914cfac92afcc6aafc8bb60104708b77dcb78f9925f259b1cb0809915e71"
+  },
+  "training_readiness_score": {
+    "contract": {
+      "aggregation": "latest",
+      "allowed_methods": [
+        "distribution",
+        "latest",
+        "median"
+      ],
+      "category_domain": null,
+      "coverage": {
+        "kind": "sparse",
+        "max_gap_seconds": null,
+        "minimum_ratio": null
+      },
+      "dimension": "ordinal",
+      "key": "system.training_readiness_score",
+      "labels": {
+        "en": "training readiness score"
+      },
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "scale_id": "system.garmin_score_0_100",
+      "scale_version": 1,
+      "time_semantics": "point",
+      "unit": "score",
+      "value_kind": "ordinal"
+    },
+    "hash": "8ab641e67b19c3620608c374182374f92f214ca0ea533e811855d9a589b2483b"
+  }
+}

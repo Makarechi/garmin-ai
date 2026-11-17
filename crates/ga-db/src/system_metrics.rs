@@ -1,0 +1,171 @@
+use std::{collections::BTreeMap, error::Error, fmt, sync::LazyLock};
+
+use ga_domain::event_contract::metric_definition_hash;
+use serde::Deserialize;
+use serde_json::Value;
+use sqlx::{Postgres, Transaction};
+use uuid::Uuid;
+
+use crate::{Database, ReadinessError, check_readiness};
+
+const METRIC_REGISTRY_LOCK: i64 = 72104629;
+
+#[derive(Debug)]
+pub enum MetricRegistryError {
+    Unavailable(ReadinessError),
+    InvalidCatalog,
+    InvalidRecordedVersion,
+    Database,
+}
+
+impl fmt::Display for MetricRegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable(_) => "Metric storage is unavailable",
+            Self::InvalidCatalog => "The built-in metric registry is invalid",
+            Self::InvalidRecordedVersion => "The stored metric definition is invalid",
+            Self::Database => "The metric registry could not be saved",
+        })
+    }
+}
+
+impl Error for MetricRegistryError {}
+
+impl From<sqlx::Error> for MetricRegistryError {
+    fn from(_: sqlx::Error) -> Self {
+        Self::Database
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemMetricVersion {
+    pub id: Uuid,
+    pub version: i32,
+}
+
+#[derive(Deserialize)]
+struct CatalogEntry {
+    hash: String,
+    contract: Value,
+}
+
+type Catalog = BTreeMap<String, CatalogEntry>;
+
+static METRICS: LazyLock<Option<Catalog>> = LazyLock::new(|| {
+    let catalog: Catalog =
+        serde_json::from_str(include_str!("../contracts/system-metrics.json")).ok()?;
+    for (key, entry) in &catalog {
+        if entry.contract["key"] != format!("system.{key}")
+            || metric_definition_hash(&entry.contract).ok()? != entry.hash
+        {
+            return None;
+        }
+    }
+    Some(catalog)
+});
+
+impl Database {
+    /// Ensure the immutable built-in contracts without altering prior observations.
+    pub async fn ensure_system_metrics(
+        &self,
+    ) -> Result<BTreeMap<&'static str, SystemMetricVersion>, MetricRegistryError> {
+        let mut txn = self.work.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(MetricRegistryError::Unavailable)?;
+        let versions = ensure_system_metrics_in(&mut txn).await?;
+        txn.commit().await?;
+        Ok(versions)
+    }
+}
+
+pub(crate) async fn ensure_system_metrics_in(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<BTreeMap<&'static str, SystemMetricVersion>, MetricRegistryError> {
+    let catalog = METRICS
+        .as_ref()
+        .ok_or(MetricRegistryError::InvalidCatalog)?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(METRIC_REGISTRY_LOCK)
+        .execute(&mut **txn)
+        .await?;
+    let mut versions = BTreeMap::new();
+    for (key, entry) in catalog {
+        versions.insert(key.as_str(), ensure_metric(txn, key, entry).await?);
+    }
+    Ok(versions)
+}
+
+async fn ensure_metric(
+    txn: &mut Transaction<'_, Postgres>,
+    key: &str,
+    entry: &CatalogEntry,
+) -> Result<SystemMetricVersion, MetricRegistryError> {
+    let key = format!("system.{key}");
+    let existing = sqlx::query_as::<_, (Uuid, String, i32, Option<Uuid>, Option<String>)>(
+        "SELECT metric.id, metric.namespace, metric.current_version, current.id, current.schema_hash
+         FROM metric_definitions AS metric
+         LEFT JOIN metric_definition_versions AS current
+           ON current.definition_id = metric.id AND current.version = metric.current_version
+         WHERE metric.key = $1 FOR UPDATE OF metric",
+    )
+    .bind(&key)
+    .fetch_optional(&mut **txn)
+    .await?;
+    let (definition, version) = match existing {
+        Some((_, namespace, version, Some(id), Some(hash)))
+            if namespace == "system" && hash == entry.hash =>
+        {
+            return Ok(SystemMetricVersion { id, version });
+        }
+        Some((definition, namespace, version, Some(_), Some(_))) if namespace == "system" => {
+            let version = version
+                .checked_add(1)
+                .ok_or(MetricRegistryError::InvalidRecordedVersion)?;
+            sqlx::query("UPDATE metric_definitions SET current_version = $2 WHERE id = $1")
+                .bind(definition)
+                .bind(version)
+                .execute(&mut **txn)
+                .await?;
+            (definition, version)
+        }
+        Some(_) => return Err(MetricRegistryError::InvalidRecordedVersion),
+        None => {
+            let definition = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO metric_definitions(id, namespace, key, status, current_version)
+                 VALUES ($1, 'system', $2, 'active', 1)",
+            )
+            .bind(definition)
+            .bind(key)
+            .execute(&mut **txn)
+            .await?;
+            (definition, 1)
+        }
+    };
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "WITH raw AS (SELECT $5::jsonb AS contract)
+         INSERT INTO metric_definition_versions (
+             id, definition_id, version, schema_hash, value_kind, unit, dimension, scale_id,
+             scale_version, aggregation, coverage_policy, time_semantics, minimum, maximum,
+             labels, allowed_methods, category_domain)
+         SELECT $1, $2, $3, $4, contract->>'value_kind', contract->>'unit', contract->>'dimension',
+             contract->>'scale_id', (contract->>'scale_version')::int, contract->>'aggregation',
+             contract->'coverage', contract->>'time_semantics', (contract->>'minimum')::float8,
+             (contract->>'maximum')::float8, contract->'labels', contract->'allowed_methods',
+             contract->'category_domain'
+         FROM raw",
+    )
+    .bind(id)
+    .bind(definition)
+    .bind(version)
+    .bind(&entry.hash)
+    .bind(entry.contract.to_string())
+    .execute(&mut **txn)
+    .await?;
+    Ok(SystemMetricVersion { id, version })
+}
