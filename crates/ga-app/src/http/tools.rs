@@ -5,8 +5,11 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use ga_db::health_analysis::{HealthAnalysisError, HealthPeriod};
-use ga_domain::access::{ReadToolInput, Scopes};
+use ga_db::health_analysis::{ActivityReadError, HealthAnalysisError, HealthPeriod};
+use ga_domain::{
+    access::{ReadToolInput, Scopes},
+    timestamp::StoredInstant,
+};
 use serde_json::{Map, Value, json};
 use speedate::{DateTime, DateTimeConfig, MicrosecondsPrecisionOverflowBehavior, TimeConfig};
 use time::{Date, Month};
@@ -20,20 +23,30 @@ const REPLAY_NOTICE: &str = "Данные Garmin пересчитываются 
 enum HealthTool {
     Snapshot,
     Range,
+    Activities,
+    ActivityDetails,
 }
 
 impl HealthTool {
-    const IMPLEMENTED: [Self; 2] = [Self::Snapshot, Self::Range];
+    const IMPLEMENTED: [Self; 4] = [
+        Self::Snapshot,
+        Self::Range,
+        Self::Activities,
+        Self::ActivityDetails,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::Snapshot => "health_snapshot",
             Self::Range => "health_range",
+            Self::Activities => "activities",
+            Self::ActivityDetails => "activity_details",
         }
     }
 
     fn catalog_entry(self) -> Value {
         let date = |title| json!({"format": "date", "title": title, "type": "string"});
+        let datetime = |title| json!({"format": "date-time", "title": title, "type": "string"});
         let (description, title, properties, required) = match self {
             Self::Snapshot => (
                 "Daily Garmin values and explicit missing metrics for one local date.",
@@ -46,6 +59,27 @@ impl HealthTool {
                 "health_rangeArgs",
                 json!({"start": date("Start"), "end": date("End")}),
                 &["start", "end"][..],
+            ),
+            Self::Activities => (
+                "List stored activity summaries in a half-open timestamp range.",
+                "activitiesArgs",
+                json!({
+                    "start": datetime("Start"),
+                    "end": datetime("End"),
+                    "kind": {"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Kind"}
+                }),
+                &["start", "end"][..],
+            ),
+            Self::ActivityDetails => (
+                "Details, laps and HR zones for one activity. Raw samples are excluded by default. Use next_offset to continue and a smaller limit for bulky samples.",
+                "activity_detailsArgs",
+                json!({
+                    "activity_id":{"title":"Activity Id","type":"string"},
+                    "include_samples":{"default":false,"title":"Include Samples","type":"boolean"},
+                    "offset":{"default":0,"title":"Offset","type":"integer"},
+                    "limit":{"default":100,"title":"Limit","type":"integer"},
+                }),
+                &["activity_id"][..],
             ),
         };
         json!({
@@ -151,11 +185,118 @@ async fn execute_health_tool(
                 Err(error) => Err(error),
             }
         }
+        HealthTool::Activities => {
+            if arguments
+                .keys()
+                .any(|key| !matches!(key.as_str(), "start" | "end" | "kind"))
+            {
+                return invalid_arguments();
+            }
+            let kind = match arguments.get("kind") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(kind)) => Some(kind.as_str()),
+                _ => return invalid_arguments(),
+            };
+            let (Some(start), Some(end)) = (
+                arguments
+                    .get("start")
+                    .and_then(StoredInstant::from_legacy_input),
+                arguments
+                    .get("end")
+                    .and_then(StoredInstant::from_legacy_input),
+            ) else {
+                return invalid_arguments();
+            };
+            return activity_response(reader.activity_summaries(start, end, kind, 200).await);
+        }
+        HealthTool::ActivityDetails => {
+            if arguments.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "activity_id" | "include_samples" | "offset" | "limit"
+                )
+            }) {
+                return invalid_arguments();
+            }
+            let (Some(id), Some(samples), Some(offset), Some(limit)) = (
+                arguments.get("activity_id").and_then(Value::as_str),
+                arguments
+                    .get("include_samples")
+                    .map_or(Some(false), bool_input),
+                arguments.get("offset").map_or(Some(0), integer_input),
+                arguments.get("limit").map_or(Some(100), integer_input),
+            ) else {
+                return invalid_arguments();
+            };
+            let Ok(limit) = u16::try_from(limit) else {
+                return invalid_arguments();
+            };
+            return activity_response(reader.activity_details(id, samples, offset, limit).await);
+        }
         _ => return invalid_arguments(),
     };
     match outcome {
         Ok(document) => Json(document).into_response(),
         Err(error) => health_failure(error),
+    }
+}
+
+fn bool_input(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(_) => match value.as_f64()? {
+            0.0 => Some(false),
+            1.0 => Some(true),
+            _ => None,
+        },
+        Value::String(value) => match value.to_ascii_lowercase().as_str() {
+            "0" | "off" | "f" | "false" | "n" | "no" => Some(false),
+            "1" | "on" | "t" | "true" | "y" | "yes" => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn integer_input(value: &Value) -> Option<u32> {
+    match value {
+        Value::Bool(value) => Some(u32::from(*value)),
+        Value::Number(_) => {
+            let value = value.as_f64()?;
+            (value.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&value))
+                .then_some(value as u32)
+        }
+        Value::String(value) => {
+            let value = value.trim();
+            let integer = match value.split_once('.') {
+                Some((integer, fraction))
+                    if !fraction.is_empty() && fraction.bytes().all(|b| b == b'0') =>
+                {
+                    integer
+                }
+                Some(_) => return None,
+                None => value,
+            };
+            let content = integer.strip_prefix(['+', '-']).unwrap_or(integer);
+            if !content.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                || !content.as_bytes().last().is_some_and(u8::is_ascii_digit)
+                || content.contains("__")
+            {
+                return None;
+            }
+            let number = content.replace('_', "").parse::<u32>().ok()?;
+            (!integer.starts_with('-') || number == 0).then_some(number)
+        }
+        _ => None,
+    }
+}
+
+fn activity_response(outcome: Result<Value, ActivityReadError>) -> Response {
+    match outcome {
+        Ok(document) => Json(document).into_response(),
+        Err(ActivityReadError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
+        Err(ActivityReadError::Analysis(error)) => health_failure(error),
+        Err(_) => invalid_arguments(),
     }
 }
 

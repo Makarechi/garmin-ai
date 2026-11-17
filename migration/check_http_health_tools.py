@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 from capture_reference import isolated_engine
+from check_activity_reads import seed as seed_activities
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -25,9 +26,11 @@ SCOPED = [
     {"key": TOKENS["health"], "scopes": ["read:health"]},
     {"key": TOKENS["diary"], "scopes": ["read:diary"]},
 ]
-TOOLS = {"health_snapshot", "health_range"}
+TOOLS = {"health_snapshot", "health_range", "activities", "activity_details"}
 SNAPSHOT = "/tools/health_snapshot"
 RANGE = "/tools/health_range"
+ACTIVITIES = "/tools/activities"
+DETAILS = "/tools/activity_details"
 
 
 def seed(engine):
@@ -89,6 +92,60 @@ def initial_cases():
     yield ("POST", RANGE, "health", {"arguments": {"start": "0001-01-01", "end": "0001-01-02"}})
 
 
+def activity_cases():
+    first = "2026-10-25T11:00:00+02:00"
+    last = "2026-10-25T12:00:00.000000001Z"
+    period = {"start": first, "end": last}
+    summary = {"activity_id": "run"}
+    for token in ("diary", "invalid", None):
+        yield ("POST", ACTIVITIES, token, {"arguments": period})
+        yield ("POST", DETAILS, token, {"arguments": summary})
+    for arguments in [
+        period,
+        {**period, "kind": None},
+        {**period, "kind": "running"},
+        {**period, "kind": ""},
+        {**period, "kind": "absent"},
+        {**period, "kind": False},
+        {**period, "limit": 5},
+        {**period, "start": "2026-10-25T09:00:00"},
+        {**period, "start": "2026-10-25"},
+        {**period, "start": "0001-01-01T00:00:00Z"},
+        {"start": last, "end": first},
+        {
+            "start": datetime(2026, 10, 25, 9, tzinfo=UTC).timestamp(),
+            "end": str(int(datetime(2026, 10, 25, 12, tzinfo=UTC).timestamp() * 1000)),
+        },
+        {},
+    ]:
+        yield ("POST", ACTIVITIES, "health", {"arguments": arguments})
+    for arguments in [
+        summary,
+        {**summary, "include_samples": True, "limit": 4},
+        {**summary, "include_samples": "YeS", "offset": "1_0", "limit": "+1.000"},
+        {**summary, "include_samples": "0", "offset": -0.0, "limit": 2.0},
+        {**summary, "include_samples": 1, "offset": True, "limit": "  1  "},
+        {**summary, "include_samples": 2},
+        {**summary, "include_samples": " yes "},
+        {**summary, "offset": -1},
+        {**summary, "offset": "1e0"},
+        {**summary, "offset": 1_000_000},
+        {**summary, "offset": 1_000_001},
+        {**summary, "limit": 0},
+        {**summary, "limit": 2001},
+        {**summary, "limit": False},
+        {**summary, "limit": "99.99"},
+        {**summary, "limit": None},
+        {**summary, "unknown": True},
+        {"activity_id": "missing"},
+        {"activity_id": "trainer"},
+        {"activity_id": "bulky", "include_samples": True, "limit": 1},
+        {"activity_id": 1},
+        {},
+    ]:
+        yield ("POST", DETAILS, "health", {"arguments": arguments})
+
+
 def compare(python, native, cases):
     count = 0
     for method, route, credential, body in cases:
@@ -122,6 +179,7 @@ def run(binary):
     engine = isolated_engine()
     try:
         seed(engine)
+        seed_activities(engine)
         settings = Settings(api_tokens=SCOPED, api_key="")
         with TestClient(create_app(settings, engine=engine)) as python:
             with subprocess.Popen(
@@ -138,6 +196,7 @@ def run(binary):
                     assert line.startswith("Listening on http://127.0.0.1:"), line
                     with httpx.Client(base_url=line.split(" on ", 1)[1], trust_env=False) as native:
                         count = compare(python, native, initial_cases())
+                        count += compare(python, native, activity_cases())
                         with Session(engine) as session, session.begin():
                             session.add(
                                 SourcePayload(
@@ -159,6 +218,9 @@ def run(binary):
                                 ("POST", SNAPSHOT, "health", {"arguments": {"day": "2026-10-24"}}),
                                 ("POST", SNAPSHOT, "health", {}),
                                 ("POST", SNAPSHOT, "diary", {"arguments": {"day": "2026-10-24"}}),
+                                ("POST", ACTIVITIES, "health", {}),
+                                ("POST", DETAILS, "health", {"arguments": {"activity_id": "run"}}),
+                                ("POST", DETAILS, "diary", {"arguments": {"activity_id": "run"}}),
                             ],
                         )
                         print(f"Matched {count} native health tool HTTP responses")
