@@ -1,3 +1,4 @@
+pub mod legacy;
 mod query;
 
 #[cfg(test)]
@@ -13,7 +14,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{
-    Client, RequestBuilder, Response, StatusCode, Url,
+    Client, ClientBuilder, RequestBuilder, Response, StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, HeaderValue, RETRY_AFTER},
 };
 use serde::Deserialize;
@@ -54,6 +55,12 @@ pub enum GarminError {
     InvalidRequest,
     UnsupportedCapability(LegacyCapability),
     InvalidTokenResponse,
+    AuthenticationRequired,
+    InvalidMfaCode,
+    MfaExpired,
+    ProfileUnavailable,
+    OwnerMismatch,
+    TokenStorage,
     Unauthorized,
     Forbidden,
     RateLimited { retry_after: Duration },
@@ -76,6 +83,12 @@ impl fmt::Display for GarminError {
             Self::InvalidRequest => "Garmin request parameters are invalid",
             Self::UnsupportedCapability(_) => "Personal API does not support this capability",
             Self::InvalidTokenResponse => "Garmin token response is invalid",
+            Self::AuthenticationRequired => "Garmin authentication is required",
+            Self::InvalidMfaCode => "Garmin verification code was rejected",
+            Self::MfaExpired => "Garmin verification session expired",
+            Self::ProfileUnavailable => "Authenticated stable Garmin profile is unavailable",
+            Self::OwnerMismatch => "Garmin profile differs from the expected owner",
+            Self::TokenStorage => "Garmin token storage is unavailable",
             Self::Unauthorized => "Garmin rejected authorization",
             Self::Forbidden => "Garmin refused this resource",
             Self::RateLimited { .. } => "Garmin is rate limiting requests",
@@ -132,39 +145,12 @@ impl PersonalClient {
 
     fn with_base(api_key: &str, base: Url, config: TransportConfig) -> Result<Self, GarminError> {
         let api_key = api_key.trim();
-        if api_key.is_empty()
-            || config.connect_timeout.is_zero()
-            || config.read_timeout.is_zero()
-            || config.total_timeout.is_zero()
-        {
+        if api_key.is_empty() {
             return Err(GarminError::InvalidConfiguration);
         }
-
-        let mut authority = HeaderValue::from_str(&format!("ApiKey {api_key}"))
-            .map_err(|_| GarminError::InvalidConfiguration)?;
-        authority.set_sensitive(true);
-
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        if roots.is_empty() {
-            return Err(GarminError::InvalidConfiguration);
-        }
-        let tls = rustls::ClientConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .map_err(|_| GarminError::InvalidConfiguration)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let http = Client::builder()
-            .tls_backend_preconfigured(tls)
-            .https_only(base.scheme() == "https")
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .no_proxy()
-            .connect_timeout(config.connect_timeout)
-            .read_timeout(config.read_timeout)
-            .timeout(config.total_timeout)
+        let authority =
+            sensitive_header("ApiKey", api_key).map_err(|_| GarminError::InvalidConfiguration)?;
+        let http = build_http(config, base.scheme() == "https")?
             .build()
             .map_err(|_| GarminError::InvalidConfiguration)?;
         Ok(Self {
@@ -303,25 +289,61 @@ impl PersonalClient {
         session.next_request = Instant::now()
             .checked_add(self.inner.pacing)
             .ok_or(GarminError::InvalidConfiguration)?;
-        let response = request.send().await.map_err(|error| {
-            if error.is_timeout() {
-                GarminError::Timeout
-            } else {
-                GarminError::Network
-            }
-        })?;
+        let response = send(request).await?;
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(parse_retry_after)
-                .unwrap_or(Duration::from_secs(900));
+            let retry_after = retry_delay(&response);
             session.throttle = Some((Instant::now(), retry_after));
             return Err(GarminError::RateLimited { retry_after });
         }
         Ok(response)
     }
+}
+
+fn build_http(config: TransportConfig, https_only: bool) -> Result<ClientBuilder, GarminError> {
+    if config.connect_timeout.is_zero()
+        || config.read_timeout.is_zero()
+        || config.total_timeout.is_zero()
+    {
+        return Err(GarminError::InvalidConfiguration);
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if roots.is_empty() {
+        return Err(GarminError::InvalidConfiguration);
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(|_| GarminError::InvalidConfiguration)?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(Client::builder()
+        .tls_backend_preconfigured(tls)
+        .https_only(https_only)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.read_timeout)
+        .timeout(config.total_timeout))
+}
+
+fn sensitive_header(scheme: &str, value: &str) -> Result<HeaderValue, GarminError> {
+    let mut header = HeaderValue::from_str(&format!("{scheme} {value}"))
+        .map_err(|_| GarminError::InvalidTokenResponse)?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
+async fn send(request: RequestBuilder) -> Result<Response, GarminError> {
+    request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            GarminError::Timeout
+        } else {
+            GarminError::Network
+        }
+    })
 }
 
 fn token_from_response(body: &[u8]) -> Result<Token, GarminError> {
@@ -356,13 +378,20 @@ fn token_from_response(body: &[u8]) -> Result<Token, GarminError> {
         .ok_or(GarminError::InvalidTokenResponse)?
         .min(86_400);
     let margin = (ttl / 10).min(30);
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {value}"))
-        .map_err(|_| GarminError::InvalidTokenResponse)?;
-    authorization.set_sensitive(true);
+    let authorization = sensitive_header("Bearer", value)?;
     Ok(Token {
         authorization,
         renew_at: Instant::now() + Duration::from_secs(ttl - margin),
     })
+}
+
+fn retry_delay(response: &Response) -> Duration {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after)
+        .unwrap_or(Duration::from_secs(900))
 }
 
 fn parse_retry_after(value: &str) -> Option<Duration> {
@@ -381,6 +410,9 @@ fn successful(response: Response) -> Result<Response, GarminError> {
     match response.status() {
         StatusCode::UNAUTHORIZED => Err(GarminError::Unauthorized),
         StatusCode::FORBIDDEN => Err(GarminError::Forbidden),
+        StatusCode::TOO_MANY_REQUESTS => Err(GarminError::RateLimited {
+            retry_after: retry_delay(&response),
+        }),
         status if status.is_redirection() => Err(GarminError::Redirect),
         status if status.is_server_error() => Err(GarminError::Upstream(status.as_u16())),
         StatusCode::PARTIAL_CONTENT => Err(GarminError::InterruptedTransfer),
