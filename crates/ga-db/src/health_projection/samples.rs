@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use futures_util::TryStreamExt;
-use ga_domain::garmin_health::{Measurement, normalize_health_payload};
+use ga_domain::garmin_health::{
+    HealthReplacement, Measurement, normalize_health_payload, replacement_channels,
+};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -20,6 +22,7 @@ pub(super) async fn publish_measurements(
     request: &ApplyActivity<'_>,
     samples: &[Measurement],
     versions: &BTreeMap<&str, SystemMetricVersion>,
+    attestation: Option<&HealthReplacement>,
 ) -> Result<bool, DocumentError> {
     let mut changed = false;
     for chunk in samples.chunks(BATCH_ROWS) {
@@ -81,6 +84,8 @@ pub(super) async fn publish_measurements(
                 LEFT JOIN measurements AS previous ON previous.ts = candidate.ts
                     AND previous.metric = candidate.metric AND previous.source = $3
                 WHERE (previous.ingested_at IS NULL OR previous.ingested_at <= $5)
+                  AND ($6::timestamptz IS NULL OR candidate.ts < $6 OR candidate.ts >= $7
+                       OR NOT (candidate.metric=ANY($8::text[])))
                   AND (previous.local_date, previous.value, previous.unit, previous.metric_definition_version_id)
                   IS DISTINCT FROM (candidate.calendar_day, candidate.value, candidate.unit, candidate.version)
              )",
@@ -90,6 +95,9 @@ pub(super) async fn publish_measurements(
         .bind(GARMIN_LEGACY_SOURCE)
         .bind(request.source_id)
         .bind(OffsetDateTime::from(request.requested_at))
+        .bind(attestation.map(|proof| OffsetDateTime::from(proof.start())))
+        .bind(attestation.map(|proof| OffsetDateTime::from(proof.end())))
+        .bind(attestation.map(HealthReplacement::metrics))
         .fetch_one(&mut **txn)
         .await?;
         changed |= altered;
@@ -102,13 +110,14 @@ pub(super) async fn record_application(
     request: &ApplyActivity<'_>,
     endpoint: &str,
     document: &Value,
+    attestation: Option<&HealthReplacement>,
 ) -> Result<(), DocumentError> {
-    if !matches!(
-        endpoint,
-        "heart_rate" | "stress" | "hrv" | "respiration" | "spo2" | "steps"
-    ) || document
-        .as_object()
-        .is_some_and(|object| object.values().all(empty_field))
+    if replacement_channels(endpoint).is_empty()
+        || (attestation.is_none()
+            && (empty_field(document)
+                || document
+                    .as_object()
+                    .is_some_and(|object| object.values().all(empty_field))))
     {
         return Ok(());
     }
@@ -138,7 +147,7 @@ pub(super) async fn record_application(
     }
     applications.push(json!({
         "raw_ref": request.source_id.to_string(), "at": request.requested_at.to_string(),
-        "timezone": request.timezone, "replacement": null,
+        "timezone": request.timezone, "replacement": attestation.map(HealthReplacement::document),
     }));
     put_state(txn, &key, &json!({"applications": applications})).await?;
     Ok(())

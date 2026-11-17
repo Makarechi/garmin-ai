@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use ga_domain::{
     event_input::known_timezone,
-    garmin_health::HealthStatus,
+    garmin_health::{HealthReplacement, HealthStatus},
     garmin_summary::{activity_identity, historical_summary_fields, summary_fields},
     timestamp::StoredInstant,
 };
@@ -85,7 +85,7 @@ pub struct ApplyHealthPayload<'a> {
 enum Projection<'a> {
     Document(ActivityDocument),
     Summary(ActivitySummaryKind),
-    Health(&'a str),
+    Health(&'a str, Option<&'a HealthReplacement>),
 }
 
 impl<'a> Projection<'a> {
@@ -93,14 +93,21 @@ impl<'a> Projection<'a> {
         match self {
             Self::Document(document) => document.endpoint(),
             Self::Summary(kind) => kind.endpoint(),
-            Self::Health(endpoint) => endpoint,
+            Self::Health(endpoint, _) => endpoint,
+        }
+    }
+
+    fn replacement(self) -> Option<&'a HealthReplacement> {
+        match self {
+            Self::Health(_, proof) => proof,
+            _ => None,
         }
     }
 
     fn shared(self) -> bool {
         matches!(
             self,
-            Self::Summary(_) | Self::Health("daily" | "heart_rate" | "body_battery")
+            Self::Summary(_) | Self::Health("daily" | "heart_rate" | "body_battery", _)
         )
     }
 }
@@ -208,6 +215,31 @@ impl Database {
         &self,
         request: ApplyHealthPayload<'_>,
     ) -> Result<DocumentStatus, DocumentError> {
+        self.apply_captured_health(request, None).await
+    }
+
+    /// Publish a complete adapter-attested interval and retain the removed samples' history.
+    pub async fn apply_attested_health_payload(
+        &self,
+        request: ApplyHealthPayload<'_>,
+        replacement: &HealthReplacement,
+    ) -> Result<DocumentStatus, DocumentError> {
+        replacement
+            .validate_endpoint(request.endpoint)
+            .map_err(|_| DocumentError::InvalidHealthPayload)?;
+        time::Date::parse(
+            request.calendar_key,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        )
+        .map_err(|_| DocumentError::InvalidHealthPayload)?;
+        self.apply_captured_health(request, Some(replacement)).await
+    }
+
+    async fn apply_captured_health(
+        &self,
+        request: ApplyHealthPayload<'_>,
+        replacement: Option<&HealthReplacement>,
+    ) -> Result<DocumentStatus, DocumentError> {
         if matches!(request.endpoint, "activity" | "activities")
             || request.endpoint.starts_with("activity_")
         {
@@ -216,7 +248,7 @@ impl Database {
         self.apply_activity(ApplyActivity {
             account_fingerprint: request.account_fingerprint,
             source_key: request.calendar_key,
-            projection: Projection::Health(request.endpoint),
+            projection: Projection::Health(request.endpoint, replacement),
             source_id: request.source_id,
             requested_at: request.requested_at,
             timezone: request.timezone,
@@ -261,18 +293,23 @@ impl Database {
             return Ok(DocumentStatus::Stale);
         }
 
+        let replacement = request
+            .projection
+            .replacement()
+            .map(HealthReplacement::document);
         let unchanged = state.get("hash").and_then(Value::as_str) == Some(&hash)
             && parser == PARSER_VERSION
             && !matches!(status.as_str(), "pending" | "error")
-            && state.get("replacement").is_none_or(Value::is_null);
+            && state.get("replacement").unwrap_or(&Value::Null)
+                == replacement.as_ref().unwrap_or(&Value::Null);
         let mut metadata = read_state(&mut txn, &meta_key).await?;
         let requested = request.requested_at.to_string();
         let attempt = json!({
             "hash": hash,
             "source_ref": request.source_id.to_string(),
             "requested_at": requested,
-            "replacement": null,
-            "completeness": "unverified",
+            "replacement": replacement,
+            "completeness": if replacement.is_some() { "adapter_attested" } else { "unverified" },
         });
 
         let mut outcome = None;
@@ -317,6 +354,7 @@ impl Database {
         value["fetched_at"] = json!(fetched.to_string());
         value["status"] = json!(raw_outcome);
         if raw_outcome == "empty"
+            && replacement.is_none()
             && let Some(reference) = state.get("source_ref").and_then(Value::as_str)
             && !reference.is_empty()
             && reference != request.source_id.to_string()
@@ -451,7 +489,7 @@ async fn apply_effects(
     previous_parser: i32,
     unchanged: bool,
 ) -> Result<DocumentStatus, DocumentError> {
-    let outcome = if empty {
+    let outcome = if empty && request.projection.replacement().is_none() {
         DocumentStatus::Empty
     } else {
         match request.projection {
@@ -463,8 +501,10 @@ async fn apply_effects(
                 apply_summaries(txn, request, kind).await?;
                 DocumentStatus::Normalized
             }
-            Projection::Health(endpoint) => {
-                match health_projection::publish(txn, request, endpoint, unchanged).await? {
+            Projection::Health(endpoint, replacement) => {
+                match health_projection::publish(txn, request, endpoint, unchanged, replacement)
+                    .await?
+                {
                     HealthStatus::Normalized => DocumentStatus::Normalized,
                     HealthStatus::Archived => DocumentStatus::Archived,
                     HealthStatus::Empty => DocumentStatus::Empty,
