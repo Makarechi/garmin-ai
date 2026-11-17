@@ -1,3 +1,7 @@
+mod replacement;
+
+pub use replacement::{HealthReplacement, InvalidHealthReplacement, replacement_channels};
+
 use std::{error::Error, fmt};
 
 use serde_json::{Map, Value, json};
