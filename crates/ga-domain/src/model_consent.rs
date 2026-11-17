@@ -10,6 +10,7 @@ pub struct ModelCategories(u8);
 impl ModelCategories {
     pub const HEALTH: Self = Self(1);
     pub const DIARY: Self = Self(2);
+    pub const HEALTH_AND_DIARY: Self = Self(Self::HEALTH.0 | Self::DIARY.0);
     pub const AUDIO: Self = Self(4);
 
     pub fn from_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Option<Self> {
