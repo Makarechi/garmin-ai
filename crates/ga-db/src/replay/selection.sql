@@ -3,6 +3,7 @@ WITH source_page AS MATERIALIZED (
     FROM source_payloads
     WHERE source = 'garmin_connect' AND parser_version != $1
       AND ($2::uuid IS NULL OR id > $2)
+      AND ($4::uuid[] IS NULL OR id = ANY($4))
     ORDER BY id
     LIMIT $3
 ), streams AS (
