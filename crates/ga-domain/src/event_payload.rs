@@ -127,7 +127,7 @@ impl SystemPayload {
     }
 }
 
-fn json_value(value: &JsonValue<'_>) -> Option<Value> {
+pub(crate) fn json_value(value: &JsonValue<'_>) -> Option<Value> {
     match value {
         JsonValue::Null => Some(Value::Null),
         JsonValue::Bool(value) => Some(Value::Bool(*value)),
@@ -345,7 +345,11 @@ fn boolean(value: Value) -> Option<Value> {
     Some(Value::Bool(converted))
 }
 
-fn finite_number(min: f64, max: f64, inclusive: bool) -> impl FnOnce(Value) -> Option<Value> {
+pub(crate) fn finite_number(
+    min: f64,
+    max: f64,
+    inclusive: bool,
+) -> impl FnOnce(Value) -> Option<Value> {
     move |value| {
         let number = match value {
             Value::Bool(boolean) => f64::from(u8::from(boolean)),

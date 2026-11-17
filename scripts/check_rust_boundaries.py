@@ -3,7 +3,7 @@
 import json
 import sys
 
-DOMAIN_DEPENDENCIES = {"jiter", "serde_json", "sha2", "time", "uuid", "zmij"}
+DOMAIN_DEPENDENCIES = {"jiff", "jiter", "serde_json", "sha2", "speedate", "time", "uuid", "zmij"}
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 
 
