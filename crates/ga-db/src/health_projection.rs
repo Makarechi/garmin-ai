@@ -75,6 +75,7 @@ pub(crate) async fn rebuild_calendar(
     endpoint: &str,
     document: &Value,
     parser_changed: bool,
+    retained: bool,
     preceding: Option<&str>,
 ) -> Result<HealthStatus, DocumentError> {
     let projection = normalize_health_payload(endpoint, request.source_key, document)
@@ -98,7 +99,8 @@ pub(crate) async fn rebuild_calendar(
             observations::preserve_for_replay(txn, request.source_id).await?;
         }
         if endpoint == "sleep" {
-            publish_sleep = daily::prepare_sleep_replay(txn, day, request, parser_changed).await?;
+            publish_sleep =
+                daily::prepare_sleep_replay(txn, day, request, parser_changed, retained).await?;
         }
     }
     let status = projection.status;

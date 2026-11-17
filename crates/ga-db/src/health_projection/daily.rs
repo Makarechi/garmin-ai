@@ -241,6 +241,7 @@ pub(super) async fn prepare_sleep_replay(
     day: Date,
     request: &ApplyActivity<'_>,
     parser_changed: bool,
+    retained: bool,
 ) -> Result<bool, DocumentError> {
     let key = format!("sleep:{day}");
     let journal = format!("interval-owner:{key}");
@@ -263,6 +264,9 @@ pub(super) async fn prepare_sleep_replay(
             crate::activity_documents::put_state(txn, &journal, &json!({"source_ref": reference}))
                 .await?;
         }
+        return Ok(true);
+    }
+    if !retained {
         return Ok(true);
     }
     let owner = match current {

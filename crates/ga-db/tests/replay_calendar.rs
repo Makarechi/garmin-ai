@@ -84,6 +84,8 @@ async fn rebuilds_calendar_projections_from_verified_archives() -> Result<(), Bo
         "forced",
         "tied_daily",
         "missing_interval",
+        "active_interval",
+        "tied_interval",
     ] {
         let id = Uuid::parse_str(&cases.refs[name])?;
         let outcome = db

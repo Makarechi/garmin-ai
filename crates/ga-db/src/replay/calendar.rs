@@ -306,6 +306,7 @@ async fn apply_calendar(
             endpoint,
             payload,
             parser_changed,
+            watermark.retained,
             preceding,
         )
         .await;

@@ -115,6 +115,30 @@ def seed(engine, archive):
         assert session.get(TimelineInterval, "sleep:2026-10-31") is None
         mark_old(missing_interval)
 
+        active_missing = sleep(
+            "2026-11-01", "2026-10-31T21:09:00Z", "2026-11-01T05:12:00Z", None, 72
+        )
+        active_interval = write("sleep", "2026-11-01", active_missing, 56)
+        session.execute(delete(TimelineInterval).where(TimelineInterval.id == "sleep:2026-11-01"))
+        session.add(
+            AppState(
+                key="interval-owner:sleep:2026-11-01",
+                value={"source_ref": "11111111-1111-1111-1111-111111111111"},
+            )
+        )
+        mark_old(active_interval)
+
+        tied_key = "2026-11-02"
+        tied_start = sleep(tied_key, "2026-11-01T21:00:00Z", "2026-11-02T05:00:00Z", None, 70)
+        tied_update = sleep(tied_key, "2026-11-01T21:20:00Z", "2026-11-02T05:30:00Z", None, 71)
+        write("sleep", tied_key, tied_start, 58)
+        interval = session.get(TimelineInterval, f"sleep:{tied_key}", populate_existing=True)
+        former = (interval.start, interval.end, dict(interval.evidence))
+        tie_interval = write("sleep", tied_key, tied_update, 58)
+        interval = session.get(TimelineInterval, f"sleep:{tied_key}", populate_existing=True)
+        interval.start, interval.end, interval.evidence = former
+        mark_old(tie_interval)
+
         forced = write("daily", "2026-10-29", {"totalSteps": 19000}, 47)
         mark_old(forced)
         session.execute(
@@ -138,6 +162,8 @@ def seed(engine, archive):
             "forced": forced,
             "tied_daily": tied_daily,
             "missing_interval": missing_interval,
+            "active_interval": active_interval,
+            "tied_interval": tie_interval,
         }
 
 
@@ -153,6 +179,8 @@ def apply_python(engine, archive, refs):
         "forced": "normalized",
         "tied_daily": "normalized",
         "missing_interval": "normalized",
+        "active_interval": "normalized",
+        "tied_interval": "normalized",
     }
     for name, identity in refs.items():
         args = {"raw_ref": identity, "target_version": 9, "account": ACCOUNT}
