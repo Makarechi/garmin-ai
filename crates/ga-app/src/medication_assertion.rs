@@ -55,6 +55,7 @@ struct Rules {
     approximate_context: Regex,
     phrase_noise: Vec<Regex>,
     phrase_ending: Regex,
+    water_adjunct: Regex,
     purpose: Regex,
     alternative: Regex,
     named_count: Regex,
@@ -125,6 +126,7 @@ impl Rules {
                 r"\b(?:после|до|с|after|before|with)\s+(?:еды|едой|завтрака|обеда|ужина|food|breakfast|lunch|dinner)\b",
             ].into_iter().map(insensitive).collect::<Result<_, _>>()?,
             phrase_ending: insensitive(&format!(r"{COMMA}|;|{UNKNOWN_DETAIL}|{REASON}|\b(?:после|до|запил[аи]?|after|before|with)\b"))?,
+            water_adjunct: insensitive(r"\bс\s+(?:водой|едой)\b")?,
             purpose: insensitive(&format!(r"\b(?:от|for)\s+.*?(?=(?:{CLOCK})|(?:{DOSE})|$)"))?,
             alternative: insensitive(r"\b(?:or|или|либо)\b")?,
             named_count: insensitive(&format!(
@@ -251,6 +253,7 @@ pub fn literal_names(clause: &str) -> Result<BTreeSet<String>, DoseTextError> {
         quoted.insert(key.clone(), casefold(unquote(&matched[0])));
         key
     })?;
+    let has_bare_dose_marker = rules.bare_dose_marker.is_match(&phrase)?;
     let mut phrase = medication_phrase(phrase, rules)?;
     for pattern in &rules.name_noise[..4] {
         replace(&mut phrase, pattern, "")?;
@@ -262,7 +265,7 @@ pub fn literal_names(clause: &str) -> Result<BTreeSet<String>, DoseTextError> {
     for pattern in &rules.name_noise[4..] {
         replace(&mut phrase, pattern, "")?;
     }
-    if rules.bare_dose_marker.is_match(clause)? {
+    if has_bare_dose_marker {
         replace(&mut phrase, &rules.numeric_name, "")?;
     }
     replace(&mut phrase, &rules.name_prefix, "")?;
@@ -296,6 +299,7 @@ fn medication_phrase(mut clause: String, rules: &Rules) -> Result<String, DoseTe
         .find(tail)?
         .map_or(tail.len(), |part| part.start())]
         .to_owned();
+    replace(&mut tail, &rules.water_adjunct, "")?;
     replace(&mut tail, &rules.purpose, "")?;
     Ok(tail)
 }
