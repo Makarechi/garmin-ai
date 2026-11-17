@@ -2,6 +2,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
+use sqlx::{Executor, Postgres};
 
 use crate::{
     Database, ReadinessError, check_readiness,
@@ -22,6 +23,12 @@ pub enum GarminTransportOutcome {
     RateLimited { retry_after: Option<Duration> },
     ConnectionFailure { retry_after: Option<Duration> },
     CircuitOpen,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum GarminRequestPause {
+    Reauthentication,
+    Cooldown(StoredInstant),
 }
 
 pub struct RecordedGarminTransport {
@@ -62,6 +69,16 @@ impl From<sqlx::Error> for GarminIntegrationError {
 }
 
 impl Database {
+    /// Check a durable pause again before starting an already leased request.
+    pub async fn garmin_request_pause(
+        &self,
+        at: StoredInstant,
+    ) -> Result<Option<GarminRequestPause>, GarminIntegrationError> {
+        tokio::time::timeout(Duration::from_millis(750), garmin_pause(&self.control, at))
+            .await
+            .map_err(|_| GarminIntegrationError::Database)?
+    }
+
     /// Persist the outcome of a single authorized Garmin transport operation.
     pub async fn record_garmin_transport(
         &self,
@@ -180,6 +197,32 @@ impl Database {
             failure_count,
         })
     }
+}
+
+pub(crate) async fn garmin_pause<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    at: StoredInstant,
+) -> Result<Option<GarminRequestPause>, GarminIntegrationError> {
+    let state: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT value->>'status', NULLIF(value->>'blocked_until','')
+         FROM app_state WHERE key=$1",
+    )
+    .bind(GARMIN_STATE_KEY)
+    .fetch_optional(executor)
+    .await?;
+    let Some((status, deadline)) = state else {
+        return Ok(None);
+    };
+    if status.as_deref() == Some("reauth_required") {
+        return Ok(Some(GarminRequestPause::Reauthentication));
+    }
+    let deadline = deadline
+        .map(|value| value.parse::<StoredInstant>())
+        .transpose()
+        .map_err(|_| GarminIntegrationError::InvalidState)?;
+    Ok(deadline
+        .filter(|deadline| *deadline > at)
+        .map(GarminRequestPause::Cooldown))
 }
 
 async fn recorded_state(

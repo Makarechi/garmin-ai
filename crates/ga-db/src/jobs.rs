@@ -148,6 +148,10 @@ impl GarminJobLease {
         self.kind
     }
 
+    pub fn lease_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.seconds as u64)
+    }
+
     pub fn payload_json(&self) -> &str {
         &self.payload
     }
@@ -250,7 +254,15 @@ impl Database {
             return Ok(None);
         }
         fail_exhausted(&mut txn, now.into(), None).await?;
-        if garmin_paused(&mut txn, now).await? {
+        let paused = crate::garmin_integration::garmin_pause(&mut *txn, now)
+            .await
+            .map_err(|error| match error {
+                crate::garmin_integration::GarminIntegrationError::InvalidState => {
+                    JobStoreError::InvalidRecordedState
+                }
+                _ => JobStoreError::Database,
+            })?;
+        if paused.is_some() {
             txn.commit().await?;
             return Ok(None);
         }
@@ -617,29 +629,4 @@ async fn fail_exhausted(
     .execute(&mut **txn)
     .await?;
     Ok(())
-}
-
-async fn garmin_paused(
-    txn: &mut Transaction<'_, Postgres>,
-    now: StoredInstant,
-) -> Result<bool, JobStoreError> {
-    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-        "SELECT value->>'status', nullif(value->>'blocked_until', '') FROM app_state
-         WHERE key = 'integration:garmin'",
-    )
-    .fetch_optional(&mut **txn)
-    .await?;
-    let Some((status, blocked_until)) = row else {
-        return Ok(false);
-    };
-    if status.as_deref() == Some("reauth_required") {
-        return Ok(true);
-    }
-    let Some(blocked_until) = blocked_until else {
-        return Ok(false);
-    };
-    let blocked: StoredInstant = blocked_until
-        .parse()
-        .map_err(|_| JobStoreError::InvalidRecordedState)?;
-    Ok(blocked > now)
 }

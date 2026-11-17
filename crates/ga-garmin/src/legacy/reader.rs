@@ -63,6 +63,11 @@ impl LegacyReader {
         })
     }
 
+    /// Account identity verified when the reader restored or refreshed its session.
+    pub fn fingerprint(&self) -> &str {
+        &self.inner.expected_fingerprint
+    }
+
     /// Return the original JSON bytes from an explicitly supported read.
     pub async fn get_json(
         &self,
