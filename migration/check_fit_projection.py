@@ -52,14 +52,18 @@ def reference(source, destination):
     index = 0
     with (
         fitdecode.FitReader(
-            source, check_crc=fitdecode.CrcCheck.RAISE, error_handling=fitdecode.ErrorHandling.IGNORE
+            source,
+            check_crc=fitdecode.CrcCheck.RAISE,
+            error_handling=fitdecode.ErrorHandling.IGNORE,
         ) as reader,
         destination.open("w", encoding="utf-8") as output,
     ):
         for frame in reader:
             if isinstance(frame, fitdecode.FitDataMessage):
                 name = frame.name or f"unknown_{frame.global_mesg_num}"
-                print(json.dumps([name, message_values(frame, index)], allow_nan=False), file=output)
+                print(
+                    json.dumps([name, message_values(frame, index)], allow_nan=False), file=output
+                )
                 index += 1
     return index
 
