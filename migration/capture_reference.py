@@ -18,6 +18,7 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from replay_reference import capture_replay
 from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
@@ -85,7 +86,7 @@ def cli_cases(cases, directory):
     for case in cases:
         process = subprocess.run(
             [executable, *case["args"]],
-            env={"PATH": os.defpath, "HOME": str(directory), "LANG": "C.UTF-8"},
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
             cwd=directory,
             capture_output=True,
             text=True,
@@ -276,6 +277,7 @@ def main():
                     "archive": archive_case(cases["archive_values"], directory / "archive"),
                     "cli": cli_cases(cases["cli_cases"], directory),
                     "diary": diary_case(engine, directory, cases["diary_event"]),
+                    "replay": capture_replay(engine, directory / "replay", cases["replay"]),
                 },
             }
     finally:

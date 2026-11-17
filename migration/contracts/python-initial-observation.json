@@ -581,6 +581,126 @@
         "audit": 1,
         "events": 1
       }
+    },
+    "replay": {
+      "after_interrupted_transaction": {
+        "archive_keys": [
+          "ad/ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af.json"
+        ],
+        "daily_steps": null,
+        "database_source_count": 0,
+        "sources": []
+      },
+      "after_replay": {
+        "archive_keys": [
+          "82/82769626774c826d644b95750e1ab1146a771f251cca1e11df16328c3a1c50d5.json",
+          "ad/ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af.json"
+        ],
+        "daily_steps": 10,
+        "database_source_count": 2,
+        "sources": [
+          {
+            "archive_key": "82/82769626774c826d644b95750e1ab1146a771f251cca1e11df16328c3a1c50d5.json",
+            "endpoint": "daily",
+            "fetched_at": "2026-10-25T01:30:02+00:00",
+            "id": "raw:2",
+            "parser_version": 0,
+            "payload": {
+              "totalSteps": 20
+            },
+            "payload_hash": "82769626774c826d644b95750e1ab1146a771f251cca1e11df16328c3a1c50d5",
+            "source": "garmin_connect",
+            "source_key": "2026-10-24",
+            "status": "normalized"
+          },
+          {
+            "archive_key": "ad/ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af.json",
+            "endpoint": "daily",
+            "fetched_at": "2026-10-25T01:30:01+00:00",
+            "id": "raw:1",
+            "parser_version": 9,
+            "payload": {
+              "totalSteps": 10
+            },
+            "payload_hash": "ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af",
+            "source": "garmin_connect",
+            "source_key": "2026-10-24",
+            "status": "normalized"
+          }
+        ]
+      },
+      "before_replay": {
+        "archive_keys": [
+          "82/82769626774c826d644b95750e1ab1146a771f251cca1e11df16328c3a1c50d5.json",
+          "ad/ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af.json"
+        ],
+        "daily_steps": 10,
+        "database_source_count": 2,
+        "sources": [
+          {
+            "archive_key": "82/82769626774c826d644b95750e1ab1146a771f251cca1e11df16328c3a1c50d5.json",
+            "endpoint": "daily",
+            "fetched_at": "2026-10-25T01:30:02+00:00",
+            "id": "raw:2",
+            "parser_version": 9,
+            "payload": {
+              "totalSteps": 20
+            },
+            "payload_hash": "82769626774c826d644b95750e1ab1146a771f251cca1e11df16328c3a1c50d5",
+            "source": "garmin_connect",
+            "source_key": "2026-10-24",
+            "status": "normalized"
+          },
+          {
+            "archive_key": "ad/ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af.json",
+            "endpoint": "daily",
+            "fetched_at": "2026-10-25T01:30:01+00:00",
+            "id": "raw:1",
+            "parser_version": 9,
+            "payload": {
+              "totalSteps": 10
+            },
+            "payload_hash": "ad6a491b2507fbb22af35c3a588dee63a0786b3196f1887f49a658a00c4277af",
+            "source": "garmin_connect",
+            "source_key": "2026-10-24",
+            "status": "normalized"
+          }
+        ]
+      },
+      "replay_outcomes": [
+        {
+          "source_ref": "raw:2",
+          "status": "superseded_revision"
+        },
+        {
+          "source_ref": "raw:1",
+          "status": "normalized"
+        }
+      ],
+      "replay_state_outcomes": {
+        "normalized": 1,
+        "superseded_revision": 1
+      },
+      "requests": [
+        {
+          "current_steps": 10,
+          "source_ref": "raw:1",
+          "status": "normalized",
+          "steps": 10
+        },
+        {
+          "current_steps": 20,
+          "source_ref": "raw:2",
+          "status": "normalized",
+          "steps": 20
+        },
+        {
+          "current_steps": 10,
+          "source_ref": "raw:1",
+          "status": "normalized",
+          "steps": 10
+        }
+      ]
     }
   }
 }

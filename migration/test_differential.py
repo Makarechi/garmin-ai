@@ -59,6 +59,26 @@ class DifferentialTests(unittest.TestCase):
             ],
         )
 
+    def test_replay_preserves_archive_identity_and_failed_transaction_boundary(self):
+        replay = self.reference["scenarios"]["replay"]
+        half = replay["after_interrupted_transaction"]
+        self.assertEqual(half["database_source_count"], 0)
+        self.assertIsNone(half["daily_steps"])
+        self.assertEqual(len(half["archive_keys"]), 1)
+        requests = replay["requests"]
+        self.assertEqual([row["current_steps"] for row in requests], [10, 20, 10])
+        self.assertEqual(requests[0]["source_ref"], requests[2]["source_ref"])
+        self.assertNotEqual(requests[0]["source_ref"], requests[1]["source_ref"])
+        final = replay["after_replay"]
+        self.assertEqual(final["database_source_count"], 2)
+        self.assertEqual(final["daily_steps"], 10)
+        candidate = self.candidate["scenarios"]["replay"]
+        candidate["requests"][2]["source_ref"] = requests[1]["source_ref"]
+        self.assertIn(
+            "/scenarios/replay/requests/2/source_ref: value differs",
+            compare(self.reference, self.candidate),
+        )
+
     def test_rejects_invalid_json_contract_values(self):
         with self.assertRaises(ValueError):
             parse_float("1e999")
