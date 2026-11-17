@@ -42,6 +42,8 @@ TOOLS = {
     "timeline",
     "device_history",
     "data_freshness",
+    "personal_baseline",
+    "analysis_compare_periods",
 }
 SNAPSHOT = "/tools/health_snapshot"
 RANGE = "/tools/health_range"
@@ -279,6 +281,40 @@ def history_cases():
     yield ("GET", FRESHNESS, "health", None)
 
 
+def period_cases():
+    baseline = "/tools/personal_baseline"
+    comparison = "/tools/analysis_compare_periods"
+    period = {"metric": "steps", "start": "2026-10-24", "end": "2026-10-25"}
+    pair = {
+        "metric": "steps",
+        "a_start": "2026-10-24",
+        "a_end": "2026-10-25",
+        "b_start": "2026-10-26",
+        "b_end": "2026-10-27",
+    }
+    for arguments in (
+        period,
+        {**period, "metric": "invalid"},
+        {**period, "end": "2026-10-21"},
+        {**period, "start": None},
+        {**period, "metric": 54},
+        {},
+    ):
+        yield ("POST", baseline, "health", {"arguments": arguments})
+    for arguments in (
+        pair,
+        {**pair, "b_start": pair["a_end"]},
+        {**pair, "metric": "invalid"},
+        {**pair, "b_end": "2026-10-21"},
+        {},
+    ):
+        yield ("POST", comparison, "health", {"arguments": arguments})
+    for route, arguments in ((baseline, period), (comparison, pair)):
+        yield ("POST", route, "diary", {"arguments": arguments})
+        yield ("POST", route, None, {"arguments": arguments})
+        yield ("GET", route, "health", None)
+
+
 def compare(python, native, cases):
     count = 0
     for method, route, credential, body in cases:
@@ -347,6 +383,7 @@ def run(binary):
                         count += compare(python, native, activity_cases())
                         count += compare(python, native, diary_cases())
                         count += compare(python, native, history_cases())
+                        count += compare(python, native, period_cases())
                         with Session(engine) as session, session.begin():
                             session.execute(
                                 text("UPDATE people SET timezone=:zone"), {"zone": SETUP_ZONE}
@@ -380,6 +417,8 @@ def run(binary):
                                 ("POST", TIMELINE, "both", {}),
                                 ("POST", TIMELINE, "diary", {}),
                                 ("POST", DEVICES, "health", {}),
+                                ("POST", "/tools/personal_baseline", "health", {}),
+                                ("POST", "/tools/analysis_compare_periods", "health", {}),
                                 ("POST", DEVICES, "diary", {}),
                                 ("POST", FRESHNESS, "health", {}),
                                 (

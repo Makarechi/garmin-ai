@@ -1,11 +1,13 @@
 mod activity_reads;
 mod device_history;
 mod read_daily;
+mod sleep_analysis;
 mod sleep_timing;
 
 pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
 pub use read_daily::DailyHealthReader;
+pub use sleep_analysis::NapPolicy;
 pub use sleep_timing::sleep_timing_result_hash;
 
 mod freshness;
@@ -46,6 +48,9 @@ pub enum HealthAnalysisError {
     InvalidTimezone,
     InvalidKnowledgeCutoff,
     TemporalVersionLimit,
+    SleepRange,
+    SleepNapLimit,
+    SleepSessionLimit,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -60,6 +65,11 @@ impl fmt::Display for HealthAnalysisError {
             Self::Database => "Daily metrics could not be read",
             Self::InvalidTimezone => "The analysis timezone is invalid",
             Self::InvalidKnowledgeCutoff => "As-known cutoff cannot follow the event",
+            Self::SleepRange => "Sleep analysis requires at most 31 calendar days",
+            Self::SleepNapLimit => "Sleep analysis exceeds 200 naps; narrow the interval",
+            Self::SleepSessionLimit => {
+                "Nap intervals span too many main sessions; inspect their dates"
+            }
             Self::TemporalVersionLimit => {
                 "Temporal context exceeds 100000 versions; narrow the activity range"
             }
@@ -112,12 +122,11 @@ impl Database {
         metric: &str,
         period: HealthPeriod,
     ) -> Result<Value, HealthAnalysisError> {
-        let (metric, query) = daily_metric(metric)?;
-        let mut txn = begin_verified_analysis(&self.work).await?;
-        let values = observed_values(&mut txn, query, period).await?;
-        txn.commit().await?;
-        let description = describe(values.iter().map(|(_, value)| Some(*value)));
-        Ok(period_document(metric, period, &values, description))
+        daily_metric(metric)?;
+        self.verified_health_reader()
+            .await?
+            .personal_baseline(metric, period)
+            .await
     }
 
     pub async fn compare_health_periods(
@@ -129,11 +138,40 @@ impl Database {
         if first.start.max(second.start) <= first.end.min(second.end) {
             return Err(HealthAnalysisError::Overlap);
         }
+        daily_metric(metric)?;
+        self.verified_health_reader()
+            .await?
+            .compare_periods(metric, first, second)
+            .await
+    }
+}
+
+impl DailyHealthReader {
+    pub async fn personal_baseline(
+        mut self,
+        metric: &str,
+        period: HealthPeriod,
+    ) -> Result<Value, HealthAnalysisError> {
         let (metric, query) = daily_metric(metric)?;
-        let mut txn = begin_verified_analysis(&self.work).await?;
-        let first_values = observed_values(&mut txn, query, first).await?;
-        let second_values = observed_values(&mut txn, query, second).await?;
-        txn.commit().await?;
+        let values = observed_values(&mut self.0, query, period).await?;
+        self.0.commit().await?;
+        let description = describe(values.iter().map(|(_, value)| Some(*value)));
+        Ok(period_document(metric, period, &values, description))
+    }
+
+    pub async fn compare_periods(
+        mut self,
+        metric: &str,
+        first: HealthPeriod,
+        second: HealthPeriod,
+    ) -> Result<Value, HealthAnalysisError> {
+        if first.start.max(second.start) <= first.end.min(second.end) {
+            return Err(HealthAnalysisError::Overlap);
+        }
+        let (metric, query) = daily_metric(metric)?;
+        let first_values = observed_values(&mut self.0, query, first).await?;
+        let second_values = observed_values(&mut self.0, query, second).await?;
+        self.0.commit().await?;
         let first_description = describe(first_values.iter().map(|(_, value)| Some(*value)));
         let second_description = describe(second_values.iter().map(|(_, value)| Some(*value)));
         let first_samples: Vec<_> = first_values.iter().map(|(_, value)| *value).collect();
