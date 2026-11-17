@@ -1,30 +1,67 @@
-use std::env;
-use std::ffi::OsStr;
-use std::process::ExitCode;
+mod http;
 
-const HELP: &str = "Garmin AI Rust migration executable
+use std::{env, ffi::OsStr, process::ExitCode};
 
-Usage: garmin-ai-rust [--help | --version]
+use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 
-Options:
-  -h, --help     Show help
-  -V, --version  Show the binary version";
+#[derive(Parser)]
+#[command(
+    name = "garmin-ai-rust",
+    version,
+    about = "Garmin AI Rust migration executable"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Serve the local liveness endpoint
+    Serve {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+}
 
 fn main() -> ExitCode {
-    let mut args = env::args_os().skip(1);
-    let first = args.next();
-
-    if args.next().is_some() {
+    let arguments: Vec<_> = env::args_os().collect();
+    let standalone_flags = ["--help", "-h", "--version", "-V"].map(OsStr::new);
+    if arguments.len() > 2 && standalone_flags.contains(&arguments[1].as_os_str()) {
         return usage_error();
     }
-
-    match first.as_deref() {
-        None => println!("{HELP}"),
-        Some(arg) if arg == OsStr::new("--help") || arg == OsStr::new("-h") => println!("{HELP}"),
-        Some(arg) if arg == OsStr::new("--version") || arg == OsStr::new("-V") => {
-            println!("garmin-ai-rust {}", env!("CARGO_PKG_VERSION"));
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            return if error.print().is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
         }
-        Some(_) => return usage_error(),
+        Err(_) => return usage_error(),
+    };
+
+    match cli.command {
+        None => {
+            if Cli::command().print_help().is_err() {
+                return ExitCode::FAILURE;
+            }
+            println!();
+        }
+        Some(Command::Serve { host, port }) => {
+            if http::serve(&host, port).is_err() {
+                eprintln!("Could not run the HTTP server.");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     ExitCode::SUCCESS
