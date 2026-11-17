@@ -1,6 +1,7 @@
 pub mod access;
 pub mod activity_scan;
 pub mod agent_interpretation;
+pub mod analysis_budget;
 pub mod channel;
 pub mod event_contract;
 pub mod event_input;
