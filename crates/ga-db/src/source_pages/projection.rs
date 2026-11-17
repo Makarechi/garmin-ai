@@ -294,34 +294,3 @@ async fn insert_observation(
     .await?;
     Ok(id)
 }
-
-pub(super) async fn invalidate_analyses(
-    txn: &mut Transaction<'_, Postgres>,
-) -> Result<(), SourcePageError> {
-    sqlx::query(
-        "UPDATE conversations SET memory_epoch=gen_random_uuid(),state=state-'analysis_turns',updated_at=now()",
-    ).execute(&mut **txn).await?;
-    sqlx::query("DELETE FROM app_state WHERE starts_with(key,'analysis:conversation:pending')")
-        .execute(&mut **txn)
-        .await?;
-    sqlx::query(
-        "UPDATE app_state SET value=value || '{\"turns\":[]}'::jsonb,updated_at=now()
-         WHERE key='analysis:conversation'",
-    )
-    .execute(&mut **txn)
-    .await?;
-    sqlx::query(
-        "UPDATE pending_questions SET status='cancelled' WHERE kind='context'
-         AND status IN ('pending','sending','sent','uncertain')",
-    )
-    .execute(&mut **txn)
-    .await?;
-    sqlx::query(
-        "UPDATE insights SET status='superseded' WHERE status IN ('candidate','accepted','delivered','uncertain')",
-    ).execute(&mut **txn).await?;
-    sqlx::query(
-        "INSERT INTO app_state(key,value) VALUES('replay:generation',jsonb_build_object('id',gen_random_uuid()::text))
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-    ).execute(&mut **txn).await?;
-    Ok(())
-}

@@ -15,7 +15,9 @@ use sqlx::{Postgres, Transaction};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{Database, ReadinessError, check_readiness};
+use crate::{
+    Database, ReadinessError, activity_documents::invalidate_replay_outputs, check_readiness,
+};
 
 const WRITER_LOCK: i64 = 72104619;
 const CURSOR_LIMIT: usize = 1000;
@@ -270,7 +272,7 @@ impl Database {
             .await?;
         }
         if changed {
-            projection::invalidate_analyses(&mut txn).await?;
+            invalidate_replay_outputs(&mut txn).await?;
         }
         write_state(&mut txn, &poll.cursor_key, &snapshot).await?;
         txn.commit().await?;
