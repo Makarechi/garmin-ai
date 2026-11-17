@@ -81,6 +81,21 @@ impl<'binding> TelegramBinding<'binding> {
             .await
     }
 
+    pub(crate) async fn accept_paired_poll_update(
+        self,
+        lease: &mut RuntimeLease,
+        wire: &Value,
+        received_at: StoredInstant,
+        callback_time_known: bool,
+    ) -> Result<TelegramPollReceipt, TelegramPollError> {
+        let update = PreparedUpdate::new(self, wire, received_at)?;
+        lease
+            .persist_paired_telegram_poll_event(update.input(), self.external_owner_id, |action| {
+                update.normalize_callback(action, callback_time_known)
+            })
+            .await
+    }
+
     pub(crate) async fn accept_webhook_update(
         self,
         database: &Database,
