@@ -506,14 +506,35 @@ def test_channel_selection_change_activates_configured_plugin_without_restart(
         )
         task = asyncio.create_task(runtime.run(settings))
         try:
+            startup_kinds = {"channel_initiatives", "agent_proactive", "agent_insights"}
             for _ in range(100):
                 await asyncio.sleep(0.05)
                 db.expire_all()
-                jobs = db.query(Job).filter(Job.kind == "channel_initiatives").all()
-                if jobs and jobs[0].status == "done":
-                    break
+                now = datetime.now(UTC)
+                startup_jobs = db.query(Job).filter(Job.kind.in_(startup_kinds)).all()
+                finished_kinds = {
+                    job.kind
+                    for job in startup_jobs
+                    if job.status == "done"
+                    or (
+                        job.status == "pending"
+                        and job.last_error == "DiaryDeferred"
+                        and job.run_at > now
+                    )
+                }
+                # Channel delivery tries the same replay lock as the startup jobs.
+                # Wait for those jobs to finish or defer before testing the channel change.
+                if finished_kinds == startup_kinds:
+                    channel_job = next(
+                        job for job in startup_jobs if job.kind == "channel_initiatives"
+                    )
+                    if channel_job.status == "done":
+                        break
+                    # Trigger the deferred check after contention has cleared in this fixture.
+                    channel_job.run_at = now
+                    db.commit()
             else:
-                pytest.fail("Initial channel job was not processed")
+                pytest.fail("Startup channel and insight jobs were not processed")
             assert len(SampleChannel.instances) == before + 1
             assert db.get(OutboxMessage, message_id).state == "queued"
             db.rollback()
