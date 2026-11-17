@@ -122,6 +122,41 @@ impl RuntimeLease {
         .map_err(|_| TelegramPollError::Database)?
     }
 
+    /// Check the current pairing on the session that owns the polling runtime
+    /// before making a provider request or resetting an old polling cursor.
+    pub async fn check_telegram_poll_pairing(
+        &mut self,
+        owner_id: Uuid,
+        instance: &str,
+        expected_chat: i64,
+    ) -> Result<(), TelegramPollError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = Connection::begin(&mut self.connection).await?;
+            sqlx::query("SET LOCAL statement_timeout = '750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(IngressError::Storage)?;
+            require_pairing(&mut txn, owner_id, instance, expected_chat).await?;
+            txn.commit().await?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| TelegramPollError::Database)?
+    }
+
+    /// The externally configured poller rechecks its pairing at commit time.
+    pub async fn persist_paired_telegram_poll_event(
+        &mut self,
+        input: TelegramPollInput<'_>,
+        expected_chat: i64,
+        normalize_callback: impl FnOnce(&Value) -> Option<InboundEnvelope>,
+    ) -> Result<TelegramPollReceipt, TelegramPollError> {
+        self.persist_polled(input, normalize_callback, Some(expected_chat))
+            .await
+    }
+
     /// The inbox, button consumption, ordering record and offset commit on the
     /// same connection that holds the shared Python/Rust runtime advisory lock.
     pub async fn persist_telegram_poll_event(
@@ -129,10 +164,25 @@ impl RuntimeLease {
         input: TelegramPollInput<'_>,
         normalize_callback: impl FnOnce(&Value) -> Option<InboundEnvelope>,
     ) -> Result<TelegramPollReceipt, TelegramPollError> {
+        self.persist_polled(input, normalize_callback, None).await
+    }
+
+    async fn persist_polled(
+        &mut self,
+        input: TelegramPollInput<'_>,
+        normalize_callback: impl FnOnce(&Value) -> Option<InboundEnvelope>,
+        paired_chat: Option<i64>,
+    ) -> Result<TelegramPollReceipt, TelegramPollError> {
         validate_binding(&input)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
             let txn = Connection::begin(&mut self.connection).await?;
-            persist(txn, input, normalize_callback, DeliveryMode::Polling).await
+            persist(
+                txn,
+                input,
+                normalize_callback,
+                DeliveryMode::Polling(paired_chat),
+            )
+            .await
         })
         .await
         .map_err(|_| TelegramPollError::Database)?
@@ -165,7 +215,7 @@ impl Database {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeliveryMode {
-    Polling,
+    Polling(Option<i64>),
     Webhook(i64),
 }
 
@@ -182,16 +232,12 @@ async fn persist(
         .await
         .map_err(IngressError::Storage)?;
     let selected = selection(&mut txn, input.instance_id).await?;
-    if let DeliveryMode::Webhook(expected_chat) = mode {
-        if !selected {
-            return Err(TelegramPollError::ChannelDisabled);
+    match mode {
+        DeliveryMode::Webhook(_) if !selected => return Err(TelegramPollError::ChannelDisabled),
+        DeliveryMode::Webhook(chat) | DeliveryMode::Polling(Some(chat)) => {
+            require_pairing(&mut txn, input.owner_id, input.instance_id, chat).await?;
         }
-        let owner = confirmed_pairing(&mut txn, input.instance_id, expected_chat)
-            .await
-            .map_err(TelegramPollError::Pairing)?;
-        if owner != input.owner_id {
-            return Err(TelegramPollError::Pairing(TelegramBindingError::Mismatch));
-        }
+        DeliveryMode::Polling(None) => {}
     }
     lock_ingress(&mut txn).await?;
     let owned_by_legacy = selected
@@ -238,7 +284,7 @@ async fn persist(
         } else {
             false
         };
-    if mode == DeliveryMode::Polling {
+    if matches!(mode, DeliveryMode::Polling(_)) {
         advance_telegram_poll_cursor(
             &mut txn,
             input.instance_id,
@@ -255,6 +301,21 @@ async fn persist(
         new_ordering_epoch,
         acknowledgement_queued,
     })
+}
+
+async fn require_pairing(
+    txn: &mut Transaction<'_, Postgres>,
+    owner_id: Uuid,
+    instance: &str,
+    expected_chat: i64,
+) -> Result<(), TelegramPollError> {
+    let owner = confirmed_pairing(txn, instance, expected_chat)
+        .await
+        .map_err(TelegramPollError::Pairing)?;
+    if owner != owner_id {
+        return Err(TelegramPollError::Pairing(TelegramBindingError::Mismatch));
+    }
+    Ok(())
 }
 
 async fn selection(

@@ -65,6 +65,27 @@ impl TelegramTransport {
                 TelegramPollError::InvalidBinding,
             ));
         }
+        let result = self.poll_bound(lease, binding, progress).await;
+        if result.is_err() {
+            progress.caught_up_at = None;
+        }
+        result
+    }
+
+    async fn poll_bound(
+        &self,
+        lease: &mut RuntimeLease,
+        binding: TelegramBinding<'_>,
+        progress: &mut PollProgress,
+    ) -> Result<PollBatch, TelegramLoopError> {
+        lease
+            .check_telegram_poll_pairing(
+                binding.owner_id,
+                binding.instance_id,
+                binding.external_owner_id,
+            )
+            .await
+            .map_err(TelegramLoopError::Ingress)?;
         let cursor = lease
             .owned_telegram_poll_cursor(binding.instance_id, wall_clock()?)
             .await
@@ -84,10 +105,19 @@ impl TelegramTransport {
         let count = updates.len();
         for update in updates {
             binding
-                .accept_polled_update(lease, &update.body, received, time_known)
+                .accept_paired_poll_update(lease, &update.body, received, time_known)
                 .await
                 .map_err(TelegramLoopError::Ingress)?;
         }
+        // An empty response still crosses a request boundary after preflight.
+        lease
+            .check_telegram_poll_pairing(
+                binding.owner_id,
+                binding.instance_id,
+                binding.external_owner_id,
+            )
+            .await
+            .map_err(TelegramLoopError::Ingress)?;
         let caught_up = count < MAX_UPDATES;
         let selected = lease
             .telegram_channel_selected(binding.instance_id)

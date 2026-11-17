@@ -1,11 +1,13 @@
 use super::{bind, request, respond};
 use crate::telegram_input::{CallbackResolution, TelegramBinding};
+use crate::telegram_transport::TelegramLoopError;
 
 use std::{env, error::Error, str::FromStr, time::Duration};
 
 use ga_db::{
     Database,
     action_tokens::{ActionTokenContext, issue_action_token},
+    channel_ingress::telegram_poll::TelegramPollError,
     jobs::RecordedJobStatus,
 };
 use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};
@@ -44,6 +46,10 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
         instance_id: "primary",
         external_owner_id: 1234567890123,
     };
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         VALUES(gen_random_uuid(),$1,'telegram','primary',$2,'fixture')",
+    ).bind(owner_id).bind(binding.external_owner_id.to_string()).execute(&pool).await?;
     let message = json!({
         "message_id":76,"chat":{"type":"private","id":binding.external_owner_id},
         "from":{"id":binding.external_owner_id},"text":"synthetic button parent"
@@ -202,6 +208,62 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
             ("synthetic-new".into(), "done".into()),
             ("synthetic-old".into(), "pending".into())
         ]
+    );
+    let previous = lease.owned_telegram_poll_cursor("primary", at).await?;
+    assert_eq!(previous.offset, Some(122));
+    let (listener, transport) = bind().await?;
+    let late_delivery = json!({"update_id":122,"message":message});
+    let server = async {
+        let (mut poll, _) = listener.accept().await?;
+        assert_eq!(request(&mut poll).await?["fields"]["offset"], 122);
+        sqlx::query("UPDATE channel_bindings SET external_id='43' WHERE owner_id=$1")
+            .bind(owner_id)
+            .execute(&pool)
+            .await?;
+        respond(
+            &mut poll,
+            "200 OK",
+            &[],
+            &json!({"ok":true,"result":[late_delivery]}).to_string(),
+        )
+        .await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let mut progress = Default::default();
+    let (server, result) = timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            server,
+            transport.poll_once(&mut lease, binding, &mut progress)
+        )
+    })
+    .await?;
+    server?;
+    assert!(matches!(
+        result,
+        Err(TelegramLoopError::Ingress(TelegramPollError::Pairing(_)))
+    ));
+    assert_eq!(
+        lease.owned_telegram_poll_cursor("primary", at).await?,
+        previous
+    );
+    let late_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM inbound_messages WHERE external_event_id='122')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!late_exists);
+    assert!(matches!(
+        timeout(
+            Duration::from_secs(2),
+            transport.poll_once(&mut lease, binding, &mut progress)
+        )
+        .await?,
+        Err(TelegramLoopError::Ingress(TelegramPollError::Pairing(_)))
+    ));
+    assert!(
+        timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
     );
     println!(
         "Verified native polling, backlog gate, callback time, independent acknowledgement and durable rate limit"
