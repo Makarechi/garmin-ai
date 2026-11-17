@@ -1,4 +1,5 @@
 pub mod garmin_worker;
+pub mod medication_assertion;
 pub mod medication_dose;
 pub mod model_gateway;
 pub mod telegram_format;
