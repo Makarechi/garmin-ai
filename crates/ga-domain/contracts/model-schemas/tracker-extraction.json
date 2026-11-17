@@ -1,0 +1,452 @@
+{
+  "$defs": {
+    "ExtractedField": {
+      "additionalProperties": false,
+      "properties": {
+        "field_id": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+          "title": "Field Id",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        },
+        "evidence": {
+          "$ref": "#/$defs/SourceEvidence"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "unit_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "field_id",
+        "value",
+        "evidence"
+      ],
+      "title": "ExtractedField",
+      "type": "object"
+    },
+    "SourceEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "maximum": 16000,
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "exclusiveMinimum": 0,
+          "maximum": 16000,
+          "title": "End",
+          "type": "integer"
+        },
+        "quote": {
+          "maxLength": 240,
+          "minLength": 1,
+          "title": "Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "quote"
+      ],
+      "title": "SourceEvidence",
+      "type": "object"
+    },
+    "TrackerFieldDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "pattern": "^[a-z][a-z0-9_]{0,62}$",
+          "title": "Key",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "number",
+            "integer",
+            "boolean",
+            "choice",
+            "scale"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "metric_semantics": {
+          "anyOf": [
+            {
+              "enum": [
+                "gauge",
+                "event_total",
+                "event_count",
+                "interval_total",
+                "cumulative_counter"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric Semantics"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_%./-]{1,32}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "title": "Options",
+          "type": "array"
+        },
+        "max_length": {
+          "default": 500,
+          "maximum": 16000,
+          "minimum": 1,
+          "title": "Max Length",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "kind"
+      ],
+      "title": "TrackerFieldDraft",
+      "type": "object"
+    },
+    "TrackerSetupDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "pattern": "^[a-z][a-z0-9_]{0,62}$",
+          "title": "Key",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "locale": {
+          "default": "en",
+          "maxLength": 255,
+          "minLength": 2,
+          "pattern": "^[A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8})*$",
+          "title": "Locale",
+          "type": "string"
+        },
+        "topology": {
+          "default": "point",
+          "enum": [
+            "point",
+            "open_interval",
+            "bounded_interval",
+            "flexible"
+          ],
+          "title": "Topology",
+          "type": "string"
+        },
+        "derived_duration": {
+          "default": false,
+          "title": "Derived Duration",
+          "type": "boolean"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/TrackerFieldDraft"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Fields",
+          "type": "array"
+        },
+        "shortcut": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shortcut"
+        },
+        "reminder_enabled": {
+          "default": false,
+          "title": "Reminder Enabled",
+          "type": "boolean"
+        },
+        "reminder_time": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reminder Time"
+        },
+        "reminder_timezone": {
+          "default": "UTC",
+          "title": "Reminder Timezone",
+          "type": "string"
+        },
+        "privacy": {
+          "default": "private",
+          "enum": [
+            "private",
+            "sensitive"
+          ],
+          "title": "Privacy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "fields"
+      ],
+      "title": "TrackerSetupDraft",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "tracker.nl.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "intent": {
+      "enum": [
+        "propose_tracker",
+        "change_tracker",
+        "create_entry",
+        "update_entry",
+        "clarify",
+        "none"
+      ],
+      "title": "Intent",
+      "type": "string"
+    },
+    "definition_version_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Definition Version Id"
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Id"
+    },
+    "start": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Start"
+    },
+    "end": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "End"
+    },
+    "start_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "end_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/$defs/ExtractedField"
+      },
+      "maxItems": 32,
+      "title": "Fields",
+      "type": "array"
+    },
+    "tracker_draft": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TrackerSetupDraft"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "clarification": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Clarification"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    }
+  },
+  "required": [
+    "schema_version",
+    "intent",
+    "confidence"
+  ],
+  "title": "TrackerExtraction",
+  "type": "object"
+}
