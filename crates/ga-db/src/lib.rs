@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod raw_capture;
 pub mod replay;
 pub mod scenario_packs;
+pub mod share_policy;
 pub mod source_pages;
 pub mod system_definitions;
 pub mod system_metrics;
