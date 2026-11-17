@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "archive_values": [
+    {"name": "unicode_and_numbers", "payload": {"café": ["☕", "é", 9007199254740993, 1.0, -0.0, true, null], "recorded": "2026-10-25T02:30:00+02:00"}},
+    {"name": "missing_metric", "payload": {"at": "2026-10-25T02:30:00+01:00"}},
+    {"name": "zero_metric", "payload": {"at": "2026-10-25T02:30:00+01:00", "value": 0}},
+    {"name": "null_metric", "payload": {"at": "2026-10-25T02:30:00+01:00", "value": null}}
+  ],
+  "diary_event": {
+    "start": "2026-10-25T02:30:00+02:00",
+    "timezone": "Europe/Bratislava",
+    "payload": {"type": "note", "description": "Synthetic café ☕ diary"}
+  },
+  "cli_cases": [
+    {"name": "inventory", "args": ["inventory"]},
+    {"name": "missing_confirmation", "args": ["erase-all"]},
+    {"name": "import_without_preview_confirmation", "args": ["import-file", "apply", "synthetic.csv", "synthetic.json"]}
+  ]
+}
