@@ -110,3 +110,18 @@ fn unsupported_methods_and_unknown_paths_have_python_error_shapes()
     assert_eq!(body, r#"{"detail":"Not Found"}"#);
     Ok(())
 }
+
+#[test]
+fn readiness_reports_unavailable_without_a_database() -> Result<(), Box<dyn std::error::Error>> {
+    let server = Server::start()?;
+    let raw = server.request(
+        "GET",
+        "/health/ready",
+        "Authorization: Bearer synthetic\r\n",
+    )?;
+    let (headers, body) = parts(&raw)?;
+    assert!(headers.starts_with("HTTP/1.1 503 "));
+    assert!(headers.contains("cache-control: no-store"));
+    assert_eq!(body, r#"{"detail":"Database unavailable or not migrated"}"#);
+    Ok(())
+}
