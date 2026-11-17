@@ -1,6 +1,11 @@
+mod queue;
+
+pub use queue::{ReplaySchedule, ScheduleReplay};
+
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
+use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -92,59 +97,76 @@ impl Database {
         verify_owner_in_transaction(&mut txn, selection.authenticated_fingerprint)
             .await
             .map_err(ReplaySelectionError::Owner)?;
-        type SourceRow = (
-            Uuid,
-            String,
-            String,
-            i32,
-            String,
-            String,
-            OffsetDateTime,
-            bool,
-        );
-        let rows = sqlx::query_as::<_, SourceRow>(include_str!("replay/selection.sql"))
-            .bind(selection.target_parser_version)
-            .bind(selection.after)
-            .bind(SCAN_LIMIT)
-            .fetch_all(&mut *txn)
-            .await?;
+        let page = source_page(
+            &mut txn,
+            selection.target_parser_version,
+            selection.after,
+            None,
+        )
+        .await?;
         txn.rollback().await?;
-        let next_after = if rows.len() as i64 == SCAN_LIMIT {
-            rows.last().map(|row| row.0)
-        } else {
-            None
-        };
-        let sources = rows
-            .into_iter()
-            .map(
-                |(
+        Ok(page)
+    }
+}
+
+async fn source_page(
+    txn: &mut Transaction<'_, Postgres>,
+    target: i32,
+    after: Option<Uuid>,
+    ids: Option<&[Uuid]>,
+) -> Result<ReplayPage, ReplaySelectionError> {
+    type SourceRow = (
+        Uuid,
+        String,
+        String,
+        i32,
+        String,
+        String,
+        OffsetDateTime,
+        bool,
+    );
+    let rows = sqlx::query_as::<_, SourceRow>(include_str!("replay/selection.sql"))
+        .bind(target)
+        .bind(after)
+        .bind(SCAN_LIMIT)
+        .bind(ids)
+        .fetch_all(&mut **txn)
+        .await?;
+    let next_after = if rows.len() as i64 == SCAN_LIMIT {
+        rows.last().map(|row| row.0)
+    } else {
+        None
+    };
+    let sources = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                endpoint,
+                source_key,
+                previous_parser_version,
+                status,
+                archive_key,
+                fetched,
+                canonical,
+            )| {
+                Ok(ReplaySource {
                     id,
                     endpoint,
                     source_key,
                     previous_parser_version,
                     status,
                     archive_key,
-                    fetched,
                     canonical,
-                )| {
-                    Ok(ReplaySource {
-                        id,
-                        endpoint,
-                        source_key,
-                        previous_parser_version,
-                        status,
-                        archive_key,
-                        canonical,
-                        fetched_at: fetched
-                            .try_into()
-                            .map_err(|_| ReplaySelectionError::InvalidClock)?,
-                    })
-                },
-            )
-            .collect::<Result<_, ReplaySelectionError>>()?;
-        Ok(ReplayPage {
-            sources,
-            next_after,
-        })
-    }
+                    fetched_at: fetched
+                        .try_into()
+                        .map_err(|_| ReplaySelectionError::InvalidClock)?,
+                })
+            },
+        )
+        .collect::<Result<_, ReplaySelectionError>>()?;
+    Ok(ReplayPage {
+        sources,
+        next_after,
+    })
 }
