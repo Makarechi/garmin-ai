@@ -12,6 +12,7 @@ pub use input::{
     GARMIN_PARSER_VERSION, PreparedReplay, ReadReplayInput, ReplayContent, ReplayInput,
     ReplayInputError, ReplayReplacement, ReplaySkip,
 };
+pub(crate) use input::{authorize_replay, fit_clock, read_input, require_parser};
 pub use queue::{ReplaySchedule, ScheduleReplay};
 pub use status::ReplayStatus;
 pub(crate) use status::{REPLAY_MUTATION_LOCK, projection_pending, replay_status_in};
@@ -132,7 +133,7 @@ async fn source_page(
     select_sources(txn, target, after, ids, false).await
 }
 
-async fn select_sources(
+pub(crate) async fn select_sources(
     txn: &mut Transaction<'_, Postgres>,
     target: i32,
     after: Option<Uuid>,

@@ -73,9 +73,19 @@ impl Database {
         source: impl Read + Seek + Send + 'static,
         limits: ExportLimits,
     ) -> Result<StagedFitProjection, FitStageError> {
+        self.stage_fit_projection_cancellable(source, limits, || false)
+            .await
+    }
+
+    pub(crate) async fn stage_fit_projection_cancellable(
+        &self,
+        source: impl Read + Seek + Send + 'static,
+        limits: ExportLimits,
+        cancelled: impl Fn() -> bool + Send + 'static,
+    ) -> Result<StagedFitProjection, FitStageError> {
         timeout(
             limits.max_duration,
-            self.stage_fit_within_budget(source, limits),
+            self.stage_fit_within_budget(source, limits, cancelled),
         )
         .await
         .map_err(|_| FitStageError::DeadlineExceeded)?
@@ -85,6 +95,7 @@ impl Database {
         &self,
         source: impl Read + Seek + Send + 'static,
         limits: ExportLimits,
+        cancelled: impl Fn() -> bool + Send + 'static,
     ) -> Result<StagedFitProjection, FitStageError> {
         let mut transaction = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
@@ -113,7 +124,7 @@ impl Database {
             .await?;
         copy.send(COPY_START).await?;
         let (sender, mut rows) = mpsc::channel::<Vec<u8>>(1);
-        let decoder = task::spawn_blocking(move || stream_copy(source, limits, &sender));
+        let decoder = task::spawn_blocking(move || stream_copy(source, limits, &sender, cancelled));
         while let Some(batch) = rows.recv().await {
             if copy.send(batch).await.is_err() {
                 rows.close();
@@ -149,6 +160,7 @@ fn stream_copy(
     source: impl Read + Seek,
     limits: ExportLimits,
     sender: &mpsc::Sender<Vec<u8>>,
+    cancelled: impl Fn() -> bool,
 ) -> Result<ExportProjectionInventory, FitError> {
     let mut batch = CopyBatch {
         sender,
@@ -158,7 +170,7 @@ fn stream_copy(
     let inventory = visit_activity_projection(
         source,
         limits,
-        || sender.is_closed(),
+        || sender.is_closed() || cancelled(),
         |row| batch.append(row),
     )?;
     batch.flush()?;

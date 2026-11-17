@@ -14,7 +14,7 @@ use super::{ReplayInputError, ReplayReplacement, ReplaySource};
 const MAX_APPLICATIONS: usize = 1000;
 const MAX_INTERVAL_MICROSECONDS: i64 = 31 * 24 * 60 * 60 * 1_000_000;
 
-pub(super) async fn fit_clock(
+pub(crate) async fn fit_clock(
     txn: &mut Transaction<'_, Postgres>,
     raw: &ReplaySource,
 ) -> Result<StoredInstant, ReplayInputError> {

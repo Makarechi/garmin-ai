@@ -1,5 +1,6 @@
 mod historical;
 
+pub(crate) use historical::fit_clock;
 pub(super) use historical::legacy_application_order_unknown;
 
 use std::{
@@ -133,7 +134,7 @@ impl Database {
     }
 }
 
-pub(super) fn require_parser(target: i32) -> Result<(), ReplayInputError> {
+pub(crate) fn require_parser(target: i32) -> Result<(), ReplayInputError> {
     match target.cmp(&GARMIN_PARSER_VERSION) {
         std::cmp::Ordering::Greater => Err(ReplayInputError::NewerParserRequired),
         std::cmp::Ordering::Less => Err(ReplayInputError::MatchingParserRequired),
@@ -141,7 +142,7 @@ pub(super) fn require_parser(target: i32) -> Result<(), ReplayInputError> {
     }
 }
 
-pub(super) async fn authorize_replay(
+pub(crate) async fn authorize_replay(
     txn: &mut Transaction<'_, Postgres>,
     authenticated_fingerprint: &str,
 ) -> Result<(), ReplayInputError> {
@@ -159,7 +160,7 @@ pub(super) async fn authorize_replay(
     Ok(())
 }
 
-pub(super) async fn read_input(
+pub(crate) async fn read_input(
     txn: &mut Transaction<'_, Postgres>,
     request: ReadReplayInput<'_>,
     archive: Arc<Archive>,
