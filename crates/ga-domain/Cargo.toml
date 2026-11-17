@@ -14,7 +14,7 @@ serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order
 speedate = "=0.17.0"
 sha2 = { version = "0.11.1", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
-uuid = { version = "1.29.3", default-features = false }
+uuid = { version = "1.29.3", default-features = false, features = ["v4"] }
 zmij = "1.0.23"
 jsonschema = { version = "0.61.2", default-features = false, features = ["arbitrary-precision"] }
 

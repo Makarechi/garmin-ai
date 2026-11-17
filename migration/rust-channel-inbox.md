@@ -1,0 +1,7 @@
+# Native channel inbox
+
+Authenticated adapters can submit the neutral inbound message envelope to the existing inbox. Channel and instance form the namespace for opaque event and message identifiers. Rust stores the conversation and inbox row in one transaction using the same database write lock as Python. Repeated delivery keeps the first stored envelope and returns its operation. A newer edit refers to the previous revision and shares that operation. An action uses the operation supplied by the channel adapter.
+
+The comparison runs the pinned Python envelope model and inbox implementation on a disposable database, then submits the same synthetic cases to native Rust. The 22 cases cover message validation, attachments, replies, action references, opaque identifiers, timestamp offsets, duplicate delivery, edits and the 100,000-character text boundary. Both implementations produce seven messages with matching stored content and operation relationships. Native storage also rejects duplicates and edits targeting a different conversation in the same channel instance. It leaves no orphan conversation after these rejections or an injected write failure. Linux ARM64 used 13,799,424 bytes in a 32 MiB container with no swap.
+
+The envelope accepts up to 2 MiB of JSON and revisions that fit the existing database column. The caller authenticates the sender and establishes the owner binding. Inbox consumption, action token verification and provider delivery have their own entry points and are outside this storage change.
