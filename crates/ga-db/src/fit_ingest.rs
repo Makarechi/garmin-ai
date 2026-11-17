@@ -1,3 +1,7 @@
+mod fit_replay;
+
+pub use fit_replay::{FitReplayError, FitReplayOutcome};
+
 use std::{
     error::Error,
     fmt,
@@ -515,6 +519,7 @@ struct LockedFit {
     source_status: String,
     source_parser: i32,
     activity_is_current: bool,
+    activity_parsed_archive: bool,
 }
 
 impl LockedFit {
@@ -528,10 +533,17 @@ impl LockedFit {
         if let Some(lease) = lease {
             lease.check_live(txn).await?;
         }
+        Self::load(txn, capture).await
+    }
+
+    async fn load(
+        txn: &mut Transaction<'_, Postgres>,
+        capture: &CapturedFit,
+    ) -> Result<Self, FitIngestError> {
+        let scope = capture.state_key();
         let archive_key = capture.key.to_string();
-        let activity_is_current = sqlx::query_scalar::<_, bool>(
-            "SELECT fit_key IS NOT DISTINCT FROM $2
-                  AND details->>'parsed_fit_key' IS NOT DISTINCT FROM $2
+        let (activity_fit_key, activity_parsed_archive) = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT fit_key IS NOT DISTINCT FROM $2, details->>'parsed_fit_key' IS NOT DISTINCT FROM $2
              FROM activities WHERE id = $1 FOR UPDATE",
         )
         .bind(&capture.activity)
@@ -567,7 +579,8 @@ impl LockedFit {
             state,
             source_status,
             source_parser,
-            activity_is_current,
+            activity_is_current: activity_fit_key && activity_parsed_archive,
+            activity_parsed_archive,
         })
     }
 
@@ -576,8 +589,12 @@ impl LockedFit {
         txn: &mut Transaction<'_, Postgres>,
         capture: &CapturedFit,
     ) -> Result<Option<FitIngestOutcome>, FitIngestError> {
-        let requested = self
-            .state
+        self.short_circuit_with(txn, capture, ReplayWatermark::default())
+            .await
+    }
+
+    fn latest_requested(&self) -> Result<Option<StoredInstant>, FitIngestError> {
+        self.state
             .get("latest_attempt")
             .and_then(|attempt| attempt.get("requested_at"))
             .filter(|value| !value.is_null())
@@ -585,8 +602,7 @@ impl LockedFit {
                 self.state
                     .get("requested_at")
                     .filter(|value| !value.is_null())
-            });
-        let requested = requested
+            })
             .map(|value| {
                 value
                     .as_str()
@@ -594,8 +610,21 @@ impl LockedFit {
                     .parse::<StoredInstant>()
                     .map_err(|_| FitIngestError::InvalidRecordedState)
             })
-            .transpose()?;
-        if requested.is_some_and(|latest| capture.requested_at < latest) {
+            .transpose()
+    }
+
+    async fn short_circuit_with(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        capture: &CapturedFit,
+        mode: ReplayWatermark,
+    ) -> Result<Option<FitIngestOutcome>, FitIngestError> {
+        if self
+            .latest_requested()?
+            .is_some_and(|latest| capture.requested_at < latest)
+            && !mode.preserve_attempt
+            && !mode.retained
+        {
             if self.source_status == "pending" {
                 update_raw(txn, capture.id, "stale", self.source_parser).await?;
             }
@@ -605,12 +634,12 @@ impl LockedFit {
             && self.source_parser == PARSER_VERSION
             && self.source_status == "normalized"
         {
-            self.record_success(txn, capture).await?;
+            self.record_success_with(txn, capture, mode).await?;
             return Ok(Some(FitIngestOutcome::Unchanged));
         }
         if capture.bytes == 0 {
             update_raw(txn, capture.id, "empty", PARSER_VERSION).await?;
-            self.record_success(txn, capture).await?;
+            self.record_success_with(txn, capture, mode).await?;
             return Ok(Some(FitIngestOutcome::Empty));
         }
         Ok(None)
@@ -621,29 +650,53 @@ impl LockedFit {
         txn: &mut Transaction<'_, Postgres>,
         capture: &CapturedFit,
     ) -> Result<(), FitIngestError> {
-        if self.source_parser != PARSER_VERSION
+        self.record_success_with(txn, capture, ReplayWatermark::default())
+            .await
+    }
+
+    async fn record_success_with(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        capture: &CapturedFit,
+        mode: ReplayWatermark,
+    ) -> Result<(), FitIngestError> {
+        if !mode.replay
+            && self.source_parser != PARSER_VERSION
             && (self.source_parser > 0 || matches!(self.source_status.as_str(), "error" | "stale"))
         {
             invalidate_replay_outputs(txn).await?;
         }
-        put_state(
-            txn,
-            &capture.state_key(),
-            &json!({
-                "requested_at": capture.requested_at.to_string(),
-                "source_ref": capture.id.to_string(),
-            }),
-        )
-        .await?;
+        if !mode.preserve_attempt && !mode.retained {
+            put_state(
+                txn,
+                &capture.state_key(),
+                &json!({
+                    "requested_at": capture.requested_at.to_string(),
+                    "source_ref": capture.id.to_string(),
+                }),
+            )
+            .await?;
+        }
         put_state(txn, &capture.metadata_key(), &json!({})).await?;
         Ok(())
     }
 
     async fn record_error(
+        self,
+        txn: &mut Transaction<'_, Postgres>,
+        capture: &CapturedFit,
+        reason: &'static str,
+    ) -> Result<FitIngestOutcome, FitIngestError> {
+        self.record_error_with(txn, capture, reason, ReplayWatermark::default())
+            .await
+    }
+
+    async fn record_error_with(
         mut self,
         txn: &mut Transaction<'_, Postgres>,
         capture: &CapturedFit,
         reason: &'static str,
+        mode: ReplayWatermark,
     ) -> Result<FitIngestOutcome, FitIngestError> {
         update_raw(txn, capture.id, "error", self.source_parser).await?;
         put_state(
@@ -652,14 +705,16 @@ impl LockedFit {
             &json!({"failed_parser_version": PARSER_VERSION}),
         )
         .await?;
-        self.state.insert(
-            "latest_attempt".to_owned(),
-            json!({
-                "source_ref": capture.id.to_string(),
-                "requested_at": capture.requested_at.to_string(),
-                "parser_version": PARSER_VERSION,
-            }),
-        );
+        if !mode.preserve_attempt && !mode.retained {
+            self.state.insert(
+                "latest_attempt".to_owned(),
+                json!({
+                    "source_ref": capture.id.to_string(),
+                    "requested_at": capture.requested_at.to_string(),
+                    "parser_version": PARSER_VERSION,
+                }),
+            );
+        }
         put_state(txn, &capture.state_key(), &Value::Object(self.state)).await?;
         sqlx::query(
             "UPDATE activities SET details = details || jsonb_build_object(
@@ -674,6 +729,13 @@ impl LockedFit {
         .await?;
         Ok(FitIngestOutcome::Error { reason })
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReplayWatermark {
+    replay: bool,
+    preserve_attempt: bool,
+    retained: bool,
 }
 
 async fn update_raw(
