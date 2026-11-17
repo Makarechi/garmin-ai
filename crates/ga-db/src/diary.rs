@@ -1,3 +1,8 @@
+pub mod custom_registry;
+pub use custom_registry::{
+    ActivatedCustomDefinition, CustomRegistryError, ManageCustomDefinition, StoredCustomDefinition,
+};
+
 mod metrics;
 mod revisions;
 mod undo;
