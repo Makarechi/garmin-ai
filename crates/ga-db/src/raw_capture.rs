@@ -226,7 +226,7 @@ async fn insert_source(
     })
 }
 
-fn required_packs(endpoint: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn required_packs(endpoint: &str) -> Option<&'static [&'static str]> {
     match endpoint {
         "daily" => Some(&["training", "wellbeing"]),
         "heart_rate"
