@@ -5,9 +5,11 @@ pub use custom_registry::{
 };
 
 mod metrics;
+mod reads;
 mod revisions;
 mod undo;
 
+pub use reads::DiaryReadError;
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 
@@ -402,28 +404,44 @@ fn relation_id(value: &Value) -> Result<Uuid, DiaryWriteError> {
         .ok_or(DiaryWriteError::InvalidRelation)
 }
 
+type EventSnapshotRow = (
+    String,
+    OffsetDateTime,
+    Option<OffsetDateTime>,
+    OffsetDateTime,
+    OffsetDateTime,
+    OffsetDateTime,
+    OffsetDateTime,
+);
+
 async fn load_event(
     txn: &mut Transaction<'_, Postgres>,
     id: Uuid,
     reused: bool,
 ) -> Result<StoredSystemEvent, DiaryWriteError> {
-    type Row = (
-        i32,
-        String,
-        OffsetDateTime,
-        Option<OffsetDateTime>,
-        OffsetDateTime,
-        OffsetDateTime,
-        OffsetDateTime,
-        OffsetDateTime,
-    );
-    let (revision, document, start, end, created, updated, recorded, ingested) = sqlx::query_as::<_, Row>(
-        "SELECT revision, to_jsonb(events)::text, start, \"end\", created_at, updated_at, recorded_at, ingested_at
+    let row = sqlx::query_as::<_, EventSnapshotRow>(
+        "SELECT to_jsonb(events)::text, start, \"end\", created_at, updated_at, recorded_at, ingested_at
          FROM events WHERE id = $1",
     )
     .bind(id)
     .fetch_one(&mut **txn)
     .await?;
+    let snapshot = event_snapshot(row)?;
+    let revision = snapshot["revision"]
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or(DiaryWriteError::InvalidRecordedState)?;
+    Ok(StoredSystemEvent {
+        id,
+        revision,
+        reused,
+        snapshot,
+    })
+}
+
+fn event_snapshot(
+    (document, start, end, created, updated, recorded, ingested): EventSnapshotRow,
+) -> Result<Value, DiaryWriteError> {
     let mut snapshot: Value =
         serde_json::from_str(&document).map_err(|_| DiaryWriteError::InvalidRecordedState)?;
     let object = snapshot
@@ -443,12 +461,7 @@ async fn load_event(
             .map(|value| value.to_string());
         object.insert(name.to_owned(), json!(value));
     }
-    Ok(StoredSystemEvent {
-        id,
-        revision,
-        reused,
-        snapshot,
-    })
+    Ok(snapshot)
 }
 
 fn stored_instant(value: OffsetDateTime) -> Result<StoredInstant, DiaryWriteError> {
