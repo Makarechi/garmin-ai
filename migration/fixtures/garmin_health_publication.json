@@ -31,5 +31,13 @@
   {
     "endpoint": "readiness", "second": 7, "status": "normalized",
     "payload": [{"score": 57, "recoveryTime": 25, "timestamp": "2026-10-25 02:30:00"}, {"score": 68, "recoveryTimeChangePhrase": "REACHED_ZERO", "timestamp": "2026-10-25T02:30:00+01:00"}]
+  },
+  {
+    "endpoint": "heart_rate", "day": "2026-10-25", "second": 10, "status": "normalized",
+    "payload": {"heartRateValues": [[1792888380000, 82]]}
+  },
+  {
+    "endpoint": "heart_rate", "day": "2026-10-24", "second": 8, "status": "normalized",
+    "payload": {"heartRateValues": [[1792888380000, 39]]}
   }
 ]

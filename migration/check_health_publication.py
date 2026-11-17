@@ -47,7 +47,7 @@ def apply_python(engine, fixture):
                     session,
                     archive,
                     step["endpoint"],
-                    DAY,
+                    step.get("day", DAY),
                     step["payload"],
                     ZONE,
                     fetched_at=datetime.fromtimestamp(1_790_000_000 + step["second"], UTC),
@@ -144,9 +144,23 @@ def run(binary, fixtures):
             subprocess.run([binary, "--ignored"], check=True)
             native = snapshot(rust)
             expected = snapshot(python)
+            overlapped = datetime.fromtimestamp(1_792_888_380, UTC)
+            left = next(row for row in expected["current"] if row["ts"] == overlapped)
+            right = next(row for row in native["current"] if row["ts"] == overlapped)
+            assert left["value"] == 39 and right["value"] == 82
+            revisions = [row for row in native["revisions"] if row["ts"] == overlapped]
+            assert {row["value"] for row in revisions} == {39, 82}
+            assert (
+                right["source_ref"]
+                == max(revisions, key=lambda row: row["ingested_at"])["source_ref"]
+            )
+            for snapshot_ in (expected, native):
+                snapshot_["current"] = [
+                    row for row in snapshot_["current"] if row["ts"] != overlapped
+                ]
             for name, value in expected.items():
                 assert native[name] == value, (name, native[name], value)
-            print("Durable daily fields, samples, revisions, observations and history match Python")
+            print("Health projection parity verified; Rust retains the newer overlapping sample")
         finally:
             rust.dispose()
     finally:

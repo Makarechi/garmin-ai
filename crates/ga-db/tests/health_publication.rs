@@ -50,6 +50,7 @@ async fn publishes_health_data_and_retains_history_atomically() -> Result<(), Bo
         let endpoint = step["endpoint"]
             .as_str()
             .ok_or("Missing synthetic endpoint")?;
+        let day = step["day"].as_str().unwrap_or(DAY);
         let second = step["second"].as_i64().ok_or("Missing synthetic clock")?;
         let fetched =
             StoredInstant::from_unix_microseconds(1_790_000_000_000_000 + second * 1_000_000)?;
@@ -62,7 +63,7 @@ async fn publishes_health_data_and_retains_history_atomically() -> Result<(), Bo
                 LegacyCapture {
                     authenticated_fingerprint: &account,
                     endpoint,
-                    source_key: DAY,
+                    source_key: day,
                     fetched_at: fetched,
                     body: serde_json::to_vec(&step["payload"])?,
                 },
@@ -77,7 +78,7 @@ async fn publishes_health_data_and_retains_history_atomically() -> Result<(), Bo
             .apply_health_payload(ApplyHealthPayload {
                 account_fingerprint: &account,
                 endpoint,
-                calendar_key: DAY,
+                calendar_key: day,
                 source_id: receipt.id,
                 requested_at: fetched,
                 timezone: "Europe/Bratislava",
@@ -113,5 +114,16 @@ async fn publishes_health_data_and_retains_history_atomically() -> Result<(), Bo
                 .await?;
         }
     }
+    let (current, newest): (f64, bool) = sqlx::query_as(
+        "SELECT measurement.value, measurement.source_ref = revision.source_ref
+         FROM measurements AS measurement
+         JOIN measurement_revisions AS revision ON revision.ts=measurement.ts
+           AND revision.metric=measurement.metric AND revision.source=measurement.source
+         WHERE measurement.ts=to_timestamp(1792888380) AND measurement.metric='heart_rate_bpm'
+           AND revision.value=82",
+    )
+    .fetch_one(&inspect)
+    .await?;
+    assert_eq!((current, newest), (82.0, true));
     Ok(())
 }

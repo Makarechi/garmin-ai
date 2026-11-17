@@ -46,9 +46,14 @@ pub(super) async fn publish_measurements(
              ), current_candidates AS (
                 SELECT DISTINCT ON (ts, metric) * FROM received
                 ORDER BY ts, metric, ordinal DESC
+             ), publishable AS MATERIALIZED (
+                SELECT candidate.* FROM current_candidates AS candidate
+                LEFT JOIN measurements AS current ON current.ts = candidate.ts
+                    AND current.metric = candidate.metric AND current.source = $3
+                WHERE current.ingested_at IS NULL OR current.ingested_at <= $5
              ), removed_owner AS (
-                DELETE FROM app_state USING current_candidates
-                WHERE app_state.key = current_candidates.ownership
+                DELETE FROM app_state USING publishable
+                WHERE app_state.key = publishable.ownership
              ), recorded AS (
                 INSERT INTO measurement_revisions (id, ts, metric, source, local_date, value, unit,
                     metric_definition_version_id, source_ref, quality, details, ingested_at, deleted)
@@ -59,12 +64,13 @@ pub(super) async fn publish_measurements(
                 INSERT INTO measurements (ts, metric, source, local_date, value, unit,
                     metric_definition_version_id, source_ref, quality, details, ingested_at)
                 SELECT ts, metric, $3, calendar_day, value, unit, version, $4, 'observed', '{}'::jsonb, $5
-                FROM current_candidates
+                FROM publishable
                 ON CONFLICT (ts, metric, source) DO UPDATE
                 SET local_date = excluded.local_date, value = excluded.value, unit = excluded.unit,
                     metric_definition_version_id = excluded.metric_definition_version_id,
                     source_ref = excluded.source_ref, ingested_at = excluded.ingested_at
-                WHERE (measurements.local_date, measurements.value, measurements.unit,
+                WHERE measurements.ingested_at <= excluded.ingested_at
+                  AND (measurements.local_date, measurements.value, measurements.unit,
                     measurements.metric_definition_version_id, measurements.source_ref, measurements.ingested_at)
                   IS DISTINCT FROM (excluded.local_date, excluded.value, excluded.unit,
                     excluded.metric_definition_version_id, excluded.source_ref, excluded.ingested_at)
@@ -74,7 +80,8 @@ pub(super) async fn publish_measurements(
                 SELECT 1 FROM received AS candidate
                 LEFT JOIN measurements AS previous ON previous.ts = candidate.ts
                     AND previous.metric = candidate.metric AND previous.source = $3
-                WHERE (previous.local_date, previous.value, previous.unit, previous.metric_definition_version_id)
+                WHERE (previous.ingested_at IS NULL OR previous.ingested_at <= $5)
+                  AND (previous.local_date, previous.value, previous.unit, previous.metric_definition_version_id)
                   IS DISTINCT FROM (candidate.calendar_day, candidate.value, candidate.unit, candidate.version)
              )",
         )
