@@ -219,7 +219,8 @@ fn digits(value: &str) -> bool {
             .all(|character| decimal_value(character).is_some())
 }
 
-pub(crate) fn decimal_value(character: char) -> Option<u8> {
+/// Return the pinned Unicode decimal value of a character.
+pub fn decimal_value(character: char) -> Option<u8> {
     let codepoint = u32::from(character);
     let ranges = unicode_decimal::DECIMAL_RANGES;
     let index = ranges.partition_point(|&(_, last)| last < codepoint);
