@@ -1,4 +1,5 @@
 mod status;
+pub(crate) use status::history_status_in;
 
 use std::{collections::BTreeMap, error::Error, fmt};
 

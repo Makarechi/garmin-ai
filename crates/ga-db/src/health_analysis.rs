@@ -24,6 +24,8 @@ use crate::{
     replay::{REPLAY_MUTATION_LOCK, projection_pending},
 };
 
+mod freshness_report;
+
 const MAX_RANGE_DAYS: i64 = 3660;
 
 #[derive(Clone, Copy, Debug)]

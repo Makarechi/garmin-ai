@@ -3,6 +3,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde_json::{Map, Value, json};
+use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -34,58 +35,75 @@ impl Database {
         timezone: &str,
         endpoints: &Map<String, Value>,
     ) -> Result<Value, HealthAnalysisError> {
-        let today =
-            source_calendar_date(at, timezone).ok_or(HealthAnalysisError::InvalidTimezone)?;
-        let midnight =
-            local_midnight(today, timezone).ok_or(HealthAnalysisError::InvalidTimezone)?;
+        let (today, midnight) = freshness_day(at, timezone)?;
         let mut txn = begin_verified_analysis(&self.work).await?;
-        let intraday = sqlx::query_as::<_, Intraday>(include_str!("freshness/intraday.sql"))
-            .bind(OffsetDateTime::from(at))
-            .bind(OffsetDateTime::from(midnight))
-            .bind(serde_json::to_string(endpoints).map_err(|_| HealthAnalysisError::Database)?)
-            .fetch_all(&mut *txn)
-            .await?;
-        let daily = sqlx::query_as::<_, Daily>(include_str!("freshness/daily.sql"))
-            .bind(today)
-            .fetch_all(&mut *txn)
-            .await?;
+        let channels = observation_freshness_in(&mut txn, at, today, midnight, endpoints).await?;
         txn.commit().await?;
-
-        let mut channels = Map::new();
-        for row in intraday {
-            let endpoint = endpoints.get(&row.1).unwrap_or(&Value::Null);
-            let (metric, channel) = intraday_document(row, at, midnight, endpoint)?;
-            channels.insert(metric, channel);
-        }
-        for (metric, endpoint, max_age, day, source_ref) in daily {
-            let age = day.map(|day| (today - day).whole_days());
-            let recent = age.is_some_and(|age| age <= i64::from(max_age));
-            let quality = if recent {
-                "recent_daily_summary"
-            } else if day.is_some() {
-                "unknown"
-            } else {
-                "not_synced"
-            };
-            channels.insert(
-                metric,
-                json!({
-                    "endpoint": endpoint,
-                    "semantics": "daily_summary",
-                    "source_calendar_date": day.map(|day| day.to_string()),
-                    "age_calendar_days": age,
-                    "newest_observed_at": null,
-                    "observation_lag_seconds": null,
-                    "coverage_ratio": null,
-                    "quality_reason": quality,
-                    "usable_for_current_state": false,
-                    "usable_as_daily_summary": recent,
-                    "source_ref": source_ref,
-                }),
-            );
-        }
-        Ok(Value::Object(channels))
+        Ok(channels)
     }
+}
+
+pub(super) fn freshness_day(
+    at: StoredInstant,
+    timezone: &str,
+) -> Result<(Date, StoredInstant), HealthAnalysisError> {
+    let today = source_calendar_date(at, timezone).ok_or(HealthAnalysisError::InvalidTimezone)?;
+    let midnight = local_midnight(today, timezone).ok_or(HealthAnalysisError::InvalidTimezone)?;
+    Ok((today, midnight))
+}
+
+pub(super) async fn observation_freshness_in(
+    txn: &mut Transaction<'_, Postgres>,
+    at: StoredInstant,
+    today: Date,
+    midnight: StoredInstant,
+    endpoints: &Map<String, Value>,
+) -> Result<Value, HealthAnalysisError> {
+    let intraday = sqlx::query_as::<_, Intraday>(include_str!("freshness/intraday.sql"))
+        .bind(OffsetDateTime::from(at))
+        .bind(OffsetDateTime::from(midnight))
+        .bind(serde_json::to_string(endpoints).map_err(|_| HealthAnalysisError::Database)?)
+        .fetch_all(&mut **txn)
+        .await?;
+    let daily = sqlx::query_as::<_, Daily>(include_str!("freshness/daily.sql"))
+        .bind(today)
+        .fetch_all(&mut **txn)
+        .await?;
+
+    let mut channels = Map::new();
+    for row in intraday {
+        let endpoint = endpoints.get(&row.1).unwrap_or(&Value::Null);
+        let (metric, channel) = intraday_document(row, at, midnight, endpoint)?;
+        channels.insert(metric, channel);
+    }
+    for (metric, endpoint, max_age, day, source_ref) in daily {
+        let age = day.map(|day| (today - day).whole_days());
+        let recent = age.is_some_and(|age| age <= i64::from(max_age));
+        let quality = if recent {
+            "recent_daily_summary"
+        } else if day.is_some() {
+            "unknown"
+        } else {
+            "not_synced"
+        };
+        channels.insert(
+            metric,
+            json!({
+                "endpoint": endpoint,
+                "semantics": "daily_summary",
+                "source_calendar_date": day.map(|day| day.to_string()),
+                "age_calendar_days": age,
+                "newest_observed_at": null,
+                "observation_lag_seconds": null,
+                "coverage_ratio": null,
+                "quality_reason": quality,
+                "usable_for_current_state": false,
+                "usable_as_daily_summary": recent,
+                "source_ref": source_ref,
+            }),
+        );
+    }
+    Ok(Value::Object(channels))
 }
 
 fn intraday_document(
@@ -162,7 +180,9 @@ fn intraday_document(
     ))
 }
 
-fn timestamp(time: Option<OffsetDateTime>) -> Result<Option<StoredInstant>, HealthAnalysisError> {
+pub(super) fn timestamp(
+    time: Option<OffsetDateTime>,
+) -> Result<Option<StoredInstant>, HealthAnalysisError> {
     time.map(StoredInstant::try_from)
         .transpose()
         .map_err(|_| HealthAnalysisError::Database)
