@@ -1,0 +1,390 @@
+mod metrics;
+
+use std::{error::Error, fmt};
+
+use ga_domain::{
+    event_input::{EventInput, InvalidEvent},
+    event_provenance::InvalidClockUncertainty,
+    event_replay::{ReplayConflict, check_idempotency_key},
+    timestamp::StoredInstant,
+};
+use serde_json::{Value, json};
+use sqlx::{Postgres, Transaction};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{
+    Database, ReadinessError, check_readiness,
+    system_definitions::{DefinitionStoreError, ensure_system_definition_in},
+};
+
+const MUTATION_LOCK: i64 = 72104619;
+
+pub struct CreateSystemEvent<'a> {
+    pub owner_id: Uuid,
+    pub authenticated_actor: &'a str,
+    pub report: &'a EventInput,
+    pub idempotency_key: Option<&'a str>,
+    pub operation_id: Option<Uuid>,
+    pub clock_uncertainty_seconds: Option<u32>,
+}
+
+pub struct StoredSystemEvent {
+    pub id: Uuid,
+    pub revision: i32,
+    pub reused: bool,
+    pub snapshot: Value,
+}
+
+#[derive(Debug)]
+pub enum DiaryWriteError {
+    Storage(ReadinessError),
+    UnknownOwner,
+    Input(InvalidEvent),
+    TrackingDisabled,
+    InvalidRelation,
+    InvalidMetricMapping,
+    InvalidRecordedState,
+    Busy,
+    Clock(InvalidClockUncertainty),
+    Replay(ReplayConflict),
+    Definition(DefinitionStoreError),
+    Database,
+}
+
+impl fmt::Display for DiaryWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Storage(_) => "Diary storage is unavailable",
+            Self::UnknownOwner => "Diary owner could not be verified",
+            Self::Input(error) => return error.fmt(formatter),
+            Self::TrackingDisabled => "The scenario pack is disabled",
+            Self::InvalidRelation => "Diary report references an unavailable or incompatible entry",
+            Self::InvalidMetricMapping => "Diary metric is outside its recorded contract",
+            Self::InvalidRecordedState => "Recorded diary entry could not be interpreted",
+            Self::Busy => "Diary writes are busy",
+            Self::Clock(error) => return error.fmt(formatter),
+            Self::Replay(error) => return error.fmt(formatter),
+            Self::Definition(_) => "System diary definition is unavailable",
+            Self::Database => "Diary write failed",
+        })
+    }
+}
+
+impl Error for DiaryWriteError {}
+
+impl From<sqlx::Error> for DiaryWriteError {
+    fn from(_: sqlx::Error) -> Self {
+        Self::Database
+    }
+}
+
+impl Database {
+    /// Create a validated built-in report and its audit and metric facts together.
+    pub async fn create_system_event(
+        &self,
+        request: CreateSystemEvent<'_>,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        request
+            .report
+            .validate_for_write()
+            .map_err(DiaryWriteError::Input)?;
+        let mut txn = self.begin_diary_write(request.owner_id).await?;
+        if let Some(key) = request.idempotency_key {
+            check_idempotency_key(key).map_err(DiaryWriteError::Replay)?;
+            if let Some(existing) = existing_replay(&mut txn, key, request.report).await? {
+                txn.commit().await?;
+                return Ok(existing);
+            }
+        }
+
+        let report = request.report;
+        let kind = report.payload().kind();
+        check_pack(
+            &mut txn,
+            request.owner_id,
+            kind,
+            request.authenticated_actor.starts_with("wearable:"),
+        )
+        .await?;
+        let version = ensure_system_definition_in(&mut txn, kind)
+            .await
+            .map_err(DiaryWriteError::Definition)?;
+        validation_relation(&mut txn, report).await?;
+        let now: OffsetDateTime = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *txn)
+            .await?;
+        let clock = stored_instant(now)?;
+        let provenance = report
+            .provenance(
+                Some(request.authenticated_actor),
+                version.topology,
+                clock,
+                request.clock_uncertainty_seconds,
+            )
+            .map_err(DiaryWriteError::Clock)?;
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO events (id, definition_version_id, kind, start, \"end\", timezone,
+                 source, confidence, status, original_text, payload, topology, envelope_version,
+                 time_precision, clock_uncertainty_seconds, assertion_kind, producer, transport,
+                 author, evidence_refs, validation_status, recorded_at, ingested_at,
+                 revision, deleted, idempotency_key)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, 1,
+                 $13, $14, $15, $16, $17, $18, '[]'::jsonb, $19, $20, $20, 1, false, $21)",
+        )
+        .bind(id)
+        .bind(version.id)
+        .bind(kind)
+        .bind(OffsetDateTime::from(report.start()))
+        .bind(report.end().map(OffsetDateTime::from))
+        .bind(report.timezone())
+        .bind(report.source().label())
+        .bind(report.confidence())
+        .bind(report.status().label())
+        .bind(report.original_text())
+        .bind(report.payload().json().to_string())
+        .bind(provenance.topology.label())
+        .bind(provenance.time_precision)
+        .bind(
+            provenance
+                .clock_uncertainty_seconds
+                .map(|value| value as i32),
+        )
+        .bind(provenance.assertion_kind)
+        .bind(provenance.producer)
+        .bind(provenance.transport)
+        .bind(provenance.author)
+        .bind(provenance.validation_status)
+        .bind(now)
+        .bind(request.idempotency_key)
+        .execute(&mut *txn)
+        .await?;
+        let written = load_event(&mut txn, id, false).await?;
+        invalidate_migraine_insights(&mut txn, kind).await?;
+        sqlx::query(
+            "INSERT INTO audit_log (event_id, action, before, after, actor, operation_id, created_at)
+             VALUES ($1, 'create', NULL, $2::jsonb, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(written.snapshot.to_string())
+        .bind(request.authenticated_actor)
+        .bind(request.operation_id)
+        .bind(now)
+        .execute(&mut *txn)
+        .await?;
+        metrics::project_creation(&mut txn, id, version.id, report, now).await?;
+        txn.commit().await?;
+        Ok(written)
+    }
+
+    async fn begin_diary_write(
+        &self,
+        owner: Uuid,
+    ) -> Result<Transaction<'static, Postgres>, DiaryWriteError> {
+        let mut txn = self.work.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(DiaryWriteError::Storage)?;
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(MUTATION_LOCK)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !locked {
+            return Err(DiaryWriteError::Busy);
+        }
+        let matches: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM people WHERE id = $1)")
+                .bind(owner)
+                .fetch_one(&mut *txn)
+                .await?;
+        if !matches {
+            return Err(DiaryWriteError::UnknownOwner);
+        }
+        Ok(txn)
+    }
+}
+
+async fn existing_replay(
+    txn: &mut Transaction<'_, Postgres>,
+    key: &str,
+    report: &EventInput,
+) -> Result<Option<StoredSystemEvent>, DiaryWriteError> {
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM events WHERE idempotency_key = $1")
+        .bind(key)
+        .fetch_optional(&mut **txn)
+        .await?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let after = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT after::text FROM audit_log WHERE event_id = $1 AND action = 'create' ORDER BY id LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **txn)
+    .await?
+    .flatten()
+    .map(|data| serde_json::from_str::<Value>(&data))
+    .transpose()
+    .map_err(|_| DiaryWriteError::Replay(ReplayConflict::AuditUnavailable))?;
+    report
+        .verify_creation_replay(after.as_ref())
+        .map_err(DiaryWriteError::Replay)?;
+    Ok(Some(load_event(txn, id, true).await?))
+}
+
+async fn check_pack(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    kind: &str,
+    collection: bool,
+) -> Result<(), DiaryWriteError> {
+    let pack = match kind {
+        "caffeine" | "caffeine_absence" | "caffeine_log_complete" => "caffeine",
+        "migraine" | "medication" | "headache_observation" | "symptom_observation" => "migraine",
+        "wellbeing_observation" => "wellbeing",
+        "activity_effort" => "training",
+        "nap" => "sleep",
+        _ => "general_diary",
+    };
+    let admitted: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM module_configs WHERE owner_id = $1)
+             OR EXISTS (SELECT 1 FROM module_configs WHERE owner_id = $1 AND pack_key = $2
+                 AND CASE WHEN $3 THEN collection_enabled ELSE tracking_enabled END)",
+    )
+    .bind(owner)
+    .bind(pack)
+    .bind(collection)
+    .fetch_one(&mut **txn)
+    .await?;
+    if !admitted {
+        return Err(DiaryWriteError::TrackingDisabled);
+    }
+    Ok(())
+}
+
+async fn validation_relation(
+    txn: &mut Transaction<'_, Postgres>,
+    report: &EventInput,
+) -> Result<(), DiaryWriteError> {
+    let payload = report.payload().json();
+    let valid = match report.payload().kind() {
+        "activity_effort" => {
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM activities WHERE id = $1 AND start <= $2)",
+            )
+            .bind(payload["activity_id"].as_str())
+            .bind(OffsetDateTime::from(report.start()))
+            .fetch_one(&mut **txn)
+            .await?
+        }
+        "symptom_observation" => {
+            let related = relation_id(&payload["episode_id"])?;
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE id = $1 AND NOT deleted
+                   AND kind = 'migraine' AND status = 'confirmed'
+                   AND start <= $2 AND (\"end\" IS NULL OR \"end\" >= $2))",
+            )
+            .bind(related)
+            .bind(OffsetDateTime::from(report.start()))
+            .fetch_one(&mut **txn)
+            .await?
+        }
+        "medication" if !payload["reason_event_id"].is_null() => {
+            let related = relation_id(&payload["reason_event_id"])?;
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE id = $1 AND NOT deleted AND kind = 'migraine')",
+            )
+            .bind(related)
+            .fetch_one(&mut **txn)
+            .await?
+        }
+        _ => true,
+    };
+    if !valid {
+        return Err(DiaryWriteError::InvalidRelation);
+    }
+    Ok(())
+}
+
+fn relation_id(value: &Value) -> Result<Uuid, DiaryWriteError> {
+    value
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(DiaryWriteError::InvalidRelation)
+}
+
+async fn load_event(
+    txn: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    reused: bool,
+) -> Result<StoredSystemEvent, DiaryWriteError> {
+    type Row = (
+        i32,
+        String,
+        OffsetDateTime,
+        Option<OffsetDateTime>,
+        OffsetDateTime,
+        OffsetDateTime,
+        OffsetDateTime,
+        OffsetDateTime,
+    );
+    let (revision, document, start, end, created, updated, recorded, ingested) = sqlx::query_as::<_, Row>(
+        "SELECT revision, to_jsonb(events)::text, start, \"end\", created_at, updated_at, recorded_at, ingested_at
+         FROM events WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut **txn)
+    .await?;
+    let mut snapshot: Value =
+        serde_json::from_str(&document).map_err(|_| DiaryWriteError::InvalidRecordedState)?;
+    let object = snapshot
+        .as_object_mut()
+        .ok_or(DiaryWriteError::InvalidRecordedState)?;
+    for (name, timestamp) in [
+        ("start", Some(start)),
+        ("end", end),
+        ("created_at", Some(created)),
+        ("updated_at", Some(updated)),
+        ("recorded_at", Some(recorded)),
+        ("ingested_at", Some(ingested)),
+    ] {
+        let value = timestamp
+            .map(stored_instant)
+            .transpose()?
+            .map(|value| value.to_string());
+        object.insert(name.to_owned(), json!(value));
+    }
+    Ok(StoredSystemEvent {
+        id,
+        revision,
+        reused,
+        snapshot,
+    })
+}
+
+fn stored_instant(value: OffsetDateTime) -> Result<StoredInstant, DiaryWriteError> {
+    StoredInstant::try_from(value).map_err(|_| DiaryWriteError::InvalidRecordedState)
+}
+
+async fn invalidate_migraine_insights(
+    txn: &mut Transaction<'_, Postgres>,
+    kind: &str,
+) -> Result<(), sqlx::Error> {
+    if matches!(
+        kind,
+        "migraine" | "headache_observation" | "symptom_observation"
+    ) {
+        sqlx::query(
+            "UPDATE insights SET status = 'superseded'
+             WHERE (category IN ('migraine', 'migraine_comparison')
+                 OR evidence->>'tool' = 'analysis_migraine_windows') AND status != 'superseded'",
+        )
+        .execute(&mut **txn)
+        .await?;
+    }
+    Ok(())
+}

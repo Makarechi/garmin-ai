@@ -123,12 +123,6 @@ impl Database {
         &self,
         kind: &str,
     ) -> Result<SystemDefinition, DefinitionStoreError> {
-        let catalog = CATALOG.as_ref().map_err(|error| *error)?;
-        let entry = catalog
-            .binary_search_by(|record| record.kind.as_str().cmp(kind))
-            .ok()
-            .and_then(|index| catalog.get(index))
-            .ok_or(DefinitionStoreError::UnknownKind)?;
         let mut txn = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
@@ -136,11 +130,24 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(DefinitionStoreError::Unavailable)?;
-        lock_registry(&mut txn).await?;
-        let result = ensure(&mut txn, entry).await?;
+        let result = ensure_system_definition_in(&mut txn, kind).await?;
         txn.commit().await?;
         Ok(result)
     }
+}
+
+pub(crate) async fn ensure_system_definition_in(
+    txn: &mut Transaction<'_, Postgres>,
+    kind: &str,
+) -> Result<SystemDefinition, DefinitionStoreError> {
+    let catalog = CATALOG.as_ref().map_err(|error| *error)?;
+    let entry = catalog
+        .binary_search_by(|record| record.kind.as_str().cmp(kind))
+        .ok()
+        .and_then(|index| catalog.get(index))
+        .ok_or(DefinitionStoreError::UnknownKind)?;
+    lock_registry(txn).await?;
+    ensure(txn, entry).await
 }
 
 async fn lock_registry(txn: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {

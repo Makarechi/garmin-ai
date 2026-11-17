@@ -182,11 +182,8 @@ impl EventInput {
         if self.end.is_some_and(|end| end < self.start) {
             return Err(InvalidEvent::ReversedInterval);
         }
-        if strict_point
-            && (machine_source || self.status == EventStatus::Inferred)
-            && mode != ValidationMode::AuditedSnapshot
-        {
-            return Err(InvalidEvent::ExplicitReportRequired);
+        if mode == ValidationMode::NewReport {
+            self.validate_for_write()?;
         }
         if self.source == EventSource::Inferred && self.status == EventStatus::Confirmed {
             return Err(InvalidEvent::InferredCannotBeConfirmed);
@@ -194,8 +191,33 @@ impl EventInput {
         Ok(())
     }
 
+    /// Recheck rules reserved for newly submitted reports after loading an audit.
+    pub fn validate_for_write(&self) -> Result<(), InvalidEvent> {
+        if matches!(
+            self.payload.kind(),
+            "wellbeing_observation" | "activity_effort"
+        ) && (matches!(self.source, EventSource::Inferred | EventSource::Wearable)
+            || self.status == EventStatus::Inferred)
+        {
+            return Err(InvalidEvent::ExplicitReportRequired);
+        }
+        Ok(())
+    }
+
     pub fn start(&self) -> StoredInstant {
         self.start
+    }
+
+    pub fn source_calendar_date(&self) -> Option<time::Date> {
+        let instant = jiff::Timestamp::from_microsecond(self.start.unix_microseconds()).ok()?;
+        let zone = jiff::tz::db().get(&self.timezone).ok()?;
+        let local = instant.to_zoned_datetime(zone).date();
+        time::Date::from_calendar_date(
+            i32::from(local.year()),
+            time::Month::try_from(u8::try_from(local.month()).ok()?).ok()?,
+            u8::try_from(local.day()).ok()?,
+        )
+        .ok()
     }
     pub fn end(&self) -> Option<StoredInstant> {
         self.end
