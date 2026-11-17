@@ -125,6 +125,12 @@ pub struct SourceRecord {
 }
 
 impl SourceRecord {
+    pub fn payload(&self) -> Result<SourcePayload<'_>, SourceContractError> {
+        JsonValue::parse(&self.payload, false)
+            .map(SourcePayload)
+            .map_err(|_| SourceContractError::Payload)
+    }
+
     pub fn canonical_json(&self) -> Result<Vec<u8>, SourceContractError> {
         let payload =
             JsonValue::parse(&self.payload, false).map_err(|_| SourceContractError::Payload)?;
@@ -172,6 +178,43 @@ impl SourceRecord {
         }
         Ok(encoded)
     }
+}
+
+pub struct SourcePayload<'a>(JsonValue<'a>);
+
+impl SourcePayload<'_> {
+    pub fn numeric_field(
+        &self,
+        value_path: &[String],
+        unit_path: &[String],
+        unit: &str,
+    ) -> Option<f64> {
+        if payload_value(&self.0, unit_path).and_then(string) != Some(unit) {
+            return None;
+        }
+        match payload_value(&self.0, value_path)? {
+            JsonValue::Int(number) if number.unsigned_abs() <= 1_u64 << 53 => Some(*number as f64),
+            JsonValue::Float(number) if number.is_finite() => Some(*number),
+            _ => None,
+        }
+    }
+}
+
+fn payload_value<'a, 'j>(
+    mut value: &'a JsonValue<'j>,
+    path: &[String],
+) -> Option<&'a JsonValue<'j>> {
+    for element in path {
+        let JsonValue::Object(fields) = value else {
+            return None;
+        };
+        value = &fields
+            .iter()
+            .rev()
+            .find(|(key, _)| key.as_ref() == element)?
+            .1;
+    }
+    Some(value)
 }
 
 #[derive(Debug)]
