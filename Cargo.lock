@@ -754,6 +754,7 @@ dependencies = [
  "futures-util",
  "ga-archive",
  "ga-domain",
+ "ga-fit",
  "serde",
  "serde_json",
  "sqlx",
