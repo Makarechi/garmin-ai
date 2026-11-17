@@ -209,15 +209,7 @@ impl EventInput {
     }
 
     pub fn source_calendar_date(&self) -> Option<time::Date> {
-        let instant = jiff::Timestamp::from_microsecond(self.start.unix_microseconds()).ok()?;
-        let zone = jiff::tz::db().get(&self.timezone).ok()?;
-        let local = instant.to_zoned_datetime(zone).date();
-        time::Date::from_calendar_date(
-            i32::from(local.year()),
-            time::Month::try_from(u8::try_from(local.month()).ok()?).ok()?,
-            u8::try_from(local.day()).ok()?,
-        )
-        .ok()
+        source_calendar_date(self.start, &self.timezone)
     }
     pub fn end(&self) -> Option<StoredInstant> {
         self.end
@@ -306,4 +298,16 @@ pub fn known_timezone(name: &str) -> bool {
                 .available()
                 .any(|available| available.as_str() == name)
     })
+}
+
+pub fn source_calendar_date(start: StoredInstant, timezone: &str) -> Option<time::Date> {
+    let instant = jiff::Timestamp::from_microsecond(start.unix_microseconds()).ok()?;
+    let zone = jiff::tz::db().get(timezone).ok()?;
+    let local = instant.to_zoned_datetime(zone).date();
+    time::Date::from_calendar_date(
+        i32::from(local.year()),
+        time::Month::try_from(u8::try_from(local.month()).ok()?).ok()?,
+        u8::try_from(local.day()).ok()?,
+    )
+    .ok()
 }

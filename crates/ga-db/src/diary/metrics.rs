@@ -1,21 +1,27 @@
-use ga_domain::event_input::EventInput;
+use ga_domain::event_input::source_calendar_date;
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::DiaryWriteError;
+use super::{
+    DiaryWriteError, relation_id,
+    revisions::{snapshot_instant, snapshot_text},
+    stored_instant,
+};
 
 const DURATION_FIELD: &str = "__derived_duration_minutes_v1__";
 
 pub(super) async fn project_event(
     txn: &mut Transaction<'_, Postgres>,
     source: Uuid,
-    definition: Uuid,
-    report: &EventInput,
-    recorded_at: OffsetDateTime,
+    snapshot: &Value,
     transition_at: OffsetDateTime,
 ) -> Result<(), DiaryWriteError> {
+    if snapshot["definition_version_id"].is_null() {
+        return Ok(());
+    }
+    let definition = relation_id(&snapshot["definition_version_id"])?;
     type Mapping = (
         String,
         Option<String>,
@@ -49,27 +55,26 @@ pub(super) async fn project_event(
     if mappings.is_empty() {
         return Ok(());
     }
-    let day = report
-        .source_calendar_date()
+    let start =
+        snapshot_instant(snapshot, "start")?.ok_or(DiaryWriteError::InvalidRecordedState)?;
+    let end = snapshot_instant(snapshot, "end")?;
+    let recorded_at =
+        snapshot_instant(snapshot, "recorded_at")?.ok_or(DiaryWriteError::InvalidRecordedState)?;
+    let timezone = snapshot_text(snapshot, "timezone")?;
+    let day = source_calendar_date(stored_instant(start)?, timezone)
         .ok_or(DiaryWriteError::InvalidMetricMapping)?;
-    let start = OffsetDateTime::from(report.start());
-    let end = report.end().map(OffsetDateTime::from);
     for (sequence, (field, name, version, key, kind, unit, low, high)) in
         mappings.into_iter().enumerate()
     {
         let duration;
         let value = if field == DURATION_FIELD {
-            duration = report
-                .end()
-                .map(|end| {
-                    (end.unix_microseconds() - report.start().unix_microseconds()) as f64
-                        / 60_000_000.0
-                })
+            duration = end
+                .map(|end| ((end - start).whole_microseconds() as f64 / 1_000_000.0) / 60.0)
                 .map(Value::from);
             duration.as_ref()
         } else {
             let name = name.ok_or(DiaryWriteError::InvalidMetricMapping)?;
-            report.payload().json().get(&name)
+            snapshot["payload"].get(&name)
         };
         let Some(value) = value.filter(|value| !value.is_null()) else {
             continue;
@@ -102,7 +107,7 @@ pub(super) async fn project_event(
         .bind(recorded_at)
         .bind(day)
         .bind(transition_at)
-        .bind(report.timezone())
+        .bind(timezone)
         .bind(sequence)
         .execute(&mut **txn)
         .await?;
