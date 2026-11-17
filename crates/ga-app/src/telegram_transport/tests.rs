@@ -10,6 +10,8 @@ use tokio::{
 
 use super::{TelegramTransport, TelegramTransportError};
 
+mod voice;
+
 const FIXTURE_TOKEN: &str = "100:synthetic-transport";
 
 #[tokio::test]
@@ -212,7 +214,7 @@ async fn request(stream: &mut TcpStream) -> Result<Value, Box<dyn Error>> {
             let path = parts.next().ok_or("Missing HTTP path")?;
             let endpoint = path
                 .strip_prefix(&format!("/bot{FIXTURE_TOKEN}/"))
-                .ok_or("Invalid fixture endpoint")?;
+                .unwrap_or(path);
             let length: usize = head
                 .lines()
                 .filter_map(|line| line.split_once(':'))
@@ -220,11 +222,15 @@ async fn request(stream: &mut TcpStream) -> Result<Value, Box<dyn Error>> {
                     key.eq_ignore_ascii_case("content-length")
                         .then_some(value.trim())
                 })
-                .ok_or("Missing HTTP length")?
+                .unwrap_or("0")
                 .parse()?;
             let start = header_size + 4;
             if let Some(bytes) = data.get(start..start + length) {
-                let fields: Value = serde_json::from_slice(bytes)?;
+                let fields: Value = if bytes.is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_slice(bytes)?
+                };
                 return Ok(json!({"method":verb,"endpoint":endpoint,"fields":fields}));
             }
         }
