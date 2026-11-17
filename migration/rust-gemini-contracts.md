@@ -1,0 +1,7 @@
+# Native Gemini structured response contracts
+
+The schema compiler expands application definitions and projects the supported Gemini Interactions fields. It keeps declaration order, expands unions, and sets every projected property in `required` as the pinned Python compiler does. Reference cycles, overly deep schemas, and excessive expansion fail before a request can be prepared. [Gemini Interactions API](https://ai.google.dev/api/interactions-api)
+
+The decoder assembles the final uninterrupted model text from interaction steps. It distinguishes incomplete and failed interactions, caps the response at 1 MiB, and validates the JSON result against the original application schema. Validated JSON retains its original numbers and field presence for the application to interpret. The decoder recognizes voice transcript JSON using its original transcript schema. Typed application commands still apply their business rules. [Interactions API steps and output](https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026)
+
+Twenty-four schema cases and thirty response cases matched the pinned Python application and `google-genai 2.22.0` on Linux ARM64. The native test also covered an oversized response and a schema with exponential reference expansion. It ran offline at a peak of 13,885,440 bytes in a 32 MiB container with swap disabled. Request construction, transport and fallback are integrated in later steps.

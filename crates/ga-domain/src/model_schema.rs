@@ -1,4 +1,7 @@
 mod anthropic;
+mod gemini;
+
+pub use gemini::compile_gemini_schema;
 
 use std::{borrow::Cow, error::Error, fmt};
 
