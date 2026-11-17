@@ -9,7 +9,7 @@ const DATABASE_DEADLINE: Duration = Duration::from_millis(750);
 
 /// The Python runtime and the native worker use the same dedicated PostgreSQL lock.
 pub struct RuntimeLease {
-    connection: PgConnection,
+    pub(crate) connection: PgConnection,
 }
 
 #[derive(Debug)]

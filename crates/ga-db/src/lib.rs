@@ -16,6 +16,7 @@ pub mod history_windows;
 pub mod jobs;
 pub mod model_gate;
 pub mod outbox_claims;
+pub mod outbox_enqueue;
 pub mod raw_capture;
 pub mod replay;
 pub mod runtime_lease;
