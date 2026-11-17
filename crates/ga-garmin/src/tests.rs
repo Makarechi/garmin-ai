@@ -216,7 +216,7 @@ async fn renews_an_expiring_token_and_paces_each_request() -> Result<(), Box<dyn
             .as_mut()
             .ok_or(GarminError::InvalidTokenResponse)?;
         token.renew_at = Instant::now();
-        session.next_request
+        session.schedule.next_request
     };
     let (first, second) = tokio::join!(settings(&client), settings(&client));
     assert_eq!(first?.as_deref(), Some(JSON));

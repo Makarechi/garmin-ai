@@ -1,4 +1,6 @@
 mod login;
+mod query;
+mod reader;
 mod session;
 
 #[cfg(test)]
@@ -9,6 +11,8 @@ use reqwest::{RequestBuilder, Url};
 use crate::GarminError;
 
 pub use login::{LegacyLogin, LoginProgress, MfaChallenge};
+pub use query::{ActivityEndpoint, DailyEndpoint, LegacyRead};
+pub use reader::LegacyReader;
 pub use session::{LegacySession, RestorePolicy};
 
 const SSO_ORIGIN: &str = "https://sso.garmin.com/";

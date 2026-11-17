@@ -17,12 +17,14 @@ use ga_archive::GarminTokenFile;
 use ga_domain::identity::GarminProfileId;
 use reqwest::{
     Method, StatusCode,
-    header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE},
+    header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, RETRY_AFTER, SET_COOKIE},
 };
 use serde_json::{Value, json};
+use time::{Date, Month};
 
 use super::{
-    DI_PATH, Hosts, LegacyLogin, LoginProgress, PROFILE_PATH, RestorePolicy, session::Native,
+    DI_PATH, DailyEndpoint, Hosts, LegacyLogin, LegacyRead, LegacyReader, LoginProgress,
+    PROFILE_PATH, RestorePolicy, session::Native,
 };
 use crate::{
     GarminError, Url,
@@ -45,6 +47,7 @@ struct Target {
     grant: AtomicUsize,
     profile: AtomicUsize,
     mode: AtomicUsize,
+    reads: AtomicUsize,
 }
 
 impl Target {
@@ -166,7 +169,33 @@ async fn handle(State(state): State<Arc<Target>>, request: Request) -> Response 
         if mode == 4 && auth == Some("Bearer synthetic-legacy-access") {
             return StatusCode::UNAUTHORIZED.into_response();
         }
-        return ok_json(json!({"profileId": if mode == 1 { 99999 } else { 12345 }}));
+        return ok_json(
+            json!({"profileId": if mode == 1 { 99999 } else { 12345 }, "displayName": "Synthetic Profile"}),
+        );
+    }
+    if path.starts_with("/api/") && parts.method == Method::GET {
+        state.reads.fetch_add(1, Ordering::Relaxed);
+        if cookie.is_some()
+            || ![INITIAL_ACCESS, ROTATED_ACCESS]
+                .iter()
+                .any(|value| auth == Some(&format!("Bearer {value}")))
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if mode == 5 && auth == Some("Bearer synthetic-legacy-access") {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if mode == 6 {
+            return (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, "60")]).into_response();
+        }
+        if path == "/api/usersummary-service/usersummary/daily/Synthetic%20Profile"
+            && parts.uri.query() == Some("calendarDate=2026-11-01")
+        {
+            return br#"{ "unknown" : 123 }"#.as_slice().into_response();
+        }
+        if path == "/api/download-service/files/activity/42" {
+            return b"PK\x03\x04synthetic".as_slice().into_response();
+        }
     }
     StatusCode::NOT_FOUND.into_response()
 }
@@ -305,5 +334,52 @@ async fn rejects_bad_password_and_bounds_attempts_and_rate_limit() -> Result<(),
         Err(GarminError::MfaExpired)
     ));
     assert_eq!(target.calls(), [3, 3, 0, 0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reads_original_data_and_rotates_once_after_a_legacy_resource_rejects_the_token()
+-> Result<(), Box<dyn Error>> {
+    use std::{num::NonZeroU64, time::Duration};
+    let (target, _server, hosts) = target().await?;
+    target.mode.store(3, Ordering::Relaxed);
+    let LoginProgress::Complete(authenticated) =
+        LegacyLogin::with_hosts(hosts.clone(), test_config())?
+            .start(USER, PASSWORD)
+            .await?
+    else {
+        return Err(io::Error::other("Expected direct fixture login").into());
+    };
+    let temporary = tempfile::tempdir()?;
+    let store = GarminTokenFile::open(&temporary.path().canonicalize()?.join("tokens"))?;
+    let owner = expected_owner()?;
+    authenticated.save_for_owner(&store, &owner)?;
+    let reader = LegacyReader::with_hosts(store, &owner, test_config(), hosts).await?;
+    let day = Date::from_calendar_date(2026, Month::November, 1)?;
+    let request = LegacyRead::Daily(DailyEndpoint::Summary, day);
+    target.mode.store(5, Ordering::Relaxed);
+    assert_eq!(
+        reader.get_json(request, 1024).await?.as_deref(),
+        Some(br#"{ "unknown" : 123 }"#.as_slice())
+    );
+    let mut destination = Vec::new();
+    reader
+        .download_activity(NonZeroU64::try_from(42)?, 1024, &mut destination)
+        .await?;
+    assert_eq!(destination, b"PK\x03\x04synthetic");
+    assert_eq!(target.calls(), [1, 0, 2, 3]);
+    target.mode.store(6, Ordering::Relaxed);
+    assert_eq!(
+        reader.get_json(request, 1024).await,
+        Err(GarminError::RateLimited {
+            retry_after: Duration::from_secs(60)
+        })
+    );
+    target.mode.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        reader.clone().get_json(request, 1024).await,
+        Err(GarminError::RateLimited { .. })
+    ));
+    assert_eq!(target.reads.load(Ordering::Relaxed), 4);
     Ok(())
 }

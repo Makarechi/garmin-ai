@@ -7,7 +7,7 @@ use base64::{
 use ga_archive::GarminTokenFile;
 use ga_domain::identity::GarminProfileId;
 use reqwest::{
-    Client, RequestBuilder,
+    Client, RequestBuilder, Url,
     header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL},
 };
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,13 @@ pub enum RestorePolicy {
     Refresh,
 }
 
+struct Profile {
+    id: GarminProfileId,
+    display_name: Option<String>,
+}
+
 pub struct LegacySession {
-    profile: GarminProfileId,
+    profile: Profile,
     tokens: Tokens,
 }
 
@@ -59,13 +64,33 @@ struct TokenClaims {
 }
 
 pub(super) struct Native {
-    http: Client,
-    hosts: Hosts,
+    pub(super) http: Client,
+    pub(super) hosts: Hosts,
 }
 
 impl LegacySession {
     pub fn fingerprint(&self) -> String {
-        self.profile.fingerprint()
+        self.profile.id.fingerprint()
+    }
+
+    pub(super) fn display_name(&self) -> Option<&str> {
+        self.profile.display_name.as_deref()
+    }
+
+    pub(super) fn expires_soon(&self) -> bool {
+        self.tokens.expires_soon()
+    }
+
+    pub(super) fn authorized_read(
+        &self,
+        client: &Client,
+        url: Url,
+        accept: &str,
+    ) -> Result<RequestBuilder, GarminError> {
+        let bearer = sensitive_header("Bearer", &self.tokens.di_token)?;
+        Ok(native_headers(client.get(url))
+            .header(AUTHORIZATION, bearer)
+            .header(ACCEPT, accept))
     }
 
     /// The application holds its owner and backup fences while publishing a new login.
@@ -263,15 +288,22 @@ impl Native {
         fetch_json(request, MAX_AUTH_BYTES).await
     }
 
-    async fn profile(&self, tokens: &Tokens) -> Result<GarminProfileId, GarminError> {
+    async fn profile(&self, tokens: &Tokens) -> Result<Profile, GarminError> {
         let bearer = sensitive_header("Bearer", &tokens.di_token)?;
         let request = native_headers(self.http.get(endpoint(&self.hosts.api, PROFILE_PATH)?))
             .header(AUTHORIZATION, bearer)
             .header(ACCEPT, "application/json");
         let response = successful(send(request).await?)?;
         let raw = read_bounded(response, MAX_PROFILE_BYTES).await?;
-        GarminProfileId::from_profile_json(&raw, MAX_PROFILE_BYTES as usize)
-            .map_err(|_| GarminError::ProfileUnavailable)
+        let id = GarminProfileId::from_profile_json(&raw, MAX_PROFILE_BYTES as usize)
+            .map_err(|_| GarminError::ProfileUnavailable)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&raw).map_err(|_| GarminError::ProfileUnavailable)?;
+        let display_name = value
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        Ok(Profile { id, display_name })
     }
 }
 
