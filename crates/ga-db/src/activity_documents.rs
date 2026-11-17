@@ -72,6 +72,19 @@ pub struct ApplyActivitySummary<'a> {
     pub timezone: &'a str,
 }
 
+impl<'a> From<ApplyActivitySummary<'a>> for ApplyActivity<'a> {
+    fn from(request: ApplyActivitySummary<'a>) -> Self {
+        Self {
+            account_fingerprint: request.account_fingerprint,
+            source_key: request.source_key,
+            projection: Projection::Summary(request.summary),
+            source_id: request.source_id,
+            requested_at: request.requested_at,
+            timezone: request.timezone,
+        }
+    }
+}
+
 pub struct ApplyHealthPayload<'a> {
     pub account_fingerprint: &'a str,
     pub endpoint: &'a str,
@@ -132,7 +145,7 @@ pub enum DocumentStatus {
 }
 
 impl DocumentStatus {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Archived => "archived",
             Self::Normalized => "normalized",
@@ -199,15 +212,7 @@ impl Database {
         &self,
         request: ApplyActivitySummary<'_>,
     ) -> Result<DocumentStatus, DocumentError> {
-        self.apply_activity(ApplyActivity {
-            account_fingerprint: request.account_fingerprint,
-            source_key: request.source_key,
-            projection: Projection::Summary(request.summary),
-            source_id: request.source_id,
-            requested_at: request.requested_at,
-            timezone: request.timezone,
-        })
-        .await
+        self.apply_activity(request.into()).await
     }
 
     /// Apply one retained daily or intraday response using its original source identity.
@@ -264,6 +269,16 @@ impl Database {
             .begin_legacy_source(request.account_fingerprint, endpoint, request.source_key)
             .await
             .map_err(DocumentError::Access)?;
+        let status = Self::apply_activity_in(&mut txn, request).await?;
+        txn.commit().await?;
+        Ok(status)
+    }
+
+    pub(crate) async fn apply_activity_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: ApplyActivity<'_>,
+    ) -> Result<DocumentStatus, DocumentError> {
+        let endpoint = request.projection.endpoint();
         let (hash, status, parser, empty) = sqlx::query_as::<_, (String, String, i32, bool)>(
             "SELECT payload_hash, status, parser_version,
                         payload IN ('null'::jsonb, '{}'::jsonb, '[]'::jsonb)
@@ -275,7 +290,7 @@ impl Database {
         .bind(GARMIN_LEGACY_SOURCE)
         .bind(endpoint)
         .bind(request.source_key)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut **txn)
         .await?
         .ok_or(DocumentError::SourceMissing)?;
 
@@ -284,12 +299,11 @@ impl Database {
             request.source_key
         );
         let meta_key = format!("ingest-meta:{}", request.source_id);
-        let mut state = read_state(&mut txn, &state_key).await?;
+        let mut state = read_state(txn, &state_key).await?;
         if last_request(&state)?.is_some_and(|latest| request.requested_at < latest) {
             if status == "pending" {
-                raw_status(&mut txn, request.source_id, "stale", parser).await?;
+                raw_status(txn, request.source_id, "stale", parser).await?;
             }
-            txn.commit().await?;
             return Ok(DocumentStatus::Stale);
         }
 
@@ -302,7 +316,7 @@ impl Database {
             && !matches!(status.as_str(), "pending" | "error")
             && state.get("replacement").unwrap_or(&Value::Null)
                 == replacement.as_ref().unwrap_or(&Value::Null);
-        let mut metadata = read_state(&mut txn, &meta_key).await?;
+        let mut metadata = read_state(txn, &meta_key).await?;
         let requested = request.requested_at.to_string();
         let attempt = json!({
             "hash": hash,
@@ -319,16 +333,15 @@ impl Database {
                 Ok(status) => outcome = Some(status),
                 Err(_) => {
                     effects.rollback().await?;
-                    raw_status(&mut txn, request.source_id, "error", parser).await?;
+                    raw_status(txn, request.source_id, "error", parser).await?;
                     metadata.insert("timezone".to_owned(), json!(request.timezone));
                     metadata.insert("failed_parser_version".to_owned(), json!(PARSER_VERSION));
-                    put_state(&mut txn, &meta_key, &Value::Object(metadata)).await?;
+                    put_state(txn, &meta_key, &Value::Object(metadata)).await?;
                     let mut attempt = attempt;
                     attempt["parser_version"] = json!(PARSER_VERSION);
                     state.insert("status".to_owned(), json!("error"));
                     state.insert("latest_attempt".to_owned(), attempt);
-                    put_state(&mut txn, &state_key, &Value::Object(state)).await?;
-                    txn.commit().await?;
+                    put_state(txn, &state_key, &Value::Object(state)).await?;
                     return Ok(DocumentStatus::Error);
                 }
             }
@@ -340,9 +353,9 @@ impl Database {
 
         metadata.insert("applied_at".to_owned(), json!(requested));
         metadata.remove("failed_parser_version");
-        put_state(&mut txn, &meta_key, &Value::Object(metadata)).await?;
+        put_state(txn, &meta_key, &Value::Object(metadata)).await?;
         let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *txn)
+            .fetch_one(&mut **txn)
             .await?;
         let fetched =
             StoredInstant::try_from(now).map_err(|_| DocumentError::InvalidRecordedState)?;
@@ -364,8 +377,7 @@ impl Database {
             state.insert("latest_attempt".to_owned(), value);
             value = Value::Object(state);
         }
-        put_state(&mut txn, &state_key, &value).await?;
-        txn.commit().await?;
+        put_state(txn, &state_key, &value).await?;
         if unchanged {
             Ok(DocumentStatus::Unchanged)
         } else {
