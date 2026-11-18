@@ -1,0 +1,89 @@
+name: ${COMPOSE_PROJECT_NAME:-garmin-ai-rust-preview}
+
+x-native-service: &native-service
+  image: ${GA_APP_IMAGE:?Set GA_APP_IMAGE to the native application image}
+  cap_drop: [ALL]
+
+x-native-settings: &native-settings
+  GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL:?Set GA_CONTAINER_DATABASE_URL for this installation}
+  GA_TIMEZONE: ${GA_TIMEZONE:-Europe/Bratislava}
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: garmin
+      POSTGRES_DB: garmin_ai
+      POSTGRES_PASSWORD: ${GA_POSTGRES_PASSWORD:?Set GA_POSTGRES_PASSWORD for this installation}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -h, "127.0.0.1", -U, garmin, -d, garmin_ai]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *native-service
+    command: [migrate]
+    environment: *native-settings
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *native-service
+    restart: unless-stopped
+    command: [serve, --host, 0.0.0.0, --port, "8080"]
+    environment:
+      <<: *native-settings
+      GA_API_KEY: ${GA_API_KEY:-}
+      GA_API_TOKENS: ${GA_API_TOKENS:-[]}
+      GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
+      GA_TELEGRAM_BOT_TOKEN: ${GA_TELEGRAM_BOT_TOKEN:-}
+      GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
+    ports:
+      - "127.0.0.1:${GA_API_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, garmin-ai-rust, healthcheck, --ready]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    <<: *native-service
+    restart: unless-stopped
+    command: [worker]
+    env_file:
+      - path: ${GA_WORKER_ENV_FILE:-.env}
+        required: false
+    environment:
+      <<: *native-settings
+      GA_DATA_DIR: /app/data
+      GA_LOCK_DIR: /app/state
+      GA_TOKEN_DIR: /app/tokens/garmin
+      GA_BACKUP_DIR: /app/backups
+    volumes:
+      - archive-data:/app/data
+      - runtime-state:/app/state
+      - garmin-tokens:/app/tokens/garmin
+      - backups:/app/backups
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, garmin-ai-rust, healthcheck, --worker]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres-data:
+  archive-data:
+  runtime-state:
+  garmin-tokens:
+  backups:
