@@ -190,7 +190,9 @@ impl Database {
             .await?;
         let mut written = load_event(&mut txn, request.id, false).await?;
         for (field, display) in ["start", "end"].into_iter().zip(display_times) {
-            if let Some(display) = display {
+            if let Some(display) = display
+                && !written.snapshot[field].is_null()
+            {
                 written.snapshot[field] = Value::String(match display.strip_suffix('Z') {
                     Some(utc) => format!("{utc}+00:00"),
                     None => display.to_owned(),

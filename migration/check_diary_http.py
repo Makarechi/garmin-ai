@@ -288,7 +288,11 @@ def compare_tracker_updates(python, native, engine):
         seeded = python.post("/entries", headers=headers("both"), json=entry)
         assert seeded.status_code == 200
         second = UUID(seeded.json()["id"])
-        edited = {**entry, "values": {"value": 4}}
+        edited = {
+            **entry,
+            "end": "2026-10-25T00:15:00.123456Z",
+            "values": {"value": 4},
+        }
         for client in (python, native):
             change = edit(client, first, edited, revision=2)
             assert change.status_code == 409
@@ -307,6 +311,7 @@ def compare_tracker_updates(python, native, engine):
             assert result["id"] == str(identity) and result["revision"] == 2
             if readable:
                 assert result["start"] == edited["start"]
+                assert result["end"] is None
                 assert result["canonical"]["observed"]["start"] == edited["start"]
                 assert result["payload"] == {"type": key, "value": 4}
             else:
@@ -315,6 +320,8 @@ def compare_tracker_updates(python, native, engine):
                 assert edit(client, identity, edited).status_code == 409
                 found = client.get(f"/events/{identity}", headers=headers("reader"))
                 assert found.status_code == (200 if readable else 404)
+                if readable:
+                    assert found.json()["end"] is None
         with engine.connect() as connection:
             audit = connection.execute(
                 text("""
@@ -328,6 +335,7 @@ def compare_tracker_updates(python, native, engine):
             assert row.before["revision"] == 1 and row.after["revision"] == 2
             assert row.after["payload"] == {"type": key, "value": 4}
             assert row.after["start"] == edited["start"]
+            assert row.after["end"] is None
 
 
 def run(binary):
