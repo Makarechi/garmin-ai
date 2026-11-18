@@ -1,6 +1,8 @@
 mod clarification;
 pub use clarification::{ClarificationClock, ClarificationError, ClarificationReply};
-pub(crate) use clarification::{clarification_active_at, save_in as save_clarification_in};
+pub(crate) use clarification::{
+    clarification_active_at, clear_history_selection, save_in as save_clarification_in,
+};
 
 mod agent_batch;
 pub use agent_batch::CreateAgentLogBatch;
@@ -20,12 +22,12 @@ mod undo;
 mod wearable;
 
 pub(crate) use proactive_answers::context as question_context;
-pub(crate) use reads::owner_events_in;
 pub use reads::{
     DiaryEventRange, DiaryReadError, InterpretationEvents, InterpretationEventsQuery,
     ModelDiaryPage, ModelDiaryQuery, event_document,
 };
 pub use reads::{InterpretationContext, InterpretationContextQuery};
+pub(crate) use reads::{caffeine_total, owner_events_in};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 pub use wearable::WearableError;

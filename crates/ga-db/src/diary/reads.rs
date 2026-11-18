@@ -534,7 +534,7 @@ pub fn event_document(mut event: Value) -> Result<Value, DiaryReadError> {
     Ok(event)
 }
 
-fn caffeine_total(payload: &Value) -> Result<Value, DiaryReadError> {
+pub(crate) fn caffeine_total(payload: &Value) -> Result<Value, DiaryReadError> {
     let unknown = json!("unknown");
     let basis = payload.get("dose_basis").unwrap_or(&unknown);
     let dose = |field: &str| -> Result<Option<f64>, DiaryReadError> {
