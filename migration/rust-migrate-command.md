@@ -1,0 +1,5 @@
+# Native migration command
+
+The Rust `migrate` command upgrades the schema and initializes the system diary definitions, metric definitions, and default scenario packs in one transaction. Historical diary rows are linked to the original compatible definition. Unresolvable rows fail the transaction. An erased database can upgrade its schema with its fence in place. `migrate --status` only inspects the current revision and does not create a local state directory.
+
+On disposable PostgreSQL 17 with TimescaleDB, `check_native_migrate_command.py` compared the Linux ARM64 command with Python `ee3a14a48a6ad30c1085951bac2f53c9088c2450`. The registry contents, contract hashes, six default scenario packs, and ordered data matched on a fresh database and on revision `b7c4e1a92d60` with synthetic history. The old free-form symptom entry kept the corresponding historical definition. The heart-rate measurement linked to the expected metric definition. The test reran the migration, exercised an erased database, and verified that invalid history rolled back the schema upgrade and the registry installation.
