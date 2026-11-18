@@ -9,6 +9,7 @@
 !crates/**/*.rs
 !crates/**/*.sql
 !crates/**/*.json
+!crates/ga-domain/src/statistics/LICENSE-scipy.txt
 !crates/**/contracts/model-prompts/*.txt
 !src/
 !src/garmin_ai/
