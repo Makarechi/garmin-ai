@@ -232,6 +232,17 @@ impl PreparedPrompt {
             // Safety decisions never use offered record references.
             return Ok(command);
         }
+        let unoffered_event_link = command.events().iter().any(|event| {
+            let payload = event.payload().json();
+            ["reason_event_id", "episode_id"].iter().any(|field| {
+                let value = &payload[*field];
+                !value.is_null()
+                    && value
+                        .as_str()
+                        .and_then(|id| id.parse::<Uuid>().ok())
+                        .is_none_or(|id| !self.events.contains(&id))
+            })
+        });
         if command
             .target_event_id()
             .is_some_and(|id| !self.events.contains(&id))
@@ -242,6 +253,7 @@ impl PreparedPrompt {
                 .question_context_ids()
                 .iter()
                 .any(|id| !self.questions.contains(id))
+            || unoffered_event_link
         {
             return Err(DiaryInterpretationError::UnofferedTarget);
         }

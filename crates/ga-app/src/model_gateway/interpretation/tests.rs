@@ -51,6 +51,60 @@ fn matches_pinned_diary_prompt_context() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn checks_buried_event_links_without_restricting_local_drafts() -> Result<(), Box<dyn Error>> {
+    let known = Uuid::from_u128(42).to_string();
+    let unknown = Uuid::from_u128(43).to_string();
+    let now = "2026-10-25T01:31:00+00:00".parse()?;
+    let prepare = |large: bool| {
+        PreparedPrompt::new(DiaryInterpretationRequest {
+            now,
+            timezone: "UTC",
+            source: EventSource::TelegramText,
+            text: "Synthetic reply",
+            context: ModelDiaryContext {
+                recent_events: vec![
+                    json!({"id":known,"kind":"migraine","status":"confirmed","end":null}),
+                ],
+                pending_clarification: large.then(|| json!({"prompt":"x".repeat(30_000)})),
+                ..ModelDiaryContext::default()
+            },
+        })
+    };
+    for (kind, field) in [
+        ("medication", "reason_event_id"),
+        ("symptom_observation", "episode_id"),
+    ] {
+        let response = |id: &str| {
+            let mut payload = if kind == "medication" {
+                json!({"type":kind,"name":"synthetic"})
+            } else {
+                json!({"type":kind,"severity":4})
+            };
+            payload[field] = json!(id);
+            json!({"intent":"log","confidence":1.0,
+                "events":[{"start":"2026-10-25T01:30:00+00:00","payload":payload}]})
+        };
+        assert!(prepare(false)?.accept(response(&known)).is_ok());
+        assert!(matches!(
+            prepare(false)?.accept(response(&unknown)),
+            Err(DiaryInterpretationError::UnofferedTarget)
+        ));
+        assert!(matches!(
+            prepare(true)?.accept(response(&known)),
+            Err(DiaryInterpretationError::UnofferedTarget)
+        ));
+    }
+    let draft = prepare(true)?.accept(json!({
+        "intent":"log","confidence":1.0,"events":[
+            {"start":"2026-10-25T01:25:00+00:00","payload":{"type":"migraine"}},
+            {"start":"2026-10-25T01:30:00+00:00","payload":{"type":"medication","name":"synthetic"}}
+        ],"draft_links":[{"child_index":1,"parent_index":0}],
+    }))?;
+    assert_eq!(draft.draft_links().len(), 1);
+    Ok(())
+}
+
+#[test]
 fn checks_offered_references_and_oversized_messages() -> Result<(), Box<dyn Error>> {
     let known = Uuid::from_u128(42);
     let unknown = Uuid::from_u128(43).to_string();
