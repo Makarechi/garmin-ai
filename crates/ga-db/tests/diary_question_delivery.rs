@@ -5,7 +5,7 @@ use ga_db::{
     outbox_claims::ReplyDestination,
     proactive_control::{
         DiaryQuestionKind, DiaryQuestionOutcome, NotificationExclusions, NotificationPolicy,
-        ProactiveControlError, QuestionDispatchResult, ReservedDiaryQuestion,
+        ProactiveCommand, ProactiveControlError, QuestionDispatchResult, ReservedDiaryQuestion,
     },
 };
 use ga_domain::timestamp::StoredInstant;
@@ -42,6 +42,12 @@ async fn dispatches_once_and_preserves_ambiguous_delivery() -> Result<(), Box<dy
     let owner: Uuid = fixture.owner.parse()?;
     let now: StoredInstant = fixture.now.parse()?;
     let retry_at: StoredInstant = (OffsetDateTime::from(now) + Duration::minutes(1)).try_into()?;
+    let pause = ProactiveCommand::Telegram {
+        message_at: retry_at,
+        received_at: retry_at,
+        ordering_epoch: 0,
+        update_id: 412,
+    };
     let destination = || ReplyDestination {
         owner_id: owner,
         channel: "telegram",
@@ -114,6 +120,10 @@ async fn dispatches_once_and_preserves_ambiguous_delivery() -> Result<(), Box<dy
                     })
                     .await;
                 assert!(matches!(duplicate, Err(ProactiveControlError::Busy)));
+                assert!(matches!(
+                    database.set_proactive_control(owner, pause, false).await,
+                    Err(ProactiveControlError::Busy)
+                ));
                 DiaryQuestionOutcome::RetryAt(retry_at)
             }
         })
@@ -202,8 +212,21 @@ async fn dispatches_once_and_preserves_ambiguous_delivery() -> Result<(), Box<dy
     assert_eq!(state(&pool, accepted.id).await?.0, "sent");
     assert_eq!(state(&pool, unsent.id).await?, ("pending".into(), None));
     assert_eq!(singleton.recover_diary_question_deliveries().await?, 0);
+    let pause_preempts = existing_reservation(&pool, now).await?;
+    let paused = database.set_proactive_control(owner, pause, false).await?;
+    assert!(paused.changed && !paused.enabled);
+    assert_eq!(
+        database
+            .dispatch_diary_question(destination(), 42, &pause_preempts, &policy, now, |_| {
+                never_send()
+            })
+            .await?,
+        QuestionDispatchResult::Unavailable
+    );
+    assert_eq!(state(&pool, pause_preempts.id).await?.0, "cancelled");
+    assert_eq!(state(&pool, retried.id).await?.0, "sent");
     println!(
-        "Verified current episode and pairing, one dispatch, safe retry and ambiguous restart recovery"
+        "Verified current episode and pairing, one dispatch, pause ordering, safe retry and ambiguous restart recovery"
     );
     Ok(())
 }

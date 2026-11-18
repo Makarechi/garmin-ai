@@ -16,14 +16,12 @@ use super::{
     policy::{decision_in, lock_notification_policy},
 };
 use crate::{
-    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK,
-    channel_ingress::telegram_poll::CHANNEL_SELECTION_LOCK,
-    check_readiness,
+    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK, check_readiness,
     diary::caffeine_answer_at,
     outbox_claims::ReplyDestination,
     replay::REPLAY_MUTATION_LOCK,
     runtime_lease::RuntimeLease,
-    share_policy::CHANNEL_CONSENT_LOCK,
+    share_policy::{CHANNEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK},
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
 };
 
@@ -81,7 +79,7 @@ impl Database {
                 OWNER_ENROLLMENT_LOCK,
                 REPLAY_MUTATION_LOCK,
                 CHANNEL_CONSENT_LOCK,
-                CHANNEL_SELECTION_LOCK,
+                OWNER_ONBOARDING_LOCK,
                 CHANNEL_BINDING_LOCK,
             ] {
                 let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
