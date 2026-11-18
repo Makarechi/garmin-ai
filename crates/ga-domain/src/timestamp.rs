@@ -2,6 +2,8 @@ use std::{error::Error, fmt};
 
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
+mod python_isoformat;
+
 /// An instant at the precision of the Python datetime and PostgreSQL columns.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StoredInstant(OffsetDateTime);
@@ -18,6 +20,11 @@ impl fmt::Display for InvalidStoredInstant {
 impl Error for InvalidStoredInstant {}
 
 impl StoredInstant {
+    /// Parse an aware legacy Python cursor timestamp at its retained microsecond precision.
+    pub fn from_python_isoformat(value: &str) -> Option<Self> {
+        python_isoformat::parse(value)
+    }
+
     /// Interpret a timestamp using the legacy typed application input contract.
     pub fn from_legacy_input(value: &serde_json::Value) -> Option<Self> {
         crate::event_time::aware(value)

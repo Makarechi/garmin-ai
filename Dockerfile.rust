@@ -23,6 +23,7 @@ RUN apt-get update \
 COPY --from=builder /garmin-ai-rust /usr/local/bin/garmin-ai-rust
 COPY LICENSE /usr/share/doc/garmin-ai/LICENSE
 COPY crates/ga-domain/src/statistics/LICENSE-scipy.txt /usr/share/doc/garmin-ai/LICENSE-scipy.txt
+COPY crates/ga-domain/src/timestamp/LICENSE-python.txt /usr/share/doc/garmin-ai/LICENSE-python.txt
 WORKDIR /app
 ENV GA_DATA_DIR=/app/data GA_LOCK_DIR=/app/state GA_BACKUP_DIR=/app/backups
 USER 1000:1000

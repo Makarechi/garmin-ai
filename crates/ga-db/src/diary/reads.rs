@@ -347,7 +347,7 @@ pub(crate) async fn analysis_events_in(
     model_events_in(txn, query, Some(window)).await
 }
 
-async fn model_diary_allowed(
+pub(super) async fn model_diary_allowed(
     txn: &mut Transaction<'_, Postgres>,
     owner_id: Uuid,
 ) -> Result<(), DiaryReadError> {
@@ -429,7 +429,10 @@ pub(crate) async fn owner_events_in(
     Ok(read_events(txn, start, end, kind, limit, None).await?.value)
 }
 
-fn check_range(start: OffsetDateTime, end: OffsetDateTime) -> Result<(), DiaryReadError> {
+pub(super) fn check_range(
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+) -> Result<(), DiaryReadError> {
     let earliest = Date::from_calendar_date(1, Month::March, 2)
         .map_err(|_| DiaryReadError::CalendarBoundary)?;
     let latest = Date::from_calendar_date(9999, Month::November, 1)
