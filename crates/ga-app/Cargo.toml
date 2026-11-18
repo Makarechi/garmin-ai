@@ -31,7 +31,7 @@ markdown-it-rust-core = "=4.2.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.5"
-rustix = { version = "1.1.6", features = ["termios"] }
+rustix = { version = "1.1.6", features = ["fs", "termios"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = { version = "0.11.1", default-features = false }
