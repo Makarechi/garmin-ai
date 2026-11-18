@@ -20,7 +20,10 @@ use crate::{
     },
     check_readiness,
     garmin_freshness::record_freshness,
-    jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome, JobStoreError},
+    jobs::{
+        FailureReason, GARMIN_PUBLICATION_SECONDS, GarminJobKind, GarminJobLease, JobOutcome,
+        JobStoreError,
+    },
     raw_capture::{
         CaptureError, CapturedSource, GARMIN_LEGACY_SOURCE, archive_json,
         authorize_legacy_mutation, checked_json_body, insert_source, lock_legacy_scope,
@@ -181,8 +184,6 @@ enum LeaseRead {
     Publication,
 }
 
-const PUBLICATION_SECONDS: i32 = 30;
-
 #[derive(Clone, Copy)]
 enum Eligibility {
     Work,
@@ -334,7 +335,7 @@ impl Database {
             .await?;
         if matches!(lease_read, LeaseRead::Publication) {
             sqlx::query("SELECT set_config('transaction_timeout', $1, true)")
-                .bind(format!("{PUBLICATION_SECONDS}s"))
+                .bind(format!("{GARMIN_PUBLICATION_SECONDS}s"))
                 .execute(&mut *txn)
                 .await?;
         }
@@ -353,7 +354,7 @@ impl Database {
         if matches!(lease_read, LeaseRead::Publication) {
             // The row stays locked through publication, and a rollback restores the prior lease.
             lease
-                .reserve_publication(&mut txn, PUBLICATION_SECONDS + 1)
+                .reserve_publication(&mut txn, GARMIN_PUBLICATION_SECONDS + 1)
                 .await?;
         }
         let eligibility = if history_window::superseded(&mut txn, endpoint, lease.id()).await? {
