@@ -36,6 +36,7 @@ fn router(state: AppState) -> Router {
         .route("/events", any(diary::create))
         .route("/events/{event_id}", any(diary::entry))
         .route("/entries", any(diary::create_custom))
+        .route("/entries/{event_id}", any(diary::edit_custom))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
         .route("/preferences/goals", any(personal_goals::preferences))

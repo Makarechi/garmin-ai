@@ -65,12 +65,12 @@ def counts(engine):
         ).one()
 
 
-def hidden_id(engine):
+def hidden_id(engine, key="user.synthetic_private", operations=("create", "delete")):
     with Session(engine) as session, session.begin():
         draft = create_definition_draft(
             session,
             {
-                "key": "user.synthetic_private",
+                "key": key,
                 "topology": "point",
                 "labels": {"en": "Synthetic private"},
                 "schema": {
@@ -81,13 +81,13 @@ def hidden_id(engine):
                 },
                 "fields": {
                     "value": {
-                        "id": "user.synthetic_private.value",
+                        "id": f"{key}.value",
                         "semantic": "count",
                         "unit": "count",
                         "labels": {"en": "Synthetic value"},
                     }
                 },
-                "allowed_operations": ["create", "delete"],
+                "allowed_operations": list(operations),
             },
             actor="fixture",
             authorized=True,
@@ -96,7 +96,7 @@ def hidden_id(engine):
         row = create_custom_event(
             session,
             {
-                "definition_key": "user.synthetic_private",
+                "definition_key": key,
                 "start": NOTE["start"],
                 "values": {"value": 1},
             },
@@ -218,6 +218,69 @@ def compare_tracker_creation(python, native, engine):
     assert counts(engine) == (5, 4)
 
 
+def compare_tracker_updates(python, native, engine):
+    def edit(client, identity, entry, role="both", revision=1):
+        return client.put(
+            f"/entries/{identity}",
+            headers=headers(role),
+            json={"revision": revision, "entry": entry},
+        )
+
+    for readable in (False, True):
+        key = "user.synthetic_readable" if readable else "user.synthetic_write_only"
+        operations = ["create", "update"] + (["query"] if readable else [])
+        first = hidden_id(engine, key, operations)
+        entry = {
+            "definition_key": key,
+            "start": "2026-10-25T02:15:00.123456+02:00",
+            "values": {"value": 3},
+            "units": {"value": "count"},
+        }
+        seeded = python.post("/entries", headers=headers("both"), json=entry)
+        assert seeded.status_code == 200
+        second = UUID(seeded.json()["id"])
+        edited = {**entry, "values": {"value": 4}}
+        for client in (python, native):
+            change = edit(client, first, edited, revision=2)
+            assert change.status_code == 409
+            assert change.json() == {"detail": "Event changed; reload before editing"}
+            for role, status in [(None, 401), ("reader", 403), ("writer", 403)]:
+                assert edit(client, first, edited, role=role).status_code == status
+            change = edit(client, first, {**edited, "definition_key": "user.other"})
+            assert change.status_code == 422
+        responses = [
+            (first, edit(native, first, edited, revision="1.0")),
+            (second, edit(python, second, edited, revision="1.0")),
+        ]
+        for identity, response in responses:
+            assert response.status_code == 200
+            result = response.json()
+            assert result["id"] == str(identity) and result["revision"] == 2
+            if readable:
+                assert result["start"] == edited["start"]
+                assert result["canonical"]["observed"]["start"] == edited["start"]
+                assert result["payload"] == {"type": key, "value": 4}
+            else:
+                assert set(result) == {"id", "revision"}
+            for client in (python, native):
+                assert edit(client, identity, edited).status_code == 409
+                found = client.get(f"/events/{identity}", headers=headers("reader"))
+                assert found.status_code == (200 if readable else 404)
+        with engine.connect() as connection:
+            audit = connection.execute(
+                text("""
+                SELECT event_id,before,after FROM audit_log
+                WHERE event_id IN (:first,:second) AND action='update' AND actor='api'
+                """),
+                {"first": first, "second": second},
+            ).all()
+        assert {row.event_id for row in audit} == {first, second} and len(audit) == 2
+        for row in audit:
+            assert row.before["revision"] == 1 and row.after["revision"] == 2
+            assert row.after["payload"] == {"type": key, "value": 4}
+            assert row.after["start"] == edited["start"]
+
+
 def run(binary):
     engine = isolated_engine()
     try:
@@ -260,6 +323,7 @@ def run(binary):
                 with httpx.Client(base_url=line.split(" on ", 1)[1], trust_env=False) as native:
                     compare(python, native, engine)
                     compare_tracker_creation(python, native, engine)
+                    compare_tracker_updates(python, native, engine)
             finally:
                 process.terminate()
                 process.wait(timeout=5)
