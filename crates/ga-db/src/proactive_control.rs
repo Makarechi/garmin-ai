@@ -1,8 +1,10 @@
 //! Owner pause and resume commands shared with the existing Telegram and web state.
 
 mod budget;
+mod diary_questions;
 mod policy;
 pub use budget::NotificationExclusions;
+pub use diary_questions::GeneratedDiaryQuestions;
 pub use policy::{NotificationDecision, NotificationPolicy, NotificationReason};
 
 use std::{error::Error, fmt, time::Duration};
