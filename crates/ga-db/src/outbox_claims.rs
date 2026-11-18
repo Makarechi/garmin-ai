@@ -86,7 +86,7 @@ struct MemoryFence {
     target_epoch: String,
     source_epochs: BTreeMap<String, String>,
     telegram_today: Option<TodayProjection>,
-    telegram_debug: Option<[Option<i64>; 2]>,
+    telegram_debug: Option<[Value; 5]>,
 }
 
 enum FenceStatus {
@@ -305,8 +305,9 @@ async fn check_fence(
     }
     if let Some(generation) = fence.telegram_debug {
         let unchanged: bool = sqlx::query_scalar(
-            "SELECT coalesce((SELECT jsonb_build_array(value->'message_at',value->'update_id')
-                 FROM app_state WHERE key='telegram:debug'), '[null,null]'::jsonb) = $1::jsonb",
+            "SELECT coalesce((SELECT jsonb_build_array(value->'message_at',value->'update_id',
+                 value->'ordering_epoch',value->'received_us',value->'channel_instance_id')
+                 FROM app_state WHERE key='telegram:debug'), '[null,null,null,null,null]'::jsonb) = $1::jsonb",
         )
         .bind(serde_json::json!(generation).to_string())
         .fetch_one(&mut **txn)

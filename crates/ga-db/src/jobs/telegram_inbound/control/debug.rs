@@ -22,7 +22,7 @@ pub(super) async fn apply(
         .fetch_one(&mut **txn)
         .await?;
     if !locked {
-        return Err(TelegramControlError::Database);
+        return Err(TelegramControlError::Busy);
     }
     let mut arguments = envelope
         .text()
@@ -92,7 +92,10 @@ pub(super) async fn apply(
         txn,
         envelope.conversation_id(),
         json!({
-            "telegram_debug": [value["message_at"], value["update_id"]],
+            "telegram_debug": [
+                value["message_at"], value["update_id"], value["ordering_epoch"],
+                value["received_us"], value["channel_instance_id"],
+            ],
         }),
     )
     .await?;
