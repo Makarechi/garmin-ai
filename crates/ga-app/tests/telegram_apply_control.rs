@@ -180,6 +180,36 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .bind(owner)
         .execute(&pool)
         .await?;
+    let mut replay = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(72104619)")
+        .execute(&mut *replay)
+        .await?;
+    match database.apply_telegram_owner_control(&pause, 3).await {
+        Err(
+            error @ TelegramControlError::Outbox(ga_db::outbox_enqueue::QueueIntentError::Busy),
+        ) => {
+            assert!(error.is_busy());
+        }
+        _ => return Err("Expected retryable outbox lock contention".into()),
+    }
+    database.defer_telegram_owner_control(&pause, now).await?;
+    let unavailable: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT FROM app_state WHERE key='proactive:enabled')
+            AND NOT EXISTS(SELECT FROM outbox_messages WHERE inbound_message_id=$1)
+            AND EXISTS(SELECT FROM jobs
+                       WHERE payload->>'inbound_message_id'=$1::uuid::text
+                         AND status='pending' AND attempts=0 AND last_error='TelegramPolicyBusy')",
+    )
+    .bind(pause.message_id())
+    .fetch_one(&pool)
+    .await?;
+    assert!(unavailable);
+    replay.rollback().await?;
+    let after_retry = StoredInstant::from_unix_microseconds(now.unix_microseconds() + 300_000)?;
+    let pause = database
+        .claim_telegram_control(target, after_retry, 60)
+        .await?
+        .ok_or("Missing rescheduled pause")?;
     assert!(
         database
             .apply_telegram_owner_control(&pause, 3, "Europe/Bratislava")
@@ -411,6 +441,90 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored, 2);
+    sqlx::query(
+        "UPDATE outbox_messages SET state='delivered' WHERE state='queued' AND memory_fence ? 'telegram_debug'",
+    ).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         VALUES(gen_random_uuid(),$1,'telegram','secondary','42','fixture')",
+    ).bind(owner).execute(&pool).await?;
+    binding
+        .accept_polled_update(&mut runtime, &wire(30, "/debug on"), now, false)
+        .await?;
+    let primary = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing primary diagnostic command")?;
+    let mut replay = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(72104619)")
+        .execute(&mut *replay)
+        .await?;
+    assert!(matches!(
+        database
+            .apply_telegram_owner_control(&primary, 4, "Europe/Bratislava")
+            .await,
+        Err(TelegramControlError::Busy)
+    ));
+    database.defer_telegram_owner_control(&primary, now).await?;
+    replay.rollback().await?;
+    let after = StoredInstant::from_unix_microseconds(now.unix_microseconds() + 300_000)?;
+    let primary = database
+        .claim_local_telegram_control(target, after, 60)
+        .await?
+        .ok_or("Missing rescheduled diagnostic command")?;
+    let primary = database
+        .apply_telegram_owner_control(&primary, 4, "Europe/Bratislava")
+        .await?;
+    let matched = database
+        .claim_outbox_reply(destination(), after, 60)
+        .await?
+        .ok_or("Missing primary diagnostic reply")?;
+    assert_eq!(matched.outbox_id, primary.outbox_id);
+    let alternate = TelegramBinding {
+        instance_id: "secondary",
+        ..binding
+    };
+    alternate
+        .accept_polled_update(&mut runtime, &wire(30, "/debug off"), after, false)
+        .await?;
+    let alternate_target = TelegramInboundTarget {
+        instance_id: "secondary",
+        ..target
+    };
+    let next = database
+        .claim_local_telegram_control(alternate_target, after, 60)
+        .await?
+        .ok_or("Missing secondary diagnostic command")?;
+    let secondary = database
+        .apply_telegram_owner_control(&next, 4, "Europe/Bratislava")
+        .await?;
+    let truth: (bool, String) = sqlx::query_as(
+        "SELECT (value->>'enabled')::bool,value->>'channel_instance_id'
+         FROM app_state WHERE key='telegram:debug'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(truth, (false, "telegram:secondary".into()));
+    let pair: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT memory_fence->'telegram_debug'->>0,memory_fence->'telegram_debug'->>1,
+                memory_fence->'telegram_debug'->>4
+         FROM outbox_messages WHERE id IN ($1,$2)",
+    )
+    .bind(primary.outbox_id)
+    .bind(secondary.outbox_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(pair.len(), 2);
+    assert_eq!((&pair[0].0, &pair[0].1), (&pair[1].0, &pair[1].1));
+    assert_ne!(pair[0].2, pair[1].2);
+    assert_eq!(
+        database
+            .dispatch_telegram_outbox_reply(destination(), 42, matched, &[], |_| async {
+                panic!("An obsolete confirmation from a different bot was sent")
+            })
+            .await?,
+        ReplyDispatchResult::Cancelled
+    );
 
     sqlx::raw_sql(
         r#"UPDATE outbox_messages SET state='delivered' WHERE state='queued' AND memory_fence ? 'telegram_debug';
@@ -429,7 +543,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         "Пульс часов: нет сохранённых измерений. Данных недостаточно для оценки текущего состояния. ",
         "Покрытие дня без заполнения пропусков: 0%.\nНочной HRV: нет данных.",
     );
-    for (update, stale) in [(30, false), (31, true)] {
+    for (update, stale) in [(31, false), (32, true)] {
         binding
             .accept_polled_update(&mut runtime, &wire(update, "/status"), now, false)
             .await?;
