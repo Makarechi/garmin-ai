@@ -1,10 +1,13 @@
+use std::io::{self, Read};
+
 use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Path, Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use ga_archive::json_spool::JsonDocument;
 use ga_db::{
     diary::DiaryReadError,
     health_analysis::{HealthAnalysisError, NapPolicy, TimelineError},
@@ -36,11 +39,12 @@ pub(crate) enum ReadTool {
     ComparePeriods,
     RunningEfficiency,
     MetricSeries,
+    EventWindows,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 9] = [
+    pub(crate) const GARMIN_READS: [Self; 10] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -50,8 +54,9 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::EventWindows,
     ];
-    const IMPLEMENTED: [Self; 13] = [
+    const IMPLEMENTED: [Self; 14] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -63,6 +68,7 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::EventWindows,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -81,6 +87,7 @@ impl ReadTool {
             Self::ComparePeriods => "analysis_compare_periods",
             Self::RunningEfficiency => "analysis_running_efficiency",
             Self::MetricSeries => "metric_series",
+            Self::EventWindows => "analysis_event_windows",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -183,6 +190,14 @@ impl ReadTool {
                     "timing_only":{"type":"boolean","title":"Timing Only","default":false}
                 }),
                 &["start", "end"][..],
+            ),
+            Self::EventWindows => (
+                "Compute measured physiology in -48h through +24h windows around diary events.",
+                "analysis_event_windowsArgs",
+                json!({"event_type":{"title":"Event Type","type":"string"},
+                    "metric":{"title":"Metric","type":"string"},
+                    "start":datetime("Start"),"end":datetime("End")}),
+                &["event_type", "metric", "start", "end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
@@ -322,7 +337,7 @@ async fn execute_read_tool(
     }
     if ReadTool::GARMIN_READS.contains(&tool) {
         return match read_garmin(&database, tool, &arguments, None).await {
-            Ok(value) => Json(value).into_response(),
+            Ok(value) => document_response(value),
             Err(GarminReadError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
             Err(GarminReadError::Health(error)) => health_failure(error),
             Err(_) => invalid_arguments(),
@@ -639,3 +654,27 @@ fn health_failure(error: HealthAnalysisError) -> Response {
 mod garmin_reads;
 
 pub(crate) use garmin_reads::{GarminReadError, read_garmin};
+
+fn document_response(document: JsonDocument) -> Response {
+    let bytes = document.byte_len();
+    let chunks = futures_util::stream::try_unfold(document.reader(), |mut reader| async move {
+        let (reader, chunk) = tokio::task::spawn_blocking(move || {
+            let mut chunk = vec![0; 64 * 1024];
+            let count = reader.read(&mut chunk)?;
+            chunk.truncate(count);
+            Ok::<_, io::Error>((reader, chunk))
+        })
+        .await
+        .map_err(io::Error::other)??;
+        Ok::<_, io::Error>((!chunk.is_empty()).then_some((chunk, reader)))
+    });
+    let mut response = Body::from_stream(chunks).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes));
+    response
+}
