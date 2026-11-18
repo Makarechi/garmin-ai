@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-pub(crate) const CHANNEL_SELECTION_LOCK: i64 = 72_104_621;
+pub(crate) use crate::share_policy::OWNER_ONBOARDING_LOCK as CHANNEL_SELECTION_LOCK;
 
 pub enum TelegramPollEvent<'a> {
     Ignore,
