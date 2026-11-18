@@ -96,12 +96,12 @@ pub(crate) fn create(destination: &Path) -> CommandResult {
     let runtime = runtime()?;
     let database = runtime.block_on(async { settings.database() })?;
     let mut sources = runtime.block_on(database.acquire_backup_sources())?;
+    let workspace = BackupWorkspace::acquire(&settings.data)?;
     let size = runtime
         .block_on(database.backup_database_bytes())
         .map_err(|_| "Backup database size is unavailable")?;
     settings.require_capacity(destination, ExportSize::DatabaseBytes(size))?;
 
-    let workspace = BackupWorkspace::acquire(&settings.data)?;
     let export = workspace.export_path();
     let at = current_time()?;
     let snapshot = write_private_export(export, |file| {
