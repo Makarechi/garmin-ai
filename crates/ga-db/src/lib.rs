@@ -22,6 +22,7 @@ pub mod personal_goals;
 pub mod proactive_control;
 pub mod raw_capture;
 pub mod replay;
+pub mod retention;
 pub mod runtime_lease;
 pub mod scenario_packs;
 pub mod share_policy;

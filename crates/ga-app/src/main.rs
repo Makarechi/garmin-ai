@@ -1,7 +1,9 @@
 mod authorization;
 mod backup_space;
+mod configuration;
 mod http;
 mod replay_worker;
+mod retention;
 
 use std::{env, ffi::OsStr, path::PathBuf, process::ExitCode};
 
@@ -29,6 +31,21 @@ enum Command {
     },
     /// Estimate local staging and destination capacity for an encrypted backup
     BackupSpace { path: PathBuf },
+    /// Preview or redact old completed transport text while retaining replay records
+    PruneTelegramText {
+        #[arg(long, default_value_t = 90)]
+        older_than_days: u16,
+        #[arg(long, default_value_t = 1000)]
+        limit: u16,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        answer_cursor: Option<String>,
+        #[arg(long)]
+        neutral_cursor: Option<String>,
+    },
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
@@ -75,6 +92,27 @@ fn main() -> ExitCode {
         }
         Some(Command::BackupSpace { path }) => {
             if let Err(error) = backup_space::run(&path) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::PruneTelegramText {
+            older_than_days,
+            limit,
+            apply,
+            cursor,
+            answer_cursor,
+            neutral_cursor,
+        }) => {
+            let selection = ga_db::retention::RetentionSelection {
+                older_than_days,
+                limit,
+                apply,
+                cursor: cursor.as_deref(),
+                answer_cursor: answer_cursor.as_deref(),
+                neutral_cursor: neutral_cursor.as_deref(),
+            };
+            if let Err(error) = retention::run(selection) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
