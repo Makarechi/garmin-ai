@@ -1,4 +1,5 @@
 mod browser;
+mod community_packs;
 pub(crate) mod demo;
 mod diary;
 mod exports;
@@ -45,6 +46,9 @@ fn router(state: AppState) -> Router {
         .route("/actions", any(tracker_actions::available))
         .route("/tracker-setups/preview", any(tracker_setup::preview))
         .route("/tracker-setups", any(tracker_setup::confirm))
+        .route("/community-packs", any(community_packs::catalog))
+        .route("/community-packs/preview", any(community_packs::preview))
+        .route("/community-packs/import", any(community_packs::import))
         .route("/actions/events/{event_id}", any(tracker_actions::event))
         .route("/forms/{action_id}", any(tracker_actions::form))
         .route("/forms/{action_id}/submit", any(tracker_actions::submit))

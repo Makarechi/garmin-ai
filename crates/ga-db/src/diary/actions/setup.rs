@@ -108,33 +108,87 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(2500), async {
             let mut txn = self.begin_definition_management(request).await?;
             let key = format!("tracker-preview:{token}");
-            let recorded: Option<String> = sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1 FOR UPDATE")
-                .bind(&key).fetch_optional(&mut *txn).await?;
-            let now = StoredInstant::try_from(setup_clock(&mut txn).await?).map_err(|_|TrackerSetupStoreError::Database)?;
-            let current = recorded.and_then(|value|serde_json::from_str::<Value>(&value).ok());
-            if !current.is_some_and(|current| current["draft_hash"]==draft.hash()
-                && StoredInstant::from_legacy_input(&current["expires_at"]).is_some_and(|deadline| deadline>now)) {
+            let recorded: Option<String> =
+                sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1 FOR UPDATE")
+                    .bind(&key)
+                    .fetch_optional(&mut *txn)
+                    .await?;
+            let now = StoredInstant::try_from(setup_clock(&mut txn).await?)
+                .map_err(|_| TrackerSetupStoreError::Database)?;
+            let current = recorded.and_then(|value| serde_json::from_str::<Value>(&value).ok());
+            if !current.is_some_and(|current| {
+                current["draft_hash"] == draft.hash()
+                    && StoredInstant::from_legacy_input(&current["expires_at"])
+                        .is_some_and(|deadline| deadline > now)
+            }) {
                 return Err(TrackerSetupStoreError::PreviewChanged);
             }
-            sqlx::query("DELETE FROM app_state WHERE key=$1").bind(key).execute(&mut *txn).await?;
-            let definition = Self::draft_custom_definition_in(&mut txn,request,draft.definition()).await?;
-            let tracker = Uuid::new_v4();
-            let document = draft.document();
-            let shortcut = document["shortcut"].as_str().filter(|value|!value.is_empty()).or_else(||document["name"].as_str());
-            sqlx::query("INSERT INTO tracker_configs(id,owner_id,definition_id,shortcut,reminder_enabled,
-                reminder_time,reminder_timezone,settings,revision) VALUES($1,$2,$3,$4,$5,$6,$7,'{}',1)")
-                .bind(tracker).bind(request.owner_id).bind(definition.id).bind(shortcut)
-                .bind(document["reminder_enabled"].as_bool()).bind(document["reminder_time"].as_str())
-                .bind(document["reminder_timezone"].as_str()).execute(&mut *txn).await?;
-            let version = Self::activate_custom_definition_in(&mut txn,request,definition.id,definition.revision).await?;
-            let action = ActionRecord { key:definition.key.clone(),version_id:version.id,
-                labels:draft.definition().contract()["labels"].to_string(),shortcut:shortcut.map(str::to_owned),
-            }.action(document["locale"].as_str().ok_or(TrackerSetupStoreError::Database)?,None)?;
+            sqlx::query("DELETE FROM app_state WHERE key=$1")
+                .bind(key)
+                .execute(&mut *txn)
+                .await?;
+            let created = Self::create_tracker_in(&mut txn, request, draft).await?;
             txn.commit().await?;
-            Ok(json!({"tracker":{"id":tracker.to_string(),"definition_id":definition.id.to_string(),
-                "definition_key":definition.key,"revision":1,"shortcut":shortcut,"reminder_enabled":document["reminder_enabled"],
-                "reminder_time":document["reminder_time"],"reminder_timezone":document["reminder_timezone"]},"action":action}))
-        }).await.map_err(|_|TrackerSetupStoreError::Database)?
+            Ok(created)
+        })
+        .await
+        .map_err(|_| TrackerSetupStoreError::Database)?
+    }
+
+    pub(super) async fn create_tracker_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: ManageCustomDefinition<'_>,
+        draft: &TrackerSetupDraft,
+    ) -> Result<Value, TrackerSetupStoreError> {
+        let definition = Self::draft_custom_definition_in(txn, request, draft.definition()).await?;
+        let tracker = Uuid::new_v4();
+        let document = draft.document();
+        let shortcut = document["shortcut"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .or_else(|| document["name"].as_str());
+        sqlx::query(
+            "INSERT INTO tracker_configs(id,owner_id,definition_id,shortcut,reminder_enabled,
+                reminder_time,reminder_timezone,settings,revision)
+             VALUES($1,$2,$3,$4,$5,$6,$7,'{}',1)",
+        )
+        .bind(tracker)
+        .bind(request.owner_id)
+        .bind(definition.id)
+        .bind(shortcut)
+        .bind(document["reminder_enabled"].as_bool())
+        .bind(document["reminder_time"].as_str())
+        .bind(document["reminder_timezone"].as_str())
+        .execute(&mut **txn)
+        .await?;
+        let version =
+            Self::activate_custom_definition_in(txn, request, definition.id, definition.revision)
+                .await?;
+        let action = ActionRecord {
+            key: definition.key.clone(),
+            version_id: version.id,
+            labels: draft.definition().contract()["labels"].to_string(),
+            shortcut: shortcut.map(str::to_owned),
+        }
+        .action(
+            document["locale"]
+                .as_str()
+                .ok_or(TrackerSetupStoreError::Database)?,
+            None,
+        )?;
+        Ok(json!({
+            "tracker": {
+                "id": tracker.to_string(),
+                "definition_id": definition.id.to_string(),
+                "definition_key": definition.key,
+                "revision": 1,
+                "shortcut": shortcut,
+                "reminder_enabled": document["reminder_enabled"],
+                "reminder_time": document["reminder_time"],
+                "reminder_timezone": document["reminder_timezone"],
+            },
+            "action": action,
+        }))
     }
 }
 
