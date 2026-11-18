@@ -19,6 +19,7 @@ pub(crate) struct Authorization {
 struct Token {
     digest: [u8; 32],
     scopes: Scopes,
+    device: Option<Uuid>,
 }
 
 impl Authorization {
@@ -36,6 +37,7 @@ impl Authorization {
             tokens.push(Token {
                 digest: credential(key),
                 scopes: [Scope::Admin].into_iter().collect(),
+                device: None,
             });
         }
         if let Some(scoped) = scoped {
@@ -58,6 +60,16 @@ impl Authorization {
     }
 
     pub(crate) fn authenticate(&self, authorization: Option<&HeaderValue>) -> Option<Scopes> {
+        self.authenticate_token(authorization)
+            .map(|token| token.scopes)
+    }
+
+    pub(crate) fn wearable_device(&self, authorization: Option<&HeaderValue>) -> Option<Uuid> {
+        self.authenticate_token(authorization)
+            .and_then(|token| token.device)
+    }
+
+    fn authenticate_token(&self, authorization: Option<&HeaderValue>) -> Option<&Token> {
         let authorization = authorization?.as_bytes();
         // ASGI decodes header bytes as Latin-1. Preserve that mapping for old keys.
         let digest: [u8; 32] = if authorization.is_ascii() {
@@ -69,7 +81,7 @@ impl Authorization {
         let mut granted = None;
         for token in &self.tokens {
             if bool::from(token.digest.ct_eq(&digest)) {
-                granted = Some(token.scopes);
+                granted = Some(token);
             }
         }
         granted
@@ -106,6 +118,7 @@ fn scoped_token(value: &Value) -> Option<Token> {
     Some(Token {
         digest: credential(key),
         scopes,
+        device,
     })
 }
 

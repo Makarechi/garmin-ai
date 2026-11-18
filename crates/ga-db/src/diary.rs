@@ -14,11 +14,13 @@ mod metrics;
 mod reads;
 mod revisions;
 mod undo;
+mod wearable;
 
 pub(crate) use reads::owner_events_in;
 pub use reads::{DiaryEventRange, DiaryReadError, ModelDiaryPage, ModelDiaryQuery};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
+pub use wearable::WearableError;
 
 use std::{error::Error, fmt};
 
