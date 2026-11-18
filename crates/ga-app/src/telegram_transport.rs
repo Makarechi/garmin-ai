@@ -1,7 +1,9 @@
 mod poller;
+mod reminders;
 mod send;
 mod worker;
 pub use poller::{PollBatch, PollProgress, TelegramLoopError};
+pub use reminders::DiaryReminderSettings;
 pub use send::TelegramSendOutcome;
 
 use std::{error::Error, fmt, time::Duration};

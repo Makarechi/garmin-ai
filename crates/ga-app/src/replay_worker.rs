@@ -7,7 +7,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ga_app::{telegram_settings::TelegramIngressSettings, telegram_transport::TelegramTransport};
+use ga_app::{
+    telegram_settings::TelegramIngressSettings,
+    telegram_transport::{DiaryReminderSettings, TelegramTransport},
+};
 use ga_archive::Archive;
 use ga_db::{
     Database,
@@ -15,9 +18,12 @@ use ga_db::{
     replay::{ReplaySelectionError, RunReplayJob},
     runtime_lease::RuntimeLeaseError,
 };
-use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
+use ga_domain::{
+    event_input::known_timezone, event_payload::legacy_boolean, timestamp::StoredInstant,
+};
 use ga_fit::{ExportLimits, MAX_FIT_BYTES};
-use tokio::{signal, time::Instant};
+use time::Time;
+use tokio::{signal, sync::watch, time::Instant};
 
 use crate::configuration;
 
@@ -92,16 +98,27 @@ impl Configuration {
 struct TelegramWorker {
     settings: TelegramIngressSettings,
     transport: TelegramTransport,
-    question_budget: u16,
+    reminders: DiaryReminderSettings,
 }
 
-fn telegram_configuration() -> Result<Option<TelegramWorker>, ReplayServiceError> {
+fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, ReplayServiceError> {
     let failure = |_| ReplayServiceError::TelegramConfiguration;
-    let [token, user, integrations, budget] = configuration::read([
+    let [
+        token,
+        user,
+        integrations,
+        budget,
+        enabled,
+        quiet_start,
+        quiet_end,
+    ] = configuration::read([
         "GA_TELEGRAM_BOT_TOKEN",
         "GA_TELEGRAM_USER_ID",
         "GA_INTEGRATIONS",
         "GA_QUESTION_BUDGET",
+        "GA_PROACTIVE_ENABLED",
+        "GA_QUIET_START_HOUR",
+        "GA_QUIET_END_HOUR",
     ])
     .map_err(failure)?;
     let Some(token) = token.filter(|token| !token.is_empty()) else {
@@ -118,21 +135,42 @@ fn telegram_configuration() -> Result<Option<TelegramWorker>, ReplayServiceError
     let question_budget = budget
         .as_deref()
         .unwrap_or("2")
-        .parse::<u16>()
+        .parse::<u8>()
         .ok()
         .filter(|value| *value <= 20)
         .ok_or(ReplayServiceError::TelegramConfiguration)?;
+    let enabled = enabled
+        .map_or(Some(false), |value| {
+            legacy_boolean(&serde_json::Value::String(value))
+        })
+        .ok_or(ReplayServiceError::TelegramConfiguration)?;
+    let quiet = |hour: Option<&str>, fallback: &str| {
+        hour.unwrap_or(fallback)
+            .parse::<u8>()
+            .ok()
+            .and_then(|hour| Time::from_hms(hour, 0, 0).ok())
+            .ok_or(ReplayServiceError::TelegramConfiguration)
+    };
     Ok(Some(TelegramWorker {
         settings,
         transport,
-        question_budget,
+        reminders: DiaryReminderSettings {
+            timezone: timezone.to_owned(),
+            enabled,
+            daily_budget: question_budget,
+            quiet_start: quiet(quiet_start.as_deref(), "22")?,
+            quiet_end: quiet(quiet_end.as_deref(), "8")?,
+        },
     }))
 }
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     let config = Configuration::read()?;
-    let telegram = worker.then(telegram_configuration).transpose()?.flatten();
+    let telegram = worker
+        .then(|| telegram_configuration(&config.timezone))
+        .transpose()?
+        .flatten();
     let database = Database::connect_lazy(&config.database_url)
         .map_err(|_| ReplayServiceError::Configuration)?;
     let archive = Arc::new(
@@ -173,11 +211,17 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             "Archive replay worker ready"
         }
     );
+    let (recovered, wait_for_recovery) = watch::channel(false);
     let receive = async {
         if let Some(telegram) = &telegram {
             telegram
                 .transport
-                .run_receiver(&database, &mut singleton, &telegram.settings)
+                .run_receiver_with_reminders(
+                    &database,
+                    &mut singleton,
+                    &telegram.settings,
+                    recovered,
+                )
                 .await
                 .map_err(ReplayServiceError::Lease)
         } else {
@@ -191,13 +235,14 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         if let Some(TelegramWorker {
             transport,
             settings,
-            question_budget,
+            reminders,
         }) = &telegram
         {
             tokio::select! {
                 result = transport.run_acknowledgements(&database, settings) => result,
-                result = transport.run_owner_controls(&database, settings, *question_budget, &config.timezone) => result,
+                result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
                 result = transport.run_replies(&database, settings) => result,
+                result = transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery) => result,
             }
         }
         future::pending::<Result<(), ReplayServiceError>>().await

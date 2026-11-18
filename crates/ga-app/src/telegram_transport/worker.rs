@@ -7,7 +7,10 @@ use ga_db::{
     runtime_lease::{RuntimeLease, RuntimeLeaseError},
 };
 use ga_domain::timestamp::StoredInstant;
-use tokio::time::{Instant, sleep};
+use tokio::{
+    sync::watch,
+    time::{Instant, sleep},
+};
 
 use super::{
     PollProgress, TelegramLoopError, TelegramTransport, TelegramTransportError, poller::wall_clock,
@@ -31,9 +34,36 @@ impl TelegramTransport {
         runtime: &mut RuntimeLease,
         settings: &TelegramIngressSettings,
     ) -> Result<(), RuntimeLeaseError> {
+        self.receive(database, runtime, settings, None).await
+    }
+
+    pub async fn run_receiver_with_reminders(
+        &self,
+        database: &Database,
+        runtime: &mut RuntimeLease,
+        settings: &TelegramIngressSettings,
+        recovered: watch::Sender<bool>,
+    ) -> Result<(), RuntimeLeaseError> {
+        self.receive(database, runtime, settings, Some(recovered))
+            .await
+    }
+
+    async fn receive(
+        &self,
+        database: &Database,
+        runtime: &mut RuntimeLease,
+        settings: &TelegramIngressSettings,
+        mut reminder_recovery: Option<watch::Sender<bool>>,
+    ) -> Result<(), RuntimeLeaseError> {
         let mut mode = None;
         let mut progress = PollProgress::default();
         loop {
+            if let Some(recovered) = reminder_recovery.as_ref()
+                && runtime.recover_diary_question_deliveries().await.is_ok()
+            {
+                let _ = recovered.send(true);
+                reminder_recovery = None;
+            }
             let binding = settings.confirmed_binding(database).await;
             let selected = runtime
                 .telegram_channel_selected(settings.instance_id())
