@@ -348,10 +348,17 @@ pub fn known_timezone(name: &str) -> bool {
 }
 
 pub fn source_calendar_date(start: StoredInstant, timezone: &str) -> Option<time::Date> {
-    source_calendar_clock(start, timezone).map(|(date, _)| date)
+    source_calendar_wall_time(start, timezone).map(|(date, _)| date)
 }
 
 pub fn source_calendar_clock(start: StoredInstant, timezone: &str) -> Option<(time::Date, u8)> {
+    source_calendar_wall_time(start, timezone).map(|(date, clock)| (date, clock.hour()))
+}
+
+pub fn source_calendar_wall_time(
+    start: StoredInstant,
+    timezone: &str,
+) -> Option<(time::Date, time::Time)> {
     let instant = jiff::Timestamp::from_microsecond(start.unix_microseconds()).ok()?;
     let zone = jiff::tz::db().get(timezone).ok()?;
     let local = instant.to_zoned_datetime(zone);
@@ -361,7 +368,14 @@ pub fn source_calendar_clock(start: StoredInstant, timezone: &str) -> Option<(ti
         u8::try_from(local.day()).ok()?,
     )
     .ok()?;
-    Some((date, u8::try_from(local.hour()).ok()?))
+    let clock = time::Time::from_hms_nano(
+        u8::try_from(local.hour()).ok()?,
+        u8::try_from(local.minute()).ok()?,
+        u8::try_from(local.second()).ok()?,
+        u32::try_from(local.subsec_nanosecond()).ok()?,
+    )
+    .ok()?;
+    Some((date, clock))
 }
 
 /// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
@@ -374,6 +388,25 @@ pub fn local_wall_time(
     day: time::Date,
     clock: time::Time,
     timezone: &str,
+) -> Option<StoredInstant> {
+    local_wall_instant(day, clock, timezone, None)
+}
+
+/// Resolve the next occurrence of a wall-clock time if a timezone overlap repeats it.
+pub fn local_wall_time_after(
+    day: time::Date,
+    clock: time::Time,
+    timezone: &str,
+    after: StoredInstant,
+) -> Option<StoredInstant> {
+    local_wall_instant(day, clock, timezone, Some(after))
+}
+
+fn local_wall_instant(
+    day: time::Date,
+    clock: time::Time,
+    timezone: &str,
+    after: Option<StoredInstant>,
 ) -> Option<StoredInstant> {
     let zone = jiff::tz::db().get(timezone).ok()?;
     let day = jiff::civil::Date::new(
@@ -388,6 +421,15 @@ pub fn local_wall_time(
         clock.second() as i8,
         clock.nanosecond() as i32,
     );
-    let instant = zone.to_ambiguous_timestamp(wall).compatible().ok()?;
-    StoredInstant::from_unix_microseconds(instant.as_microsecond()).ok()
+    let resolution = zone.to_ambiguous_timestamp(wall);
+    let mut instant = resolution.compatible().ok()?.as_microsecond();
+    if let Some(after) = after
+        && instant <= after.unix_microseconds()
+    {
+        instant = resolution.later().ok()?.as_microsecond();
+        if instant <= after.unix_microseconds() {
+            return None;
+        }
+    }
+    StoredInstant::from_unix_microseconds(instant).ok()
 }
