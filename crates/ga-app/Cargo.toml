@@ -32,6 +32,7 @@ subtle = { version = "2.6.1", default-features = false }
 uuid = { version = "1.29.3", default-features = false, features = ["v5"] }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 tokio = { version = "1.54.1", features = ["macros", "net", "rt", "signal", "time"] }
+rmcp = { version = "=3.11.0", default-features = false, features = ["server", "transport-io"] }
 
 [lints]
 workspace = true
