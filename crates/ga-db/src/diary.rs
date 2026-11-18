@@ -1,4 +1,5 @@
 mod clarification;
+pub(crate) use clarification::clarification_active_at;
 pub use clarification::{ClarificationClock, ClarificationError, ClarificationReply};
 
 mod agent_batch;
