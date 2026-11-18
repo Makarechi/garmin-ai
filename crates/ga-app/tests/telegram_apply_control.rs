@@ -679,13 +679,29 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .accept_polled_update(&mut runtime, &voice, now, false)
         .await?;
     assert!(accepted.inbound.is_some_and(|receipt| receipt.created));
+    let original = wire(38, "Synthetic unsent diary text");
     binding
-        .accept_polled_update(&mut runtime, &wire(38, "/goals"), now, false)
+        .accept_polled_update(&mut runtime, &original, now, false)
+        .await?;
+    let mut edited = original["message"].clone();
+    edited["text"] = json!("/goals сон");
+    edited["edit_date"] = json!(clock.unix_timestamp() + 1);
+    let accepted = binding
+        .accept_polled_update(
+            &mut runtime,
+            &json!({"update_id":39,"edited_message":edited}),
+            now,
+            false,
+        )
+        .await?;
+    assert!(accepted.inbound.is_some_and(|receipt| receipt.created));
+    binding
+        .accept_polled_update(&mut runtime, &wire(40, "/goals"), now, false)
         .await?;
     let menu = database
         .claim_local_telegram_control(target, now, 60)
         .await?
-        .ok_or("The goals menu was held by a voice caption")?;
+        .ok_or("The goals menu was held by a diary message")?;
     database
         .apply_telegram_owner_control(&menu, 4, "Europe/Bratislava")
         .await?;
@@ -703,7 +719,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             },
         )
         .await?;
-    let mut earlier = wire(39, "/goals бег");
+    let mut earlier = wire(41, "/goals бег");
     earlier["message"]["date"] = json!(clock.unix_timestamp() - 60);
     binding
         .accept_polled_update(&mut runtime, &earlier, now, false)

@@ -137,10 +137,11 @@ async fn earlier_change(
         "SELECT EXISTS(
              SELECT FROM jobs j JOIN inbound_messages i
                  ON j.dedup_key=concat('telegram:inbound:native:',i.id)
+                 AND j.payload->>'inbound_message_id'=i.id::text
              WHERE j.kind='telegram_native_inbound' AND j.status IN ('pending','running')
+               AND j.payload->>'lane'='control'
                AND i.owner_id=$1 AND i.channel='telegram' AND i.channel_instance_id=$2
                AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
-               AND i.kind <> 'voice'
                AND (coalesce((j.payload->>'ordering_epoch')::bigint,0),i.external_event_id::bigint)<($3,$4)
                AND translate(i.envelope->>'text',$5,repeat(' ',char_length($5))) ~ $6
          ) OR EXISTS(
