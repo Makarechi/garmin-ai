@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ga_domain::event_input::known_timezone;
+use ga_domain::event_input::{known_timezone, local_midnight};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{FromRow, Row, postgres::PgRow};
@@ -65,9 +65,17 @@ impl DailyHealthReader {
             if !known_timezone(&timezone) {
                 return Err(HealthAnalysisError::InvalidTimezone.into());
             }
+            let left = local_midnight(start, &timezone)
+                .map(time::OffsetDateTime::from)
+                .ok_or(HealthAnalysisError::InvalidTimezone)?;
+            let right = end
+                .next_day()
+                .and_then(|day| local_midnight(day, &timezone))
+                .map(time::OffsetDateTime::from)
+                .ok_or(HealthAnalysisError::InvalidTimezone)?;
             let observed: Vec<ObservedHour> = sqlx::query_as(include_str!("stress.sql"))
-                .bind(start)
-                .bind(end)
+                .bind(left)
+                .bind(right)
                 .bind(&timezone)
                 .fetch_all(&mut *self.0)
                 .await?;

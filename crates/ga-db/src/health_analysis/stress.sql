@@ -1,6 +1,5 @@
 WITH RECURSIVE bounds AS MATERIALIZED (
-    SELECT $1::date::timestamp AT TIME ZONE $3 AS first,
-        ($2::date+1)::timestamp AT TIME ZONE $3 AS last
+    SELECT $1::timestamptz AS first,$2::timestamptz AS last
 ), clock(at) AS (
     SELECT first FROM bounds
     UNION ALL

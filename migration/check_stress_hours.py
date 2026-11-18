@@ -56,6 +56,9 @@ def seed_stress(engine):
                 at = datetime(2026, month, day, tzinfo=UTC)
                 for index in range(49):
                     add(at + timedelta(minutes=5 * index), 51 if index % 2 else 50.999999)
+        midnight = datetime(2026, 11, 1, 4, tzinfo=UTC)
+        for index in range(25):
+            add(midnight + timedelta(minutes=5 * index), 80)
 
 
 def exercise(engine, python, native):
@@ -95,6 +98,8 @@ def exercise(engine, python, native):
     for zone in ("Europe/Bratislava", "Asia/Kathmandu", "Australia/Lord_Howe"):
         compare({"start": "2026-03-28", "end": "2026-03-30", "timezone": zone})
         compare({"start": "2026-10-23", "end": "2026-10-25", "timezone": zone})
+    for day in ("2026-10-31", "2026-11-01"):
+        compare({"start": day, "end": day, "timezone": "America/Havana"})
     skipped = compare({"start": "2011-12-30", "end": "2011-12-30", "timezone": "Pacific/Apia"})
     assert skipped["status"] == "insufficient_coverage"
     for bad in (
