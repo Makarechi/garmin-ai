@@ -269,7 +269,7 @@ fn record_missing() -> Response {
     detail(StatusCode::NOT_FOUND, "Record not found")
 }
 
-fn event_response(snapshot: serde_json::Value) -> Response {
+pub(super) fn event_response(snapshot: serde_json::Value) -> Response {
     match event_document(snapshot) {
         Ok(value) => Json(value).into_response(),
         Err(_) => storage_unavailable(),
@@ -352,7 +352,7 @@ fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ReplayConflict
         .transpose()
 }
 
-async fn authorized<'a>(
+pub(super) async fn authorized<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
     required: &[Scope],
@@ -375,7 +375,7 @@ async fn authorized<'a>(
     Ok((database, owner))
 }
 
-fn access_failure(status: StatusCode) -> Response {
+pub(super) fn access_failure(status: StatusCode) -> Response {
     match status {
         StatusCode::UNAUTHORIZED => unauthorized(),
         StatusCode::FORBIDDEN => forbidden(),
@@ -383,7 +383,7 @@ fn access_failure(status: StatusCode) -> Response {
     }
 }
 
-fn write_failure(error: DiaryWriteError) -> Response {
+pub(super) fn write_failure(error: DiaryWriteError) -> Response {
     match error {
         DiaryWriteError::Replay(ReplayConflict::InputChanged) => detail(
             StatusCode::CONFLICT,

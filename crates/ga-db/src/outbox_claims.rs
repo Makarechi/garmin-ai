@@ -17,8 +17,8 @@ use crate::{
     channel_ingress::telegram_poll::telegram_primary,
     check_readiness,
     conversation_memory::{ConversationBinding, MemoryFence as ConversationFence},
-    jobs::storage_notices::StorageNoticeFence,
     jobs::telegram_inbound::analysis_reply::DiaryAnalysisFence,
+    jobs::telegram_notices::TelegramNoticeFence,
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{MODEL_CONSENT_LOCK, try_shared_lock},
     telegram_garmin::GarminProjection,
@@ -87,7 +87,7 @@ impl Candidate {
         })
     }
 
-    fn storage_notice(&self) -> Option<StorageNoticeFence> {
+    fn telegram_notice(&self) -> Option<TelegramNoticeFence> {
         self.fence
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok())
@@ -250,12 +250,12 @@ async fn check_fence(
     destination: &ReplyDestination<'_>,
     candidate: &Candidate,
 ) -> Result<FenceStatus, sqlx::Error> {
-    if let Some(notice) = candidate.storage_notice() {
+    if let Some(notice) = candidate.telegram_notice() {
         let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut **txn)
             .await?;
         let now = StoredInstant::try_from(at)
-            .map_err(|_| sqlx::Error::Protocol("Invalid storage notice clock".into()))?;
+            .map_err(|_| sqlx::Error::Protocol("Invalid Telegram notice clock".into()))?;
         return Ok(
             if candidate.inbound_id.is_none()
                 && destination.channel == "telegram"

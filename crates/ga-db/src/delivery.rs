@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    Database, ReadinessError, check_readiness, jobs::storage_notices::StorageNoticeFence,
+    Database, ReadinessError, check_readiness, jobs::telegram_notices::TelegramNoticeFence,
     replay::REPLAY_MUTATION_LOCK,
 };
 
@@ -301,7 +301,7 @@ impl Database {
             if state != DeliveryState::Uncertain.label() {
                 return Err(DeliveryError::RequiresReconciliation);
             }
-            if let Some(notice) = fence.as_deref().and_then(|value| serde_json::from_str::<StorageNoticeFence>(value).ok())
+            if let Some(notice) = fence.as_deref().and_then(|value| serde_json::from_str::<TelegramNoticeFence>(value).ok())
                 && !notice.reopen(&mut txn, instance.as_deref().ok_or(DeliveryError::InvalidReceipt)?).await?
             {
                 return Err(DeliveryError::RequiresReconciliation);

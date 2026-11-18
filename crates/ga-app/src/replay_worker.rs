@@ -12,6 +12,7 @@ use std::{
 };
 
 use ga_app::{
+    garmin_worker::GarminReauthNoticeSettings,
     model_gateway::{ModelEnvironmentError, RuntimeModelSettings},
     telegram_settings::TelegramIngressSettings,
     telegram_transport::{DiaryReminderSettings, TelegramTransport},
@@ -106,6 +107,7 @@ struct TelegramWorker {
     settings: TelegramIngressSettings,
     transport: TelegramTransport,
     reminders: DiaryReminderSettings,
+    garmin_notice: Option<GarminReauthNoticeSettings>,
 }
 
 fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, ReplayServiceError> {
@@ -118,6 +120,10 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
         enabled,
         quiet_start,
         quiet_end,
+        garmin_auth_url,
+        garmin_email,
+        garmin_password,
+        garmin_tokens,
     ] = configuration::read([
         "GA_TELEGRAM_BOT_TOKEN",
         "GA_TELEGRAM_USER_ID",
@@ -126,6 +132,10 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
         "GA_PROACTIVE_ENABLED",
         "GA_QUIET_START_HOUR",
         "GA_QUIET_END_HOUR",
+        "GA_GARMIN_AUTH_URL",
+        "GA_GARMIN_EMAIL",
+        "GA_GARMIN_PASSWORD_SECRET_VERSION",
+        "GA_TOKEN_DIR",
     ])
     .map_err(failure)?;
     let Some(token) = token.filter(|token| !token.is_empty()) else {
@@ -161,6 +171,15 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
     Ok(Some(TelegramWorker {
         settings,
         transport,
+        garmin_notice: GarminReauthNoticeSettings::resolve(
+            integrations.as_deref(),
+            &PathBuf::from(garmin_tokens.unwrap_or_else(|| "tokens/garmin".into())),
+            garmin_auth_url.as_deref(),
+            garmin_email.as_deref(),
+            garmin_password,
+        )
+        .ok()
+        .flatten(),
         reminders: DiaryReminderSettings {
             timezone: timezone.to_owned(),
             enabled,
@@ -319,6 +338,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             transport,
             settings,
             reminders,
+            garmin_notice,
         }) = &telegram
         {
             tokio::select! {
@@ -326,7 +346,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
                 result = transport.run_local_diary(&database, settings, &config.timezone) => result,
                 result = transport.run_local_text(&database, settings, &config.locale, reminders_available) => result,
-                result = transport.run_replies(&database, settings) => result,
+                result = transport.run_replies_with_garmin_notices(&database, settings, garmin_notice.as_ref()) => result,
                 result = async {
                     if let (Some(selected), Some(gateway)) = (&model_configuration, &model_gateway) {
                         transport.run_model_diary(&database,settings,selected,gateway,&config.timezone,&config.locale).await

@@ -34,12 +34,25 @@ impl TelegramTransport {
         intent: &OutboundIntent,
         now: StoredInstant,
     ) -> Result<TelegramSendOutcome, TelegramReplyError> {
+        self.send_reply(binding, intent, now, None).await
+    }
+
+    async fn send_reply(
+        &self,
+        binding: TelegramBinding<'_>,
+        intent: &OutboundIntent,
+        now: StoredInstant,
+        garmin_launch: Option<&reqwest::Url>,
+    ) -> Result<TelegramSendOutcome, TelegramReplyError> {
         let reply = prepare_reply(binding, intent, now)?;
-        let buttons: Vec<_> = reply
+        let mut buttons: Vec<_> = reply
             .buttons
             .iter()
             .map(|button| [json!({"text":button.label,"callback_data":button.callback_data})])
             .collect();
+        if let Some(url) = garmin_launch {
+            buttons.push([json!({"text":"Войти в Garmin","web_app":{"url":url.as_str()}})]);
+        }
         let mut last_message_id = None;
         let parts = reply.parts.len();
         for (index, text) in reply.parts.iter().enumerate() {
