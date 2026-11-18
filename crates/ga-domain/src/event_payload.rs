@@ -328,8 +328,13 @@ fn rating(value: Value) -> Option<Value> {
 }
 
 pub(crate) fn boolean(value: Value) -> Option<Value> {
+    legacy_boolean(&value).map(Value::Bool)
+}
+
+/// Coerce a boolean as accepted by the existing Python settings and data contracts.
+pub fn legacy_boolean(value: &Value) -> Option<bool> {
     let converted = match value {
-        Value::Bool(value) => value,
+        Value::Bool(value) => *value,
         Value::String(value) => match value.to_ascii_lowercase().as_str() {
             "1" | "on" | "t" | "true" | "y" | "yes" => true,
             "0" | "off" | "f" | "false" | "n" | "no" => false,
@@ -342,7 +347,7 @@ pub(crate) fn boolean(value: Value) -> Option<Value> {
         },
         _ => return None,
     };
-    Some(Value::Bool(converted))
+    Some(converted)
 }
 
 pub(crate) fn finite_number(

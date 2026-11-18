@@ -82,6 +82,11 @@ enum Command {
         executable: PathBuf,
         instance_id: String,
     },
+    /// Read a configured source extension and save its validated pages
+    PollSourceExtension {
+        executable: PathBuf,
+        instance_id: String,
+    },
     /// Probe the local native HTTP service or worker
     Healthcheck {
         #[arg(long, default_value_t = 8080)]
@@ -198,6 +203,12 @@ fn main() -> ExitCode {
             instance_id,
         }) => {
             return report(extensions::check_source(&executable, &instance_id));
+        }
+        Some(Command::PollSourceExtension {
+            executable,
+            instance_id,
+        }) => {
+            return report(extensions::poll_source(&executable, &instance_id));
         }
         Some(Command::Healthcheck {
             port,

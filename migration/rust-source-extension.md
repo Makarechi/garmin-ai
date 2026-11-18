@@ -28,3 +28,17 @@ The Linux ARM64 native check matched the pinned Python example's two pages and t
 `check_source_extension.py` also exercised malformed envelopes, version and request mismatches,
 undeclared capabilities, a repeated cursor, an out-of-window record, deadlines and cancellation.
 The independent executable and native check ran together with networking disabled at 32 MiB.
+
+## Reading a configured source
+
+`garmin-ai-rust poll-source-extension /absolute/path/to/adapter source:sample:one` reads up to
+ten pages for a currently enabled item in `GA_INTEGRATIONS`. The database's saved source
+selection and retry time are checked before starting the adapter. The request's optional
+`context` carries the instance's `config` and resolved `secrets` over standard input. Only
+explicitly referenced `GA_PLUGIN_` variables enter this context. The existing mapping
+confirmation uses the same configuration fingerprint as Python.
+
+Each accepted page commits its raw observations, mapped values, and next cursor together.
+The next invocation resumes that cursor after a failure. The paired PostgreSQL fixture
+confirmed an interrupted second page, cancellation during the publication transaction, and
+matching final records and mapped values in Python and Rust.
