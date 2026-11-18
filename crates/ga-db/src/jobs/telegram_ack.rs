@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
 use sqlx::{Postgres, Transaction};
@@ -5,7 +7,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{ATTEMPT_LIMIT, JobOutcome, JobStoreError, RecordedJobStatus, begin, fail_exhausted};
-use crate::Database;
+use crate::{
+    Database, ReadinessError,
+    channel_ingress::telegram_poll::{TelegramPollError, selection},
+    telegram_binding::{TelegramBindingError, confirmed_pairing},
+};
 
 const KIND: &str = "telegram_native_ack";
 const LEASE_SECONDS: i32 = 15;
@@ -14,6 +20,7 @@ const LEASE_SECONDS: i32 = 15;
 pub struct TelegramAckTarget<'a> {
     pub owner_id: Uuid,
     pub instance_id: &'a str,
+    pub confirmed_chat: Option<i64>,
 }
 
 pub struct TelegramAckLease {
@@ -38,6 +45,9 @@ pub async fn enqueue_telegram_ack(
     received_at: StoredInstant,
 ) -> Result<bool, JobStoreError> {
     if !valid_instance(target.instance_id)
+        || target
+            .confirmed_chat
+            .is_some_and(|chat| !(1..(1_i64 << 52)).contains(&chat))
         || !(1..i64::MAX).contains(&update_id)
         || !valid_callback_id(callback_id)
     {
@@ -58,6 +68,7 @@ pub async fn enqueue_telegram_ack(
         json!({
             "owner_id":target.owner_id.to_string(),
             "instance_id":target.instance_id,
+            "confirmed_chat":target.confirmed_chat,
             "update_id":update_id,
             "callback_id":callback_id,
         })
@@ -132,6 +143,59 @@ impl Database {
     ) -> Result<RecordedJobStatus, JobStoreError> {
         self.finish_job(lease.id, lease.token, KIND, now, outcome)
             .await
+    }
+
+    /// Keep the same pairing and channel selection for the full provider request.
+    pub async fn with_telegram_ack_authorization<T>(
+        &self,
+        lease: &TelegramAckLease,
+        target: TelegramAckTarget<'_>,
+        request: impl Future<Output = T>,
+    ) -> Result<Option<T>, JobStoreError> {
+        let Some(chat) = target.confirmed_chat else {
+            return Ok(None);
+        };
+        let mut txn = begin(&self.control).await?;
+        let stored: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT payload->>'confirmed_chat' FROM jobs
+             WHERE id=$1 AND kind=$2 AND status='running' AND lease_token=$3
+               AND lease_until>clock_timestamp() + interval '6 seconds' AND payload->>'owner_id'=$4
+               AND payload->>'instance_id'=$5 FOR UPDATE NOWAIT",
+        )
+        .bind(lease.id)
+        .bind(KIND)
+        .bind(lease.token)
+        .bind(target.owner_id.to_string())
+        .bind(target.instance_id)
+        .fetch_optional(&mut *txn)
+        .await?;
+        let (stored,) = stored.ok_or(JobStoreError::LeaseLost)?;
+        if stored.as_deref() != Some(&chat.to_string()) {
+            return Ok(None);
+        }
+        let selected =
+            selection(&mut txn, target.instance_id)
+                .await
+                .map_err(|error| match error {
+                    TelegramPollError::Busy => JobStoreError::Storage(ReadinessError::Unavailable),
+                    _ => JobStoreError::Database,
+                })?;
+        if !selected {
+            return Ok(None);
+        }
+        match confirmed_pairing(&mut txn, target.instance_id, chat).await {
+            Ok(owner) if owner == target.owner_id => {}
+            Ok(_) | Err(TelegramBindingError::Missing | TelegramBindingError::Mismatch) => {
+                return Ok(None);
+            }
+            Err(TelegramBindingError::Busy) => {
+                return Err(JobStoreError::Storage(ReadinessError::Unavailable));
+            }
+            Err(_) => return Err(JobStoreError::Database),
+        }
+        let result = request.await;
+        txn.rollback().await?;
+        Ok(Some(result))
     }
 }
 
