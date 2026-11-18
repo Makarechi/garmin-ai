@@ -173,7 +173,7 @@ def compare(python, native, engine):
 
 
 def compare_deletion(python, native, engine, hidden):
-    system = native.post(PATH, headers=headers("both", "fixture-native"), json=CAFFEINE).json()
+    system = native.post(PATH, headers=headers("both", "fixture-rust"), json=CAFFEINE).json()
     identity = UUID(system["id"])
     endpoint = f"{PATH}/{identity}"
     for client in (python, native):
@@ -207,7 +207,7 @@ def compare_deletion(python, native, engine, hidden):
     for client in (python, native):
         assert client.delete(f"{endpoint}?revision=2", headers=headers("both")).status_code == 404
         assert client.get(endpoint, headers=headers("reader")).status_code == 404
-        replay = client.post(PATH, headers=headers("both", "fixture-native"), json=CAFFEINE)
+        replay = client.post(PATH, headers=headers("both", "fixture-rust"), json=CAFFEINE)
         assert replay.json() == deleted.json()
 
     protected = f"{PATH}/{hidden}?revision=1"
