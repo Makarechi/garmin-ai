@@ -30,6 +30,7 @@ pub enum SourcePageError {
     Correction,
     Mapping,
     Busy,
+    Cancelled,
     Contract(SourceContractError),
     Storage(ReadinessError),
     Database,
@@ -44,6 +45,7 @@ impl fmt::Display for SourcePageError {
             Self::Correction => "Source changed a record without correction capability",
             Self::Mapping => "Source metric mappings could not be applied",
             Self::Busy => "Source publication is busy",
+            Self::Cancelled => "Source publication was cancelled",
             Self::Contract(error) => return error.fmt(f),
             Self::Storage(_) => "Source publication storage is unavailable",
             Self::Database => "Source page could not be saved",
@@ -200,6 +202,28 @@ impl Database {
         capabilities: SourceCapabilities,
         page: &SourcePage,
     ) -> Result<PublishedSourcePage, SourcePageError> {
+        self.publish_source_page_unless_cancelled(
+            poll,
+            configured_source_hash,
+            capabilities,
+            page,
+            || false,
+        )
+        .await
+    }
+
+    /// Leave the saved cursor and facts unchanged when a live poll is cancelled before commit.
+    pub async fn publish_source_page_unless_cancelled(
+        &self,
+        poll: PreparedSourcePoll,
+        configured_source_hash: &str,
+        capabilities: SourceCapabilities,
+        page: &SourcePage,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<PublishedSourcePage, SourcePageError> {
+        if is_cancelled() {
+            return Err(SourcePageError::Cancelled);
+        }
         if !valid_sha256(configured_source_hash) {
             return Err(SourcePageError::Configuration);
         }
@@ -275,6 +299,9 @@ impl Database {
             invalidate_replay_outputs(&mut txn).await?;
         }
         write_state(&mut txn, &poll.cursor_key, &snapshot).await?;
+        if is_cancelled() {
+            return Err(SourcePageError::Cancelled);
+        }
         txn.commit().await?;
         let state = if page.next_cursor.is_none() {
             PublicationState::Complete

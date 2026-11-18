@@ -11,7 +11,7 @@ const RECORDS: [(&str, &str, u8); 3] = [
     ("walk-3", "2026-01-01T18:00:00+00:00", 10),
 ];
 
-fn read_page(instance: &str, params: &Value) -> Option<Value> {
+fn read_page(instance: &str, label: &str, params: &Value) -> Option<Value> {
     // The probe sends UTC timestamps at second precision.
     let start = params["start"].as_str()?;
     let end = params["end"].as_str()?;
@@ -38,7 +38,7 @@ fn read_page(instance: &str, params: &Value) -> Option<Value> {
         .map(|(id, at, minutes)| {
             json!({
                 "source_record_id": id, "operation": "upsert", "observed_at": at,
-                "effective_at": at, "source_timezone": "UTC", "source_reference": format!("sample:{id}"),
+                "effective_at": at, "source_timezone": "UTC", "source_reference": format!("sample:{label}:{id}"),
                 "payload": {"walk_minutes": minutes, "unit": "minutes"},
             })
         })
@@ -57,6 +57,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let request: Value = serde_json::from_slice(&input)?;
     let instance = request["instance_id"].as_str().ok_or("missing instance")?;
+    let label = request["context"]["config"]["label"]
+        .as_str()
+        .unwrap_or("probe");
     let request_id = request["request_id"].as_u64().ok_or("missing request ID")?;
     let mut response = json!({"version": 1, "request_id": request_id});
     if request["version"] != 1 {
@@ -71,7 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "capabilities": {"observations":true,"cursor":true,"max_page_size":2},
                 });
             }
-            Some("read_page") => match read_page(instance, &request["params"]) {
+            Some("read_page") => match read_page(instance, label, &request["params"]) {
                 Some(page) => response["result"] = page,
                 None => response["error"] = json!("invalid_request"),
             },

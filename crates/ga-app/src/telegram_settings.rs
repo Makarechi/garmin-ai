@@ -74,8 +74,10 @@ impl TelegramIngressSettings {
             if item["kind"] != "channel" || item["provider"] != "telegram" {
                 continue;
             }
-            let enabled =
-                enabled(item.get("enabled")).ok_or(TelegramSettingsError::InvalidIntegrations)?;
+            let enabled = item
+                .get("enabled")
+                .map_or(Some(true), ga_domain::event_payload::legacy_boolean)
+                .ok_or(TelegramSettingsError::InvalidIntegrations)?;
             if !enabled {
                 continue;
             }
@@ -131,22 +133,4 @@ fn valid_instance_id(id: &str) -> bool {
         && id.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.:-".contains(&byte)
         })
-}
-
-fn enabled(value: Option<&Value>) -> Option<bool> {
-    match value {
-        None => Some(true),
-        Some(Value::Bool(enabled)) => Some(*enabled),
-        Some(Value::Number(number)) => match number.as_f64()? {
-            0.0 => Some(false),
-            1.0 => Some(true),
-            _ => None,
-        },
-        Some(Value::String(value)) => match value.to_ascii_lowercase().as_str() {
-            "1" | "on" | "t" | "true" | "y" | "yes" => Some(true),
-            "0" | "off" | "f" | "false" | "n" | "no" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
 }

@@ -1,4 +1,11 @@
-use std::{collections::BTreeSet, error::Error, fmt, path::Path, process::Stdio, time::Duration};
+mod source_poll;
+
+pub(crate) use source_poll::poll_source;
+
+use std::{
+    collections::BTreeSet, error::Error, fmt, future::Future, path::Path, process::Stdio,
+    time::Duration,
+};
 
 use ga_domain::{
     source_contract::{SourceCapabilities, SourcePage, SourceRequest},
@@ -16,6 +23,7 @@ use tokio::{
 const VERSION: u8 = 1;
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_REPLY: usize = 4 * 1024 * 1024;
+const MAX_SOURCE_REPLY: usize = 8 * 1024 * 1024;
 const MAX_PAGES: usize = 1000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -91,6 +99,7 @@ struct Extension<'a> {
     executable: &'a Path,
     directory: &'a Path,
     instance_id: &'a str,
+    context: Option<Value>,
 }
 
 impl<'a> Extension<'a> {
@@ -109,6 +118,7 @@ impl<'a> Extension<'a> {
             executable,
             directory: directory.ok_or(ExtensionError::Configuration)?,
             instance_id,
+            context: None,
         })
     }
 
@@ -117,21 +127,25 @@ impl<'a> Extension<'a> {
         request_id: u64,
         method: &str,
         params: Value,
+        max_reply: usize,
         cancelled: &mut watch::Receiver<bool>,
     ) -> Result<Box<RawValue>, ExtensionError> {
-        let mut wire = serde_json::to_vec(&json!({
+        let mut envelope = json!({
             "version": VERSION,
             "request_id": request_id,
             "instance_id": self.instance_id,
             "method": method,
             "params": params,
-        }))
-        .map_err(|_| ExtensionError::Protocol)?;
+        });
+        if let Some(context) = &self.context {
+            envelope["context"] = context.clone();
+        }
+        let mut wire = serde_json::to_vec(&envelope).map_err(|_| ExtensionError::Protocol)?;
         if wire.len() >= MAX_REQUEST {
             return Err(ExtensionError::Protocol);
         }
         wire.push(b'\n');
-        let response = self.exchange(&wire, cancelled).await?;
+        let response = self.exchange(&wire, max_reply, cancelled).await?;
         let line = response
             .strip_suffix(b"\n")
             .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
@@ -152,6 +166,7 @@ impl<'a> Extension<'a> {
     async fn exchange(
         &self,
         request: &[u8],
+        max_reply: usize,
         cancelled: &mut watch::Receiver<bool>,
     ) -> Result<Vec<u8>, ExtensionError> {
         if *cancelled.borrow() {
@@ -169,7 +184,7 @@ impl<'a> Extension<'a> {
         let mut stdin = child.stdin.take().ok_or(ExtensionError::Transport)?;
         let stdout = child.stdout.take().ok_or(ExtensionError::Transport)?;
         let mut response = Vec::new();
-        let mut bounded_output = stdout.take((MAX_REPLY + 1) as u64);
+        let mut bounded_output = stdout.take((max_reply + 1) as u64);
         let exchange = async {
             tokio::try_join!(
                 async move {
@@ -180,7 +195,7 @@ impl<'a> Extension<'a> {
                 bounded_output.read_to_end(&mut response)
             )
             .map_err(|_| ExtensionError::Transport)?;
-            if response.len() > MAX_REPLY {
+            if response.len() > max_reply {
                 return Err(ExtensionError::Protocol);
             }
             let status = child.wait().await.map_err(|_| ExtensionError::Transport)?;
@@ -201,11 +216,13 @@ impl<'a> Extension<'a> {
         result
     }
 
-    async fn source_probe(
+    async fn describe(
         &self,
         cancelled: &mut watch::Receiver<bool>,
-    ) -> Result<Value, ExtensionError> {
-        let descriptor = self.request(1, "describe", Value::Null, cancelled).await?;
+    ) -> Result<SourceCapabilities, ExtensionError> {
+        let descriptor = self
+            .request(1, "describe", Value::Null, MAX_REPLY, cancelled)
+            .await?;
         let descriptor: SourceDescriptor =
             serde_json::from_str(descriptor.get()).map_err(|_| ExtensionError::Capabilities)?;
         if descriptor.kind != "source"
@@ -215,10 +232,36 @@ impl<'a> Extension<'a> {
         {
             return Err(ExtensionError::Capabilities);
         }
-        let capabilities = SourceCapabilities::from_json(&descriptor.capabilities)
+        SourceCapabilities::from_json(&descriptor.capabilities)
             .ok()
             .filter(|capabilities| capabilities.observations)
-            .ok_or(ExtensionError::Capabilities)?;
+            .ok_or(ExtensionError::Capabilities)
+    }
+
+    async fn read_page(
+        &self,
+        request_id: u64,
+        window: (StoredInstant, StoredInstant),
+        cursor: Option<&str>,
+        limit: usize,
+        cancelled: &mut watch::Receiver<bool>,
+    ) -> Result<SourcePage, ExtensionError> {
+        let (start, end) = window;
+        let raw = self.request(
+            request_id,
+            "read_page",
+            json!({"start": start.to_string(), "end": end.to_string(), "cursor": cursor, "limit": limit}),
+            MAX_SOURCE_REPLY,
+            cancelled,
+        ).await?;
+        SourcePage::from_json(raw.get().as_bytes(), limit).map_err(|_| ExtensionError::SourcePage)
+    }
+
+    async fn source_probe(
+        &self,
+        cancelled: &mut watch::Receiver<bool>,
+    ) -> Result<Value, ExtensionError> {
+        let capabilities = self.describe(cancelled).await?;
         let start: StoredInstant = "2026-01-01T00:00:00Z"
             .parse()
             .map_err(|_| ExtensionError::Configuration)?;
@@ -230,14 +273,15 @@ impl<'a> Extension<'a> {
         let mut previous_cursors = BTreeSet::new();
         let mut records = BTreeSet::new();
         for pages in 1..=MAX_PAGES {
-            let raw = self.request(
-                (pages + 1) as u64,
-                "read_page",
-                json!({"start": start.to_string(), "end": end.to_string(), "cursor": cursor, "limit": limit}),
-                cancelled,
-            ).await?;
-            let page = SourcePage::from_json(raw.get().as_bytes(), limit)
-                .map_err(|_| ExtensionError::SourcePage)?;
+            let page = self
+                .read_page(
+                    (pages + 1) as u64,
+                    (start, end),
+                    cursor.as_deref(),
+                    limit,
+                    cancelled,
+                )
+                .await?;
             let next_digest = page
                 .check_request(&SourceRequest {
                     instance_id: self.instance_id,
@@ -274,6 +318,20 @@ pub(crate) async fn check_source(
     instance_id: &str,
 ) -> Result<(), Box<dyn Error>> {
     let extension = Extension::source(executable, instance_id)?;
+    let (cancel, mut cancelled) = watch::channel(false);
+    let report = run_until_shutdown(cancel, PROBE_TIMEOUT, async {
+        Ok(extension.source_probe(&mut cancelled).await?)
+    })
+    .await?;
+    println!("{report}");
+    Ok(())
+}
+
+async fn run_until_shutdown<T>(
+    cancel: watch::Sender<bool>,
+    deadline: Duration,
+    task: impl Future<Output = Result<T, Box<dyn Error>>>,
+) -> Result<T, Box<dyn Error>> {
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let interrupted = async {
@@ -285,18 +343,13 @@ pub(crate) async fn check_source(
         #[cfg(not(unix))]
         let _ = tokio::signal::ctrl_c().await;
     };
-    let (cancel, mut cancelled) = watch::channel(false);
-    let probe = extension.source_probe(&mut cancelled);
-    tokio::pin!(probe);
+    tokio::pin!(task);
     let reason = tokio::select! {
-        result = &mut probe => {
-            println!("{}", result?);
-            return Ok(());
-        }
+        result = &mut task => return result,
         () = interrupted => ExtensionError::Cancelled,
-        () = sleep(PROBE_TIMEOUT) => ExtensionError::Timeout,
+        () = sleep(deadline) => ExtensionError::Timeout,
     };
     let _ = cancel.send(true);
-    let _ = probe.await;
+    let _ = task.await;
     Err(reason.into())
 }
