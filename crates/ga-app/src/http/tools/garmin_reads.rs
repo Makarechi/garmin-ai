@@ -2,12 +2,12 @@ use ga_db::{
     Database,
     health_analysis::{
         ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod,
-        MODEL_HEALTH_PACKS, model_metric_packs,
+        MODEL_HEALTH_PACKS, SeriesReadError, model_metric_packs,
     },
 };
 use ga_domain::timestamp::StoredInstant;
 use serde_json::{Map, Value};
-use time::Date;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{ReadTool, bool_input, date_input, device_arguments, integer_input, range_with_kind};
@@ -31,6 +31,15 @@ impl From<ActivityReadError> for GarminReadError {
         match error {
             ActivityReadError::Missing => Self::Missing,
             ActivityReadError::Analysis(error) => Self::Health(error),
+            _ => Self::Value,
+        }
+    }
+}
+
+impl From<SeriesReadError> for GarminReadError {
+    fn from(error: SeriesReadError) -> Self {
+        match error {
+            SeriesReadError::Analysis(error) => Self::Health(error),
             _ => Self::Value,
         }
     }
@@ -81,6 +90,9 @@ pub(crate) async fn read_garmin(
         Query::Running(start, end, min, max) => {
             Ok(reader.running_efficiency(start, end, min, max).await?)
         }
+        Query::Series(metric, start, end, minutes) => {
+            Ok(reader.metric_series(metric, start, end, minutes).await?)
+        }
     }
 }
 
@@ -93,6 +105,7 @@ enum Query<'a> {
     Baseline(&'a str, Date, Date),
     Compare(&'a str, [Date; 4]),
     Running(StoredInstant, StoredInstant, f64, f64),
+    Series(&'a str, OffsetDateTime, OffsetDateTime, u16),
 }
 
 impl Query<'_> {
@@ -100,7 +113,9 @@ impl Query<'_> {
         match self {
             Self::Snapshot(_) | Self::Range(..) => MODEL_HEALTH_PACKS,
             Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
-            Self::Baseline(metric, ..) | Self::Compare(metric, ..) => model_metric_packs(metric),
+            Self::Baseline(metric, ..) | Self::Compare(metric, ..) | Self::Series(metric, ..) => {
+                model_metric_packs(metric)
+            }
             Self::Running(..) => &["training", "sleep", "wellbeing"],
         }
     }
@@ -161,8 +176,36 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
             Ok(Query::Compare(metric, [a_start, a_end, b_start, b_end]))
         }
         ReadTool::RunningEfficiency => running_arguments(arguments),
+        ReadTool::MetricSeries => series_arguments(arguments),
         _ => Err(GarminReadError::Arguments),
     }
+}
+
+fn series_arguments(arguments: &Map<String, Value>) -> Result<Query<'_>, GarminReadError> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "metric" | "start" | "end" | "minutes"))
+    {
+        return Err(GarminReadError::Arguments);
+    }
+    let metric = arguments
+        .get("metric")
+        .and_then(Value::as_str)
+        .ok_or(GarminReadError::Arguments)?;
+    let start = arguments
+        .get("start")
+        .and_then(StoredInstant::legacy_input_with_offset)
+        .ok_or(GarminReadError::Arguments)?;
+    let end = arguments
+        .get("end")
+        .and_then(StoredInstant::legacy_input_with_offset)
+        .ok_or(GarminReadError::Arguments)?;
+    let minutes = arguments
+        .get("minutes")
+        .map_or(Some(5), integer_input)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or(GarminReadError::Arguments)?;
+    Ok(Query::Series(metric, start, end, minutes))
 }
 
 fn running_arguments(arguments: &Map<String, Value>) -> Result<Query<'_>, GarminReadError> {
