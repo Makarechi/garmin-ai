@@ -1,13 +1,13 @@
 //! Verify model citations against values returned by trusted read tools.
 
-use std::{collections::BTreeSet, error::Error, fmt, sync::LazyLock};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use jiff::Timestamp;
 use num_bigint::{BigInt, ToBigInt};
 use serde_json::{Number, Value};
 use speedate::{DateTime, MicrosecondsPrecisionOverflowBehavior, TimeConfig};
 
-use crate::event_time;
+use crate::{event_time, localization::catalog_text};
 
 #[derive(Clone, Copy)]
 pub struct AnswerEvidence<'a> {
@@ -160,26 +160,7 @@ fn sleep_label(tool: &str, path: &[Value], language: &str) -> Option<&'static st
         "end" => "evidence.sleep.end",
         _ => return None,
     };
-    static EN: LazyLock<Value> = LazyLock::new(|| {
-        serde_json::from_str(include_str!("../../../src/garmin_ai/locales/en.json"))
-            .unwrap_or(Value::Null)
-    });
-    static RU: LazyLock<Value> = LazyLock::new(|| {
-        serde_json::from_str(include_str!("../../../src/garmin_ai/locales/ru.json"))
-            .unwrap_or(Value::Null)
-    });
-    static SK: LazyLock<Value> = LazyLock::new(|| {
-        serde_json::from_str(include_str!("../../../src/garmin_ai/locales/sk.json"))
-            .unwrap_or(Value::Null)
-    });
-    let catalog = if language.eq_ignore_ascii_case("ru") {
-        &RU
-    } else if language.eq_ignore_ascii_case("sk") {
-        &SK
-    } else {
-        &EN
-    };
-    catalog[key].as_str().or_else(|| EN[key].as_str())
+    catalog_text(language, key)
 }
 
 fn cited_value<'a, 'claim>(

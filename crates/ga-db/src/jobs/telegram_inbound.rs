@@ -4,6 +4,7 @@ mod history;
 mod local_text;
 mod model_correction;
 mod model_publication;
+mod model_reply;
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
@@ -12,6 +13,7 @@ pub use local_text::{
     LocalTelegramText, SetupMetadata, TelegramModelAdmission, TelegramSafetyDecision,
 };
 pub use model_publication::TelegramModelContext;
+pub use model_reply::{ModelContinuation, ModelContinuationReply};
 
 use std::time::Duration;
 

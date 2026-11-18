@@ -4,7 +4,10 @@ mod fit;
 mod scheduler;
 
 pub use activities::ActivityPageWork;
-pub use configuration::{GarminConfigurationError, GarminSourceSettings};
+pub use configuration::{
+    GarminConfigurationError, GarminReauthNoticeSettings, GarminSourceSettings, garmin_auth_source,
+    garmin_auth_url,
+};
 pub use fit::{ActivityExportSource, ActivityFitWork};
 pub use scheduler::{GarminQueueStep, ScheduledGarminWorker};
 

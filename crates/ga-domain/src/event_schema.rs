@@ -4,8 +4,10 @@ pub use form::{FormProjectionError, form_schema_flags, project_form_fields};
 mod custom;
 mod entry;
 mod specification;
+mod tracker_setup;
 pub use entry::{CustomEntry, CustomEntryError, ResolvedCustomEntry};
 pub use specification::{CustomDefinition, CustomDefinitionError};
+pub use tracker_setup::{TrackerSettingsUpdate, TrackerSetupDraft, TrackerSetupError};
 
 pub use custom::{CustomSchemaError, validate_custom_schema};
 

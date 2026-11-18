@@ -39,7 +39,11 @@ pub enum LocalTelegramText<'a> {
 }
 
 pub enum TelegramModelAdmission {
-    Ready { timezone: String, locale: String },
+    Ready {
+        timezone: String,
+        locale: String,
+        undo_anchor: Option<i64>,
+    },
     Replied,
 }
 
@@ -98,8 +102,14 @@ impl Database {
                 .await
                 .map_err(|_| TelegramDiaryCommitError::Database)?;
             let locale = preferred_locale(&mut txn, binding, configured_locale).await?;
+            let undo_anchor =
+                super::model_reply::latest_undo_anchor(&mut txn, envelope.sender_ref()).await?;
             txn.commit().await?;
-            Ok(TelegramModelAdmission::Ready { timezone, locale })
+            Ok(TelegramModelAdmission::Ready {
+                timezone,
+                locale,
+                undo_anchor,
+            })
         })
         .await
         .map_err(|_| TelegramDiaryCommitError::Database)?

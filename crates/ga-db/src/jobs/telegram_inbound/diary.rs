@@ -28,6 +28,8 @@ use crate::{
     telegram_binding::confirmed_pairing,
 };
 
+pub(super) const UNDO_UNAVAILABLE_REPLY: &str = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись.";
+
 #[derive(Debug)]
 pub enum TelegramDiaryCommitError {
     Job(JobStoreError),
@@ -145,7 +147,7 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             let current = if let Some(expected) = expected {
-                let current = verify(&mut txn, &envelope, expected).await?;
+                let current = verify(&mut txn, lease, &envelope, expected).await?;
                 if current.pending_clarification.is_some() || current.selection_unavailable {
                     return Err(TelegramDiaryCommitError::ExistingContextRequired);
                 }
@@ -242,7 +244,7 @@ impl Database {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             lock_clarification(&mut txn).await.map_err(TelegramDiaryCommitError::Clarification)?;
             let current = if let Some(expected) = expected {
-                Some(verify(&mut txn, &envelope, expected).await?)
+                Some(verify(&mut txn, lease, &envelope, expected).await?)
             } else {
                 None
             };
@@ -428,9 +430,17 @@ pub(super) async fn complete_reply(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
 ) -> Result<(), TelegramDiaryCommitError> {
+    complete_reply_as(txn, lease, TelegramInboundState::Processed).await
+}
+
+pub(super) async fn complete_reply_as(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+    state: TelegramInboundState,
+) -> Result<(), TelegramDiaryCommitError> {
     let completed_at = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **txn)
         .await?;
-    complete(txn, lease, completed_at, TelegramInboundState::Processed).await?;
+    complete(txn, lease, completed_at, state).await?;
     Ok(())
 }
