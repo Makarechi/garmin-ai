@@ -65,6 +65,16 @@ pub(crate) async fn read_garmin(
                 DeviceHistoryError::Analysis(error) => GarminReadError::Health(error),
                 _ => GarminReadError::Value,
             }),
+        Query::Baseline(metric, start, end) => Ok(reader
+            .personal_baseline(metric, HealthPeriod::new(start, end)?)
+            .await?),
+        Query::Compare(metric, [a_start, a_end, b_start, b_end]) => Ok(reader
+            .compare_periods(
+                metric,
+                HealthPeriod::new(a_start, a_end)?,
+                HealthPeriod::new(b_start, b_end)?,
+            )
+            .await?),
     }
 }
 
@@ -74,20 +84,53 @@ enum Query<'a> {
     Activities(StoredInstant, StoredInstant, Option<&'a str>),
     Activity(&'a str, bool, u32, u16),
     Devices(StoredInstant, StoredInstant, u16),
+    Baseline(&'a str, Date, Date),
+    Compare(&'a str, [Date; 4]),
 }
 
 impl Query<'_> {
     fn model_packs(&self) -> &'static [&'static str] {
         match self {
-            Self::Snapshot(_) | Self::Range(..) => {
-                &["sleep", "wellbeing", "training", "general_diary"]
-            }
+            Self::Snapshot(_) | Self::Range(..) => HEALTH_PACKS,
             Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
+            Self::Baseline(metric, ..) | Self::Compare(metric, ..) => metric_packs(metric),
         }
     }
 }
 
+const HEALTH_PACKS: &[&str] = &["general_diary", "sleep", "training", "wellbeing"];
+
+fn metric_packs(metric: &str) -> &'static [&'static str] {
+    let metric = metric.strip_prefix("system.").unwrap_or(metric);
+    match metric {
+        "hydration_ml" => &["general_diary"],
+        "steps"
+        | "steps_bucket"
+        | "active_calories"
+        | "intensity_minutes"
+        | "training_status"
+        | "training_readiness_score"
+        | "recovery_time_minutes" => &["training"],
+        "heart_rate_bpm" | "spo2_pct" | "respiration_rpm" | "resting_hr" => &["wellbeing"],
+        _ if ["sleep_", "deep_", "rem_", "light_", "awake_"]
+            .iter()
+            .any(|prefix| metric.starts_with(prefix)) =>
+        {
+            &["sleep"]
+        }
+        _ if ["hrv_", "stress_", "body_battery_"]
+            .iter()
+            .any(|prefix| metric.starts_with(prefix)) =>
+        {
+            &["wellbeing"]
+        }
+        _ => HEALTH_PACKS,
+    }
+}
+
 fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, GarminReadError> {
+    let day = |name| arguments.get(name).and_then(date_input);
+    let metric = || arguments.get("metric").and_then(Value::as_str);
     match tool {
         ReadTool::Snapshot if arguments.len() == 1 => {
             let day = arguments
@@ -120,6 +163,24 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
             let (start, end, limit) =
                 device_arguments(arguments).ok_or(GarminReadError::Arguments)?;
             Ok(Query::Devices(start, end, limit))
+        }
+        ReadTool::Baseline if arguments.len() == 3 => {
+            let (Some(metric), Some(start), Some(end)) = (metric(), day("start"), day("end"))
+            else {
+                return Err(GarminReadError::Arguments);
+            };
+            Ok(Query::Baseline(metric, start, end))
+        }
+        ReadTool::ComparePeriods if arguments.len() == 5 => {
+            let Some(metric) = metric() else {
+                return Err(GarminReadError::Arguments);
+            };
+            let [Some(a_start), Some(a_end), Some(b_start), Some(b_end)] =
+                ["a_start", "a_end", "b_start", "b_end"].map(day)
+            else {
+                return Err(GarminReadError::Arguments);
+            };
+            Ok(Query::Compare(metric, [a_start, a_end, b_start, b_end]))
         }
         _ => Err(GarminReadError::Arguments),
     }

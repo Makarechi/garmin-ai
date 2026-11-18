@@ -58,7 +58,7 @@ pub(crate) async fn run() -> Result<(), &'static str> {
         database,
         owner,
         read_tools: std::iter::once(ReadTool::Events)
-            .chain(ReadTool::MCP_GARMIN)
+            .chain(ReadTool::GARMIN_READS)
             .map(read_tool)
             .collect::<Result<_, _>>()?,
         create_tool: writes
@@ -135,7 +135,7 @@ impl ServerHandler for Mcp {
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
             }
-            tool_name => match ReadTool::MCP_GARMIN
+            tool_name => match ReadTool::GARMIN_READS
                 .into_iter()
                 .find(|tool| tool.name() == tool_name)
             {
