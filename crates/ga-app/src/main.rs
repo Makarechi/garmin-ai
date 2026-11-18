@@ -1,6 +1,7 @@
 mod authorization;
 mod backup_space;
 mod configuration;
+mod healthcheck;
 mod http;
 mod mcp_stdio;
 mod migrate;
@@ -55,6 +56,13 @@ enum Command {
     },
     /// Serve MCP tools over standard input and output
     Mcp,
+    /// Probe the local native HTTP service
+    Healthcheck {
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long)]
+        ready: bool,
+    },
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
@@ -135,6 +143,11 @@ fn main() -> ExitCode {
         Some(Command::Mcp) => {
             if let Err(error) = mcp_stdio::run() {
                 eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Healthcheck { port, ready }) => {
+            if !healthcheck::probe(port, ready).unwrap_or(false) {
                 return ExitCode::FAILURE;
             }
         }
