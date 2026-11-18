@@ -61,8 +61,28 @@ impl ModelGateway<'_> {
         budget: &mut AnalysisBudget,
         policy: impl Fn() -> CurrentModelPolicy<'policy> + Sync,
     ) -> Result<TelegramDiaryInterpretation, DiaryInterpretationError> {
+        self.interpret_telegram_diary_with(
+            lease,
+            timezone,
+            processing_started,
+            budget,
+            policy,
+            &self.transport,
+        )
+        .await
+    }
+
+    pub(crate) async fn interpret_telegram_diary_with<'policy>(
+        &self,
+        lease: &TelegramInboundLease,
+        timezone: &str,
+        processing_started: StoredInstant,
+        budget: &mut AnalysisBudget,
+        policy: impl Fn() -> CurrentModelPolicy<'policy> + Sync,
+        sender: &impl Sender,
+    ) -> Result<TelegramDiaryInterpretation, DiaryInterpretationError> {
         let text = TelegramText::from_lease(lease, timezone, processing_started)?;
-        self.interpret_telegram_with(lease, text, budget, &policy, &self.transport)
+        self.interpret_telegram_with(lease, text, budget, &policy, sender)
             .await
     }
 

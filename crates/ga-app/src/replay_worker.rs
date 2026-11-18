@@ -171,7 +171,7 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
     }))
 }
 
-fn reminder_model_available(database: &Database, now: StoredInstant) -> bool {
+fn model_settings() -> Option<RuntimeModelSettings> {
     let settings = RuntimeModelSettings::resolve(
         |name| {
             configuration::read([name])
@@ -185,14 +185,10 @@ fn reminder_model_available(database: &Database, now: StoredInstant) -> bool {
         },
     );
     match settings {
-        Ok(Some(settings)) => settings
-            .configured()
-            .gateway(database.clone(), false, now)
-            .is_ok(),
-        Ok(None) => false,
+        Ok(settings) => settings,
         Err(error) => {
             eprintln!("{error}");
-            false
+            None
         }
     }
 }
@@ -233,7 +229,16 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             }
         })
         .flatten();
-    let reminders_available = telegram.is_some() && reminder_model_available(&database, clock()?);
+    let selected_model = telegram.as_ref().and_then(|_| model_settings());
+    let model_configuration = selected_model
+        .as_ref()
+        .map(RuntimeModelSettings::configured);
+    let model_gateway = if let Some(settings) = &model_configuration {
+        settings.gateway(database.clone(), false, clock()?).ok()
+    } else {
+        None
+    };
+    let reminders_available = model_gateway.is_some();
     let archive = Arc::new(
         Archive::open_read_only(&config.raw_archive).map_err(|_| ReplayServiceError::Archive)?,
     );
@@ -322,6 +327,12 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_local_diary(&database, settings, &config.timezone) => result,
                 result = transport.run_local_text(&database, settings, &config.locale, reminders_available) => result,
                 result = transport.run_replies(&database, settings) => result,
+                result = async {
+                    if let (Some(selected), Some(gateway)) = (&model_configuration, &model_gateway) {
+                        transport.run_model_diary(&database,settings,selected,gateway,&config.timezone,&config.locale).await
+                    }
+                    future::pending().await
+                } => result,
                 result = async {
                     if reminders_available {
                         transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery).await
