@@ -192,7 +192,7 @@ impl Database {
     }
 }
 
-async fn lock_update_target(
+pub(crate) async fn lock_update_target(
     txn: &mut Transaction<'_, Postgres>,
     event_id: Uuid,
 ) -> Result<(i32, Option<String>, bool), DiaryWriteError> {
@@ -215,7 +215,7 @@ async fn lock_update_target(
     Ok((revision, namespace, change_allowed))
 }
 
-fn corrected_report(
+pub(crate) fn corrected_report(
     before: &Value,
     changes: Map<String, Value>,
 ) -> Result<(EventInput, [Option<String>; 2]), DiaryWriteError> {
@@ -277,7 +277,7 @@ fn display_timestamp(input: &str) -> String {
     }
 }
 
-async fn update_system_event_in(
+pub(crate) async fn update_system_event_in(
     txn: &mut Transaction<'_, Postgres>,
     request: UpdateSystemEvent<'_>,
     before: StoredSystemEvent,
