@@ -310,12 +310,17 @@ const DECIMAL_ZEROES: &[u32] = &[
     0x1fbf0,
 ];
 
+pub(crate) fn decimal_digit(character: char) -> Option<u32> {
+    let codepoint = u32::from(character);
+    let index = DECIMAL_ZEROES.partition_point(|zero| *zero <= codepoint);
+    let digit = codepoint - DECIMAL_ZEROES[index.checked_sub(1)?];
+    (digit < 10).then_some(digit)
+}
+
 fn decimal_number(value: &str) -> Option<u32> {
     value.chars().try_fold(0u32, |number, character| {
-        let codepoint = u32::from(character);
-        let index = DECIMAL_ZEROES.partition_point(|zero| *zero <= codepoint);
-        let digit = codepoint - DECIMAL_ZEROES[index.checked_sub(1)?];
-        (digit < 10).then(|| number.saturating_mul(10).saturating_add(digit))
+        let digit = decimal_digit(character)?;
+        Some(number.saturating_mul(10).saturating_add(digit))
     })
 }
 

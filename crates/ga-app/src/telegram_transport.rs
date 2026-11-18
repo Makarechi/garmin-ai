@@ -1,3 +1,4 @@
+mod local_text;
 mod poller;
 mod reminders;
 mod send;
