@@ -29,6 +29,7 @@ pub mod scenario_packs;
 pub mod schema_migration;
 pub mod share_policy;
 pub mod source_pages;
+pub mod storage_maintenance;
 pub mod system_definitions;
 pub mod system_metrics;
 pub mod telegram_binding;

@@ -31,7 +31,7 @@ macro_rules! export_tables {
     };
 }
 
-const TABLES: &[(&str, &str)] = export_tables![
+pub(crate) const TABLES: &[(&str, &str)] = export_tables![
     "activities",
     "app_state",
     "audit_log",
