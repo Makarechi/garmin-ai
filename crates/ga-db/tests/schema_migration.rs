@@ -47,6 +47,20 @@ async fn migrates_only_a_supported_disposable_schema() -> Result<(), Box<dyn Err
                 Err(SchemaMigrationError::Occupied)
             ));
         }
+        "telegram_collision" => {
+            assert_eq!(
+                database.schema_status().await?,
+                SchemaState::BeforeTelegramRepair
+            );
+            assert!(matches!(
+                database.migrate_schema().await,
+                Err(SchemaMigrationError::ConversationCollision)
+            ));
+            assert_eq!(
+                database.schema_status().await?,
+                SchemaState::BeforeTelegramRepair
+            );
+        }
         case @ ("rollback" | "rollback_ingestion") => {
             let expected = if case == "rollback_ingestion" {
                 SchemaState::BeforeIngestionTime
@@ -76,6 +90,7 @@ async fn migrates_only_a_supported_disposable_schema() -> Result<(), Box<dyn Err
         other => {
             let expected = match other {
                 "fresh" => SchemaState::Empty,
+                "before_telegram_repair" => SchemaState::BeforeTelegramRepair,
                 "before_ingestion" => SchemaState::BeforeIngestionTime,
                 "before_revisions" => SchemaState::BeforeRevisions,
                 "before_fence" => SchemaState::BeforeFence,

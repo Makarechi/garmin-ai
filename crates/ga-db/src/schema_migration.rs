@@ -1,6 +1,7 @@
 //! Run native schema transitions using the existing Alembic revision ledger.
 
 mod catalog;
+mod telegram_conversations;
 
 use std::{error::Error, fmt};
 
@@ -11,6 +12,7 @@ use crate::{
     runtime_lease::RUNTIME_LOCK,
 };
 
+const BEFORE_TELEGRAM_REPAIR: &str = "a42d9e18c701";
 const BEFORE_INGESTION_TIME: &str = "a72d9f4c8e31";
 const BEFORE_REVISIONS: &str = "b7c4e1a92d60";
 const BEFORE_FENCE: &str = "c8f51d3a7e20";
@@ -18,6 +20,7 @@ const BEFORE_FENCE: &str = "c8f51d3a7e20";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaState {
     Empty,
+    BeforeTelegramRepair,
     BeforeIngestionTime,
     BeforeRevisions,
     BeforeFence,
@@ -28,6 +31,7 @@ impl SchemaState {
     pub fn revision(self) -> Option<&'static str> {
         match self {
             Self::Empty => None,
+            Self::BeforeTelegramRepair => Some(BEFORE_TELEGRAM_REPAIR),
             Self::BeforeIngestionTime => Some(BEFORE_INGESTION_TIME),
             Self::BeforeRevisions => Some(BEFORE_REVISIONS),
             Self::BeforeFence => Some(BEFORE_FENCE),
@@ -42,6 +46,7 @@ pub enum SchemaMigrationError {
     Unsupported,
     Occupied,
     Registry,
+    ConversationCollision,
     Database,
 }
 
@@ -52,6 +57,9 @@ impl fmt::Display for SchemaMigrationError {
             Self::Unsupported => "The recorded database revision is unsupported",
             Self::Occupied => "A database without a Garmin AI revision must be empty",
             Self::Registry => "Application definitions could not be initialized safely",
+            Self::ConversationCollision => {
+                "Telegram conversation repair found an identity collision"
+            }
             Self::Database => "The database schema could not be inspected or upgraded",
         })
     }
@@ -90,13 +98,12 @@ impl Database {
         let state = schema_state(&mut txn).await?;
         match state {
             SchemaState::Empty => install(&mut txn).await?,
-            SchemaState::BeforeIngestionTime => {
-                sqlx::raw_sql(include_str!("schema_migration/measurement_ingestion.sql"))
-                    .execute(&mut *txn)
-                    .await?;
-                advance(&mut txn, BEFORE_INGESTION_TIME, BEFORE_REVISIONS).await?;
-                measurement_revisions(&mut txn).await?;
+            SchemaState::BeforeTelegramRepair => {
+                telegram_conversations::repair(&mut txn).await?;
+                advance(&mut txn, BEFORE_TELEGRAM_REPAIR, BEFORE_INGESTION_TIME).await?;
+                measurement_ingestion(&mut txn).await?;
             }
+            SchemaState::BeforeIngestionTime => measurement_ingestion(&mut txn).await?,
             SchemaState::BeforeRevisions => measurement_revisions(&mut txn).await?,
             SchemaState::BeforeFence => delivery_fence(&mut txn).await?,
             SchemaState::Current => {}
@@ -151,6 +158,7 @@ async fn schema_state(
         [revision] if revision == BEFORE_FENCE => Ok(SchemaState::BeforeFence),
         [revision] if revision == BEFORE_REVISIONS => Ok(SchemaState::BeforeRevisions),
         [revision] if revision == BEFORE_INGESTION_TIME => Ok(SchemaState::BeforeIngestionTime),
+        [revision] if revision == BEFORE_TELEGRAM_REPAIR => Ok(SchemaState::BeforeTelegramRepair),
         _ => Err(SchemaMigrationError::Unsupported),
     }
 }
@@ -203,6 +211,16 @@ async fn install(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrat
         .execute(&mut **txn)
         .await?;
     Ok(())
+}
+
+async fn measurement_ingestion(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), SchemaMigrationError> {
+    sqlx::raw_sql(include_str!("schema_migration/measurement_ingestion.sql"))
+        .execute(&mut **txn)
+        .await?;
+    advance(txn, BEFORE_INGESTION_TIME, BEFORE_REVISIONS).await?;
+    measurement_revisions(txn).await
 }
 
 async fn measurement_revisions(
