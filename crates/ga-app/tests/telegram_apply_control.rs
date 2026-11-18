@@ -326,8 +326,77 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             .await?
             .is_none()
     );
+    binding
+        .accept_polled_update(&mut runtime, &wire(27, "/debug on"), now, false)
+        .await?;
+    let enable = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing diagnostic enable command")?;
+    let enabled = database.apply_telegram_owner_control(&enable, 4).await?;
+    let destination = || ReplyDestination {
+        owner_id: owner,
+        channel: "telegram",
+        instance_id: "primary",
+    };
+    let old = database
+        .claim_outbox_reply(destination(), now, 60)
+        .await?
+        .ok_or("Missing first diagnostic reply")?;
+    assert_eq!(old.outbox_id, enabled.outbox_id);
+
+    binding
+        .accept_polled_update(&mut runtime, &wire(28, "/debug  off"), now, false)
+        .await?;
+    let disable = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing diagnostic disable command")?;
+    let disabled = database.apply_telegram_owner_control(&disable, 4).await?;
+    assert_eq!(
+        database
+            .dispatch_telegram_outbox_reply(destination(), 42, old, &[], |_| {
+                async { panic!("An outdated diagnostic message was sent") }
+            })
+            .await?,
+        ReplyDispatchResult::Cancelled
+    );
+
+    let mut late = wire(29, "/debug on");
+    late["message"]["date"] = json!(clock.unix_timestamp() - 1);
+    binding
+        .accept_polled_update(&mut runtime, &late, now, false)
+        .await?;
+    let late = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing older diagnostic command")?;
+    database.apply_telegram_owner_control(&late, 4).await?;
+    let (enabled, update): (bool, i64) = sqlx::query_as(
+        "SELECT (value->>'enabled')::bool,(value->>'update_id')::bigint
+         FROM app_state WHERE key='telegram:debug'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!enabled);
+    assert_eq!(update, 28);
+    let text: String =
+        sqlx::query_scalar("SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE id=$1")
+            .bind(disabled.outbox_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        text,
+        "Диагностика выключена. Включить уведомления об ошибках: /debug on"
+    );
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox_messages WHERE memory_fence->'telegram_debug'->>1='28'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, 2);
     println!(
-        "Verified durable owner controls, rollback, stale pairing, and current, pending and stale daily summaries"
+        "Verified durable owner controls, daily summaries, and suppression of stale diagnostic replies"
     );
     Ok(())
 }

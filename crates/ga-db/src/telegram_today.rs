@@ -1,10 +1,13 @@
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::Date;
 use uuid::Uuid;
 
-use crate::replay::{GARMIN_PARSER_VERSION, projection_pending};
+use crate::{
+    outbox_claims::control_reply_fence,
+    replay::{GARMIN_PARSER_VERSION, projection_pending},
+};
 
 pub(crate) const REPLAY_NOTICE: &str = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже.";
 
@@ -36,17 +39,22 @@ pub(crate) async fn capture(
     txn: &mut Transaction<'_, Postgres>,
     conversation: Uuid,
 ) -> Result<(String, String), sqlx::Error> {
-    let fence: String = sqlx::query_scalar(
-        "SELECT jsonb_build_object(
-            'target_epoch',target.memory_epoch::text,
-            'source_epochs',CASE WHEN target.share_owner_memory THEN coalesce((
-                SELECT jsonb_object_agg(source.id::text,source.memory_epoch::text)
-                FROM conversations source WHERE source.owner_id=target.owner_id
-                AND source.id<>target.id AND source.share_owner_memory), '{}'::jsonb) ELSE '{}'::jsonb END,
-            'telegram_today',jsonb_build_object('generation',(
-                SELECT value FROM app_state WHERE key='replay:generation'))
-         )::text FROM conversations target WHERE id=$1",
-    ).bind(conversation).fetch_one(&mut **txn).await?;
+    let generation: Option<String> =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='replay:generation'")
+            .fetch_optional(&mut **txn)
+            .await?;
+    let generation = generation
+        .map(|value| serde_json::from_str::<Value>(&value))
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    let fence = control_reply_fence(
+        txn,
+        conversation,
+        json!({
+            "telegram_today": {"generation": generation},
+        }),
+    )
+    .await?;
     if projection_pending(txn, GARMIN_PARSER_VERSION).await? {
         return Ok((REPLAY_NOTICE.into(), fence));
     }

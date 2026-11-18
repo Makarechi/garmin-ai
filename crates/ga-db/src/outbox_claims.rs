@@ -7,6 +7,7 @@ use ga_domain::{
     channel::InboundEnvelope, telegram_control::TelegramControl, timestamp::StoredInstant,
 };
 use serde::Deserialize;
+use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -85,11 +86,28 @@ struct MemoryFence {
     target_epoch: String,
     source_epochs: BTreeMap<String, String>,
     telegram_today: Option<TodayProjection>,
+    telegram_debug: Option<[Option<i64>; 2]>,
 }
 
 enum FenceStatus {
     Stale,
     Current(Option<TodayProjection>),
+}
+
+pub(crate) async fn control_reply_fence(
+    txn: &mut Transaction<'_, Postgres>,
+    conversation: Uuid,
+    state: Value,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT (jsonb_build_object(
+            'target_epoch',target.memory_epoch::text,
+            'source_epochs',CASE WHEN target.share_owner_memory THEN coalesce((
+                SELECT jsonb_object_agg(source.id::text,source.memory_epoch::text)
+                FROM conversations source WHERE source.owner_id=target.owner_id
+                AND source.id<>target.id AND source.share_owner_memory), '{}'::jsonb) ELSE '{}'::jsonb END
+          ) || $2::jsonb)::text FROM conversations target WHERE id=$1",
+    ).bind(conversation).bind(state.to_string()).fetch_one(&mut **txn).await
 }
 
 impl Database {
@@ -216,14 +234,22 @@ async fn check_fence(
     let Ok(fence) = serde_json::from_str::<MemoryFence>(fence) else {
         return Ok(FenceStatus::Stale);
     };
-    let today = fence.telegram_today.is_some();
-    if !today
+    let owner_control = match (
+        fence.telegram_today.is_some(),
+        fence.telegram_debug.is_some(),
+    ) {
+        (true, false) => Some(TelegramControl::Today),
+        (false, true) => Some(TelegramControl::Debug),
+        (false, false) => None,
+        (true, true) => return Ok(FenceStatus::Stale),
+    };
+    if owner_control.is_none()
         && (fence.target_epoch.parse().ok() != Some(candidate.memory_epoch)
             || (!candidate.owner_memory && !fence.source_epochs.is_empty()))
     {
         return Ok(FenceStatus::Stale);
     }
-    if candidate.owner_memory && !today {
+    if candidate.owner_memory && owner_control.is_none() {
         let sources: Option<BTreeMap<Uuid, Uuid>> = fence
             .source_epochs
             .into_iter()
@@ -261,21 +287,33 @@ async fn check_fence(
     .bind(owner_id)
     .bind(candidate.conversation_id)
     .bind(candidate.operation_id)
-    .bind(today)
+    .bind(owner_control.is_some())
     .fetch_optional(&mut **txn)
     .await?;
     let Some((true, envelope)) = inbound else {
         return Ok(FenceStatus::Stale);
     };
-    if today
+    if owner_control.is_some()
         && envelope
             .as_deref()
             .and_then(|raw| InboundEnvelope::parse(raw.as_bytes()).ok())
             .as_ref()
             .and_then(TelegramControl::from_envelope)
-            != Some(TelegramControl::Today)
+            != owner_control
     {
         return Ok(FenceStatus::Stale);
+    }
+    if let Some(generation) = fence.telegram_debug {
+        let unchanged: bool = sqlx::query_scalar(
+            "SELECT coalesce((SELECT jsonb_build_array(value->'message_at',value->'update_id')
+                 FROM app_state WHERE key='telegram:debug'), '[null,null]'::jsonb) = $1::jsonb",
+        )
+        .bind(serde_json::json!(generation).to_string())
+        .fetch_one(&mut **txn)
+        .await?;
+        if !unchanged {
+            return Ok(FenceStatus::Stale);
+        }
     }
     Ok(FenceStatus::Current(fence.telegram_today))
 }
