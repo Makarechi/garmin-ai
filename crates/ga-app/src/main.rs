@@ -76,12 +76,14 @@ enum Command {
     ResumeStorage,
     /// Serve MCP tools over standard input and output
     Mcp,
-    /// Probe the local native HTTP service
+    /// Probe the local native HTTP service or worker
     Healthcheck {
         #[arg(long, default_value_t = 8080)]
         port: u16,
         #[arg(long)]
         ready: bool,
+        #[arg(long, conflicts_with_all = ["port", "ready"])]
+        worker: bool,
     },
     /// Restore projections from the local Garmin archive
     Replay {
@@ -185,8 +187,17 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
-        Some(Command::Healthcheck { port, ready }) => {
-            if !healthcheck::probe(port, ready).unwrap_or(false) {
+        Some(Command::Healthcheck {
+            port,
+            ready,
+            worker,
+        }) => {
+            let healthy = if worker {
+                healthcheck::worker()
+            } else {
+                healthcheck::probe(port, ready).unwrap_or(false)
+            };
+            if !healthy {
                 return ExitCode::FAILURE;
             }
         }

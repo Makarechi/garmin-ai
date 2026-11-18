@@ -5,7 +5,7 @@ use ga_db::{
     channel_ingress::telegram_poll::TelegramPollError,
     jobs::{
         FailureReason, JobOutcome, JobStoreError, RecordedJobStatus,
-        telegram_ack::TelegramAckTarget,
+        telegram_ack::{TelegramAckAuthorization, TelegramAckTarget},
     },
     runtime_lease::{RuntimeLease, RuntimeLeaseError},
     telegram_cursor::TelegramCursorError,
@@ -161,12 +161,21 @@ impl TelegramTransport {
             .map_err(TelegramLoopError::Acknowledgement)?;
         let now = wall_clock()?;
         let outcome = match result {
-            None => JobOutcome::Failed {
+            TelegramAckAuthorization::BindingChanged => JobOutcome::Failed {
                 reason: FailureReason::TelegramPairingChanged,
                 retry_at: None,
             },
-            Some(Ok(()) | Err(TelegramTransportError::Rejected)) => JobOutcome::Completed,
-            Some(Err(TelegramTransportError::RateLimited(delay))) => {
+            TelegramAckAuthorization::Busy => JobOutcome::Failed {
+                reason: FailureReason::TelegramPolicyBusy,
+                retry_at: StoredInstant::from_unix_microseconds(
+                    now.unix_microseconds().saturating_add(250_000),
+                )
+                .ok(),
+            },
+            TelegramAckAuthorization::Observed(Ok(()) | Err(TelegramTransportError::Rejected)) => {
+                JobOutcome::Completed
+            }
+            TelegramAckAuthorization::Observed(Err(TelegramTransportError::RateLimited(delay))) => {
                 let micros = i64::try_from(delay.as_micros())
                     .ok()
                     .and_then(|delay| now.unix_microseconds().checked_add(delay));
@@ -181,7 +190,7 @@ impl TelegramTransport {
                     retry_at,
                 }
             }
-            Some(Err(
+            TelegramAckAuthorization::Observed(Err(
                 TelegramTransportError::Authorization
                 | TelegramTransportError::InvalidInput
                 | TelegramTransportError::Configuration,
@@ -189,7 +198,7 @@ impl TelegramTransport {
                 reason: FailureReason::ProviderRequestInvalid,
                 retry_at: None,
             },
-            Some(Err(_)) => JobOutcome::Failed {
+            TelegramAckAuthorization::Observed(Err(_)) => JobOutcome::Failed {
                 reason: FailureReason::RuntimeError,
                 retry_at: None,
             },
@@ -202,7 +211,7 @@ impl TelegramTransport {
     }
 }
 
-fn wall_clock() -> Result<StoredInstant, TelegramLoopError> {
+pub(super) fn wall_clock() -> Result<StoredInstant, TelegramLoopError> {
     let micros = i64::try_from(
         OffsetDateTime::now_utc()
             .unix_timestamp_nanos()
