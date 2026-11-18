@@ -13,6 +13,7 @@ use super::{ExistingMessage, InboundReceipt, IngressError, ingest};
 use crate::{
     Database,
     action_tokens::{ActionTokenContext, consume_action_token},
+    jobs::telegram_inbound::resolve_legacy_history,
 };
 
 pub struct ChannelCallback<'a> {
@@ -93,6 +94,9 @@ async fn consume_outbox_action(
     txn: &mut Transaction<'_, Postgres>,
     callback: &ChannelCallback<'_>,
 ) -> Result<Value, IngressError> {
+    if let Some(history) = resolve_legacy_history(txn, callback).await? {
+        return Ok(history);
+    }
     if callback.token.len() != 57 || !callback.token.is_ascii() {
         return Err(IngressError::ActionUnavailable);
     }
