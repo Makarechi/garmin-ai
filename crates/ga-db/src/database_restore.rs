@@ -93,6 +93,15 @@ impl Database {
         &self,
         source: &mut impl BufRead,
     ) -> Result<ExportCounts, DatabaseRestoreError> {
+        self.restore_current_database_with_activation(source, || Ok(()))
+            .await
+    }
+
+    pub async fn restore_current_database_with_activation(
+        &self,
+        source: &mut impl BufRead,
+        before_commit: impl FnOnce() -> io::Result<()>,
+    ) -> Result<ExportCounts, DatabaseRestoreError> {
         let mut line = Vec::new();
         read_line(source, &mut line, MAX_HEADER_BYTES)?;
         let header: Header = serde_json::from_slice(&line)?;
@@ -112,6 +121,7 @@ impl Database {
         }
         validate_restored_events(&mut txn).await?;
         reset_sequences(&mut txn).await?;
+        before_commit()?;
         txn.commit().await?;
         Ok(counts)
     }
