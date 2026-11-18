@@ -143,7 +143,7 @@ impl ServerHandler for Mcp {
                 .into_iter()
                 .find(|tool| tool.name() == tool_name)
             {
-                Some(tool) => self.garmin(tool, call.arguments.unwrap_or_default()).await,
+                Some(tool) => self.garmin(tool, args).await,
                 None => Err("ValueError"),
             },
         };
