@@ -61,6 +61,13 @@ struct ScenarioPack {
 static CATALOG: LazyLock<Option<Vec<ScenarioPack>>> =
     LazyLock::new(|| serde_json::from_str(include_str!("../contracts/scenario-packs.json")).ok());
 
+pub(crate) fn pack_keys() -> Result<impl Iterator<Item = &'static str>, ScenarioPackError> {
+    let catalog = CATALOG
+        .as_ref()
+        .ok_or(ScenarioPackError::IncompleteCatalog)?;
+    Ok(catalog.iter().map(|pack| pack.key))
+}
+
 #[derive(Clone)]
 pub struct PackSelection {
     pub revision: i32,

@@ -1,5 +1,7 @@
 //! Run native schema transitions using the existing Alembic revision ledger.
 
+mod catalog;
+
 use std::{error::Error, fmt};
 
 use sqlx::{Postgres, Transaction};
@@ -39,6 +41,7 @@ pub enum SchemaMigrationError {
     Busy,
     Unsupported,
     Occupied,
+    Registry,
     Database,
 }
 
@@ -48,6 +51,7 @@ impl fmt::Display for SchemaMigrationError {
             Self::Busy => "Stop the worker or other storage maintenance before upgrading",
             Self::Unsupported => "The recorded database revision is unsupported",
             Self::Occupied => "A database without a Garmin AI revision must be empty",
+            Self::Registry => "Application definitions could not be initialized safely",
             Self::Database => "The database schema could not be inspected or upgraded",
         })
     }
@@ -72,6 +76,15 @@ impl Database {
     /// Install or upgrade a supported schema. Schema, transformations and the
     /// version ledger commit together under the original database runtime locks.
     pub async fn migrate_schema(&self) -> Result<SchemaState, SchemaMigrationError> {
+        self.migrate(false).await
+    }
+
+    /// The application command commits the schema and its active registry together.
+    pub async fn migrate_and_initialize(&self) -> Result<SchemaState, SchemaMigrationError> {
+        self.migrate(true).await
+    }
+
+    async fn migrate(&self, initialize: bool) -> Result<SchemaState, SchemaMigrationError> {
         let mut txn = self.work.begin().await?;
         protect(&mut txn).await?;
         let state = schema_state(&mut txn).await?;
@@ -87,6 +100,9 @@ impl Database {
             SchemaState::BeforeRevisions => measurement_revisions(&mut txn).await?,
             SchemaState::BeforeFence => delivery_fence(&mut txn).await?,
             SchemaState::Current => {}
+        }
+        if initialize {
+            catalog::initialize(&mut txn).await?;
         }
         txn.commit().await?;
         Ok(state)

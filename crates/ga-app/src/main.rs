@@ -2,6 +2,7 @@ mod authorization;
 mod backup_space;
 mod configuration;
 mod http;
+mod migrate;
 mod replay_worker;
 mod retention;
 
@@ -45,6 +46,11 @@ enum Command {
         answer_cursor: Option<String>,
         #[arg(long)]
         neutral_cursor: Option<String>,
+    },
+    /// Inspect or upgrade the local PostgreSQL schema
+    Migrate {
+        #[arg(long)]
+        status: bool,
     },
     /// Restore projections from the local Garmin archive
     Replay {
@@ -113,6 +119,12 @@ fn main() -> ExitCode {
                 neutral_cursor: neutral_cursor.as_deref(),
             };
             if let Err(error) = retention::run(selection) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Migrate { status }) => {
+            if let Err(error) = migrate::run(status) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }

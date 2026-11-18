@@ -1,3 +1,7 @@
+mod bootstrap;
+
+pub(crate) use bootstrap::initialize_system_events;
+
 use std::{error::Error, fmt, sync::LazyLock};
 
 use ga_domain::{event_contract::definition_hash, event_provenance::EventTopology};
@@ -206,6 +210,25 @@ async fn ensure(
             }
         }
     }
+    let installed = insert_version(txn, definition, entry).await?;
+    sqlx::query(
+        "UPDATE event_definitions
+         SET current_version = $2, revision = revision + $3, updated_at = now()
+         WHERE id = $1 AND (current_version IS DISTINCT FROM $2 OR $3 != 0)",
+    )
+    .bind(definition)
+    .bind(installed.version)
+    .bind(i32::from(had_version))
+    .execute(&mut **txn)
+    .await?;
+    Ok(installed)
+}
+
+async fn insert_version(
+    txn: &mut Transaction<'_, Postgres>,
+    definition: Uuid,
+    entry: &CatalogEntry,
+) -> Result<SystemDefinition, DefinitionStoreError> {
     let version: i32 = sqlx::query_scalar(
         "SELECT coalesce(max(version), 0) + 1 FROM event_definition_versions WHERE definition_id = $1",
     )
@@ -229,16 +252,6 @@ async fn ensure(
     .bind(entry.field("labels")?.to_string())
     .bind(entry.text("privacy")?)
     .bind(entry.field("allowed_operations")?.to_string())
-    .execute(&mut **txn)
-    .await?;
-    sqlx::query(
-        "UPDATE event_definitions
-         SET current_version = $2, revision = revision + $3, updated_at = now()
-         WHERE id = $1 AND (current_version IS DISTINCT FROM $2 OR $3 != 0)",
-    )
-    .bind(definition)
-    .bind(version)
-    .bind(i32::from(had_version))
     .execute(&mut **txn)
     .await?;
     Ok(SystemDefinition {
