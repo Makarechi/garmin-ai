@@ -269,7 +269,7 @@ fn record_missing() -> Response {
     detail(StatusCode::NOT_FOUND, "Record not found")
 }
 
-fn event_response(snapshot: serde_json::Value) -> Response {
+pub(super) fn event_response(snapshot: serde_json::Value) -> Response {
     match event_document(snapshot) {
         Ok(value) => Json(value).into_response(),
         Err(_) => storage_unavailable(),
@@ -383,7 +383,7 @@ pub(super) fn access_failure(status: StatusCode) -> Response {
     }
 }
 
-fn write_failure(error: DiaryWriteError) -> Response {
+pub(super) fn write_failure(error: DiaryWriteError) -> Response {
     match error {
         DiaryWriteError::Replay(ReplayConflict::InputChanged) => detail(
             StatusCode::CONFLICT,

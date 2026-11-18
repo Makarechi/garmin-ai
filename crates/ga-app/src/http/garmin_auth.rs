@@ -10,7 +10,7 @@ use axum::{
 };
 use ga_app::{
     garmin_mini_app::{GarminMiniApp, GarminMiniAppError, GarminMiniAppSettings},
-    garmin_worker::GarminSourceSettings,
+    garmin_worker::{garmin_auth_source, garmin_auth_url},
     telegram_settings::TelegramIngressSettings,
 };
 use ga_db::{
@@ -69,17 +69,7 @@ fn configured(database: Database) -> Option<GarminMiniApp> {
         "GA_LOCK_DIR",
     ])
     .ok()?;
-    let url = reqwest::Url::parse(url.as_deref()?).ok()?;
-    if url.scheme() != "https"
-        || url.host().is_none()
-        || url.path() != "/garmin-auth"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
+    garmin_auth_url(url.as_deref()?)?;
     let telegram = TelegramIngressSettings::selected(owner.as_deref(), integrations.as_deref())
         .ok()
         .flatten()?;
@@ -92,15 +82,9 @@ fn configured(database: Database) -> Option<GarminMiniApp> {
     let lock_directory =
         configuration::lock_directory(&data_directory, &token_directory, locks.map(PathBuf::from))
             .ok()?;
-    let garmin_instance = if integrations.is_some() {
-        GarminSourceSettings::resolve(integrations.as_deref(), &token_directory)
-            .ok()
-            .flatten()?
-            .instance_id()
-            .to_owned()
-    } else {
-        "source:garmin:primary".to_owned()
-    };
+    let garmin_instance = garmin_auth_source(integrations.as_deref(), &token_directory)
+        .ok()
+        .flatten()?;
     let settings = GarminMiniAppSettings {
         telegram,
         bot_token,

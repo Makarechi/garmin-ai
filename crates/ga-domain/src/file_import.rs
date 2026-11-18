@@ -1,10 +1,13 @@
 mod csv;
+mod decimal;
 mod json;
 mod mapping;
 
 pub use csv::{CsvRows, read_csv_rows};
 pub use json::{JsonRow, JsonRowIssue, read_json_rows};
-pub use mapping::{FileFormat, FileMapping, MAX_MAPPING_BYTES};
+pub use mapping::{
+    FileFieldInput, FileFormat, FileMappedRow, FileMapping, FileRowIssue, MAX_MAPPING_BYTES,
+};
 
 use std::{error::Error, fmt};
 

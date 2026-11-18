@@ -12,6 +12,9 @@ use crate::{
 
 use super::ImportFileError;
 
+mod row;
+pub use row::{FileFieldInput, FileMappedRow, FileRowIssue};
+
 pub const MAX_MAPPING_BYTES: usize = 16_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

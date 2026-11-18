@@ -1,5 +1,7 @@
 mod forms;
 mod setup;
+
+pub use forms::{FormSubmission, FormSubmitError};
 pub use setup::TrackerSetupStoreError;
 
 use std::{error::Error, fmt, time::Duration};

@@ -47,6 +47,7 @@ fn router(state: AppState) -> Router {
         .route("/tracker-setups", any(tracker_setup::confirm))
         .route("/actions/events/{event_id}", any(tracker_actions::event))
         .route("/forms/{action_id}", any(tracker_actions::form))
+        .route("/forms/{action_id}/submit", any(tracker_actions::submit))
         .route("/events", any(diary::create))
         .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))

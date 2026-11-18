@@ -10,6 +10,8 @@ use super::{ActionRecord, TrackerActionError, localized_label, read_locale};
 use crate::{Database, diary::DiaryReadError};
 
 pub(super) mod projection;
+mod submit;
+pub use submit::{FormSubmission, FormSubmitError};
 
 enum FormAction {
     Create(Uuid),
