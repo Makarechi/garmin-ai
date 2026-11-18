@@ -72,6 +72,7 @@ impl TelegramControlError {
                 | Self::Memory(MemoryError::Busy)
                 | Self::Proactive(ProactiveControlError::Busy)
                 | Self::Goals(PersonalGoalsError::Busy)
+                | Self::Outbox(QueueIntentError::Busy)
         )
     }
 }
