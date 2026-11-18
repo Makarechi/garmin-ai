@@ -43,21 +43,16 @@ impl Error for GarminWorkerError {}
 pub(super) struct GarminWorkerSettings {
     source: GarminSourceSettings,
     history_days: u16,
-    backups_enabled: bool,
 }
 
 impl GarminWorkerSettings {
     pub(super) fn read() -> Result<Option<Self>, GarminWorkerError> {
-        let [integrations, tokens, history, backup] = configuration::read([
-            "GA_INTEGRATIONS",
-            "GA_TOKEN_DIR",
-            "GA_BACKFILL_DAYS",
-            "GA_BACKUP_KEY",
-        ])
-        .map_err(|_| GarminWorkerError::Configuration)?;
+        let [integrations, tokens, history] =
+            configuration::read(["GA_INTEGRATIONS", "GA_TOKEN_DIR", "GA_BACKFILL_DAYS"])
+                .map_err(|_| GarminWorkerError::Configuration)?;
         let tokens = std::path::absolute(tokens.as_deref().unwrap_or("tokens/garmin"))
             .map_err(|_| GarminWorkerError::Configuration)?;
-        let Some(source) = GarminSourceSettings::resolve(integrations.as_deref(), &tokens)
+        let Some(source) = GarminSourceSettings::for_worker(integrations.as_deref(), &tokens)
             .map_err(GarminWorkerError::Source)?
         else {
             return Ok(None);
@@ -73,11 +68,16 @@ impl GarminWorkerSettings {
         Ok(Some(Self {
             source,
             history_days,
-            backups_enabled: backup.is_some_and(|key| !key.is_empty()),
         }))
     }
 
-    pub(super) async fn run(&self, database: &Database, raw_archive: &Path, timezone: &str) -> ! {
+    pub(super) async fn run(
+        &self,
+        database: &Database,
+        raw_archive: &Path,
+        timezone: &str,
+        backups_running: bool,
+    ) -> ! {
         let mut session: Option<LegacyReader> = None;
         let mut archive = None;
         let mut next_plan = Instant::now();
@@ -182,7 +182,7 @@ impl GarminWorkerSettings {
                 },
                 instance: self.source.instance_id(),
                 history_days: self.history_days,
-                backups_enabled: self.backups_enabled,
+                backups_enabled: backups_running,
                 fit_limits: ExportLimits {
                     max_bytes: MAX_FIT_BYTES,
                     max_zip_entries: FIT_ZIP_ENTRIES,

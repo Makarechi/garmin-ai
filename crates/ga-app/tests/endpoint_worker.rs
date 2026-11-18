@@ -766,7 +766,7 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
             started: Some(started.clone()),
         },
     };
-    let worker = ScheduledGarminWorker {
+    let mut worker = ScheduledGarminWorker {
         runner: fixture.worker(&source),
         instance: "source:garmin:primary",
         history_days: 0,
@@ -790,6 +790,22 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     sqlx::query("UPDATE jobs SET run_at=run_at+interval '1 day' WHERE kind='garmin_endpoint'")
         .execute(&fixture.inspect)
         .await?;
+    let overdue =
+        StoredInstant::try_from(OffsetDateTime::from(now().await?) - time::Duration::hours(1))?;
+    assert!(
+        fixture
+            .database
+            .schedule_daily_backup(overdue)
+            .await?
+            .is_some()
+    );
+    worker.backups_enabled = true;
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Idle
+    );
+    assert_eq!(source.calls.load(Ordering::Relaxed), 0);
+    worker.backups_enabled = false;
     assert_eq!(
         worker.process_one(now().await?).await?,
         GarminQueueStep::Activities(ActivityPageWork::Publication(
@@ -876,15 +892,50 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
             .await?,
         0
     );
+    let next =
+        StoredInstant::try_from(OffsetDateTime::from(now().await?) + time::Duration::days(1))?;
+    assert!(matches!(
+        worker.plan(next).await?,
+        GarminSyncSchedule::Scheduled {
+            activity_pages: 1,
+            ..
+        }
+    ));
+    let scan_key = format!("activity_scan:{ACCOUNT}:recent");
+    let scan_state = || {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT value->>'status',value->>'generation' FROM app_state WHERE key=$1",
+        )
+        .bind(&scan_key)
+        .fetch_one(&fixture.inspect)
+    };
+    let pending = scan_state().await?;
+    assert_eq!(pending.0, "running");
     sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"source_instance_ids\":[]}')")
         .execute(&fixture.inspect).await?;
     assert!(
         fixture
             .database
-            .retire_deselected_garmin_work(worker.instance, now().await?)
+            .retire_deselected_garmin_work(worker.instance, next)
             .await?
             > 0
     );
+    let disabled = scan_state().await?;
+    assert_eq!(disabled.0, "disabled");
+    assert_eq!(disabled.1, pending.1);
+    sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+        .execute(&fixture.inspect)
+        .await?;
+    assert!(matches!(
+        worker.plan(next).await?,
+        GarminSyncSchedule::Scheduled {
+            activity_pages: 1,
+            ..
+        }
+    ));
+    let reselected = scan_state().await?;
+    assert_eq!(reselected.0, "running");
+    assert_ne!(reselected.1, pending.1);
     let old_export_still_visible: bool =
         sqlx::query_scalar("SELECT fit_key IS NOT NULL FROM activities WHERE id='761'")
             .fetch_one(&fixture.inspect)

@@ -322,7 +322,12 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     let garmin_work = async {
         if let Some(settings) = &garmin {
             settings
-                .run(&database, &config.raw_archive, &timezone)
+                .run(
+                    &database,
+                    &config.raw_archive,
+                    &timezone,
+                    backups.is_some() && backup_worker.is_some(),
+                )
                 .await
         } else {
             future::pending().await
