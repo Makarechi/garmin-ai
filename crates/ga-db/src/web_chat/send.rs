@@ -151,7 +151,7 @@ async fn local_reply(
         .await?;
         let locale = saved.as_deref().unwrap_or(request.configured_locale);
         let russian_locale = locale
-            .split(['-', '_'])
+            .split('-')
             .next()
             .is_some_and(|code| code.eq_ignore_ascii_case("ru"));
         return Ok((
