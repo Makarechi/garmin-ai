@@ -1,6 +1,7 @@
 mod personal_goals;
 mod tools;
 mod tracker_sharing;
+mod wearable;
 
 use std::{env, io, sync::Arc};
 
@@ -35,6 +36,7 @@ fn router(state: AppState) -> Router {
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
         .route("/preferences/goals", any(personal_goals::preferences))
+        .route("/wearable/marks", any(wearable::marks))
         .route(
             "/tracker-sharing-consents",
             any(tracker_sharing::collection),
