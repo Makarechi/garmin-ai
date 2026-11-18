@@ -1,3 +1,4 @@
+mod browser;
 pub(crate) mod demo;
 mod diary;
 mod garmin_auth;
@@ -54,6 +55,7 @@ fn router(state: AppState) -> Router {
             "/tracker-sharing-consents/{definition}/{kind}/{instance}",
             any(tracker_sharing::revoke),
         )
+        .merge(browser::routes())
         .fallback(missing)
         .with_state(state)
 }
