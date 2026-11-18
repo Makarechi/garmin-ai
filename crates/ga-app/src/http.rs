@@ -1,5 +1,6 @@
 pub(crate) mod demo;
 mod diary;
+mod garmin_auth;
 mod personal_goals;
 pub(crate) mod tools;
 mod tracker_sharing;
@@ -166,6 +167,7 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
         })
         .unwrap_or_else(|| "Europe/Bratislava".into());
     let webhook = TelegramWebhook::configured(database.clone()).router();
+    let garmin_auth = garmin_auth::router(database.clone());
     println!("Listening on http://{}", listener.local_addr()?);
     accept(
         listener,
@@ -174,7 +176,8 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
             authorization,
             configured_timezone: configured_timezone.into(),
         })
-        .merge(webhook),
+        .merge(webhook)
+        .merge(garmin_auth),
     )
     .await
 }
