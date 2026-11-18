@@ -4,7 +4,9 @@ use ga_db::{
     model_gate::{
         ModelGateError, ModelGateOutcomeReason, ModelGateSession, ModelResume, RecordModelGate,
     },
-    share_policy::{DestinationKind, ShareDestination, SharePolicyError, ShareRequirement},
+    share_policy::{
+        DestinationKind, ModelChannelSharing, ShareDestination, SharePolicyError, ShareRequirement,
+    },
 };
 use ga_domain::{
     model_consent::{ModelCategories, ModelOperation},
@@ -27,6 +29,12 @@ use super::{
 
 const BUSY_RETRY: Duration = Duration::from_secs(1);
 
+pub(super) struct ModelRequestScope<'a> {
+    pub requirements: &'a [ShareRequirement<'a>],
+    pub channel: Option<ModelChannelSharing<'a>>,
+    pub job: Option<ActiveModelJob>,
+}
+
 impl ModelGateway<'_> {
     pub(super) async fn execute_with<'policy, P, S>(
         &self,
@@ -40,6 +48,35 @@ impl ModelGateway<'_> {
         P: Fn() -> CurrentModelPolicy<'policy> + Sync,
         S: Sender,
     {
+        self.execute_with_context(
+            input,
+            policy,
+            ModelRequestScope {
+                requirements,
+                channel: None,
+                job,
+            },
+            sender,
+        )
+        .await
+    }
+
+    pub(super) async fn execute_with_context<'policy, P, S>(
+        &self,
+        input: ModelInput<'_>,
+        policy: &P,
+        scope: ModelRequestScope<'_>,
+        sender: &S,
+    ) -> Result<StructuredModelOutput, GatewayError>
+    where
+        P: Fn() -> CurrentModelPolicy<'policy> + Sync,
+        S: Sender,
+    {
+        let ModelRequestScope {
+            requirements,
+            channel,
+            job,
+        } = scope;
         let clock = RequestClock::new()?;
         let deadline = clock.started + self.selected.deadline;
         let operation = input.operation();
@@ -104,6 +141,7 @@ impl ModelGateway<'_> {
             policy,
             operation,
             requirements,
+            channel,
             deadline,
             clock,
             state,
@@ -176,6 +214,7 @@ struct Runtime<'a, 'config, P, S> {
     policy: &'a P,
     operation: ModelOperation,
     requirements: &'a [ShareRequirement<'a>],
+    channel: Option<ModelChannelSharing<'a>>,
     deadline: Instant,
     clock: RequestClock,
     state: ModelGateSession<'a>,
@@ -220,6 +259,7 @@ where
                     destination,
                     self.operation.categories(),
                     self.requirements,
+                    self.channel,
                     || async {
                         let allowed = self
                             .gateway
