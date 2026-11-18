@@ -13,7 +13,7 @@ use ga_db::{
     Database,
     jobs::{JobStoreError, RecordedJobStatus},
     replay::{ReplaySelectionError, RunReplayJob},
-    runtime_lease::{RuntimeLease, RuntimeLeaseError},
+    runtime_lease::RuntimeLeaseError,
 };
 use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
 use ga_fit::{ExportLimits, MAX_FIT_BYTES};
@@ -147,6 +147,12 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .await
         .map_err(ReplayServiceError::Lease)?
         .unwrap_or(config.timezone);
+    if worker {
+        singleton
+            .publish_worker_heartbeat()
+            .await
+            .map_err(ReplayServiceError::Lease)?;
+    }
     #[cfg(unix)]
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
         .map_err(|_| ReplayServiceError::Shutdown)?;
@@ -175,7 +181,10 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 .await
                 .map_err(ReplayServiceError::Lease)
         } else {
-            verify_runtime(&mut singleton).await
+            singleton
+                .while_held(future::pending::<()>())
+                .await
+                .map_err(ReplayServiceError::Lease)
         }
     };
     let telegram_work = async {
@@ -199,13 +208,6 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         result = receive => result,
         result = telegram_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
-    }
-}
-
-async fn verify_runtime(singleton: &mut RuntimeLease) -> Result<(), ReplayServiceError> {
-    loop {
-        tokio::time::sleep(PLAN_BUSY).await;
-        singleton.check().await.map_err(ReplayServiceError::Lease)?;
     }
 }
 
