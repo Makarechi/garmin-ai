@@ -6,7 +6,11 @@ use sqlx::{Acquire, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{QueueIntent, QueueIntentError, QueuedIntent, enqueue};
-use crate::{check_readiness, conversation_memory::MemoryFence, replay::REPLAY_MUTATION_LOCK};
+use crate::{
+    check_readiness,
+    conversation_memory::{ConversationBinding, MemoryFence, shared_memory_epochs},
+    replay::REPLAY_MUTATION_LOCK,
+};
 
 /// Queue a generated answer only while its input revision and memory scope remain current.
 pub async fn queue_generated_outbox_intent(
@@ -62,14 +66,15 @@ async fn queue_current(
     if epoch != fence.target_epoch {
         return Ok(None);
     }
-    let sources = if shared {
-        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-            "SELECT id,memory_epoch FROM conversations WHERE owner_id=$1 AND id<>$2 AND share_owner_memory",
-        ).bind(owner).bind(conversation).fetch_all(&mut **txn).await?;
-        rows.into_iter().collect::<BTreeMap<_, _>>()
-    } else {
-        BTreeMap::new()
-    };
+    let sources = shared_memory_epochs(
+        txn,
+        ConversationBinding {
+            owner_id: owner,
+            conversation_id: conversation,
+        },
+        shared,
+    )
+    .await?;
     if sources != fence.source_epochs {
         return Ok(None);
     }

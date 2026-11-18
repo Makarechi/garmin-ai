@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::{EventSnapshotRow, event_snapshot};
 use crate::{
     Database, ReadinessError, check_readiness,
+    conversation_memory::{AnalysisReadContext, analysis_channel_in},
     scenario_packs::model_disallowed_event_kinds,
     share_policy::{DestinationKind, ShareDestination},
     system_definitions::known_system_event,
@@ -28,6 +29,7 @@ pub enum DiaryReadError {
     ModelConsent,
     InvalidDestination,
     Owner,
+    ContextChanged,
 }
 
 impl fmt::Display for DiaryReadError {
@@ -44,6 +46,7 @@ impl fmt::Display for DiaryReadError {
             Self::ModelConsent => "The diary model category is disabled",
             Self::InvalidDestination => "Invalid diary sharing destination",
             Self::Owner => "Diary entries belong to a different owner",
+            Self::ContextChanged => "Analysis context changed during the question",
         })
     }
 }
@@ -64,6 +67,13 @@ pub struct ModelDiaryQuery<'a> {
     pub limit: u16,
     pub model: ShareDestination<'a>,
     pub channel: Option<ShareDestination<'a>>,
+}
+
+pub struct DiaryEventRange<'a> {
+    pub start: StoredInstant,
+    pub end: StoredInstant,
+    pub kind: Option<&'a str>,
+    pub limit: u16,
 }
 
 pub struct ModelDiaryPage {
@@ -108,47 +118,65 @@ impl Database {
         &self,
         query: ModelDiaryQuery<'_>,
     ) -> Result<ModelDiaryPage, DiaryReadError> {
-        if query.model.kind() != DestinationKind::Model
-            || query
-                .channel
-                .is_some_and(|channel| channel.kind() != DestinationKind::Channel)
-        {
-            return Err(DiaryReadError::InvalidDestination);
-        }
-        let (start, end) = (
-            OffsetDateTime::from(query.start),
-            OffsetDateTime::from(query.end),
-        );
-        check_range(start, end)?;
+        let (start, end) = model_window(&query)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
-            let diary_allowed: Option<bool> = sqlx::query_scalar(
-                "SELECT COALESCE((SELECT COALESCE(value->'model_categories' @> '[\"diary\"]'::jsonb,false)
-                    FROM app_state WHERE key='preferences:onboarding'), true)
-                 FROM people WHERE singleton AND id=$1",
-            )
-            .bind(query.owner_id)
-            .fetch_optional(&mut *txn)
-            .await?;
-            let diary_allowed = diary_allowed.ok_or(DiaryReadError::Owner)?;
-            if !diary_allowed {
-                return Err(DiaryReadError::ModelConsent);
-            }
-            let audience = ModelAudience {
-                model: query.model.instance(),
-                channel: query.channel.map(ShareDestination::instance),
-                pack_denials: model_disallowed_event_kinds(&mut txn)
+            let page = model_events_in(&mut txn, query, start, end).await?;
+            txn.commit().await?;
+            Ok(page)
+        })
+        .await
+        .map_err(|_| DiaryReadError::Database)?
+    }
+
+    /// Revalidate the question and diary grant before preparing the next model request.
+    pub async fn analysis_diary_context_current(&self, context: AnalysisReadContext<'_>) -> bool {
+        matches!(
+            tokio::time::timeout(Duration::from_millis(1500), async {
+                let mut txn = self.begin_diary_read().await?;
+                let channel = analysis_channel_in(&mut txn, context)
                     .await
-                    .map_err(|_| DiaryReadError::Database)?,
+                    .map_err(|_| DiaryReadError::ContextChanged)?;
+                let Some(channel) = channel else {
+                    return Ok(false);
+                };
+                ShareDestination::new(DestinationKind::Channel, &channel)
+                    .map_err(|_| DiaryReadError::InvalidDestination)?;
+                model_diary_allowed(&mut txn, context.binding.owner_id).await?;
+                txn.commit().await?;
+                Ok::<_, DiaryReadError>(true)
+            })
+            .await,
+            Ok(Ok(true))
+        )
+    }
+
+    /// Resolve the delivery channel from the current authenticated question in the same snapshot.
+    pub async fn list_analysis_events(
+        &self,
+        context: AnalysisReadContext<'_>,
+        model: ShareDestination<'_>,
+        range: DiaryEventRange<'_>,
+    ) -> Result<ModelDiaryPage, DiaryReadError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.begin_diary_read().await?;
+            let channel = analysis_channel_in(&mut txn, context)
+                .await
+                .map_err(|_| DiaryReadError::ContextChanged)?
+                .ok_or(DiaryReadError::ContextChanged)?;
+            let channel = ShareDestination::new(DestinationKind::Channel, &channel)
+                .map_err(|_| DiaryReadError::InvalidDestination)?;
+            let query = ModelDiaryQuery {
+                owner_id: context.binding.owner_id,
+                model,
+                channel: Some(channel),
+                start: range.start,
+                end: range.end,
+                kind: range.kind,
+                limit: range.limit,
             };
-            let kind = match query.kind {
-                Some(key) if key.starts_with("user.") => Some(key.to_owned()),
-                kind => stored_kind(&mut txn, kind).await?,
-            };
-            if !(1..=1000).contains(&query.limit) {
-                return Err(DiaryReadError::Limit);
-            }
-            let page = read_events(&mut txn, start, end, kind.as_deref(), query.limit, Some(audience)).await?;
+            let (start, end) = model_window(&query)?;
+            let page = model_events_in(&mut txn, query, start, end).await?;
             txn.commit().await?;
             Ok(page)
         })
@@ -169,6 +197,75 @@ impl Database {
             .map_err(DiaryReadError::Storage)?;
         Ok(txn)
     }
+}
+
+async fn model_diary_allowed(
+    txn: &mut Transaction<'_, Postgres>,
+    owner_id: Uuid,
+) -> Result<(), DiaryReadError> {
+    let allowed: Option<bool> = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT COALESCE(value->'model_categories' @> '[\"diary\"]'::jsonb,false)
+            FROM app_state WHERE key='preferences:onboarding'), true)
+         FROM people WHERE singleton AND id=$1",
+    )
+    .bind(owner_id)
+    .fetch_optional(&mut **txn)
+    .await?;
+    match allowed {
+        Some(true) => Ok(()),
+        Some(false) => Err(DiaryReadError::ModelConsent),
+        None => Err(DiaryReadError::Owner),
+    }
+}
+
+fn model_window(
+    query: &ModelDiaryQuery<'_>,
+) -> Result<(OffsetDateTime, OffsetDateTime), DiaryReadError> {
+    if query.model.kind() != DestinationKind::Model
+        || query
+            .channel
+            .is_some_and(|channel| channel.kind() != DestinationKind::Channel)
+    {
+        return Err(DiaryReadError::InvalidDestination);
+    }
+    let (start, end) = (
+        OffsetDateTime::from(query.start),
+        OffsetDateTime::from(query.end),
+    );
+    check_range(start, end)?;
+    Ok((start, end))
+}
+
+async fn model_events_in(
+    txn: &mut Transaction<'_, Postgres>,
+    query: ModelDiaryQuery<'_>,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+) -> Result<ModelDiaryPage, DiaryReadError> {
+    model_diary_allowed(txn, query.owner_id).await?;
+    let audience = ModelAudience {
+        model: query.model.instance(),
+        channel: query.channel.map(ShareDestination::instance),
+        pack_denials: model_disallowed_event_kinds(txn)
+            .await
+            .map_err(|_| DiaryReadError::Database)?,
+    };
+    let kind = match query.kind {
+        Some(key) if key.starts_with("user.") => Some(key.to_owned()),
+        kind => stored_kind(txn, kind).await?,
+    };
+    if !(1..=1000).contains(&query.limit) {
+        return Err(DiaryReadError::Limit);
+    }
+    read_events(
+        txn,
+        start,
+        end,
+        kind.as_deref(),
+        query.limit,
+        Some(audience),
+    )
+    .await
 }
 
 pub(crate) async fn owner_events_in(
