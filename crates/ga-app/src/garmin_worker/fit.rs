@@ -2,7 +2,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 use ga_archive::{ArchiveError, PutLimits};
 use ga_db::{
-    fit_ingest::{FitIngestError, FitIngestOutcome, LegacyFitCapture},
+    fit_ingest::{FitIngestError, FitIngestOutcome, LeasedFitLimits, LegacyFitCapture},
     garmin_integration::GarminTransportOutcome,
     jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome, RecordedJobStatus},
     raw_capture::CaptureError,
@@ -112,17 +112,26 @@ impl<S: ActivityExportSource> EndpointWorker<'_, S> {
                 .export_fetch_failed(lease, request, GarminError::InterruptedTransfer)
                 .await;
         }
+        let (publishing, stop_renewal) = tokio::sync::oneshot::channel();
         let published = self
-            .with_renewal(
+            .with_renewal_until(
                 lease,
-                self.database.ingest_leased_legacy_fit(
+                self.database.ingest_leased_legacy_fit_before_publish(
                     request,
                     lease,
                     file,
                     Arc::clone(&self.archive),
-                    put_limits,
-                    export_limits,
+                    LeasedFitLimits {
+                        archive: put_limits,
+                        projection: export_limits,
+                    },
+                    || {
+                        let _ = publishing.send(());
+                    },
                 ),
+                async {
+                    let _ = stop_renewal.await;
+                },
             )
             .await?;
         match published {

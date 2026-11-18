@@ -306,6 +306,16 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         lease: &GarminJobLease,
         work: impl Future<Output = T>,
     ) -> Result<T, EndpointWorkerError> {
+        self.with_renewal_until(lease, work, std::future::pending())
+            .await
+    }
+
+    async fn with_renewal_until<T>(
+        &self,
+        lease: &GarminJobLease,
+        work: impl Future<Output = T>,
+        stop_renewal: impl Future<Output = ()>,
+    ) -> Result<T, EndpointWorkerError> {
         let period = lease.lease_duration() / 3;
         let mut ticks = interval_at(Instant::now() + period, period);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -320,7 +330,13 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         tokio::select! {
             biased;
             result = work => Ok(result),
-            lost = renew => lost,
+            lost = async {
+                tokio::select! {
+                    biased;
+                    () = stop_renewal => std::future::pending().await,
+                    lost = renew => lost,
+                }
+            } => lost,
         }
     }
 }
