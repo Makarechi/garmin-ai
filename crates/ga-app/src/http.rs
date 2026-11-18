@@ -1,6 +1,8 @@
+mod diary;
 mod personal_goals;
 pub(crate) mod tools;
 mod tracker_sharing;
+mod wearable;
 
 use std::{env, io, sync::Arc};
 
@@ -32,9 +34,12 @@ fn router(state: AppState) -> Router {
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
+        .route("/events", any(diary::create))
+        .route("/events/{event_id}", any(diary::entry))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
         .route("/preferences/goals", any(personal_goals::preferences))
+        .route("/wearable/marks", any(wearable::marks))
         .route(
             "/tracker-sharing-consents",
             any(tracker_sharing::collection),

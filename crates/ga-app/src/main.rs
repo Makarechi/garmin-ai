@@ -2,6 +2,7 @@ mod authorization;
 mod backup;
 mod backup_space;
 mod configuration;
+mod healthcheck;
 mod http;
 mod lifecycle;
 mod mcp_stdio;
@@ -75,12 +76,21 @@ enum Command {
     ResumeStorage,
     /// Serve MCP tools over standard input and output
     Mcp,
+    /// Probe the local native HTTP service
+    Healthcheck {
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long)]
+        ready: bool,
+    },
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
         #[arg(long)]
         once: bool,
     },
+    /// Run archive replay and Telegram receipt processing
+    Worker,
 }
 
 fn main() -> ExitCode {
@@ -175,8 +185,19 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        Some(Command::Healthcheck { port, ready }) => {
+            if !healthcheck::probe(port, ready).unwrap_or(false) {
+                return ExitCode::FAILURE;
+            }
+        }
         Some(Command::Replay { once }) => {
-            if let Err(error) = replay_worker::run(once) {
+            if let Err(error) = replay_worker::run(once, false) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Worker) => {
+            if let Err(error) = replay_worker::run(false, true) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }

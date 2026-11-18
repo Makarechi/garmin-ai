@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use sqlx::{Connection, PgConnection};
 
@@ -6,6 +6,7 @@ use crate::{Database, ReadinessError};
 
 pub(crate) const RUNTIME_LOCK: i64 = 72104620;
 const DATABASE_DEADLINE: Duration = Duration::from_millis(750);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The Python runtime and the native worker use the same dedicated PostgreSQL lock.
 pub struct RuntimeLease {
@@ -59,6 +60,23 @@ impl Database {
 }
 
 impl RuntimeLease {
+    /// Keep verifying runtime ownership during waits that do not borrow its connection.
+    pub async fn while_held<F: Future>(
+        &mut self,
+        operation: F,
+    ) -> Result<F::Output, RuntimeLeaseError> {
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tokio::pin!(operation);
+        loop {
+            tokio::select! {
+                biased;
+                _ = heartbeat.tick() => self.check().await?,
+                result = &mut operation => return Ok(result),
+            }
+        }
+    }
+
     /// Recorded onboarding preferences take precedence over bootstrap configuration.
     pub async fn owner_timezone(&mut self) -> Result<Option<String>, RuntimeLeaseError> {
         let result = tokio::time::timeout(
