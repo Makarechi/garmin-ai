@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::{Candidate, ReplyClaim, ReplyDestination, valid_fence};
+use super::{Candidate, FenceStatus, ReplyClaim, ReplyDestination, check_fence};
 use crate::{
     Database, OWNER_ENROLLMENT_LOCK, ReadinessError, STORAGE_LIFECYCLE_LOCK,
     channel_ingress::telegram_poll::{CHANNEL_SELECTION_LOCK, TelegramPollError, selection},
@@ -16,6 +16,7 @@ use crate::{
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{CHANNEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed},
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
+    telegram_today::REPLAY_NOTICE,
 };
 
 const DATABASE_DEADLINE: Duration = Duration::from_millis(1500);
@@ -287,14 +288,24 @@ async fn prepare(
         return Ok(Dispatch::Cancelled);
     }
     let share_target = format!("{}:{}", destination.channel, destination.instance_id);
-    let ready = match serde_json::from_str::<Value>(&raw) {
-        Ok(intent)
+    let fence = check_fence(&mut txn, destination.owner_id, &candidate).await?;
+    let ready = match (serde_json::from_str::<Value>(&raw), fence) {
+        (Ok(mut intent), FenceStatus::Current(projection))
             if matches_intent(&intent, destination, &candidate)
-                && valid_fence(&mut txn, destination.owner_id, &candidate).await?
                 && intent_sharing_allowed(&mut txn, &share_target, &intent, requirements)
                     .await
                     .map_err(|_| ReplyDispatchError::Database)? =>
         {
+            if let Some(projection) = projection
+                && projection.requires_notice(&mut txn).await?
+            {
+                intent["blocks"] = serde_json::json!([{"text":REPLAY_NOTICE}]);
+                sqlx::query("UPDATE outbox_messages SET intent=$2::jsonb WHERE id=$1")
+                    .bind(candidate.id)
+                    .bind(intent.to_string())
+                    .execute(&mut *txn)
+                    .await?;
+            }
             Some(intent)
         }
         _ => None,

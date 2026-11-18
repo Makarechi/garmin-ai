@@ -1,12 +1,14 @@
-use std::{env, error::Error, str::FromStr};
+use std::{env, error::Error, future::ready, str::FromStr};
 
 use ga_app::telegram_input::TelegramBinding;
 use ga_db::{
     Database,
+    delivery::DeliveryState,
     jobs::{
         JobStoreError,
         telegram_inbound::{TelegramControlError, TelegramInboundTarget},
     },
+    outbox_claims::{ReplyDestination, ReplyDispatchResult, ReplyObservation, ReplySendOutcome},
 };
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
@@ -190,10 +192,12 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .claim_telegram_control(target, now, 60)
         .await?
         .ok_or("Missing status lease")?;
-    assert!(matches!(
-        database.apply_telegram_owner_control(&today, 4).await,
-        Err(TelegramControlError::Unsupported)
-    ));
+    assert!(
+        database
+            .apply_telegram_owner_control(&today, 4)
+            .await?
+            .created
+    );
     let state: String =
         sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='proactive:enabled'")
             .fetch_one(&pool)
@@ -230,8 +234,92 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
                 "processed".into(),
                 resume.operation_id()
             ),
+            (
+                "23".into(),
+                "Показатели Garmin ещё не загружены.".into(),
+                "processed".into(),
+                today.operation_id()
+            ),
         ]
     );
+    sqlx::raw_sql(
+        "UPDATE outbox_messages SET state='delivered';
+         INSERT INTO health_days(day,sleep_score,hrv_nightly_avg,resting_hr,body_battery_high,training_readiness_score,sources)
+         VALUES ('2026-10-24',10,20,30,40,50,'{}'),('2026-10-25',82.5,NULL,'-0'::double precision,1e-5,60,'{}');",
+    ).execute(&pool).await?;
+    let summary = "Последние сохранённые показатели за 25.10.2026:\nСон: 82.5\nHRV: нет данных\nПульс покоя: -0.0\nBody Battery максимум: 1e-05\nГотовность: 60.0";
+    let notice = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже.";
+    for (update, invalidate, pending, expected) in [
+        (24, false, false, summary),
+        (25, true, false, notice),
+        (26, false, true, notice),
+    ] {
+        if pending {
+            sqlx::query(
+                "INSERT INTO source_payloads(id,source,endpoint,source_key,payload_hash,archive_key,parser_version,status)
+                 VALUES(gen_random_uuid(),'garmin_connect','daily_summary','synthetic-day','fixture','synthetic/archive',1,'normalized')",
+            ).execute(&pool).await?;
+        }
+        let accepted = binding
+            .accept_polled_update(&mut runtime, &wire(update, "/today"), now, false)
+            .await?;
+        assert!(accepted.inbound.is_some_and(|row| row.created));
+        let lease = database
+            .claim_telegram_control(target, now, 60)
+            .await?
+            .ok_or("Missing daily summary")?;
+        let recorded = database.apply_telegram_owner_control(&lease, 4).await?;
+        let (captured, guarded): (String, bool) = sqlx::query_as(
+            "SELECT intent#>>'{blocks,0,text}',memory_fence ? 'telegram_today' FROM outbox_messages WHERE id=$1",
+        ).bind(recorded.outbox_id).fetch_one(&pool).await?;
+        assert_eq!(captured, if pending { notice } else { summary });
+        assert!(guarded);
+        let destination = ReplyDestination {
+            owner_id: owner,
+            channel: "telegram",
+            instance_id: "primary",
+        };
+        let claim = database
+            .claim_outbox_reply(destination, now, 60)
+            .await?
+            .ok_or("Missing daily reply")?;
+        assert_eq!(claim.outbox_id, recorded.outbox_id);
+        if invalidate {
+            sqlx::raw_sql("INSERT INTO app_state(key,value) VALUES('replay:generation','{\"id\":\"normalization-fixture\"}');
+                           UPDATE conversations SET memory_epoch=gen_random_uuid();")
+                .execute(&pool).await?;
+        }
+        let destination = ReplyDestination {
+            owner_id: owner,
+            channel: "telegram",
+            instance_id: "primary",
+        };
+        let result = database
+            .dispatch_telegram_outbox_reply(destination, 42, claim, &[], |intent| {
+                assert_eq!(intent["blocks"][0]["text"], expected);
+                ready(Some(ReplySendOutcome::Observation(ReplyObservation {
+                    state: DeliveryState::ProviderAccepted,
+                    observed_at: now,
+                    provider_reference: Some(update.to_string()),
+                    detail: None,
+                })))
+            })
+            .await?;
+        assert!(matches!(
+            result,
+            ReplyDispatchResult::Recorded {
+                state: DeliveryState::ProviderAccepted,
+                ..
+            }
+        ));
+        let text: String = sqlx::query_scalar(
+            "SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE id=$1",
+        )
+        .bind(recorded.outbox_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(text, expected);
+    }
     assert!(
         database
             .claim_telegram_inbound(target, now, 60)
@@ -239,7 +327,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             .is_none()
     );
     println!(
-        "Verified three durable owner controls, retry rollback, stale pairing and replay protection"
+        "Verified durable owner controls, rollback, stale pairing, and current, pending and stale daily summaries"
     );
     Ok(())
 }
