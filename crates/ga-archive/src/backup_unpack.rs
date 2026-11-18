@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read, Seek},
     os::fd::OwnedFd,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use flate2::bufread::MultiGzDecoder;
@@ -18,7 +18,7 @@ use rustix::{
 use self::format::{Member, invalid};
 use crate::{
     DIRECTORY_MODE, DIRECTORY_READ, FILE_MODE,
-    backup_bundle::normalized,
+    backup_bundle::{MAX_DIRECTORY_DEPTH, normalized},
     backup_envelope::{
         BackupDigest, BackupError, PrivateStageDirectory, authenticate_source, parent_file,
     },
@@ -27,7 +27,8 @@ use crate::{
 };
 
 const RECOVERY_TREE: &str = "contents";
-const MAX_PATH_DEPTH: usize = 128;
+// The writer counts directories below raw/ or tokens/, excluding the filename.
+const MAX_MEMBER_COMPONENTS: usize = MAX_DIRECTORY_DEPTH + 2;
 
 pub fn unpack_backup(
     source: &Path,
@@ -38,7 +39,7 @@ pub fn unpack_backup(
 ) -> Result<BackupDigest, BackupError> {
     let target = normalized(destination)?;
     for source in [data_dir, token_dir] {
-        let protected = normalized(source)?;
+        let protected = resolve_protected_root(source)?;
         if target.starts_with(&protected) || protected.starts_with(&target) {
             return Err(BackupError::InvalidPath);
         }
@@ -79,13 +80,37 @@ pub fn unpack_backup(
     Ok(digest)
 }
 
+fn resolve_protected_root(path: &Path) -> Result<PathBuf, BackupError> {
+    let mut resolved = PathBuf::new();
+    for part in std::path::absolute(path)?.components() {
+        if part == Component::ParentDir {
+            resolved.pop();
+            continue;
+        }
+        resolved.push(part.as_os_str());
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                resolved = std::fs::canonicalize(&resolved)?;
+                if !std::fs::metadata(&resolved)?.is_dir() {
+                    return Err(BackupError::InvalidPath);
+                }
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(BackupError::InvalidPath),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(resolved)
+}
+
 fn extract(stream: &mut impl Read, target: &OwnedFd) -> io::Result<()> {
     let mut database = false;
     while let Some(member) = Member::next(stream)? {
         let path = Path::new(&member.path);
         let parts: Vec<_> = path.components().collect();
         if parts.is_empty()
-            || parts.len() > MAX_PATH_DEPTH
+            || parts.len() > MAX_MEMBER_COMPONENTS
             || parts
                 .iter()
                 .any(|part| !matches!(part, Component::Normal(_)))

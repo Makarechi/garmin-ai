@@ -26,7 +26,7 @@ use crate::{
 
 const DATABASE_MEMBER: &str = "database.jsonl.gz";
 const COVERAGE_MEMBER: &str = "coverage-report.json";
-const MAX_DIRECTORY_DEPTH: usize = 128;
+pub(crate) const MAX_DIRECTORY_DEPTH: usize = 128;
 
 pub struct BackupBundle<'a> {
     pub data_dir: &'a Path,

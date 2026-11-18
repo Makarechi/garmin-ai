@@ -1,7 +1,15 @@
-use std::{env, error::Error, fs, io::Write, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{
+    env,
+    error::Error,
+    fs,
+    io::Write,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::PathBuf,
+};
 
 use flate2::{Compression, write::GzEncoder};
 use ga_archive::{
+    backup_bundle::{BackupBundle, write_backup_bundle},
     backup_envelope::{BackupError, write_encrypted_backup},
     backup_unpack::unpack_backup,
 };
@@ -11,6 +19,71 @@ const FIXTURE_BYTES: [u8; 32] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 30, 31,
 ];
+
+#[test]
+fn restores_a_bundle_with_the_deepest_supported_tree() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let data = root.join("data");
+    let tokens = root.join("tokens");
+    let export = root.join("export");
+    let mut name = PathBuf::from("raw");
+    name.extend(std::iter::repeat_n("d", 128));
+    let leaf = data.join(&name);
+    fs::create_dir_all(&leaf)?;
+    fs::write(leaf.join("record"), b"deep synthetic record")?;
+    fs::write(&export, b"synthetic export")?;
+    let source = root.join("backup");
+    write_backup_bundle(
+        &source,
+        &FIXTURE_BYTES,
+        BackupBundle {
+            data_dir: &data,
+            token_dir: &tokens,
+            database_export: &export,
+            required_raw: &[],
+        },
+    )?;
+    let recovery = root.join("recovered");
+    unpack_backup(&source, &recovery, &FIXTURE_BYTES, &data, &tokens)?;
+    assert_eq!(
+        fs::read(recovery.join(name).join("record"))?,
+        b"deep synthetic record"
+    );
+    Ok(())
+}
+
+#[test]
+fn protects_resolved_data_and_token_directories() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let live = root.join("live");
+    fs::create_dir_all(live.join("present"))?;
+    let alias = root.join("alias");
+    symlink(live.join("present"), &alias)?;
+    let source = root.join("unused");
+    let independent = root.join("independent");
+    for (target, data, tokens) in [
+        (live.join("recovery"), alias.join(".."), independent.clone()),
+        (
+            live.join("present/recovery"),
+            independent.clone(),
+            alias.clone(),
+        ),
+        (
+            live.join("recovery"),
+            independent,
+            alias.join("../recovery/tokens"),
+        ),
+    ] {
+        assert!(matches!(
+            unpack_backup(&source, &target, &FIXTURE_BYTES, &data, &tokens),
+            Err(BackupError::InvalidPath)
+        ));
+        assert!(!target.exists());
+    }
+    Ok(())
+}
 
 #[test]
 #[ignore = "requires independently generated Python PAX fixture"]
