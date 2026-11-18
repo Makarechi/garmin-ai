@@ -1,6 +1,7 @@
 mod activity_reads;
 mod device_history;
 mod read_daily;
+mod running;
 mod sleep_analysis;
 mod sleep_timing;
 
