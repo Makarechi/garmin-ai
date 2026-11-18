@@ -3,6 +3,7 @@ mod backup;
 mod backup_space;
 mod configuration;
 mod extensions;
+mod garmin_setup;
 mod healthcheck;
 mod http;
 mod lifecycle;
@@ -41,6 +42,16 @@ enum Command {
         host: String,
         #[arg(long, default_value_t = 8765)]
         port: u16,
+    },
+    /// Sign in to Garmin from a local terminal and save the verified session
+    Login {
+        #[arg(long)]
+        confirm_existing_owner: bool,
+    },
+    /// Confirm ownership of retained data using a saved Garmin session
+    EnrollAccount {
+        #[arg(long, required = true)]
+        confirm_existing_owner: bool,
     },
     /// Estimate local staging and destination capacity for an encrypted backup
     BackupSpace { path: PathBuf },
@@ -109,7 +120,7 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Run archive replay and Telegram receipt processing
+    /// Run Garmin acquisition, archive replay and Telegram processing
     Worker,
 }
 
@@ -152,6 +163,20 @@ fn main() -> ExitCode {
         Some(Command::Demo { host, port }) => {
             if http::demo::serve(&host, port).is_err() {
                 eprintln!("Could not run the demo server.");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Login {
+            confirm_existing_owner,
+        }) => {
+            if let Err(error) = garmin_setup::login(confirm_existing_owner) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::EnrollAccount { .. }) => {
+            if let Err(error) = garmin_setup::enroll() {
+                eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
         }

@@ -1,3 +1,7 @@
+mod send;
+
+pub use send::WebChatSubmission;
+
 use std::{collections::VecDeque, error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
@@ -23,6 +27,8 @@ pub enum WebChatError {
     Database,
     Missing,
     Unavailable,
+    Invalid,
+    ReusedMessage,
 }
 
 impl fmt::Display for WebChatError {
@@ -32,6 +38,8 @@ impl fmt::Display for WebChatError {
             Self::Storage(_) | Self::Database => "Database unavailable or identity is not ready",
             Self::Missing => "Message not found",
             Self::Unavailable => "Message is no longer available",
+            Self::Invalid => "Invalid arguments",
+            Self::ReusedMessage => "Message ID was already used for different text",
         })
     }
 }
@@ -63,7 +71,7 @@ pub struct WebChatSnapshot {
     replies: VecDeque<(Uuid, i32, WebChatReply)>,
     active: Option<(Uuid, i32, i32)>,
     first: bool,
-    finished: bool,
+    closing: Option<&'static [u8]>,
     permissions: Transaction<'static, Postgres>,
 }
 
@@ -101,7 +109,7 @@ impl WebChatSnapshot {
             self.active = Some((id, 0, count));
             return Ok(Some(bytes));
         }
-        Ok((!std::mem::replace(&mut self.finished, true)).then(|| b"]}".to_vec()))
+        Ok(self.closing.take().map(<[u8]>::to_vec))
     }
 }
 
@@ -155,7 +163,7 @@ impl Database {
             serde_json::to_writer(&mut opening, &messages).map_err(|_| WebChatError::Database)?;
             opening.extend_from_slice(b",\"replies\":[");
             Ok(WebChatSnapshot {
-                opening:Some(opening), replies, active:None, first:true, finished:false, permissions:txn,
+                opening:Some(opening), replies, active:None, first:true, closing:Some(b"]}"), permissions:txn,
             })
         }).await.map_err(|_| WebChatError::Database)?
     }

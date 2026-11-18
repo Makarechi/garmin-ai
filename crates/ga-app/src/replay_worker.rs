@@ -1,4 +1,5 @@
 mod backups;
+mod garmin;
 
 use std::{
     env,
@@ -30,7 +31,7 @@ use ga_fit::{ExportLimits, MAX_FIT_BYTES};
 use time::Time;
 use tokio::{signal, sync::watch, time::Instant};
 
-use crate::configuration;
+use crate::{configuration, extensions::ScheduledSourcePlugins};
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
 const PLAN_BUSY: Duration = Duration::from_secs(30);
@@ -222,8 +223,26 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .flatten();
     let database = Database::connect_lazy(&config.database_url)
         .map_err(|_| ReplayServiceError::Configuration)?;
+    let garmin = worker
+        .then(|| match garmin::GarminWorkerSettings::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
     let backups = worker
         .then(|| match backups::ScheduledBackups::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
+    let sources = worker
+        .then(|| match ScheduledSourcePlugins::read() {
             Ok(settings) => settings,
             Err(error) => {
                 eprintln!("{error}");
@@ -318,7 +337,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             tokio::select! {
                 result = transport.run_acknowledgements(&database, settings) => result,
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
-                result = transport.run_history(&database, settings) => result,
+                result = transport.run_local_diary(&database, settings, &config.timezone) => result,
                 result = transport.run_replies_with_garmin_notices(&database, settings, garmin_notice.as_ref()) => result,
                 result = async {
                     if reminders_available {
@@ -330,9 +349,30 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         }
         future::pending::<Result<(), ReplayServiceError>>().await
     };
+    let garmin_work = async {
+        if let Some(settings) = &garmin {
+            settings
+                .run(
+                    &database,
+                    &config.raw_archive,
+                    &config.timezone,
+                    backups.is_some() && backup_worker.is_some(),
+                )
+                .await
+        } else {
+            future::pending().await
+        }
+    };
     let backup_work = async {
         if let (Some(settings), Some(worker)) = (&backups, backup_worker) {
             settings.run(&database, worker, telegram.is_some()).await
+        } else {
+            future::pending().await
+        }
+    };
+    let source_work = async {
+        if let Some(sources) = &sources {
+            sources.run(&database).await
         } else {
             future::pending().await
         }
@@ -342,7 +382,9 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
         result = receive => result,
         result = telegram_work => result,
+        result = garmin_work => result,
         result = backup_work => result,
+        result = source_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

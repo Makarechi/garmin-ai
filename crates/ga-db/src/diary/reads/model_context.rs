@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod continuations;
+pub(crate) use continuations::interpretation_context_in;
 pub use continuations::{InterpretationContext, InterpretationContextQuery};
 
 const RECENT_LIMIT: usize = 12;

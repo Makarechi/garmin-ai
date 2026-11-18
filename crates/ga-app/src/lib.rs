@@ -9,3 +9,4 @@ pub mod telegram_reply;
 pub mod telegram_settings;
 pub mod telegram_transport;
 pub mod telegram_webhook;
+pub mod urgent_screen;

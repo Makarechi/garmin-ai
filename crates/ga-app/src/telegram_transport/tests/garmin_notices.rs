@@ -183,6 +183,20 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
         ReplyDispatchResult::Cancelled
     );
 
+    let account_key = format!("account-binding:{}", at.date());
+    let account_receipt = format!("outbox:{account_key}:0");
+    set_connection(&pool, "reauth_required", "AccountMismatch").await?;
+    database
+        .queue_telegram_garmin_notice(owner, "primary", chat, SOURCE, now)
+        .await?;
+    let unsent_id: Uuid = sqlx::query_scalar(
+        "UPDATE outbox_messages SET next_attempt_at=clock_timestamp()+interval '5 minutes'
+         WHERE dedup_key=$1 AND state='queued' AND lease_token IS NULL RETURNING id",
+    )
+    .bind(&account_key)
+    .fetch_one(&pool)
+    .await?;
+
     let settings = TelegramIngressSettings::selected(
         Some("43"),
         Some(r#"[{"id":"channel:telegram:alternate","kind":"channel","provider":"telegram"}]"#),
@@ -202,9 +216,6 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
         .execute(&pool)
         .await?;
 
-    let account_key = format!("account-binding:{}", at.date());
-    let account_receipt = format!("outbox:{account_key}:0");
-    set_connection(&pool, "reauth_required", "AccountMismatch").await?;
     let server = async {
         for (index, (receipt, expected)) in [(&account_receipt, None), (&auth_receipt, Some(URL))]
             .into_iter()
@@ -278,14 +289,14 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
         }
     })
     .await??;
-    let old: (String, String) = sqlx::query_as(
+    let old: Vec<(String, String)> = sqlx::query_as(
         "SELECT o.state,c.channel_instance_id FROM outbox_messages o JOIN conversations c
-           ON c.id=o.conversation_id WHERE o.id=$1",
+           ON c.id=o.conversation_id WHERE o.id=ANY($1)",
     )
-    .bind(stale_id)
-    .fetch_one(&pool)
+    .bind(&[stale_id, unsent_id][..])
+    .fetch_all(&pool)
     .await?;
-    assert_eq!(old, ("cancelled".into(), "primary".into()));
+    assert_eq!(old, vec![("cancelled".into(), "primary".into()); 2]);
     let destinations: Vec<String> = sqlx::query_scalar(
         "SELECT intent#>>'{channel_instance,instance_id}' FROM outbox_messages
          WHERE dedup_key IN ($1,$2) AND state='provider_accepted' ORDER BY dedup_key",

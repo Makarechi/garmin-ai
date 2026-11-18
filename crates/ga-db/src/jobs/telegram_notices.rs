@@ -376,14 +376,17 @@ async fn queue_notice(
     let clock = OffsetDateTime::from(now);
     let key = fence.key();
     let operation: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM jobs WHERE kind=$1 AND dedup_key=$2 AND payload @> $3::jsonb
+        "SELECT id FROM jobs WHERE kind=$1 AND dedup_key=$2 AND payload @> $3::jsonb
                 AND ((status='pending' AND run_at<=$4)
                   OR (status='running' AND lease_until<$4))
-                AND NOT EXISTS(SELECT 1 FROM outbox_messages WHERE dedup_key=$2 AND state<>'cancelled')
              FOR UPDATE SKIP LOCKED",
-        )
-        .bind(fence.kind()).bind(&key).bind(fence.payload().to_string()).bind(clock)
-        .fetch_optional(&mut *txn).await?;
+    )
+    .bind(fence.kind())
+    .bind(&key)
+    .bind(fence.payload().to_string())
+    .bind(clock)
+    .fetch_optional(&mut *txn)
+    .await?;
     let Some(operation) = operation else {
         return Ok(());
     };
@@ -416,11 +419,13 @@ async fn queue_notice(
         "blocks":[{"text":fence.text()}],"expires_at":expires.to_string(),
     }))
     .map_err(|_| JobStoreError::InvalidRecordedState)?;
-    // Preserve the old attempt and free the daily key only for a cancelled send
-    // with no delivery observation that the new destination could duplicate.
+    // Keep the old history and free the daily key for a definitely unsent notice.
+    // Claiming a reply uses the same replay mutation lock.
     sqlx::query(
-        "UPDATE outbox_messages o SET dedup_key=concat($1,':cancelled:',o.id)
-         WHERE o.dedup_key=$1 AND o.operation_id=$2 AND o.state='cancelled'
+        "UPDATE outbox_messages o SET dedup_key=concat($1,':cancelled:',o.id),state='cancelled',
+                next_attempt_at=NULL,updated_at=clock_timestamp()
+         WHERE o.dedup_key=$1 AND o.operation_id=$2
+           AND (o.state='cancelled' OR (o.state='queued' AND o.lease_token IS NULL AND o.lease_until IS NULL))
            AND o.inbound_message_id IS NULL AND o.legacy_key IS NULL
            AND (o.owner_id,o.conversation_id)<>($3,$4)
            AND coalesce(o.memory_fence->>'storage_notice_day',o.memory_fence->>'garmin_notice_day')=$5
@@ -435,6 +440,25 @@ async fn queue_notice(
     .bind(fence.day())
     .execute(&mut *txn)
     .await?;
+    let already_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM outbox_messages o WHERE o.dedup_key=$1 AND
+         (o.state<>'cancelled' OR o.operation_id IS DISTINCT FROM $2
+          OR o.inbound_message_id IS NOT NULL OR o.legacy_key IS NOT NULL
+          OR (o.owner_id,o.conversation_id)<>($3,$4)
+          OR coalesce(o.memory_fence->>'storage_notice_day',o.memory_fence->>'garmin_notice_day') IS DISTINCT FROM $5
+          OR EXISTS(SELECT 1 FROM message_delivery_receipts r WHERE r.outbox_message_id=o.id
+                    AND r.state IN ('provider_accepted','delivered','read','uncertain'))))",
+    )
+    .bind(&key)
+    .bind(operation)
+    .bind(owner)
+    .bind(conversation)
+    .bind(fence.day())
+    .fetch_one(&mut *txn)
+    .await?;
+    if already_pending {
+        return Ok(());
+    }
     let queued = queue_outbox_intent(
         &mut txn,
         QueueIntent {

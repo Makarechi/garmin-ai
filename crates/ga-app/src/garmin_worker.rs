@@ -1,6 +1,7 @@
 mod activities;
 mod configuration;
 mod fit;
+mod scheduler;
 
 pub use activities::ActivityPageWork;
 pub use configuration::{
@@ -8,6 +9,7 @@ pub use configuration::{
     garmin_auth_url,
 };
 pub use fit::{ActivityExportSource, ActivityFitWork};
+pub use scheduler::{GarminQueueStep, ScheduledGarminWorker};
 
 use std::{
     error::Error,
@@ -27,6 +29,7 @@ use ga_db::{
         PublishEndpoint,
     },
     garmin_integration::{GarminIntegrationError, GarminRequestPause, GarminTransportOutcome},
+    garmin_periodic::GarminSyncScheduleError,
     jobs::{FailureReason, GarminJobLease, JobOutcome, JobStoreError, RecordedJobStatus},
 };
 use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
@@ -81,6 +84,7 @@ pub enum EndpointWorkerError {
     Fit(FitIngestError),
     Job(JobStoreError),
     Integration(GarminIntegrationError),
+    Schedule(GarminSyncScheduleError),
     Fetch(GarminError),
     InvalidClock,
 }
@@ -93,6 +97,7 @@ impl fmt::Display for EndpointWorkerError {
             Self::Fit(error) => error.fmt(f),
             Self::Job(error) => error.fmt(f),
             Self::Integration(error) => error.fmt(f),
+            Self::Schedule(error) => error.fmt(f),
             Self::Fetch(error) => error.fmt(f),
             Self::InvalidClock => f.write_str("Garmin request clock cannot be represented"),
         }

@@ -4,7 +4,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use ga_archive::GarminTokenFile;
+use ga_archive::{GarminTokenFile, GarminTokenGuard};
 use ga_domain::identity::GarminProfileId;
 use reqwest::{
     Client, RequestBuilder, Response, Url,
@@ -119,6 +119,20 @@ impl LegacySession {
         Native::new(Hosts::production()?, config)?
             .restore(store, expected_fingerprint, policy)
             .await
+    }
+
+    /// Read and authenticate saved credentials for explicit offline enrollment.
+    /// A successful profile lookup alone never replaces the saved token file.
+    pub async fn restore_for_local_enrollment(
+        store: &GarminTokenFile,
+        config: TransportConfig,
+    ) -> Result<Self, GarminError> {
+        let native = Native::new(Hosts::production()?, config)?;
+        let guard = store.try_lock().map_err(|_| GarminError::TokenStorage)?;
+        let (candidate, _) = native
+            .restore_candidate(&guard, RestorePolicy::IfNeeded, &mut Schedule::new())
+            .await?;
+        Ok(candidate)
     }
 }
 
@@ -236,6 +250,24 @@ impl Native {
         schedule: &mut Schedule,
     ) -> Result<LegacySession, GarminError> {
         let guard = store.try_lock().map_err(|_| GarminError::TokenStorage)?;
+        let (session, rotated) = self.restore_candidate(&guard, policy, schedule).await?;
+        if session.fingerprint() != expected_fingerprint {
+            return Err(GarminError::OwnerMismatch);
+        }
+        if rotated {
+            guard
+                .replace(&session.tokens.encode()?)
+                .map_err(|_| GarminError::TokenStorage)?;
+        }
+        Ok(session)
+    }
+
+    async fn restore_candidate(
+        &self,
+        guard: &GarminTokenGuard,
+        policy: RestorePolicy,
+        schedule: &mut Schedule,
+    ) -> Result<(LegacySession, bool), GarminError> {
         let bytes = guard
             .read()
             .map_err(|_| GarminError::TokenStorage)?
@@ -257,16 +289,7 @@ impl Native {
             }
             outcome => outcome?,
         };
-        let session = LegacySession { profile, tokens };
-        if session.fingerprint() != expected_fingerprint {
-            return Err(GarminError::OwnerMismatch);
-        }
-        if rotated {
-            guard
-                .replace(&session.tokens.encode()?)
-                .map_err(|_| GarminError::TokenStorage)?;
-        }
-        Ok(session)
+        Ok((LegacySession { profile, tokens }, rotated))
     }
 
     async fn refresh(

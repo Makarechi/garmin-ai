@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{sha256_hex, timestamp::StoredInstant};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -57,50 +57,113 @@ impl Database {
         &self,
         input: InterpretationContextQuery<'_>,
     ) -> Result<InterpretationContext, DiaryReadError> {
-        if input.mentioned_events.len() > MENTION_LIMIT {
-            return Err(DiaryReadError::Limit);
-        }
-        if input.model.kind() != DestinationKind::Model {
-            return Err(DiaryReadError::InvalidDestination);
-        }
         tokio::time::timeout(std::time::Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
-            model_diary_allowed(&mut txn,input.binding.owner_id).await?;
-            let (channel, pending) = pending_in(&mut txn,input.binding,input.clarification_clock)
-                .await.map_err(|_| DiaryReadError::ContextChanged)?;
-            ShareDestination::new(DestinationKind::Channel,&channel)
-                .map_err(|_| DiaryReadError::InvalidDestination)?;
-            let audience = ModelAudience {
-                model:input.model.instance(), channel:Some(&channel),
-                pack_denials:model_disallowed_event_kinds(&mut txn).await.map_err(|_| DiaryReadError::Database)?,
-            };
-            let packs = model_packs(&mut txn,input.binding.owner_id).await?;
-            let now = OffsetDateTime::from(input.now);
-            let mut events = fetch_context(&mut txn,&audience,now,input.mentioned_events).await?;
-            let mut continuations = Continuations {
-                events: &mut events,
-                allow_additional_events: input.mentioned_events.is_empty(),
-            };
-            let recent_questions =
-                continuations.questions(&mut txn, &audience, &packs, now).await?;
-            let (pending_clarification, selection_unavailable) =
-                continuations.clarification(&mut txn, &audience, &packs, now, pending).await?;
-            let memory = conversation_memory::snapshot(&mut txn,input.binding,input.now,false)
-                .await.map_err(|_| DiaryReadError::ContextChanged)?;
-            let native_question = memory.turns.last().and_then(|turn| {
-                Some(json!({"question":turn["question"].as_str()?.chars().take(400).collect::<String>(),
-                    "asked_at":turn["asked_at"].as_str()?}))
-            });
-            let legacy_question = legacy_memory::recent_question(&mut txn,&channel,input.now).await?;
-            let recent_analysis_question = [native_question,legacy_question].into_iter().flatten()
-                .max_by_key(|question| StoredInstant::from_legacy_input(&question["asked_at"]));
+            let context = interpretation_context_in(&mut txn, input).await?;
             txn.commit().await?;
-            Ok(InterpretationContext {
-                channel,events,recent_questions,pending_clarification,selection_unavailable,recent_analysis_question,
-                memory_fence:memory.fence,
-            })
-        }).await.map_err(|_| DiaryReadError::Database)?
+            Ok(context)
+        })
+        .await
+        .map_err(|_| DiaryReadError::Database)?
     }
+}
+
+impl InterpretationContext {
+    /// Fingerprint the authorized records and continuation state without persisting them.
+    pub fn digest(&self) -> Result<String, DiaryReadError> {
+        let tracker_versions: Vec<_> = self
+            .events
+            .tracker_versions
+            .iter()
+            .map(Uuid::to_string)
+            .collect();
+        let channel_versions: Vec<_> = self
+            .events
+            .channel_versions
+            .iter()
+            .map(Uuid::to_string)
+            .collect();
+        let sources: Vec<_> = self
+            .memory_fence
+            .source_epochs
+            .iter()
+            .map(|(id, epoch)| (id.to_string(), epoch.to_string()))
+            .collect();
+        let bytes = serde_json::to_vec(&(
+            &self.channel,
+            &self.events.entries,
+            self.events.history_truncated,
+            tracker_versions,
+            channel_versions,
+            &self.recent_questions,
+            &self.pending_clarification,
+            self.selection_unavailable,
+            &self.recent_analysis_question,
+            self.memory_fence.target_epoch.to_string(),
+            sources,
+        ))
+        .map_err(|_| DiaryReadError::InvalidEvent)?;
+        Ok(sha256_hex(&bytes))
+    }
+}
+
+pub(crate) async fn interpretation_context_in(
+    txn: &mut Transaction<'_, Postgres>,
+    input: InterpretationContextQuery<'_>,
+) -> Result<InterpretationContext, DiaryReadError> {
+    if input.mentioned_events.len() > MENTION_LIMIT {
+        return Err(DiaryReadError::Limit);
+    }
+    if input.model.kind() != DestinationKind::Model {
+        return Err(DiaryReadError::InvalidDestination);
+    }
+    model_diary_allowed(txn, input.binding.owner_id).await?;
+    let (channel, pending) = pending_in(txn, input.binding, input.clarification_clock)
+        .await
+        .map_err(|_| DiaryReadError::ContextChanged)?;
+    ShareDestination::new(DestinationKind::Channel, &channel)
+        .map_err(|_| DiaryReadError::InvalidDestination)?;
+    let audience = ModelAudience {
+        model: input.model.instance(),
+        channel: Some(&channel),
+        pack_denials: model_disallowed_event_kinds(txn)
+            .await
+            .map_err(|_| DiaryReadError::Database)?,
+    };
+    let packs = model_packs(txn, input.binding.owner_id).await?;
+    let now = OffsetDateTime::from(input.now);
+    let mut events = fetch_context(txn, &audience, now, input.mentioned_events).await?;
+    let mut continuations = Continuations {
+        events: &mut events,
+        allow_additional_events: input.mentioned_events.is_empty(),
+    };
+    let recent_questions = continuations.questions(txn, &audience, &packs, now).await?;
+    let (pending_clarification, selection_unavailable) = continuations
+        .clarification(txn, &audience, &packs, now, pending)
+        .await?;
+    let memory = conversation_memory::snapshot(txn, input.binding, input.now, false)
+        .await
+        .map_err(|_| DiaryReadError::ContextChanged)?;
+    let native_question = memory.turns.last().and_then(|turn| {
+        Some(
+            json!({"question":turn["question"].as_str()?.chars().take(400).collect::<String>(),
+            "asked_at":turn["asked_at"].as_str()?}),
+        )
+    });
+    let legacy_question = legacy_memory::recent_question(txn, &channel, input.now).await?;
+    let recent_analysis_question = [native_question, legacy_question]
+        .into_iter()
+        .flatten()
+        .max_by_key(|question| StoredInstant::from_legacy_input(&question["asked_at"]));
+    Ok(InterpretationContext {
+        channel,
+        events,
+        recent_questions,
+        pending_clarification,
+        selection_unavailable,
+        recent_analysis_question,
+        memory_fence: memory.fence,
+    })
 }
 
 async fn model_packs(

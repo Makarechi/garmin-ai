@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
 
+mod setup;
+pub use setup::{GarminSetupError, LocalGarminSetup, LocalGarminSetupMode};
+
 const EXISTING_NAMESPACE: &str = "socialProfile.profileId:v1";
 const LEGACY_BINDING_KEY: &str = "account:garmin";
 

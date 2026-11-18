@@ -9,7 +9,7 @@ use crate::{
     Database, ReadinessError,
     activity_scans::{ActivityScanError, StartActivityScans, start_activity_scans_in},
     check_readiness,
-    garmin_integration::{GarminIntegrationError, garmin_pause},
+    garmin_integration::{GarminIntegrationError, current_source_selected, garmin_pause},
     garmin_owner::{OwnerVerificationError, verify_owner_in_transaction},
     history_windows::{
         DAY_ENDPOINTS, HistorySchedule, HistoryScheduleError, ScheduleHistory, enabled_endpoints,
@@ -84,7 +84,72 @@ impl From<sqlx::Error> for GarminSyncScheduleError {
     }
 }
 
+async fn retire_jobs(
+    txn: &mut Transaction<'_, Postgres>,
+    now: StoredInstant,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(include_str!("garmin_periodic/retire.sql"))
+        .bind(OffsetDateTime::from(now))
+        .bind(now.to_string())
+        .fetch_one(&mut **txn)
+        .await
+}
+
 impl Database {
+    /// Apply saved onboarding preferences for each current Garmin job.
+    pub async fn garmin_job_timezone(
+        &self,
+        configured_timezone: &str,
+    ) -> Result<String, GarminSyncScheduleError> {
+        tokio::time::timeout(std::time::Duration::from_millis(1500), async {
+            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SET LOCAL statement_timeout='750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(GarminSyncScheduleError::Storage)?;
+            let timezone = crate::health_analysis::owner_timezone(&mut txn, configured_timezone)
+                .await
+                .map_err(|_| GarminSyncScheduleError::Database)?;
+            txn.commit().await?;
+            Ok(timezone)
+        })
+        .await
+        .map_err(|_| GarminSyncScheduleError::Database)?
+    }
+
+    /// Retire existing work when onboarding has disabled this configured source.
+    pub async fn retire_deselected_garmin_work(
+        &self,
+        source_instance: &str,
+        now: StoredInstant,
+    ) -> Result<i64, GarminSyncScheduleError> {
+        let mut txn = self.work.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(GarminSyncScheduleError::Storage)?;
+        if current_source_selected(&mut txn, source_instance)
+            .await
+            .map_err(GarminSyncScheduleError::Connection)?
+        {
+            return Ok(0);
+        }
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(MUTATION_LOCK)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !locked {
+            return Ok(0);
+        }
+        let retired = retire_jobs(&mut txn, now).await?;
+        txn.commit().await?;
+        Ok(retired)
+    }
+
     /// Plan one persistent Garmin scheduler cycle using the already verified session identity.
     /// Enqueues work only. The caller supplies an available, configured source instance.
     pub async fn schedule_garmin_sync(
@@ -112,11 +177,7 @@ impl Database {
             return Ok(GarminSyncSchedule::Busy);
         }
         if !source_instance_selected(&mut txn, request.source_instance).await? {
-            let retired = sqlx::query_scalar(include_str!("garmin_periodic/retire.sql"))
-                .bind(OffsetDateTime::from(request.now))
-                .bind(request.now.to_string())
-                .fetch_one(&mut *txn)
-                .await?;
+            let retired = retire_jobs(&mut txn, request.now).await?;
             txn.commit().await?;
             return Ok(GarminSyncSchedule::Disabled { retired });
         }
@@ -127,16 +188,11 @@ impl Database {
         {
             return Ok(GarminSyncSchedule::Paused);
         }
-        let selected_timezone: Option<String> = sqlx::query_scalar(
-            "SELECT timezone FROM people WHERE id=$1
-             AND EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')",
-        )
-        .bind(owner.owner_id())
-        .fetch_optional(&mut *txn)
-        .await?;
-        let timezone = selected_timezone
-            .as_deref()
-            .unwrap_or(request.configured_timezone);
+        let timezone =
+            crate::health_analysis::owner_timezone(&mut txn, request.configured_timezone)
+                .await
+                .map_err(|_| GarminSyncScheduleError::Database)?;
+        let timezone = timezone.as_str();
         let (today, hour) = source_calendar_clock(request.now, timezone)
             .ok_or(GarminSyncScheduleError::InvalidCalendar)?;
         let yesterday = today
