@@ -90,6 +90,7 @@ async fn migrates_only_a_supported_disposable_schema() -> Result<(), Box<dyn Err
         other => {
             let expected = match other {
                 "fresh" => SchemaState::Empty,
+                "before_telegram_backfill" => SchemaState::BeforeTelegramBackfill,
                 "before_telegram_repair" => SchemaState::BeforeTelegramRepair,
                 "before_ingestion" => SchemaState::BeforeIngestionTime,
                 "before_revisions" => SchemaState::BeforeRevisions,
