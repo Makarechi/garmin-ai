@@ -86,6 +86,9 @@ def exercise(engine, python, native):
     compare(request | {"lags": [7, -7, 0, 7]})
     compare(request | {"lags": []})
     compare(request | {"lags": ["1.0", True, False]})
+    compare(request | {"lags": ["-1.0", -30.0, "+1.0", "-0.0"]})
+    for value in ("-+1", "--1", "- 1"):
+        compare(request | {"lags": [value]}, 422)
     compare(request | {"metric_a": "vo2max"})
     compare(request | {"metric_b": "vo2max"})
     compare(request | {"metric_a": "hydration_ml", "metric_b": "steps"})
