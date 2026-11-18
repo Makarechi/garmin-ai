@@ -58,3 +58,14 @@ Keep this snapshot immutable. If an intentional rebaseline is needed, retain the
 record why each accepted contract changed, and regenerate the collection and evidence for the
 new SHA. Use pinned revisions for comparisons rather than comparing to whichever commit is
 currently at the tip of `main`.
+
+## Check parity evidence
+
+Run `python3 migration/check_parity.py` to validate ownership of the baseline inventory and the
+references to collected Python tests and native comparison cases. An `implemented` area has
+native coverage at the recorded level. Its remaining work is listed in `known_limits`.
+Use `verified` after the full area has been exercised.
+
+Run `python3 migration/check_parity.py --require-verified` when checking release readiness.
+The command exits unsuccessfully while any area remains unverified and lists each such area.
+Execute the recorded comparisons and the required release workloads before recording a result.
