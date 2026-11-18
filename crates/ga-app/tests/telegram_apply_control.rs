@@ -732,6 +732,21 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .apply_telegram_owner_control(&delayed, 4, "Europe/Bratislava")
         .await?;
     assert_eq!(database.personal_goals(owner).await?, saved);
+    for (update, text) in [(99, "/goals сон"), (100, "/goals нет")] {
+        binding
+            .accept_polled_update(&mut runtime, &wire(update, text), now, false)
+            .await?;
+    }
+    for expected in [vec![PersonalGoal::Sleep], Vec::new()] {
+        let next = database
+            .claim_local_telegram_control(target, now, 60)
+            .await?
+            .ok_or("Missing same-second goal command")?;
+        database
+            .apply_telegram_owner_control(&next, 4, "Europe/Bratislava")
+            .await?;
+        assert_eq!(database.personal_goals(owner).await?.goals, expected);
+    }
     println!(
         "Verified durable owner controls, Garmin status, goals and suppression of stale replies"
     );
