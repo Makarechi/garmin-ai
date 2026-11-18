@@ -112,7 +112,7 @@ impl DailyHealthReader {
             .fetch_one(&mut *self.0)
             .await?;
         let cutoff = StoredInstant::try_from(cutoff).map_err(|_| HealthAnalysisError::Database)?;
-        let contexts = temporal_features_in(
+        let mut contexts = temporal_features_in(
             &mut self.0,
             &METRICS,
             &times,
@@ -123,12 +123,15 @@ impl DailyHealthReader {
         self.0.commit().await?;
         let mut groups = BTreeMap::<String, Vec<String>>::new();
         let mut rows = Vec::with_capacity(kept.len());
-        for entry in kept {
+        let mut kept = kept.into_iter().peekable();
+        while let Some(entry) = kept.next() {
             let run = entry.run;
-            let mut context = contexts
-                .get(&entry.at)
-                .cloned()
-                .ok_or(HealthAnalysisError::Database)?;
+            let mut context = if kept.peek().is_some_and(|next| next.at == entry.at) {
+                contexts.get(&entry.at).cloned()
+            } else {
+                contexts.remove(&entry.at)
+            }
+            .ok_or(HealthAnalysisError::Database)?;
             for feature in context.values_mut() {
                 for key in [
                     "event_cutoff",
@@ -158,17 +161,17 @@ impl DailyHealthReader {
         }
         let mixed = groups.len() > 1;
         let groups=groups.into_iter().map(|(kind,ids)|json!({"activity_type":kind,"activity_ids":ids,"n":ids.len(),"status":"descriptive_only"})).collect::<Vec<_>>();
-        Ok(
-            json!({"n":rows.len(),"excluded":total-rows.len(),"rows":rows,"hr_range":[min,max],
-                "ordering":"chronological; no cross-condition performance ranking","comparison_groups":groups,
-                "mixed_activity_types":mixed,"method_version":"running-summary-comparability-v1",
-                "method":"distance / moving duration * 60 / average HR; minimum 20 minutes",
-                "limitations":["Chronological descriptive summaries; no global ranking or claim of physiological progress",
-                    "Compare similar terrain and activity type; mixed conditions are shown explicitly",
-                    "Whole-activity means do not establish steady-state cardiac efficiency",
-                    "Pre-event context requires source time; calendar-only HRV is unknown"],
-            }),
-        )
+        let mut document = json!({"n":rows.len(),"excluded":total-rows.len(),"hr_range":[min,max],
+            "ordering":"chronological; no cross-condition performance ranking","comparison_groups":groups,
+            "mixed_activity_types":mixed,"method_version":"running-summary-comparability-v1",
+            "method":"distance / moving duration * 60 / average HR; minimum 20 minutes",
+            "limitations":["Chronological descriptive summaries; no global ranking or claim of physiological progress",
+                "Compare similar terrain and activity type; mixed conditions are shown explicitly",
+                "Whole-activity means do not establish steady-state cardiac efficiency",
+                "Pre-event context requires source time; calendar-only HRV is unknown"],
+        });
+        document["rows"] = Value::Array(rows);
+        Ok(document)
     }
 }
 

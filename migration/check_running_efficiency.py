@@ -102,6 +102,16 @@ def exercise(engine, python, rust):
     with engine.begin() as connection:
         connection.execute(
             text("""
+            INSERT INTO activities(id,kind,start,"end",timezone,distance_m,moving_seconds,duration_seconds,avg_hr,details)
+            SELECT concat('same-time:',i),'running',:at,:at,'UTC',5000,1500,1800,135,'{}'::jsonb
+            FROM generate_series(1,2) i
+        """),
+            {"at": EVENT + timedelta(microseconds=120000)},
+        )
+    assert compare(request)["n"] == 6
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
             INSERT INTO activities(id,kind,start,"end",timezone,details)
             SELECT concat('limit:',i),'running',:start,:start,'UTC','{}'::jsonb FROM generate_series(1,2001) i
         """),
