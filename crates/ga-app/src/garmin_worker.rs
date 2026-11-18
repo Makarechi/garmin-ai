@@ -1,8 +1,10 @@
 mod activities;
 mod configuration;
+mod fit;
 
 pub use activities::ActivityPageWork;
 pub use configuration::{GarminConfigurationError, GarminSourceSettings};
+pub use fit::{ActivityExportSource, ActivityFitWork};
 
 use std::{
     error::Error,
@@ -16,6 +18,7 @@ use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
     activity_scans::ActivityScanError,
+    fit_ingest::FitIngestError,
     garmin_endpoint::{
         CaptureEndpoint, EndpointCapture, EndpointError, EndpointPreflight, EndpointPublication,
         PublishEndpoint,
@@ -72,6 +75,7 @@ pub enum EndpointWork {
 pub enum EndpointWorkerError {
     Storage(EndpointError),
     ActivityScan(ActivityScanError),
+    Fit(FitIngestError),
     Job(JobStoreError),
     Integration(GarminIntegrationError),
     Fetch(GarminError),
@@ -83,6 +87,7 @@ impl fmt::Display for EndpointWorkerError {
         match self {
             Self::Storage(error) => error.fmt(f),
             Self::ActivityScan(error) => error.fmt(f),
+            Self::Fit(error) => error.fmt(f),
             Self::Job(error) => error.fmt(f),
             Self::Integration(error) => error.fmt(f),
             Self::Fetch(error) => error.fmt(f),
@@ -100,6 +105,11 @@ impl From<EndpointError> for EndpointWorkerError {
 impl From<ActivityScanError> for EndpointWorkerError {
     fn from(value: ActivityScanError) -> Self {
         Self::ActivityScan(value)
+    }
+}
+impl From<FitIngestError> for EndpointWorkerError {
+    fn from(value: FitIngestError) -> Self {
+        Self::Fit(value)
     }
 }
 impl From<JobStoreError> for EndpointWorkerError {
@@ -299,6 +309,16 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         lease: &GarminJobLease,
         work: impl Future<Output = T>,
     ) -> Result<T, EndpointWorkerError> {
+        self.with_renewal_until(lease, work, std::future::pending())
+            .await
+    }
+
+    async fn with_renewal_until<T>(
+        &self,
+        lease: &GarminJobLease,
+        work: impl Future<Output = T>,
+        stop_renewal: impl Future<Output = ()>,
+    ) -> Result<T, EndpointWorkerError> {
         let period = lease.lease_duration() / 3;
         let mut ticks = interval_at(Instant::now() + period, period);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -313,7 +333,13 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         tokio::select! {
             biased;
             result = work => Ok(result),
-            lost = renew => lost,
+            lost = async {
+                tokio::select! {
+                    biased;
+                    () = stop_renewal => std::future::pending().await,
+                    lost = renew => lost,
+                }
+            } => lost,
         }
     }
 }

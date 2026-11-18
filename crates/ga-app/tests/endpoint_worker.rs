@@ -1,7 +1,8 @@
 use std::{
     env,
     error::Error,
-    io,
+    io::{self, Read},
+    num::{NonZeroU64, NonZeroUsize},
     str::FromStr,
     sync::{
         Arc,
@@ -11,18 +12,21 @@ use std::{
 };
 
 use ga_app::garmin_worker::{
-    ActivityPageWork, EndpointSource, EndpointWork, EndpointWorker, EndpointWorkerError,
+    ActivityExportSource, ActivityFitWork, ActivityPageWork, EndpointSource, EndpointWork,
+    EndpointWorker, EndpointWorkerError,
 };
 use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
     activity_documents::DocumentStatus,
     activity_scans::{ActivityPageResult, ActivityScansStarted, StartActivityScans},
+    fit_ingest::FitIngestOutcome,
     garmin_endpoint::EndpointPublication,
     garmin_integration::GarminTransportOutcome,
     jobs::{GarminJobLease, JobStoreError, RecordedJobStatus},
 };
 use ga_domain::timestamp::StoredInstant;
+use ga_fit::ExportLimits;
 use ga_garmin::{
     GarminError,
     legacy::{DailyEndpoint, LegacyRead},
@@ -30,7 +34,7 @@ use ga_garmin::{
 use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::{OffsetDateTime, format_description::well_known::Iso8601};
-use tokio::sync::Notify;
+use tokio::{fs::File, io::AsyncWriteExt, sync::Notify};
 use uuid::Uuid;
 
 const ACCOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -131,7 +135,7 @@ impl Fixture {
         Ok(serde_json::from_str(&document)?)
     }
 
-    fn worker<'a>(&'a self, source: &'a Source) -> EndpointWorker<'a, Source> {
+    fn worker<'a, S: EndpointSource>(&'a self, source: &'a S) -> EndpointWorker<'a, S> {
         EndpointWorker {
             database: &self.database,
             source,
@@ -491,5 +495,203 @@ async fn restores_the_pending_page_and_refuses_a_superseded_response() -> Result
     assert_eq!(raw_count, 1);
     let freshness = fixture.stored("freshness:activities:page:0").await?;
     assert_eq!(freshness["status"], "normalized");
+    Ok(())
+}
+
+const FIT_RECORDING: &[u8] =
+    b"\x0e\x20\x34\x08\x0b\x00\x00\x00.FIT\xfb\xdc\x40\x00\x00\x14\x00\x01\x03\x01\x02\x00\x48\xb0\xe5";
+
+struct FitSource {
+    calls: AtomicUsize,
+    interrupted: bool,
+}
+
+impl EndpointSource for FitSource {
+    fn fingerprint(&self) -> &str {
+        ACCOUNT
+    }
+
+    async fn read(&self, _: LegacyRead, _: u64) -> Result<Option<Vec<u8>>, GarminError> {
+        panic!("The FIT job should use the export resource");
+    }
+}
+
+impl ActivityExportSource for FitSource {
+    async fn download(
+        &self,
+        activity: NonZeroU64,
+        maximum_bytes: u64,
+        destination: &mut File,
+    ) -> Result<u64, GarminError> {
+        assert_eq!(activity.get(), 761);
+        assert_eq!(maximum_bytes, 65_536);
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        destination
+            .write_all(&FIT_RECORDING[..16])
+            .await
+            .map_err(|_| GarminError::DestinationWrite)?;
+        if self.interrupted {
+            return Err(GarminError::InterruptedTransfer);
+        }
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        destination
+            .write_all(&FIT_RECORDING[16..])
+            .await
+            .map_err(|_| GarminError::DestinationWrite)?;
+        Ok(FIT_RECORDING.len() as u64)
+    }
+}
+
+#[tokio::test]
+#[ignore = "uses a disposable database and synthetic streaming Garmin FIT"]
+async fn downloads_fit_in_private_staging_and_preserves_the_last_complete_export()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, root) = setup().await?;
+    sqlx::query(
+        "INSERT INTO activities(id,kind,start,\"end\",timezone,details)
+         VALUES('761','run',$1,$1,'UTC','{}')",
+    )
+    .bind(fixture.start)
+    .execute(&fixture.inspect)
+    .await?;
+    let claim = |seconds| {
+        let fixture = &fixture;
+        async move {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO jobs(id,kind,payload,dedup_key,status,run_at,attempts)
+                 VALUES($1,'garmin_fit',$2::jsonb,$3,'pending',clock_timestamp(),0)",
+            )
+            .bind(id)
+            .bind(json!({"activity_id":"761","account":ACCOUNT}).to_string())
+            .bind(format!("synthetic:{id}"))
+            .execute(&fixture.inspect)
+            .await?;
+            let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&fixture.inspect)
+                .await?;
+            let lease = fixture
+                .database
+                .claim_garmin_job(now.try_into()?, now.date(), seconds, false)
+                .await?
+                .ok_or_else(|| -> Box<dyn Error> {
+                    io::Error::other("Missing FIT claim").into()
+                })?;
+            assert_eq!(lease.id(), id);
+            Ok::<_, Box<dyn Error>>(lease)
+        }
+    };
+    let limits = ExportLimits {
+        max_bytes: 65_536,
+        max_zip_entries: NonZeroUsize::MIN,
+        max_duration: Duration::from_secs(2),
+    };
+    let good = FitSource {
+        calls: AtomicUsize::new(0),
+        interrupted: false,
+    };
+    let first = claim(1).await?;
+    sqlx::raw_sql(
+        "CREATE SEQUENCE synthetic_fit_capture_entered;
+         CREATE FUNCTION slow_fit_capture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+            PERFORM nextval('synthetic_fit_capture_entered');
+            PERFORM pg_sleep(0.45);
+            RETURN NEW;
+         END $$;
+         CREATE TRIGGER slow_fit_capture BEFORE INSERT ON source_payloads
+            FOR EACH ROW WHEN (NEW.endpoint='activity_fit') EXECUTE FUNCTION slow_fit_capture();
+         CREATE FUNCTION slow_fit_publication() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_sleep(1.18); RETURN NEW; END $$;
+         CREATE TRIGGER slow_fit_publication BEFORE INSERT ON activity_parts FOR EACH ROW
+            EXECUTE FUNCTION slow_fit_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
+    let verify_renewal = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let entered: bool =
+                    sqlx::query_scalar("SELECT is_called FROM synthetic_fit_capture_entered")
+                        .fetch_one(&fixture.inspect)
+                        .await?;
+                if entered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let mut renew = fixture.inspect.begin().await?;
+            let alive: Uuid =
+                sqlx::query_scalar("SELECT id FROM jobs WHERE id=$1 FOR UPDATE NOWAIT")
+                    .bind(first.id())
+                    .fetch_one(&mut *renew)
+                    .await?;
+            assert_eq!(alive, first.id());
+            renew.rollback().await
+        })
+        .await??;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let worker = fixture.worker(&good);
+    let (result, renewal) =
+        tokio::join!(worker.run_activity_export(&first, limits), verify_renewal);
+    renewal?;
+    sqlx::raw_sql(
+        "DROP TRIGGER slow_fit_capture ON source_payloads;
+         DROP FUNCTION slow_fit_capture();
+         DROP SEQUENCE synthetic_fit_capture_entered;
+         DROP TRIGGER slow_fit_publication ON activity_parts;
+         DROP FUNCTION slow_fit_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
+    assert_eq!(
+        result?,
+        ActivityFitWork::Publication(FitIngestOutcome::Normalized { rows: 1 }),
+    );
+    assert_eq!(good.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.job(&first).await?, ("done".into(), 1));
+    let key: String = sqlx::query_scalar("SELECT fit_key FROM activities WHERE id='761'")
+        .fetch_one(&fixture.inspect)
+        .await?;
+    let mut archived = Vec::new();
+    fixture
+        .archive
+        .open_reader(&key.parse()?)?
+        .read_to_end(&mut archived)?;
+    assert_eq!(archived, FIT_RECORDING);
+
+    let interrupted = FitSource {
+        calls: AtomicUsize::new(0),
+        interrupted: true,
+    };
+    let second = claim(20).await?;
+    assert!(matches!(
+        fixture
+            .worker(&interrupted)
+            .run_activity_export(&second, limits)
+            .await,
+        Err(EndpointWorkerError::Fetch(GarminError::InterruptedTransfer)),
+    ));
+    assert_eq!(interrupted.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.job(&second).await?, ("pending".into(), 1));
+    let actual: (String,i32,i64) = sqlx::query_as(
+        "SELECT (SELECT fit_key FROM activities WHERE id='761'),
+            (SELECT (payload->>'heart_rate')::int FROM activity_parts WHERE activity_id='761' AND kind='fit_record'),
+            (SELECT count(*) FROM source_payloads WHERE source_key='761')"
+    ).fetch_one(&fixture.inspect).await?;
+    assert_eq!(actual, (key, 72, 1));
+    let freshness = fixture.stored("freshness:activity_fit:761").await?;
+    assert_eq!(freshness["status"], "fetch_error");
+    assert!(freshness["success_at"].is_string());
+
+    for path in std::fs::read_dir(root.path().join("raw"))? {
+        assert!(
+            !path?
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rust-stage-")
+        );
+    }
     Ok(())
 }
