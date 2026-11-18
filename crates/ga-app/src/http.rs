@@ -43,6 +43,7 @@ fn router(state: AppState) -> Router {
         .route("/capabilities", any(capabilities))
         .route("/actions", any(tracker_actions::available))
         .route("/actions/events/{event_id}", any(tracker_actions::event))
+        .route("/forms/{action_id}", any(tracker_actions::form))
         .route("/events", any(diary::create))
         .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))

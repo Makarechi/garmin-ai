@@ -347,7 +347,7 @@ fn bounded(node: &Node, minimum: &str, maximum: &str, limit: u64) -> Result<(), 
     }
 }
 
-struct ExactNumber {
+pub(super) struct ExactNumber {
     // Python compares integer inputs without converting them to double.
     // Decimal/exponent inputs have already taken Python's binary64 path.
     integer: BigInt,
@@ -356,7 +356,7 @@ struct ExactNumber {
 }
 
 impl ExactNumber {
-    fn read(value: &Value) -> Option<Self> {
+    pub(super) fn read(value: &Value) -> Option<Self> {
         let value = value.as_number()?;
         if let Ok(integer) = value.as_str().parse::<BigInt>() {
             return Some(Self {
@@ -373,11 +373,11 @@ impl ExactNumber {
         })
     }
 
-    fn floor(&self) -> BigInt {
+    pub(super) fn floor(&self) -> BigInt {
         &self.integer - i32::from(self.fraction < 0.0)
     }
 
-    fn ceil(&self) -> BigInt {
+    pub(super) fn ceil(&self) -> BigInt {
         &self.integer + i32::from(self.fraction > 0.0)
     }
 }
