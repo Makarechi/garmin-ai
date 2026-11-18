@@ -1,5 +1,6 @@
 mod control;
 mod diary;
+mod history;
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
