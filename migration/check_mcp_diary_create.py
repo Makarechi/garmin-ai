@@ -152,7 +152,9 @@ async def cancel_write(binary, engine, root, env, name, arguments):
 async def compare(binary, root, engine):
     env = {"GA_DATABASE_URL": engine.url.render_as_string(hide_password=False)}
     async with open_client(str(binary), ["mcp"], root, env, "read-only") as read_only:
-        assert [tool.name for tool in (await read_only.list_tools()).tools] == ["events"]
+        listed = (await read_only.list_tools()).tools
+        assert "events" in [tool.name for tool in listed]
+        assert all(tool.annotations.readOnlyHint for tool in listed)
         denial = await create(read_only, "fixture-disabled")
         assert denial["isError"] and "PermissionError" in denial["content"][0]["text"]
     assert counts(engine) == (0, 0, 0)

@@ -13,7 +13,7 @@ use ga_db::{
     Database,
     jobs::{JobStoreError, RecordedJobStatus},
     replay::{ReplaySelectionError, RunReplayJob},
-    runtime_lease::{RuntimeLease, RuntimeLeaseError},
+    runtime_lease::RuntimeLeaseError,
 };
 use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
 use ga_fit::{ExportLimits, MAX_FIT_BYTES};
@@ -89,13 +89,19 @@ impl Configuration {
     }
 }
 
-fn telegram_configuration()
--> Result<Option<(TelegramIngressSettings, TelegramTransport)>, ReplayServiceError> {
+struct TelegramWorker {
+    settings: TelegramIngressSettings,
+    transport: TelegramTransport,
+    question_budget: u16,
+}
+
+fn telegram_configuration() -> Result<Option<TelegramWorker>, ReplayServiceError> {
     let failure = |_| ReplayServiceError::TelegramConfiguration;
-    let [token, user, integrations] = configuration::read([
+    let [token, user, integrations, budget] = configuration::read([
         "GA_TELEGRAM_BOT_TOKEN",
         "GA_TELEGRAM_USER_ID",
         "GA_INTEGRATIONS",
+        "GA_QUESTION_BUDGET",
     ])
     .map_err(failure)?;
     let Some(token) = token.filter(|token| !token.is_empty()) else {
@@ -109,7 +115,18 @@ fn telegram_configuration()
     };
     let transport =
         TelegramTransport::new(&token).map_err(|_| ReplayServiceError::TelegramConfiguration)?;
-    Ok(Some((settings, transport)))
+    let question_budget = budget
+        .as_deref()
+        .unwrap_or("2")
+        .parse::<u16>()
+        .ok()
+        .filter(|value| *value <= 20)
+        .ok_or(ReplayServiceError::TelegramConfiguration)?;
+    Ok(Some(TelegramWorker {
+        settings,
+        transport,
+        question_budget,
+    }))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -130,6 +147,12 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .await
         .map_err(ReplayServiceError::Lease)?
         .unwrap_or(config.timezone);
+    if worker {
+        singleton
+            .publish_worker_heartbeat()
+            .await
+            .map_err(ReplayServiceError::Lease)?;
+    }
     #[cfg(unix)]
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
         .map_err(|_| ReplayServiceError::Shutdown)?;
@@ -151,35 +174,40 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         }
     );
     let receive = async {
-        if let Some((settings, transport)) = &telegram {
-            transport
-                .run_receiver(&database, &mut singleton, settings)
+        if let Some(telegram) = &telegram {
+            telegram
+                .transport
+                .run_receiver(&database, &mut singleton, &telegram.settings)
                 .await
                 .map_err(ReplayServiceError::Lease)
         } else {
-            verify_runtime(&mut singleton).await
+            singleton
+                .while_held(future::pending::<()>())
+                .await
+                .map_err(ReplayServiceError::Lease)
         }
     };
-    let acknowledge = async {
-        if let Some((settings, transport)) = &telegram {
-            transport.run_acknowledgements(&database, settings).await
-        } else {
-            future::pending::<Result<(), ReplayServiceError>>().await
+    let telegram_work = async {
+        if let Some(TelegramWorker {
+            transport,
+            settings,
+            question_budget,
+        }) = &telegram
+        {
+            tokio::select! {
+                result = transport.run_acknowledgements(&database, settings) => result,
+                result = transport.run_owner_controls(&database, settings, *question_budget) => result,
+                result = transport.run_replies(&database, settings) => result,
+            }
         }
+        future::pending::<Result<(), ReplayServiceError>>().await
     };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
         result = receive => result,
-        result = acknowledge => result,
+        result = telegram_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
-    }
-}
-
-async fn verify_runtime(singleton: &mut RuntimeLease) -> Result<(), ReplayServiceError> {
-    loop {
-        tokio::time::sleep(PLAN_BUSY).await;
-        singleton.check().await.map_err(ReplayServiceError::Lease)?;
     }
 }
 

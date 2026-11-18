@@ -65,7 +65,7 @@ async def session(command, arguments, root, env, *, native):
             assert initialized["protocolVersion"] == "2025-11-25"
             listed = (await client.list_tools()).tools
             if native:
-                assert [tool.name for tool in listed] == ["events"]
+                assert all(tool.annotations.readOnlyHint for tool in listed)
             event = next(tool for tool in listed if tool.name == "events")
             assert event.annotations.readOnlyHint and event.annotations.openWorldHint is False
             cases = []

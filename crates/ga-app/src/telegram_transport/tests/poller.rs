@@ -97,31 +97,78 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
         .await?;
         let (mut first, _) = listener.accept().await?;
         assert_eq!(request(&mut first).await?["endpoint"], "getUpdates");
+        let mut unhandled = message.clone();
+        unhandled["message_id"] = json!(75);
+        unhandled["text"] = json!("/status");
+        let mut pause = message.clone();
+        pause["message_id"] = json!(77);
+        pause["text"] = json!("\u{00a0}/pause\u{2003}");
         let updates = json!({"ok":true,"result":[
+            {"update_id":39,"message":unhandled},
             {"update_id":40,"message":message},
             {"update_id":41,"callback_query":{"id":"synthetic-worker-ack","data":"expired",
-                                             "message":message,"from":{"id":chat}}}
+                                             "message":message,"from":{"id":chat}}},
+            {"update_id":42,"message":pause}
         ]});
         respond(&mut first, "200 OK", &[], &updates.to_string()).await?;
         let (mut long_poll, _) = listener.accept().await?;
         let next = request(&mut long_poll).await?;
         assert_eq!(next["endpoint"], "getUpdates");
-        assert_eq!(next["fields"]["offset"], 42);
+        assert_eq!(next["fields"]["offset"], 43);
+        let mut policy = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(72104621)")
+            .execute(&mut *policy)
+            .await?;
         poll_started
             .send(())
             .map_err(|_| "Missing callback worker")?;
-        let (mut ack, _) = timeout(Duration::from_secs(2), listener.accept()).await??;
-        let ack_request = request(&mut ack).await?;
-        assert_eq!(ack_request["endpoint"], "answerCallbackQuery");
-        assert_eq!(
-            ack_request["fields"]["callback_query_id"],
-            "synthetic-worker-ack"
-        );
-        respond(&mut ack, "200 OK", &[], r#"{"ok":true,"result":true}"#).await?;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let deferred: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT FROM jobs j JOIN inbound_messages i
+                          ON i.id::text=j.payload->>'inbound_message_id'
+                        WHERE i.external_event_id='42' AND i.status='pending'
+                          AND j.status='pending' AND j.attempts=0 AND j.last_error='TelegramPolicyBusy'
+                    )",
+                ).fetch_one(&pool).await?;
+                if deferred {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.map_err(|_| "Pause did not return to its queue while policy was locked")??;
+        policy.rollback().await?;
+        timeout(Duration::from_secs(2), async {
+            let mut endpoints = Vec::new();
+            for _ in 0..2 {
+                let (mut outgoing, _) = listener.accept().await?;
+                let wire = request(&mut outgoing).await?;
+                let endpoint = wire["endpoint"].as_str().ok_or("Missing endpoint")?;
+                let body = match endpoint {
+                    "answerCallbackQuery" => {
+                        assert_eq!(wire["fields"]["callback_query_id"], "synthetic-worker-ack");
+                        json!({"ok": true, "result": true})
+                    }
+                    "sendMessage" => {
+                        assert_eq!(wire["fields"]["chat_id"], chat);
+                        assert_eq!(wire["fields"]["text"], "Вопросы отключены. Синхронизация продолжается.");
+                        json!({"ok": true, "result": {"message_id":7,"chat":{"id":chat,"type":"private"}}})
+                    }
+                    _ => return Err(format!("Unexpected Telegram endpoint {endpoint}").into()),
+                };
+                endpoints.push(endpoint.to_owned());
+                respond(&mut outgoing, "200 OK", &[], &body.to_string()).await?;
+            }
+            endpoints.sort();
+            assert_eq!(endpoints, ["answerCallbackQuery", "sendMessage"]);
+            Ok::<_, Box<dyn Error>>(())
+        }).await??;
         timeout(Duration::from_secs(2), async {
             loop {
                 let finished: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT FROM jobs WHERE kind='telegram_native_ack' AND status='done')",
+                    "SELECT EXISTS(SELECT FROM jobs WHERE kind='telegram_native_ack' AND status='done')
+                       AND EXISTS(SELECT FROM outbox_messages WHERE state='provider_accepted')",
                 ).fetch_one(&pool).await?;
                 if finished {
                     return Ok::<_, sqlx::Error>(());
@@ -150,7 +197,11 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
     };
     let callback = async {
         wait_for_poll.await?;
-        transport.run_acknowledgements(&database, &settings).await
+        tokio::select! {
+            result = transport.run_acknowledgements(&database, &settings) => result,
+            result = transport.run_owner_controls(&database, &settings, 2) => result,
+            result = transport.run_replies(&database, &settings) => result,
+        }
     };
     let receiver = transport.run_receiver(&database, &mut runtime, &settings);
     let completion = async {
@@ -162,18 +213,29 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
             result = callback => result,
         }
     };
-    let (server, completion) = timeout(Duration::from_secs(8), async {
-        tokio::join!(server, completion)
+    timeout(Duration::from_secs(8), async {
+        tokio::try_join!(server, completion)
     })
-    .await?;
-    server?;
-    completion?;
-    let retained: Vec<String> = sqlx::query_scalar(
-        "SELECT external_event_id FROM inbound_messages ORDER BY external_event_id",
+    .await??;
+    let retained: Vec<(String, String)> = sqlx::query_as(
+        "SELECT external_event_id,status FROM inbound_messages ORDER BY external_event_id",
     )
     .fetch_all(&pool)
     .await?;
-    assert_eq!(retained, ["40"]);
+    assert_eq!(
+        retained,
+        [
+            ("39".into(), "pending".into()),
+            ("40".into(), "pending".into()),
+            ("42".into(), "processed".into())
+        ]
+    );
+    let paused: bool = sqlx::query_scalar(
+        "SELECT value->'enabled'='false'::jsonb FROM app_state WHERE key='proactive:enabled'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(paused);
     assert!(database.acquire_runtime_lease().await.is_ok());
     Ok(())
 }
