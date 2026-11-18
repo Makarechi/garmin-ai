@@ -1106,6 +1106,47 @@ def test_login_lock_error_explains_safe_recovery_without_sensitive_details(monke
     assert "synthetic sensitive" not in output
 
 
+@pytest.mark.parametrize("command", ["resume-storage", "restore-db", "probe", "login"])
+def test_python_storage_refuses_incomplete_native_erasure(
+    db, db_engine, tmp_path, monkeypatch, capsys, command
+):
+    from garmin_ai import cli
+
+    archive = tmp_path / "synthetic-export.gz"
+    db.add(AppState(key="synthetic:export", value={"source": "fixture"}))
+    db.commit()
+    export_database(db_engine, archive)
+    db.delete(db.get(AppState, "synthetic:export"))
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+    )
+    settings.lock_dir.mkdir()
+    marker = settings.lock_dir / "erasing"
+    marker.write_text("Synthetic interrupted native erasure.", encoding="utf-8")
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
+
+    def unexpected_input(prompt):
+        raise AssertionError("An incomplete erasure cannot prompt for Garmin login")
+
+    monkeypatch.setattr("builtins.input", unexpected_input)
+    args = [str(archive)] if command == "restore-db" else []
+    monkeypatch.setattr("sys.argv", ["garmin-ai", command, *args])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 1
+    assert "Operation failed (ValueError)" in capsys.readouterr().err
+    assert marker.is_file() and not (settings.lock_dir / "activating").exists()
+    assert not settings.data_dir.exists() and not settings.token_dir.exists()
+    db.expire_all()
+    assert db.get(AppState, "maintenance:erased").value == {"disabled": True}
+    assert db.get(AppState, "synthetic:export") is None
+
+
 @pytest.mark.parametrize("command", ["restore-db", "resume-storage"])
 @pytest.mark.parametrize("failure", ["unlink", "fsync"])
 def test_activation_cleanup_failure_keeps_database_disabled(

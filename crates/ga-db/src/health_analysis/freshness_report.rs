@@ -7,7 +7,7 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
-    HealthAnalysisError, begin_daily_analysis,
+    DailyHealthReader, HealthAnalysisError, begin_daily_analysis,
     freshness::{freshness_day, observation_freshness_in, timestamp},
 };
 use crate::{
@@ -15,6 +15,36 @@ use crate::{
     history_windows::history_status_in,
     replay::{GARMIN_PARSER_VERSION, replay_status_in},
 };
+
+pub const MODEL_HEALTH_PACKS: &[&str] = &["general_diary", "sleep", "training", "wellbeing"];
+
+pub fn model_metric_packs(metric: &str) -> &'static [&'static str] {
+    let metric = metric.strip_prefix("system.").unwrap_or(metric);
+    match metric {
+        "hydration_ml" => &["general_diary"],
+        "steps"
+        | "steps_bucket"
+        | "active_calories"
+        | "intensity_minutes"
+        | "training_status"
+        | "training_readiness_score"
+        | "recovery_time_minutes" => &["training"],
+        "heart_rate_bpm" | "spo2_pct" | "respiration_rpm" | "resting_hr" => &["wellbeing"],
+        _ if ["sleep_", "deep_", "rem_", "light_", "awake_"]
+            .iter()
+            .any(|prefix| metric.starts_with(prefix)) =>
+        {
+            &["sleep"]
+        }
+        _ if ["hrv_", "stress_", "body_battery_"]
+            .iter()
+            .any(|prefix| metric.starts_with(prefix)) =>
+        {
+            &["wellbeing"]
+        }
+        _ => MODEL_HEALTH_PACKS,
+    }
+}
 
 struct Endpoint {
     endpoint: String,
@@ -63,6 +93,44 @@ impl Database {
         configured_timezone: &str,
     ) -> Result<Value, HealthAnalysisError> {
         self.freshness_report(at, configured_timezone, true).await
+    }
+
+    /// Return only model-visible observation channels, including when replay is pending.
+    pub async fn model_data_freshness(
+        &self,
+        owner: Uuid,
+        at: StoredInstant,
+        configured_timezone: &str,
+    ) -> Result<Option<Value>, HealthAnalysisError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut reader = DailyHealthReader(begin_daily_analysis(&self.work).await?);
+            if !reader.permits_model_health(owner).await? {
+                return Ok(None);
+            }
+            let timezone = super::owner_timezone(&mut reader.0, configured_timezone).await?;
+            let mut report = data_freshness_in(&mut reader.0, at, &timezone).await?;
+            let Value::Object(channels) = report["channels"].take() else {
+                return Err(HealthAnalysisError::Database);
+            };
+            let mut visible = Map::new();
+            for (metric, channel) in channels {
+                if reader
+                    .permits_model_packs(owner, model_metric_packs(&metric))
+                    .await?
+                {
+                    visible.insert(metric, channel);
+                }
+            }
+            reader.0.commit().await?;
+            Ok(Some(json!({
+                "checked_at": report["checked_at"],
+                "available": !visible.is_empty(),
+                "channels": visible,
+                "limitations": report["limitations"],
+            })))
+        })
+        .await
+        .map_err(|_| HealthAnalysisError::Database)?
     }
 
     async fn freshness_report(

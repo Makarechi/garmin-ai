@@ -10,7 +10,6 @@ use crate::{
         EventProvenance, EventTopology, InvalidClockUncertainty, derive_provenance,
     },
     event_replay::{ReplayConflict, audited_instant, same_json},
-    event_time::aware,
     timestamp::StoredInstant,
 };
 
@@ -48,6 +47,7 @@ pub struct CustomEntry {
     key: String,
     start: StoredInstant,
     end: Option<StoredInstant>,
+    display_times: [Option<String>; 2],
     timezone: Option<String>,
     source: &'static str,
     status: &'static str,
@@ -92,18 +92,19 @@ impl CustomEntry {
                     .map(str::to_owned)
             })
             .ok_or(CustomEntryError::Key)?;
-        let start = fields
+        let (start, display_start) = fields
             .remove("start")
             .as_ref()
-            .and_then(aware)
+            .and_then(StoredInstant::legacy_input_with_json)
             .ok_or(CustomEntryError::Timestamp)?;
-        let end = match fields.remove("end") {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(
-                aware(&value)
-                    .filter(|end| *end >= start)
-                    .ok_or(CustomEntryError::Timestamp)?,
-            ),
+        let (end, display_end) = match fields.remove("end") {
+            None | Some(Value::Null) => (None, None),
+            Some(value) => {
+                let (end, display) = StoredInstant::legacy_input_with_json(&value)
+                    .filter(|(end, _)| *end >= start)
+                    .ok_or(CustomEntryError::Timestamp)?;
+                (Some(end), Some(display))
+            }
         };
         let timezone = match fields.remove("timezone") {
             None | Some(Value::Null) => None,
@@ -167,6 +168,7 @@ impl CustomEntry {
             key,
             start,
             end,
+            display_times: [Some(display_start), display_end],
             timezone,
             source,
             status,
@@ -179,6 +181,10 @@ impl CustomEntry {
 
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    pub fn display_times(&self) -> [Option<&str>; 2] {
+        self.display_times.each_ref().map(|time| time.as_deref())
     }
 
     pub fn resolve<'a>(
