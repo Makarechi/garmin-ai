@@ -13,7 +13,7 @@ use crate::{
     channel_ingress::telegram_poll::{CHANNEL_SELECTION_LOCK, TelegramPollError, selection},
     check_readiness,
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
-    jobs::{STORAGE_QUEUE_LOCK, storage_notices::StorageNoticeFence},
+    jobs::{STORAGE_QUEUE_LOCK, telegram_notices::TelegramNoticeFence},
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{
         CHANNEL_CONSENT_LOCK, MODEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed,
@@ -82,7 +82,7 @@ enum Dispatch {
         token: Uuid,
         deadline: Instant,
         clock: (StoredInstant, Instant),
-        storage_notice: Option<StorageNoticeFence>,
+        telegram_notice: Option<TelegramNoticeFence>,
     },
 }
 
@@ -133,12 +133,11 @@ impl Database {
         if destination.channel == "telegram" {
             return Ok(ReplyDispatchResult::ClaimUnavailable);
         }
-        self.dispatch_reply(destination, claim, requirements, None, send)
+        self.dispatch_reply(destination, claim, requirements, None, |body, _| send(body))
             .await
     }
 
-    /// Deliver to the configured Telegram chat under its current pairing and
-    /// onboarding screen for the full duration of provider network I/O.
+    /// Deliver to the current, paired Telegram chat.
     pub async fn dispatch_telegram_outbox_reply<F>(
         &self,
         destination: ReplyDestination<'_>,
@@ -146,6 +145,29 @@ impl Database {
         claim: ReplyClaim,
         requirements: &[ShareRequirement<'_>],
         send: impl FnOnce(Value) -> F,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError>
+    where
+        F: Future<Output = Option<ReplySendOutcome>>,
+    {
+        self.dispatch_telegram_runtime_reply(
+            destination,
+            expected_chat,
+            claim,
+            requirements,
+            |body, _| send(body),
+        )
+        .await
+    }
+
+    /// Deliver to the configured Telegram chat under its current pairing and
+    /// onboarding screen for the full duration of provider network I/O.
+    pub async fn dispatch_telegram_runtime_reply<F>(
+        &self,
+        destination: ReplyDestination<'_>,
+        expected_chat: i64,
+        claim: ReplyClaim,
+        requirements: &[ShareRequirement<'_>],
+        send: impl FnOnce(Value, Option<String>) -> F,
     ) -> Result<ReplyDispatchResult, ReplyDispatchError>
     where
         F: Future<Output = Option<ReplySendOutcome>>,
@@ -163,7 +185,7 @@ impl Database {
         claim: ReplyClaim,
         requirements: &[ShareRequirement<'_>],
         expected_chat: Option<i64>,
-        send: impl FnOnce(Value) -> F,
+        send: impl FnOnce(Value, Option<String>) -> F,
     ) -> Result<ReplyDispatchResult, ReplyDispatchError>
     where
         F: Future<Output = Option<ReplySendOutcome>>,
@@ -183,7 +205,7 @@ impl Database {
         })
         .await
         .map_err(|_| ReplyDispatchError::Database)??;
-        let (intent, token, deadline, (wall, started), storage_notice) = match dispatch {
+        let (intent, token, deadline, (wall, started), telegram_notice) = match dispatch {
             Dispatch::Unavailable => return Ok(ReplyDispatchResult::ClaimUnavailable),
             Dispatch::Cancelled => return Ok(ReplyDispatchResult::Cancelled),
             Dispatch::Started {
@@ -191,17 +213,21 @@ impl Database {
                 token,
                 deadline,
                 clock,
-                storage_notice,
-            } => (intent, token, deadline, clock, storage_notice),
+                telegram_notice,
+            } => (intent, token, deadline, clock, telegram_notice),
         };
-        let notice = storage_notice
+        let notice = telegram_notice
             .as_ref()
             .map(|notice| (notice, destination.instance_id));
         let outcome = tokio::time::timeout_at(deadline, async {
             if Instant::now() >= deadline {
                 return None;
             }
-            send(intent).await
+            let garmin_source = telegram_notice
+                .as_ref()
+                .and_then(TelegramNoticeFence::garmin_login_source)
+                .map(str::to_owned);
+            send(intent, garmin_source).await
         })
         .await
         .ok()
@@ -331,8 +357,8 @@ async fn prepare(
         return Ok(Dispatch::Cancelled);
     }
     let share_target = format!("{}:{}", destination.channel, destination.instance_id);
-    let storage_notice = candidate.storage_notice();
-    if storage_notice.is_some() {
+    let telegram_notice = candidate.telegram_notice();
+    if telegram_notice.is_some() {
         acquire_shared(&mut txn, STORAGE_QUEUE_LOCK).await?;
     }
     if candidate.has_diary_analysis() {
@@ -397,7 +423,7 @@ async fn prepare(
     let remaining = Duration::try_from(expiry.map_or(until, |expiry| until.min(expiry)) - now)
         .map_err(|_| ReplyDispatchError::Database)?;
     let wall = StoredInstant::try_from(now).map_err(|_| ReplyDispatchError::Database)?;
-    if let Some(notice) = &storage_notice {
+    if let Some(notice) = &telegram_notice {
         notice
             .start(&mut txn, destination.instance_id, wall)
             .await?;
@@ -408,7 +434,7 @@ async fn prepare(
         token,
         deadline: started + remaining,
         clock: (wall, started),
-        storage_notice,
+        telegram_notice,
     })
 }
 
@@ -507,7 +533,7 @@ async fn persist(
     outbox_id: Uuid,
     lease_token: Uuid,
     observation: &ReplyObservation,
-    notice: Option<(&StorageNoticeFence, &str)>,
+    notice: Option<(&TelegramNoticeFence, &str)>,
 ) -> Result<Uuid, ReplyDispatchError> {
     let mut txn = connection.begin().await?;
     let result = record_delivery_receipt(
@@ -555,7 +581,7 @@ async fn defer_after_send(
     outbox: Uuid,
     token: Uuid,
     retry_at: StoredInstant,
-    notice: Option<(&StorageNoticeFence, &str)>,
+    notice: Option<(&TelegramNoticeFence, &str)>,
 ) -> Result<bool, sqlx::Error> {
     let Some((notice, instance)) = notice else {
         return defer(connection, owner, outbox, token, retry_at).await;

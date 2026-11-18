@@ -52,9 +52,18 @@ impl Database {
             return Err(DiaryWriteError::Cancelled);
         }
         let mut txn = self.begin_diary_write(request.owner_id).await?;
+        let stored = Self::create_custom_entry_in(&mut txn, request).await?;
+        commit_diary_write(txn, is_cancelled).await?;
+        Ok(stored)
+    }
+
+    pub(crate) async fn create_custom_entry_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: CreateCustomEntry<'_>,
+    ) -> Result<StoredCustomEntry, DiaryWriteError> {
         let timezone: String = sqlx::query_scalar("SELECT timezone FROM people WHERE id=$1")
             .bind(request.owner_id)
-            .fetch_one(&mut *txn)
+            .fetch_one(&mut **txn)
             .await?;
         if let Some(key) = request.idempotency_key {
             check_idempotency_key(key).map_err(DiaryWriteError::Replay)?;
@@ -62,26 +71,22 @@ impl Database {
                 "SELECT id,definition_version_id FROM events WHERE idempotency_key=$1",
             )
             .bind(key)
-            .fetch_optional(&mut *txn)
+            .fetch_optional(&mut **txn)
             .await?;
             if let Some((id, version)) = row {
                 let version =
                     version.ok_or(DiaryWriteError::Replay(ReplayConflict::InputChanged))?;
-                let contract = definition_version(
-                    &mut txn,
-                    request.owner_id,
-                    request.entry.key(),
-                    Some(version),
-                )
-                .await?
-                .ok_or(DiaryWriteError::Replay(ReplayConflict::InputChanged))?;
+                let contract =
+                    definition_version(txn, request.owner_id, request.entry.key(), Some(version))
+                        .await?
+                        .ok_or(DiaryWriteError::Replay(ReplayConflict::InputChanged))?;
                 let entry = contract.resolve(request.entry, &timezone)?;
-                let audit = creation_audit(&mut txn, id).await?;
+                let audit = creation_audit(txn, id).await?;
                 entry
                     .verify_creation(contract.id, &audit)
                     .map_err(DiaryWriteError::Replay)?;
                 let stored = if contract.operations["query"] == true {
-                    load_event(&mut txn, id, true).await?
+                    load_event(txn, id, true).await?
                 } else {
                     let revision = audit["revision"]
                         .as_i64()
@@ -94,11 +99,10 @@ impl Database {
                         snapshot: audit,
                     }
                 };
-                commit_diary_write(txn, is_cancelled).await?;
                 return Ok(stored);
             }
         }
-        let contract = definition_version(&mut txn, request.owner_id, request.entry.key(), None)
+        let contract = definition_version(txn, request.owner_id, request.entry.key(), None)
             .await?
             .ok_or(DiaryWriteError::EventMissing)?;
         if contract.operations["create"] != true {
@@ -106,7 +110,7 @@ impl Database {
         }
         let entry = contract.resolve(request.entry, &timezone)?;
         let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *txn)
+            .fetch_one(&mut **txn)
             .await?;
         let document = fields(&entry, request.actor, request.evidence_refs, at)?;
         let id = Uuid::new_v4();
@@ -115,11 +119,11 @@ impl Database {
             .bind(contract.id)
             .bind(document.to_string())
             .bind(request.idempotency_key)
-            .execute(&mut *txn)
+            .execute(&mut **txn)
             .await?;
-        let created = load_event(&mut txn, id, false).await?;
+        let created = load_event(txn, id, false).await?;
         append_audit(
-            &mut txn,
+            txn,
             AuditEntry {
                 id,
                 action: "create",
@@ -131,8 +135,7 @@ impl Database {
             },
         )
         .await?;
-        metrics::project_event(&mut txn, id, &created.snapshot, at).await?;
-        commit_diary_write(txn, is_cancelled).await?;
+        metrics::project_event(txn, id, &created.snapshot, at).await?;
         Ok(created)
     }
 
@@ -168,40 +171,46 @@ impl Database {
         display_times: [Option<&str>; 2],
     ) -> Result<(StoredCustomEntry, bool), DiaryWriteError> {
         let mut txn = self.begin_diary_write(request.owner_id).await?;
+        let updated = Self::update_custom_entry_in(&mut txn, request, display_times).await?;
+        txn.commit().await?;
+        Ok(updated)
+    }
+
+    pub(crate) async fn update_custom_entry_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: UpdateCustomEntry<'_>,
+        display_times: [Option<&str>; 2],
+    ) -> Result<(StoredCustomEntry, bool), DiaryWriteError> {
         let (version, revision, timezone): (Uuid, i32, String) = sqlx::query_as(
             "SELECT definition_version_id,revision,timezone FROM events
              WHERE id=$1 AND NOT deleted AND definition_version_id IS NOT NULL FOR UPDATE",
         )
         .bind(request.id)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut **txn)
         .await?
         .ok_or(DiaryWriteError::EventMissing)?;
         if revision != request.expected_revision {
             return Err(DiaryWriteError::RevisionChanged);
         }
-        let contract = definition_version(
-            &mut txn,
-            request.owner_id,
-            request.entry.key(),
-            Some(version),
-        )
-        .await?
-        .ok_or(DiaryWriteError::CustomEntry)?;
+        let contract =
+            definition_version(txn, request.owner_id, request.entry.key(), Some(version))
+                .await?
+                .ok_or(DiaryWriteError::CustomEntry)?;
         if contract.operations["update"] != true {
             return Err(DiaryWriteError::OperationForbidden);
         }
         let entry = contract.resolve(request.entry, &timezone)?;
-        let before = load_event(&mut txn, request.id, false).await?;
+        let before = load_event(txn, request.id, false).await?;
         let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *txn)
+            .fetch_one(&mut **txn)
             .await?;
         let document = fields(&entry, request.actor, request.evidence_refs, at)?;
         sqlx::query(include_str!("custom_entries/update.sql"))
             .bind(request.id)
             .bind(document.to_string())
-            .execute(&mut *txn)
+            .execute(&mut **txn)
             .await?;
-        let mut written = load_event(&mut txn, request.id, false).await?;
+        let mut written = load_event(txn, request.id, false).await?;
         for (field, display) in ["start", "end"].into_iter().zip(display_times) {
             if let Some(display) = display
                 && !written.snapshot[field].is_null()
@@ -213,7 +222,7 @@ impl Database {
             }
         }
         append_audit(
-            &mut txn,
+            txn,
             AuditEntry {
                 id: request.id,
                 action: "update",
@@ -225,9 +234,8 @@ impl Database {
             },
         )
         .await?;
-        metrics::invalidate(&mut txn, request.id, at).await?;
-        metrics::project_event(&mut txn, request.id, &written.snapshot, at).await?;
-        txn.commit().await?;
+        metrics::invalidate(txn, request.id, at).await?;
+        metrics::project_event(txn, request.id, &written.snapshot, at).await?;
         Ok((written, contract.operations["query"] == true))
     }
 }
