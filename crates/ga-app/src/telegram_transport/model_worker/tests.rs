@@ -5,7 +5,10 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use ga_db::jobs::telegram_inbound::{LocalTelegramText, TelegramSafetyDecision};
+use ga_db::{
+    delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
+    jobs::telegram_inbound::{LocalTelegramText, TelegramSafetyDecision},
+};
 use ga_domain::model_response::StructuredModelOutput;
 use ga_model::ModelTransportError;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
@@ -199,6 +202,69 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
             "The diary contains the synthetic detail.\n\nBased on saved diary data.".into(),
             true
         )
+    );
+    let (outbox_id, conversation_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT id,conversation_id FROM outbox_messages WHERE memory_fence ? 'telegram_diary_analysis'",
+    ).fetch_one(&pool).await?;
+    let conversation = ConversationBinding {
+        owner_id,
+        conversation_id,
+    };
+    let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await?;
+    let observed = StoredInstant::try_from(now)?;
+    for state in [
+        DeliveryState::ProviderAccepted,
+        DeliveryState::Delivered,
+        DeliveryState::Read,
+    ] {
+        let mut txn = pool.begin().await?;
+        record_delivery_receipt(
+            &mut txn,
+            DeliveryTarget {
+                owner_id,
+                outbox_id,
+                lease_token: None,
+            },
+            DeliveryReceipt {
+                id: Uuid::new_v4(),
+                intent_id: outbox_id,
+                state,
+                observed_at: observed,
+                provider_reference: Some("synthetic-confirmed-analysis"),
+                detail: None,
+            },
+        )
+        .await?;
+        txn.commit().await?;
+        let memory = database.conversation_memory(conversation, observed).await?;
+        assert_eq!(memory.turns.len(), usize::from(state.confirms_delivery()));
+        if state.confirms_delivery() {
+            assert_eq!(
+                memory.turns[0]["question"],
+                "What is in the synthetic diary?"
+            );
+            assert_eq!(memory.turns[0]["answer"], replies[1].0);
+        }
+    }
+    sqlx::query("UPDATE conversations SET state=jsonb_set(state,'{analysis_turns}','[]'::jsonb) WHERE id=$1")
+        .bind(conversation_id).execute(&pool).await?;
+    assert_eq!(
+        database
+            .conversation_memory(conversation, observed)
+            .await?
+            .turns
+            .len(),
+        1
+    );
+    database.forget_conversation_memory(conversation).await?;
+    assert!(
+        database
+            .conversation_memory(conversation, observed)
+            .await?
+            .turns
+            .is_empty()
     );
     Ok(())
 }

@@ -4,7 +4,7 @@ use ga_domain::{
     access::{Scope, Scopes},
     timestamp::StoredInstant,
 };
-use sqlx::{Postgres, Transaction};
+use sqlx::{Acquire, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -212,6 +212,19 @@ pub async fn record_delivery_receipt(
     .bind(receipt.state != DeliveryState::Sending)
     .execute(&mut **txn)
     .await?;
+    if receipt.state.confirms_delivery() {
+        let mut savepoint = txn.begin().await?;
+        match crate::conversation_memory::remember_delivered_in(
+            &mut savepoint,
+            target.owner_id,
+            target.outbox_id,
+        )
+        .await
+        {
+            Ok(_) => savepoint.commit().await?,
+            Err(_) => savepoint.rollback().await?,
+        }
+    }
     Ok(evidence_id)
 }
 
