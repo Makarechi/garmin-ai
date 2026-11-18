@@ -1,11 +1,15 @@
 use ga_db::{
     Database,
-    diary::{CreateSystemEvent, DeleteEvent, DiaryReadError, DiaryWriteError},
+    diary::{
+        CreateSystemEvent, DeleteEvent, DiaryReadError, DiaryWriteError,
+        custom_entries::CreateCustomEntry,
+    },
     health_analysis::HealthAnalysisError,
 };
 use ga_domain::{
     event_input::{EventInput, ValidationMode},
-    event_replay::check_idempotency_key,
+    event_replay::{ReplayConflict, check_idempotency_key},
+    event_schema::CustomEntry,
     legacy_json::{Utf8Layout, encode},
 };
 use rmcp::{
@@ -32,6 +36,7 @@ const WRITE_TOOLS: &[&str] = &[
     include_str!("../contracts/mcp-events-create.json"),
     include_str!("../contracts/mcp-events-update.json"),
     include_str!("../contracts/mcp-events-delete.json"),
+    include_str!("../contracts/mcp-entries-create.json"),
 ];
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
@@ -143,6 +148,7 @@ impl ServerHandler for Mcp {
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
             "events_update" if enable_writes => self.update(args, is_cancelled).await,
             "events_delete" if enable_writes => self.delete(args, is_cancelled).await,
+            "entries_create" if enable_writes => self.create_custom(args, is_cancelled).await,
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
             }
@@ -247,18 +253,10 @@ impl Mcp {
 
     async fn create(
         &self,
-        mut args: serde_json::Map<String, Value>,
+        args: Map<String, Value>,
         is_cancelled: impl Fn() -> bool,
     ) -> Result<CallToolResult, &'static str> {
-        let Some(event) = args.remove("event") else {
-            return Err("ValidationError");
-        };
-        let Some(Value::String(key)) = args.remove("idempotency_key") else {
-            return Err("ValidationError");
-        };
-        if !args.is_empty() || check_idempotency_key(&key).is_err() {
-            return Err("ValidationError");
-        }
+        let (event, key) = creation_arguments(args, "event")?;
         let input = serde_json::to_vec(&event).map_err(|_| "ValidationError")?;
         let report = EventInput::from_json(&input, MAX_MESSAGE_BYTES, ValidationMode::NewReport)
             .and_then(EventInput::into_mcp_report)
@@ -281,6 +279,35 @@ impl Mcp {
         tool_result(entry.snapshot)
     }
 
+    async fn create_custom(
+        &self,
+        args: Map<String, Value>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<CallToolResult, &'static str> {
+        let (entry, key) = creation_arguments(args, "entry")?;
+        if entry["values"].get("type").is_some() {
+            return Err("ValueError");
+        }
+        let entry = CustomEntry::from_value(entry)
+            .map_err(|_| "ValidationError")?
+            .into_mcp_entry();
+        let stored = self
+            .database
+            .create_custom_entry_unless_cancelled(
+                CreateCustomEntry {
+                    owner_id: self.owner,
+                    actor: "mcp",
+                    entry: &entry,
+                    idempotency_key: Some(&key),
+                    evidence_refs: &[],
+                },
+                is_cancelled,
+            )
+            .await
+            .map_err(write_error)?;
+        tool_result(stored.snapshot)
+    }
+
     async fn events(
         &self,
         args: serde_json::Map<String, Value>,
@@ -297,6 +324,20 @@ impl Mcp {
             .map_err(diary_error)?;
         tool_result(page.value)
     }
+}
+
+fn creation_arguments(
+    mut args: Map<String, Value>,
+    field: &str,
+) -> Result<(Value, String), &'static str> {
+    let entry = args.remove(field).ok_or("ValidationError")?;
+    let Some(Value::String(key)) = args.remove("idempotency_key") else {
+        return Err("ValidationError");
+    };
+    if !args.is_empty() || check_idempotency_key(&key).is_err() {
+        return Err("ValidationError");
+    }
+    Ok((entry, key))
 }
 
 fn revision_target(args: &Map<String, Value>) -> Result<(Uuid, i32), &'static str> {
@@ -376,6 +417,9 @@ fn write_error(error: DiaryWriteError) -> &'static str {
         DiaryWriteError::Input(_) => "ValidationError",
         DiaryWriteError::EventMissing => "LookupError",
         DiaryWriteError::RevisionChanged
+        | DiaryWriteError::Replay(
+            ReplayConflict::AuditUnavailable | ReplayConflict::InputChanged,
+        )
         | DiaryWriteError::LinkedObservations
         | DiaryWriteError::SelfReference(_)
         | DiaryWriteError::SymptomBounds => "Conflict",

@@ -1,0 +1,135 @@
+{
+  "name": "entries_create",
+  "description": "Record a fact for an active custom definition using its validated version.",
+  "inputSchema": {
+    "$defs": {
+      "CustomEntryInput": {
+        "additionalProperties": false,
+        "properties": {
+          "definition_key": {
+            "pattern": "^user\\.[a-z][a-z0-9_]{0,62}$",
+            "title": "Definition Key",
+            "type": "string"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timezone"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "telegram_text",
+              "telegram_button",
+              "telegram_voice",
+              "mcp",
+              "file_import"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "confidence": {
+            "default": 1,
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "status": {
+            "default": "confirmed",
+            "enum": [
+              "confirmed",
+              "needs_confirmation"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "original_text": {
+            "anyOf": [
+              {
+                "maxLength": 16000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Original Text"
+          },
+          "values": {
+            "additionalProperties": true,
+            "maxProperties": 32,
+            "title": "Values",
+            "type": "object"
+          },
+          "units": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 32,
+            "title": "Units",
+            "type": "object"
+          }
+        },
+        "required": [
+          "definition_key",
+          "start",
+          "values"
+        ],
+        "title": "CustomEntryInput",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "entry": {
+        "$ref": "#/$defs/CustomEntryInput"
+      },
+      "idempotency_key": {
+        "maxLength": 200,
+        "minLength": 1,
+        "title": "Idempotency Key",
+        "type": "string"
+      }
+    },
+    "required": [
+      "entry",
+      "idempotency_key"
+    ],
+    "title": "CustomCreateArgs",
+    "type": "object"
+  },
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  }
+}
