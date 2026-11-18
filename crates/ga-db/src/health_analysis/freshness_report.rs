@@ -78,14 +78,22 @@ impl Database {
             } else {
                 configured_timezone.to_owned()
             };
-            let (today, midnight) = freshness_day(at, &timezone)?;
-            let report = read_report(&mut txn, at, today, midnight).await?;
+            let report = data_freshness_in(&mut txn, at, &timezone).await?;
             txn.commit().await?;
             Ok(report)
         })
         .await
         .map_err(|_| HealthAnalysisError::Database)?
     }
+}
+
+pub(crate) async fn data_freshness_in(
+    txn: &mut Transaction<'_, Postgres>,
+    at: StoredInstant,
+    timezone: &str,
+) -> Result<Value, HealthAnalysisError> {
+    let (today, midnight) = freshness_day(at, timezone)?;
+    read_report(txn, at, today, midnight).await
 }
 
 async fn read_report(

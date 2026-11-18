@@ -23,7 +23,7 @@ use crate::{
     proactive_control::{ProactiveCommand, ProactiveControlError, set_in},
     replay::REPLAY_MUTATION_LOCK,
     telegram_binding::{TelegramBindingError, confirmed_pairing},
-    telegram_today,
+    telegram_garmin,
 };
 
 #[derive(Debug)]
@@ -70,6 +70,7 @@ impl Database {
         &self,
         lease: &TelegramInboundLease,
         question_budget: u16,
+        configured_timezone: &str,
     ) -> Result<QueuedIntent, TelegramControlError> {
         let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
             .map_err(|_| TelegramControlError::Malformed)?;
@@ -81,6 +82,7 @@ impl Database {
                 command @ (TelegramControl::Pause
                 | TelegramControl::Resume
                 | TelegramControl::Today
+                | TelegramControl::Status
                 | TelegramControl::Help
                 | TelegramControl::Start
                 | TelegramControl::Debug
@@ -115,13 +117,18 @@ impl Database {
                     reply_fence = Some(fence);
                     text
                 }
-                TelegramControl::Today => {
+                TelegramControl::Today | TelegramControl::Status => {
                     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
                         .bind(REPLAY_MUTATION_LOCK).fetch_one(&mut *txn).await?;
                     if !locked {
                         return Err(TelegramControlError::Database);
                     }
-                    let (text, fence) = telegram_today::capture(&mut txn, conversation).await?;
+                    let (text, fence) = if command == TelegramControl::Today {
+                        telegram_garmin::capture_today(&mut txn, conversation).await?
+                    } else {
+                        let now = sqlx::query_scalar("SELECT clock_timestamp()").fetch_one(&mut *txn).await?;
+                        telegram_garmin::capture_status(&mut txn, conversation, configured_timezone, now).await?
+                    };
                     reply_fence = Some(fence);
                     text
                 }

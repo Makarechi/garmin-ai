@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod freshness_report;
+pub(crate) use freshness_report::data_freshness_in;
 
 const MAX_RANGE_DAYS: i64 = 3660;
 
@@ -192,7 +193,7 @@ impl DailyHealthReader {
     }
 }
 
-async fn owner_timezone(
+pub(crate) async fn owner_timezone(
     txn: &mut Transaction<'_, Postgres>,
     configured: &str,
 ) -> Result<String, HealthAnalysisError> {

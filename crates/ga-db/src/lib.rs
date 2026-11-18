@@ -35,7 +35,7 @@ pub mod system_definitions;
 pub mod system_metrics;
 pub mod telegram_binding;
 pub mod telegram_cursor;
-mod telegram_today;
+mod telegram_garmin;
 
 use std::{str::FromStr, time::Duration};
 

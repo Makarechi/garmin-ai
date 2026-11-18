@@ -103,7 +103,9 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .ok_or("Missing forget lease")?;
     assert_ne!(forget.message_id(), diary.message_id());
     assert!(matches!(
-        database.apply_telegram_owner_control(&forget, 3).await,
+        database
+            .apply_telegram_owner_control(&forget, 3, "Europe/Bratislava")
+            .await,
         Err(TelegramControlError::Outbox(_))
     ));
     let (epoch, count): (Uuid, i64) = sqlx::query_as(
@@ -122,10 +124,14 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
     sqlx::query("DROP TRIGGER fixture_fail_owner_reply ON outbox_messages")
         .execute(&pool)
         .await?;
-    let applied = database.apply_telegram_owner_control(&forget, 3).await?;
+    let applied = database
+        .apply_telegram_owner_control(&forget, 3, "Europe/Bratislava")
+        .await?;
     assert!(applied.created);
     assert!(matches!(
-        database.apply_telegram_owner_control(&forget, 3).await,
+        database
+            .apply_telegram_owner_control(&forget, 3, "Europe/Bratislava")
+            .await,
         Err(TelegramControlError::Job(JobStoreError::LeaseLost))
     ));
     let committed: (Uuid, Option<String>) = sqlx::query_as(
@@ -157,7 +163,9 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .execute(&pool)
         .await?;
     assert!(matches!(
-        database.apply_telegram_owner_control(&pause, 3).await,
+        database
+            .apply_telegram_owner_control(&pause, 3, "Europe/Bratislava")
+            .await,
         Err(TelegramControlError::Pairing(_) | TelegramControlError::BindingChanged)
     ));
     assert!(
@@ -174,7 +182,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .await?;
     assert!(
         database
-            .apply_telegram_owner_control(&pause, 3)
+            .apply_telegram_owner_control(&pause, 3, "Europe/Bratislava")
             .await?
             .created
     );
@@ -184,7 +192,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .ok_or("Missing resume lease")?;
     assert!(
         database
-            .apply_telegram_owner_control(&resume, 4)
+            .apply_telegram_owner_control(&resume, 4, "Europe/Bratislava")
             .await?
             .created
     );
@@ -194,7 +202,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .ok_or("Missing status lease")?;
     assert!(
         database
-            .apply_telegram_owner_control(&today, 4)
+            .apply_telegram_owner_control(&today, 4, "Europe/Bratislava")
             .await?
             .created
     );
@@ -268,7 +276,9 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             .claim_telegram_control(target, now, 60)
             .await?
             .ok_or("Missing daily summary")?;
-        let recorded = database.apply_telegram_owner_control(&lease, 4).await?;
+        let recorded = database
+            .apply_telegram_owner_control(&lease, 4, "Europe/Bratislava")
+            .await?;
         let (captured, guarded): (String, bool) = sqlx::query_as(
             "SELECT intent#>>'{blocks,0,text}',memory_fence ? 'telegram_today' FROM outbox_messages WHERE id=$1",
         ).bind(recorded.outbox_id).fetch_one(&pool).await?;
@@ -333,7 +343,9 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .claim_local_telegram_control(target, now, 60)
         .await?
         .ok_or("Missing diagnostic enable command")?;
-    let enabled = database.apply_telegram_owner_control(&enable, 4).await?;
+    let enabled = database
+        .apply_telegram_owner_control(&enable, 4, "Europe/Bratislava")
+        .await?;
     let destination = || ReplyDestination {
         owner_id: owner,
         channel: "telegram",
@@ -352,7 +364,9 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .claim_local_telegram_control(target, now, 60)
         .await?
         .ok_or("Missing diagnostic disable command")?;
-    let disabled = database.apply_telegram_owner_control(&disable, 4).await?;
+    let disabled = database
+        .apply_telegram_owner_control(&disable, 4, "Europe/Bratislava")
+        .await?;
     assert_eq!(
         database
             .dispatch_telegram_outbox_reply(destination(), 42, old, &[], |_| {
@@ -371,7 +385,9 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .claim_local_telegram_control(target, now, 60)
         .await?
         .ok_or("Missing older diagnostic command")?;
-    database.apply_telegram_owner_control(&late, 4).await?;
+    database
+        .apply_telegram_owner_control(&late, 4, "Europe/Bratislava")
+        .await?;
     let (enabled, update): (bool, i64) = sqlx::query_as(
         "SELECT (value->>'enabled')::bool,(value->>'update_id')::bigint
          FROM app_state WHERE key='telegram:debug'",
@@ -395,8 +411,73 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored, 2);
+
+    sqlx::raw_sql(
+        r#"UPDATE outbox_messages SET state='delivered' WHERE state='queued' AND memory_fence ? 'telegram_debug';
+           DELETE FROM source_payloads WHERE archive_key='synthetic/archive';
+           UPDATE health_days SET hrv_nightly_avg=NULL;
+           INSERT INTO app_state(key,value) VALUES
+             ('integration:garmin','{"status":"reauth_required","reason_class":"AccountMismatch"}'),
+             ('freshness:synthetic:live','{"source_key":"live","success_at":"2026-10-25T00:30:00+00:00"}'),
+             ('freshness:historical:2000-01-02','{"source_key":"2000-01-02","success_at":"2026-11-17T12:00:00+00:00"}');"#,
+    ).execute(&pool).await?;
+    // Captured with migration/check_telegram_status.py against pinned Python.
+    let expected_status = concat!(
+        "Связь с базой работает. Сохранено дней: 2. Обновляемых источников: 1.\n",
+        "Garmin: синхронизация остановлена, проверьте привязку владельца аккаунта локально. ",
+        "Последний успешный ответ Garmin: 25.10 02:30.\n",
+        "Пульс часов: нет сохранённых измерений. Данных недостаточно для оценки текущего состояния. ",
+        "Покрытие дня без заполнения пропусков: 0%.\nНочной HRV: нет данных.",
+    );
+    for (update, stale) in [(30, false), (31, true)] {
+        binding
+            .accept_polled_update(&mut runtime, &wire(update, "/status"), now, false)
+            .await?;
+        let command = database
+            .claim_local_telegram_control(target, now, 60)
+            .await?
+            .ok_or("Missing status command")?;
+        let stored = database
+            .apply_telegram_owner_control(&command, 4, "Europe/Bratislava")
+            .await?;
+        let (captured, guarded): (String, bool) = sqlx::query_as(
+            "SELECT intent#>>'{blocks,0,text}',memory_fence ? 'telegram_status' FROM outbox_messages WHERE id=$1",
+        ).bind(stored.outbox_id).fetch_one(&pool).await?;
+        assert!(guarded);
+        assert_eq!(captured, expected_status);
+        let lease = database
+            .claim_outbox_reply(destination(), now, 60)
+            .await?
+            .ok_or("Missing status reply")?;
+        assert_eq!(lease.outbox_id, stored.outbox_id);
+        if stale {
+            sqlx::query("UPDATE app_state SET value='{\"id\":\"changed-after-status\"}' WHERE key='replay:generation'")
+                .execute(&pool).await?;
+        }
+        let sent = database
+            .dispatch_telegram_outbox_reply(destination(), 42, lease, &[], |intent| {
+                assert_eq!(
+                    intent["blocks"][0]["text"],
+                    if stale { notice } else { expected_status }
+                );
+                ready(Some(ReplySendOutcome::Observation(ReplyObservation {
+                    state: DeliveryState::ProviderAccepted,
+                    observed_at: now,
+                    provider_reference: Some(update.to_string()),
+                    detail: None,
+                })))
+            })
+            .await?;
+        assert!(matches!(
+            sent,
+            ReplyDispatchResult::Recorded {
+                state: DeliveryState::ProviderAccepted,
+                ..
+            }
+        ));
+    }
     println!(
-        "Verified durable owner controls, daily summaries, and suppression of stale diagnostic replies"
+        "Verified durable owner controls, Garmin summaries and status, and suppression of stale replies"
     );
     Ok(())
 }

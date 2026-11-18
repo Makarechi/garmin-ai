@@ -100,6 +100,7 @@ impl TelegramTransport {
         database: &Database,
         settings: &TelegramIngressSettings,
         question_budget: u16,
+        configured_timezone: &str,
     ) -> ! {
         loop {
             if let (Ok(binding), Ok(now)) =
@@ -113,7 +114,7 @@ impl TelegramTransport {
                     .claim_local_telegram_control(target, now, CONTROL_LEASE_SECONDS)
                     .await
                     && database
-                        .apply_telegram_owner_control(&lease, question_budget)
+                        .apply_telegram_owner_control(&lease, question_budget, configured_timezone)
                         .await
                         .is_ok()
                 {
