@@ -1,4 +1,5 @@
 use std::{
+    env,
     error::Error,
     fmt, future,
     num::NonZeroUsize,
@@ -8,6 +9,7 @@ use std::{
 };
 
 use ga_app::{
+    model_gateway::{ModelEnvironmentError, RuntimeModelSettings},
     telegram_settings::TelegramIngressSettings,
     telegram_transport::{DiaryReminderSettings, TelegramTransport},
 };
@@ -164,6 +166,32 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
     }))
 }
 
+fn reminder_model_available(database: &Database, now: StoredInstant) -> bool {
+    let settings = RuntimeModelSettings::resolve(
+        |name| {
+            configuration::read([name])
+                .map(|[value]| value)
+                .map_err(|_| ModelEnvironmentError::Invalid)
+        },
+        |name| match env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(env::VarError::NotUnicode(_)) => Err(ModelEnvironmentError::Invalid),
+        },
+    );
+    match settings {
+        Ok(Some(settings)) => settings
+            .configured()
+            .gateway(database.clone(), false, now)
+            .is_ok(),
+        Ok(None) => false,
+        Err(error) => {
+            eprintln!("{error}");
+            false
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     let config = Configuration::read()?;
@@ -173,6 +201,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .flatten();
     let database = Database::connect_lazy(&config.database_url)
         .map_err(|_| ReplayServiceError::Configuration)?;
+    let reminders_available = telegram.is_some() && reminder_model_available(&database, clock()?);
     let archive = Arc::new(
         Archive::open_read_only(&config.raw_archive).map_err(|_| ReplayServiceError::Archive)?,
     );
@@ -214,16 +243,23 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     let (recovered, wait_for_recovery) = watch::channel(false);
     let receive = async {
         if let Some(telegram) = &telegram {
-            telegram
-                .transport
-                .run_receiver_with_reminders(
-                    &database,
-                    &mut singleton,
-                    &telegram.settings,
-                    recovered,
-                )
-                .await
-                .map_err(ReplayServiceError::Lease)
+            if reminders_available {
+                telegram
+                    .transport
+                    .run_receiver_with_reminders(
+                        &database,
+                        &mut singleton,
+                        &telegram.settings,
+                        recovered,
+                    )
+                    .await
+            } else {
+                telegram
+                    .transport
+                    .run_receiver(&database, &mut singleton, &telegram.settings)
+                    .await
+            }
+            .map_err(ReplayServiceError::Lease)
         } else {
             singleton
                 .while_held(future::pending::<()>())
@@ -242,7 +278,12 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_acknowledgements(&database, settings) => result,
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
                 result = transport.run_replies(&database, settings) => result,
-                result = transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery) => result,
+                result = async {
+                    if reminders_available {
+                        transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery).await
+                    }
+                    future::pending().await
+                } => result,
             }
         }
         future::pending::<Result<(), ReplayServiceError>>().await

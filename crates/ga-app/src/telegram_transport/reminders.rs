@@ -115,7 +115,15 @@ impl TelegramTransport {
                 policy,
                 now,
                 |text| async move {
-                    if !*ready.borrow() {
+                    let allowed = database
+                        .telegram_diary_reminders_enabled(
+                            binding.owner_id,
+                            binding.instance_id,
+                            policy.default_enabled,
+                        )
+                        .await
+                        .unwrap_or(false);
+                    if !allowed || !*ready.borrow() {
                         return retry_outcome(now, RETRY_INTERVAL);
                     }
                     self.send_diary_reminder(binding, now, text).await

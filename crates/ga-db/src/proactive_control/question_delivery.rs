@@ -68,7 +68,10 @@ impl Database {
             let enabled: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM people WHERE id=$1)
                      AND coalesce((SELECT value->'enabled' = 'true'::jsonb
-                         FROM app_state WHERE key='proactive:enabled'),$2)",
+                         FROM app_state WHERE key='proactive:enabled'),$2)
+                     AND coalesce((SELECT CASE WHEN jsonb_typeof(value->'model_categories')='array'
+                         THEN value->'model_categories' ?| ARRAY['health','diary','audio'] ELSE false END
+                         FROM app_state WHERE key='preferences:onboarding'),true)",
             )
             .bind(owner)
             .bind(default_enabled)

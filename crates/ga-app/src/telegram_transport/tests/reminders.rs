@@ -44,13 +44,30 @@ async fn worker_recovers_and_sends_one_current_reminder() -> Result<(), Box<dyn 
          INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
          SELECT gen_random_uuid(),id,'telegram','primary','42','fixture' FROM people;
          INSERT INTO app_state(key,value) VALUES
-           ('preferences:onboarding','{\"channel\":{\"channel\":\"telegram\",\"instance_id\":\"primary\"}}'),
+           ('preferences:onboarding','{\"channel\":{\"channel\":\"telegram\",\"instance_id\":\"primary\"},\"model_categories\":[\"diary\"]}'),
            ('proactive:enabled','{\"enabled\":true}');",
     ).execute(&pool).await?;
     let owner: Uuid = sqlx::query_scalar("SELECT id FROM people")
         .fetch_one(&pool)
         .await?;
     let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    sqlx::query(
+        "UPDATE app_state SET value=value-'model_categories' WHERE key='preferences:onboarding'",
+    )
+    .execute(&pool)
+    .await?;
+    assert!(
+        !database
+            .telegram_diary_reminders_enabled(owner, "primary", true)
+            .await?
+    );
+    sqlx::query("UPDATE app_state SET value=value || '{\"model_categories\":[\"diary\"]}'::jsonb WHERE key='preferences:onboarding'")
+        .execute(&pool).await?;
+    assert!(
+        database
+            .telegram_diary_reminders_enabled(owner, "primary", false)
+            .await?
+    );
     let clock = OffsetDateTime::now_utc();
     let now = clock.replace_nanosecond(clock.microsecond() * 1_000)?;
     let start = StoredInstant::try_from(now - time::Duration::hours(3))?;
