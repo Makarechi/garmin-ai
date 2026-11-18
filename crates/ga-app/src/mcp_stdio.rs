@@ -1,4 +1,4 @@
-use ga_db::{Database, diary::DiaryReadError};
+use ga_db::{Database, diary::DiaryReadError, health_analysis::HealthAnalysisError};
 use ga_domain::legacy_json::{Utf8Layout, encode};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -10,13 +10,13 @@ use rmcp::{
     service::RequestContext,
     transport::{async_rw::AsyncRwTransport, stdio_pipes},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::{
     configuration,
-    http::tools::{event_tool_description, range_with_kind},
+    http::tools::{GarminReadError, ReadTool, range_with_kind, read_garmin},
 };
 
 const INSTRUCTIONS: &str = include_str!("../../../src/garmin_ai/prompts/mcp_server.txt");
@@ -26,7 +26,7 @@ const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 struct Mcp {
     database: Database,
     owner: Uuid,
-    events_tool: Tool,
+    read_tools: Vec<Tool>,
     active_reads: Semaphore,
 }
 
@@ -51,7 +51,10 @@ pub(crate) async fn run() -> Result<(), &'static str> {
     let service = Mcp {
         database,
         owner,
-        events_tool: diary_tool()?,
+        read_tools: std::iter::once(ReadTool::Events)
+            .chain(ReadTool::MCP_GARMIN)
+            .map(read_tool)
+            .collect::<Result<_, _>>()?,
         active_reads: Semaphore::new(2),
     };
     let (input, output) = stdio_pipes();
@@ -67,17 +70,17 @@ pub(crate) async fn run() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn diary_tool() -> Result<Tool, &'static str> {
-    let mut description = event_tool_description();
+fn read_tool(tool: ReadTool) -> Result<Tool, &'static str> {
+    let mut description = tool.catalog_entry();
     let schema = description["input_schema"].take();
     let Value::Object(schema) = schema else {
-        return Err("The MCP diary tool schema is invalid");
+        return Err("The MCP read tool schema is invalid");
     };
     let description = description["description"]
         .as_str()
-        .ok_or("The MCP diary tool description is invalid")?;
+        .ok_or("The MCP read tool description is invalid")?;
     Ok(
-        Tool::new("events", description.to_owned(), schema).with_annotations(
+        Tool::new(tool.name(), description.to_owned(), schema).with_annotations(
             ToolAnnotations::from_raw(None, Some(true), Some(false), None, Some(false)),
         ),
     )
@@ -101,9 +104,7 @@ impl ServerHandler for Mcp {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(vec![
-            self.events_tool.clone(),
-        ]))
+        Ok(ListToolsResult::with_all_items(self.read_tools.clone()))
     }
 
     async fn call_tool(
@@ -116,7 +117,13 @@ impl ServerHandler for Mcp {
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
             }
-            _ => Err("ValueError"),
+            tool_name => match ReadTool::MCP_GARMIN
+                .into_iter()
+                .find(|tool| tool.name() == tool_name)
+            {
+                Some(tool) => self.garmin(tool, call.arguments.unwrap_or_default()).await,
+                None => Err("ValueError"),
+            },
         };
         let mut result = result.unwrap_or_else(|class| CallToolResult::error(vec![ContentBlock::text(format!(
             "Operation failed ({class}); reload the record or check arguments. No sensitive details logged.",
@@ -127,6 +134,21 @@ impl ServerHandler for Mcp {
 }
 
 impl Mcp {
+    async fn garmin(
+        &self,
+        tool: ReadTool,
+        args: serde_json::Map<String, Value>,
+    ) -> Result<CallToolResult, &'static str> {
+        let _permit = self
+            .active_reads
+            .try_acquire()
+            .map_err(|_| "RuntimeError")?;
+        let result = read_garmin(&self.database, tool, &args, Some(self.owner))
+            .await
+            .map_err(garmin_error)?;
+        tool_result(result)
+    }
+
     async fn events(
         &self,
         args: serde_json::Map<String, Value>,
@@ -141,13 +163,35 @@ impl Mcp {
             .list_mcp_events(self.owner, start, end, kind)
             .await
             .map_err(diary_error)?;
-        let compact = serde_json::to_vec(&page.value).map_err(|_| "ValueError")?;
-        let encoded =
-            encode(&compact, Utf8Layout::Ordered, MAX_RESULT_BYTES).map_err(|_| "ValueError")?;
-        let text = String::from_utf8(encoded).map_err(|_| "ValueError")?;
-        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-        result.structured_content = Some(page.value);
-        Ok(result)
+        tool_result(page.value)
+    }
+}
+
+fn tool_result(value: Value) -> Result<CallToolResult, &'static str> {
+    let value = if value.is_object() {
+        value
+    } else {
+        json!({"rows": value})
+    };
+    let compact = serde_json::to_vec(&value).map_err(|_| "ValueError")?;
+    let encoded =
+        encode(&compact, Utf8Layout::Ordered, MAX_RESULT_BYTES).map_err(|_| "ValueError")?;
+    let text = String::from_utf8(encoded).map_err(|_| "ValueError")?;
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+    result.structured_content = Some(value);
+    Ok(result)
+}
+
+fn garmin_error(error: GarminReadError) -> &'static str {
+    match error {
+        GarminReadError::Arguments => "ValidationError",
+        GarminReadError::Missing => "LookupError",
+        GarminReadError::Permission => "PermissionError",
+        GarminReadError::Health(HealthAnalysisError::ReplayPending) => "ReplayUnavailable",
+        GarminReadError::Health(
+            HealthAnalysisError::Storage(_) | HealthAnalysisError::Database,
+        ) => "RuntimeError",
+        _ => "ValueError",
     }
 }
 
