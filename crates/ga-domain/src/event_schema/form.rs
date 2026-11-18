@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
-use super::custom::ExactNumber;
+use super::custom::{ExactNumber, python_equal};
 
 mod minimum;
 
@@ -178,7 +178,14 @@ fn resolve(
             original.get("enum").and_then(Value::as_array),
             current.get("enum").and_then(Value::as_array),
         ) {
-            let allowed: Vec<_> = base.iter().filter(|item| sibling.contains(item)).collect();
+            let allowed: Vec<_> = base
+                .iter()
+                .filter(|item| {
+                    sibling
+                        .iter()
+                        .any(|candidate| python_equal(item, candidate))
+                })
+                .collect();
             merged.insert("enum".into(), json!(allowed));
         }
         current = merged;

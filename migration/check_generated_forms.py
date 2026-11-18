@@ -38,6 +38,7 @@ def seed_complex(engine):
             "items": {"type": "number", "exclusiveMinimum": 1.23, "exclusiveMaximum": 1.24},
         },
         "rating": {"$ref": "#/$defs/range", "minimum": 2},
+        "numeric_choice": {"$ref": "#/$defs/numeric_choices", "enum": [1.0]},
         "select": {"type": "string", "enum": ["первый", "второй"], "maxLength": 100},
     }
     draft = {
@@ -63,6 +64,7 @@ def seed_complex(engine):
                     "required": ["description", "count"],
                 },
                 "range": {"type": "integer", "minimum": 1, "maximum": 8},
+                "numeric_choices": {"type": "number", "enum": [1, 3.5]},
             },
         },
         "fields": {
@@ -149,6 +151,9 @@ def compare(python, rust, entries):
     assert english["title"] != russian["title"] and nonce != repeated
     assert any(field["complex_json"] for field in russian["fields"])
     assert any(field["min_json_length"] for field in russian["fields"])
+    assert next(field for field in russian["fields"] if field["name"] == "numeric_choice")[
+        "options"
+    ] == [1]
     for key in ("active_actions", "retired_actions"):
         action = python.get(f"/actions/events/{entries[key]}", headers=auth).json()
         current, _ = form(action["id"], 200, locale="en")
