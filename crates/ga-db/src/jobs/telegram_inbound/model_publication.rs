@@ -38,6 +38,7 @@ pub struct TelegramModelContext<'a> {
 pub(super) struct CurrentTelegramModelContext {
     memory: MemoryFence,
     pub(super) offered: Vec<Value>,
+    pub(super) questions: Vec<Value>,
     versions: BTreeSet<Uuid>,
     pub(super) pending_clarification: Option<Value>,
     pub(super) selection_unavailable: bool,
@@ -51,6 +52,7 @@ impl CurrentTelegramModelContext {
 
 pub(super) async fn verify(
     txn: &mut Transaction<'_, Postgres>,
+    lease: &Lease,
     envelope: &InboundEnvelope,
     expected: TelegramModelContext<'_>,
 ) -> Result<CurrentTelegramModelContext, TelegramDiaryCommitError> {
@@ -81,16 +83,21 @@ pub(super) async fn verify(
         .fetch_one(&mut **txn)
         .await?;
     let at = StoredInstant::try_from(at).map_err(|_| Database)?;
+    let binding = ConversationBinding {
+        owner_id: envelope.owner_id(),
+        conversation_id: envelope.conversation_id(),
+    };
+    let local_prompt = super::history::prompt::inspect(txn, binding, lease, envelope, at).await?;
+    if local_prompt.guided_form || local_prompt.draft.is_some() || local_prompt.notice.is_some() {
+        return Err(ModelContextChanged);
+    }
     let message_at =
         StoredInstant::try_from(envelope.occurred_at().unwrap_or(envelope.received_at()))
             .map_err(|_| ModelContextChanged)?;
     let current = interpretation_context_in(
         txn,
         InterpretationContextQuery {
-            binding: ConversationBinding {
-                owner_id: envelope.owner_id(),
-                conversation_id: envelope.conversation_id(),
-            },
+            binding,
             model,
             now: message_at,
             clarification_clock: ClarificationClock {
@@ -114,6 +121,7 @@ pub(super) async fn verify(
     Ok(CurrentTelegramModelContext {
         memory: current.memory_fence,
         offered: current.events.entries,
+        questions: current.recent_questions,
         versions: current.events.channel_versions,
         pending_clarification: current.pending_clarification,
         selection_unavailable: current.selection_unavailable,

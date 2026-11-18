@@ -6,7 +6,7 @@ use ga_domain::{
     sha256_hex,
 };
 use serde_json::{Map, Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Acquire, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -111,6 +111,29 @@ pub(crate) async fn undo_and_reconcile(
         .await?;
     proactive_answers::reconcile(txn, request.owner_id, now, &timezone).await?;
     Ok(result)
+}
+
+pub(crate) async fn try_undo_and_reconcile(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &UndoDiaryOperation<'_>,
+    configured_timezone: &str,
+) -> Result<Option<UndoneDiaryOperation>, DiaryWriteError> {
+    let mut savepoint = txn.begin().await?;
+    match undo_and_reconcile(&mut savepoint, request, configured_timezone).await {
+        Ok(undone) => {
+            savepoint.commit().await?;
+            Ok(Some(undone))
+        }
+        Err(
+            DiaryWriteError::NothingToUndo
+            | DiaryWriteError::UndoConflict
+            | DiaryWriteError::LinkedObservations,
+        ) => {
+            savepoint.rollback().await?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn apply_undo(
