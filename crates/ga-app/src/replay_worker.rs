@@ -307,7 +307,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             tokio::select! {
                 result = transport.run_acknowledgements(&database, settings) => result,
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
-                result = transport.run_history(&database, settings) => result,
+                result = transport.run_local_diary(&database, settings, &config.timezone) => result,
                 result = transport.run_replies(&database, settings) => result,
                 result = async {
                     if reminders_available {

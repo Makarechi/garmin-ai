@@ -75,21 +75,15 @@ impl Database {
             txn.commit().await?;
             return Ok(receipt);
         }
-        let result = apply_undo(
+        let result = undo_and_reconcile(
             &mut txn,
             &UndoDiaryOperation {
                 owner_id: owner,
                 authenticated_actor: "api",
             },
+            configured_timezone,
         )
         .await?;
-        let timezone = owner_timezone(&mut txn, configured_timezone)
-            .await
-            .map_err(|_| DiaryWriteError::Database)?;
-        let now = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *txn)
-            .await?;
-        proactive_answers::reconcile(&mut txn, owner, now, &timezone).await?;
         let receipt = json!({"id":result.id.to_string(), "revision":result.revision, "deleted":result.deleted});
         if let Some(key) = key.as_deref() {
             sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
@@ -101,6 +95,22 @@ impl Database {
         txn.commit().await?;
         Ok(receipt)
     }
+}
+
+pub(crate) async fn undo_and_reconcile(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &UndoDiaryOperation<'_>,
+    configured_timezone: &str,
+) -> Result<UndoneDiaryOperation, DiaryWriteError> {
+    let result = apply_undo(txn, request).await?;
+    let timezone = owner_timezone(txn, configured_timezone)
+        .await
+        .map_err(|_| DiaryWriteError::Database)?;
+    let now = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **txn)
+        .await?;
+    proactive_answers::reconcile(txn, request.owner_id, now, &timezone).await?;
+    Ok(result)
 }
 
 async fn apply_undo(

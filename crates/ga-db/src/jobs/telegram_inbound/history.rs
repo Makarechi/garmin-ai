@@ -1,3 +1,4 @@
+mod commands;
 mod labels;
 mod legacy;
 mod prompt;
@@ -145,8 +146,22 @@ impl Database {
         &self,
         lease: &TelegramInboundLease,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        self.apply_local_telegram_diary(lease, "Europe/Bratislava")
+            .await
+    }
+
+    pub async fn apply_local_telegram_diary(
+        &self,
+        lease: &TelegramInboundLease,
+        configured_timezone: &str,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
         let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+        if let Some(command) = commands::Command::from_envelope(&envelope) {
+            return self
+                .apply_telegram_diary_command(lease, &envelope, command, configured_timezone)
+                .await;
+        }
         if HistoryPage::from_update(&envelope).is_some() || expired_history(&envelope) {
             self.apply_telegram_history_page(lease).await
         } else {

@@ -206,6 +206,16 @@ impl TelegramTransport {
     }
 
     pub async fn run_history(&self, database: &Database, settings: &TelegramIngressSettings) -> ! {
+        self.run_local_diary(database, settings, "Europe/Bratislava")
+            .await
+    }
+
+    pub async fn run_local_diary(
+        &self,
+        database: &Database,
+        settings: &TelegramIngressSettings,
+        configured_timezone: &str,
+    ) -> ! {
         loop {
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
@@ -218,7 +228,10 @@ impl TelegramTransport {
                     .claim_local_telegram_history(target, now, HISTORY_LEASE_SECONDS)
                     .await
                 {
-                    match database.apply_telegram_history(&lease).await {
+                    match database
+                        .apply_local_telegram_diary(&lease, configured_timezone)
+                        .await
+                    {
                         Ok(_) => continue,
                         Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy)) => {
                             if let Ok(now) = wall_clock() {
