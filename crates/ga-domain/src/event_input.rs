@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use crate::{
     event_payload::{InvalidPayload, SystemPayload, finite_number, json_value},
-    event_time,
     timestamp::StoredInstant,
 };
 
@@ -36,6 +35,7 @@ pub enum ValidationMode {
 pub struct EventInput {
     start: StoredInstant,
     end: Option<StoredInstant>,
+    display_times: [Option<String>; 2],
     timezone: String,
     source: EventSource,
     status: EventStatus,
@@ -99,15 +99,17 @@ impl EventInput {
         let Some(Value::Object(mut fields)) = json_value(&parsed) else {
             return Err(InvalidEvent::InvalidObject);
         };
-        let start = fields
+        let (start, display_start) = fields
             .remove("start")
             .as_ref()
-            .and_then(event_time::aware)
+            .and_then(StoredInstant::legacy_input_with_json)
             .ok_or(InvalidEvent::InvalidField("start"))?;
-        let end = match fields.remove("end") {
-            None | Some(Value::Null) => None,
+        let (end, display_end) = match fields.remove("end") {
+            None | Some(Value::Null) => (None, None),
             Some(value) => {
-                Some(event_time::aware(&value).ok_or(InvalidEvent::InvalidField("end"))?)
+                let (end, display) = StoredInstant::legacy_input_with_json(&value)
+                    .ok_or(InvalidEvent::InvalidField("end"))?;
+                (Some(end), Some(display))
             }
         };
         let timezone = match fields.remove("timezone") {
@@ -141,6 +143,7 @@ impl EventInput {
         let mut event = Self {
             start,
             end,
+            display_times: [Some(display_start), display_end],
             timezone,
             source,
             status,
@@ -240,6 +243,7 @@ impl EventInput {
         let mut event = Self {
             start: self.start,
             end: self.end,
+            display_times: self.display_times.clone(),
             timezone: self.timezone.clone(),
             source,
             status: EventStatus::Confirmed,
@@ -260,6 +264,9 @@ impl EventInput {
     }
     pub fn end(&self) -> Option<StoredInstant> {
         self.end
+    }
+    pub fn display_times(&self) -> [Option<&str>; 2] {
+        self.display_times.each_ref().map(|time| time.as_deref())
     }
     pub fn timezone(&self) -> &str {
         &self.timezone

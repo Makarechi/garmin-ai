@@ -497,7 +497,7 @@ fn bool_input(value: &Value) -> Option<bool> {
     }
 }
 
-fn integer_input(value: &Value) -> Option<u32> {
+pub(super) fn integer_input(value: &Value) -> Option<u32> {
     match value {
         Value::Bool(value) => Some(u32::from(*value)),
         Value::Number(_) => {

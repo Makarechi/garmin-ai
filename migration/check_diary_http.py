@@ -167,26 +167,104 @@ def compare(python, native, engine):
     assert native.get(endpoint, headers=headers("reader")).status_code == 404
     assert native.post(PATH, headers=headers("both", "fixture-python"), json=NOTE).json()["deleted"]
     assert counts(engine) == (3, 2)
+    compare_system_updates(python, native, engine, hidden, endpoint)
+
+
+def compare_system_updates(python, native, engine, hidden, deleted_endpoint):
+    amended = {
+        **NOTE,
+        "start": "2026-10-25T02:15:00.123456+02:00",
+        "original_text": "Синтетическое уточнение",
+        "payload": {**NOTE["payload"], "description": "synthetic correction"},
+    }
+    request = {"revision": 1, "event": amended}
+    target = python.post(PATH, headers=headers("both"), json=NOTE).json()
+    identity = UUID(target["id"])
+    endpoint = f"{PATH}/{identity}"
+    for client in (python, native):
+        for role, status in [(None, 401), ("reader", 403), ("writer", 403)]:
+            assert client.put(endpoint, headers=headers(role), json=request).status_code == status
+        missing = client.put(deleted_endpoint, headers=headers("both"), json=request)
+        assert missing.status_code == 404 and missing.json() == {"detail": "Record not found"}
+        assert (
+            client.put(f"{PATH}/{hidden}", headers=headers("both"), json=request).status_code == 422
+        )
+        stale = client.put(endpoint, headers=headers("both"), json={**request, "revision": 2})
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Event changed; reload before editing"}
+        self_reference = {
+            **amended,
+            "payload": {
+                "type": "medication",
+                "name": "synthetic medication",
+                "reason_event_id": str(identity),
+            },
+        }
+        invalid_relation = client.put(
+            endpoint, headers=headers("both"), json={"revision": 1, "event": self_reference}
+        )
+        assert invalid_relation.status_code == 409
+        assert invalid_relation.json() == {"detail": "A medication cannot reference itself"}
+        assert client.get(endpoint, headers=headers("reader")).json() == target
+
+    updated = native.put(endpoint, headers=headers("both"), json=request)
+    assert updated.status_code == 200 and updated.headers["cache-control"] == "no-store"
+    document = updated.json()
+    assert document["revision"] == 2 and document["start"] == amended["start"]
+    assert document["canonical"]["observed"]["start"] == amended["start"]
+    assert document["payload"]["description"] == amended["payload"]["description"]
+    assert document["original_text"] == amended["original_text"]
+    assert (
+        native.get(endpoint, headers=headers("reader")).json()
+        == python.get(endpoint, headers=headers("reader")).json()
+    )
+    for client in (python, native):
+        assert client.put(endpoint, headers=headers("both"), json=request).status_code == 409
+    with engine.connect() as connection:
+        audits = connection.execute(
+            text("SELECT action,actor,before,after FROM audit_log WHERE event_id=:id ORDER BY id"),
+            {"id": identity},
+        ).all()
+    assert [(audit.action, audit.actor) for audit in audits] == [
+        ("create", "api"),
+        ("update", "api"),
+    ]
+    assert audits[1].before == audits[0].after
+    assert audits[1].after["revision"] == 2 and audits[1].after["start"] == amended["start"]
+
+    python_target = python.post(PATH, headers=headers("both"), json=NOTE).json()
+    reference = python.put(f"{PATH}/{python_target['id']}", headers=headers("both"), json=request)
+    assert reference.status_code == 200
+    expected = reference.json()
+    for name in ("id", "created_at", "updated_at", "recorded_at", "ingested_at"):
+        document.pop(name)
+        expected.pop(name)
+    for name in ("recorded_at", "ingested_at"):
+        document["canonical"].pop(name)
+        expected["canonical"].pop(name)
+    assert document == expected
 
 
 def run(binary):
     engine = isolated_engine()
     try:
         with Session(engine) as session, session.begin():
-            row = ensure_scenario_packs(session, legacy_install=False)["caffeine"]
-            configure_scenario_pack(
-                session,
-                "caffeine",
-                PackSelection(
-                    revision=row.revision,
-                    tracking_enabled=True,
-                    collection_enabled=row.collection_enabled,
-                    reminders_enabled=row.reminders_enabled,
-                    visible=row.visible,
-                    llm_enabled=row.llm_enabled,
-                    outcome_goal=row.outcome_goal,
-                ),
-            )
+            packs = ensure_scenario_packs(session, legacy_install=False)
+            for key in ("caffeine", "migraine"):
+                row = packs[key]
+                configure_scenario_pack(
+                    session,
+                    key,
+                    PackSelection(
+                        revision=row.revision,
+                        tracking_enabled=True,
+                        collection_enabled=row.collection_enabled,
+                        reminders_enabled=row.reminders_enabled,
+                        visible=row.visible,
+                        llm_enabled=row.llm_enabled,
+                        outcome_goal=row.outcome_goal,
+                    ),
+                )
         settings = Settings(api_tokens=TOKENS, api_key="")
         with (
             TestClient(create_app(settings, engine=engine)) as python,
