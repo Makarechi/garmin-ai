@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72104631;
-const MODEL_CONSENT_LOCK: i64 = 72104632;
+pub(crate) const MODEL_CONSENT_LOCK: i64 = 72104632;
 pub(crate) const OWNER_ONBOARDING_LOCK: i64 = 72104621;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -292,7 +292,7 @@ impl Database {
     }
 }
 
-async fn try_shared_lock(
+pub(crate) async fn try_shared_lock(
     txn: &mut Transaction<'_, Postgres>,
     key: i64,
 ) -> Result<(), SharePolicyError> {

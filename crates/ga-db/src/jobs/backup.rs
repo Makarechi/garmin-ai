@@ -152,7 +152,7 @@ impl Database {
         lease: &DailyBackupLease,
         now: StoredInstant,
     ) -> Result<bool, JobStoreError> {
-        self.renew_job(lease.id, lease.token, lease.seconds, KIND, now)
+        self.renew_job(lease.id, lease.token, lease.seconds, KIND, now, None)
             .await
     }
 

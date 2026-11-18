@@ -261,9 +261,53 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
         .command
         .clarification()
         .ok_or("Missing model clarification")?;
-    let queued = database
-        .apply_telegram_text_clarification(&lease, now, question, "en")
+    let original: String =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='conversation:pending'")
+            .fetch_one(&pool)
+            .await?;
+    sqlx::query(
+        "UPDATE app_state SET value=jsonb_set(value,'{text}',to_jsonb('Synthetic revised prompt'::text))
+         WHERE key='conversation:pending'",
+    ).execute(&pool).await?;
+    assert!(matches!(
+        database
+            .apply_telegram_model_clarification(
+                &lease,
+                now,
+                question,
+                "en",
+                request.publication_context("Europe/Bratislava"),
+            )
+            .await,
+        Err(ga_db::jobs::telegram_inbound::TelegramDiaryCommitError::ModelContextChanged)
+    ));
+    let untouched: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM inbound_messages WHERE id=$1 AND status='pending')
+            AND NOT EXISTS(SELECT 1 FROM outbox_messages WHERE inbound_message_id=$1)",
+    )
+    .bind(ingress.message_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(untouched);
+    sqlx::query("UPDATE app_state SET value=$1::jsonb WHERE key='conversation:pending'")
+        .bind(original)
+        .execute(&pool)
         .await?;
+    let queued = database
+        .apply_telegram_model_clarification(
+            &lease,
+            now,
+            question,
+            "en",
+            request.publication_context("Europe/Bratislava"),
+        )
+        .await?;
+    let fenced: bool =
+        sqlx::query_scalar("SELECT memory_fence ? 'target_epoch' FROM outbox_messages WHERE id=$1")
+            .bind(queued.outbox_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(fenced);
     let actual: (String,String) = sqlx::query_as(
         "SELECT inbox.status, reply.intent#>>'{blocks,0,text}'
            FROM inbound_messages inbox JOIN outbox_messages reply ON reply.inbound_message_id=inbox.id

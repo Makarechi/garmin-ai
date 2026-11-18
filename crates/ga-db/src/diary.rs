@@ -24,6 +24,7 @@ pub(crate) mod undo;
 mod wearable;
 
 pub(crate) use proactive_answers::context as question_context;
+pub(crate) use reads::interpretation_context_in;
 pub use reads::{
     DiaryEventRange, DiaryReadError, InterpretationEvents, InterpretationEventsQuery,
     ModelDiaryPage, ModelDiaryQuery, event_document,
@@ -174,7 +175,7 @@ impl Database {
         Ok(written)
     }
 
-    async fn create_system_event_in(
+    pub(crate) async fn create_system_event_in(
         txn: &mut Transaction<'_, Postgres>,
         request: CreateSystemEvent<'_>,
     ) -> Result<StoredSystemEvent, DiaryWriteError> {
