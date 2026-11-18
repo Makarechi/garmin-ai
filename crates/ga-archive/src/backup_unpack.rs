@@ -80,7 +80,7 @@ pub fn unpack_backup(
     Ok(digest)
 }
 
-fn resolve_protected_root(path: &Path) -> Result<PathBuf, BackupError> {
+pub(crate) fn resolve_protected_root(path: &Path) -> Result<PathBuf, BackupError> {
     let mut resolved = PathBuf::new();
     for part in std::path::absolute(path)?.components() {
         if part == Component::ParentDir {
