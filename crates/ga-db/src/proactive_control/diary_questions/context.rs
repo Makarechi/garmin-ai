@@ -1,5 +1,5 @@
 use ga_domain::{event_input::source_calendar_wall_time, timestamp::StoredInstant};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -13,16 +13,7 @@ pub(super) async fn generate(
     now: OffsetDateTime,
     timezone: &str,
 ) -> Result<u64, ProactiveControlError> {
-    let enabled: bool = sqlx::query_scalar(
-        "SELECT count(*)=0 OR (
-             coalesce(bool_or(pack_key='wellbeing' AND reminders_enabled),false)
-             AND coalesce(bool_or(pack_key='general_diary' AND reminders_enabled AND tracking_enabled),false)
-         ) FROM module_configs WHERE owner_id=$1",
-    )
-    .bind(owner)
-    .fetch_one(&mut **txn)
-    .await?;
-    if !enabled {
+    if !enabled(txn, owner).await? {
         return Ok(0);
     }
 
@@ -56,6 +47,133 @@ pub(super) async fn generate(
         .await?;
     }
     Ok(generated)
+}
+
+pub(in crate::proactive_control) async fn enabled(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*)=0 OR (
+             coalesce(bool_or(pack_key='wellbeing' AND reminders_enabled),false)
+             AND coalesce(bool_or(pack_key='general_diary' AND reminders_enabled AND tracking_enabled),false)
+         ) FROM module_configs WHERE owner_id=$1",
+    )
+    .bind(owner)
+    .fetch_one(&mut **txn)
+    .await
+}
+
+pub(in crate::proactive_control) async fn refresh(
+    txn: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    stored: &str,
+    now: OffsetDateTime,
+    fallback_timezone: &str,
+) -> Result<Option<String>, ProactiveControlError> {
+    let invalid = || ProactiveControlError::InvalidStoredState;
+    let mut evidence: Map<String, Value> = serde_json::from_str(stored).map_err(|_| invalid())?;
+    let (Some(left), Some(right)) = (
+        evidence
+            .get("start")
+            .and_then(StoredInstant::from_legacy_input),
+        evidence
+            .get("end")
+            .and_then(StoredInstant::from_legacy_input),
+    ) else {
+        return Ok(None);
+    };
+    if right <= left {
+        return Ok(None);
+    }
+    let timezone = evidence
+        .get("timezone")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_timezone);
+    let observed = measurements(txn, now, left.into(), right.into(), timezone).await?;
+    let (coverage, explained) = coverage(txn, left.into(), right.into()).await?;
+    let text = if let Some((threshold, samples, ratio)) = observed
+        && !explained
+    {
+        let text = current_question_text(&coverage, timezone)?;
+        evidence.insert("baseline_hr_p95".into(), json!(threshold));
+        evidence.insert("hr_samples".into(), json!(samples));
+        evidence.insert("hr_coverage_ratio".into(), json!(ratio));
+        Some(text)
+    } else {
+        None
+    };
+    evidence.insert("context_coverage".into(), coverage);
+    sqlx::query(
+        "UPDATE pending_questions SET evidence=$2::jsonb, text=coalesce($3,text) WHERE id=$1",
+    )
+    .bind(id)
+    .bind(Value::Object(evidence).to_string())
+    .bind(text.as_deref())
+    .execute(&mut **txn)
+    .await?;
+    Ok(text)
+}
+
+fn current_question_text(
+    coverage: &Value,
+    timezone: &str,
+) -> Result<String, ProactiveControlError> {
+    let invalid = || ProactiveControlError::InvalidStoredState;
+    let gaps = coverage["uncovered_intervals"]
+        .as_array()
+        .ok_or_else(invalid)?;
+    let minutes = coverage["uncovered_seconds"].as_f64().ok_or_else(invalid)? / 60.0;
+    let local = |instant| {
+        let instant = StoredInstant::from_legacy_input(instant).ok_or_else(invalid)?;
+        let (day, at) = source_calendar_wall_time(instant, timezone).ok_or_else(invalid)?;
+        Ok::<_, ProactiveControlError>(format!(
+            "{:02}.{:02} {:02}:{:02}",
+            day.day(),
+            u8::from(day.month()),
+            at.hour(),
+            at.minute()
+        ))
+    };
+    let windows = gaps
+        .iter()
+        .take(3)
+        .map(|gap| Ok(format!("{}–{}", local(&gap["start"])?, local(&gap["end"])?)))
+        .collect::<Result<Vec<_>, ProactiveControlError>>()?
+        .join("; ");
+    let additional = if gaps.len() > 3 {
+        "; есть другие промежутки"
+    } else {
+        ""
+    };
+    let minutes = question_minutes(minutes)?;
+    Ok(format!(
+        "Часы записали повышенные показатели стресса и пульса. Неизвестный контекст: {minutes} мин; {windows}{additional}. Помните, чем занимались? Можно ответить «не помню»."
+    ))
+}
+
+fn question_minutes(minutes: f64) -> Result<String, ProactiveControlError> {
+    // Match the six significant digits of the existing question text.
+    let scientific = format!("{minutes:.5e}");
+    let invalid = || ProactiveControlError::InvalidStoredState;
+    let (mantissa, exponent) = scientific.split_once('e').ok_or_else(invalid)?;
+    let exponent: i32 = exponent.parse().map_err(|_| invalid())?;
+    let trimmed = |digits: &str| {
+        digits
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    if !(-4..6).contains(&exponent) {
+        return Ok(format!("{}e{exponent:+03}", trimmed(mantissa)));
+    }
+    let decimals = usize::try_from(5 - exponent).map_err(|_| invalid())?;
+    let decimal = format!("{minutes:.decimals$}");
+    Ok(if decimals == 0 {
+        decimal
+    } else {
+        trimmed(&decimal)
+    })
 }
 
 async fn already_asked(

@@ -109,6 +109,7 @@ async fn reserves_current_questions_without_overspending() -> Result<(), Box<dyn
         let kind = match question.kind {
             DiaryQuestionKind::Migraine => "migraine",
             DiaryQuestionKind::Caffeine => "caffeine",
+            DiaryQuestionKind::Context => "context",
         };
         assert_eq!(
             &json!({

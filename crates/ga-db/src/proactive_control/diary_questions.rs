@@ -15,7 +15,7 @@ use crate::{
     Database, activity_documents::PARSER_VERSION, check_readiness, replay::projection_pending,
 };
 
-mod context;
+pub(super) mod context;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct GeneratedDiaryQuestions {
