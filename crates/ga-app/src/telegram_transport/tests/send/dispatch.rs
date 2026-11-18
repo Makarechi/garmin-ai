@@ -8,7 +8,7 @@ use ga_db::{
     delivery::DeliveryState,
     outbox_claims::{ReplyDestination, ReplyDispatchResult},
 };
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{channel::telegram_conversation_id, timestamp::StoredInstant};
 use serde_json::json;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
@@ -52,7 +52,7 @@ async fn persists_partial_acceptance_and_defers_only_unaccepted_sends() -> Resul
     )
     .execute(&pool)
     .await?;
-    let conversation = Uuid::from_u128(2501);
+    let conversation = telegram_conversation_id(owner_id, binding.instance_id, 42);
     sqlx::query(
         "INSERT INTO conversations(id,owner_id,channel,channel_instance_id,memory_epoch,state,share_owner_memory)
          VALUES($1,$2,'telegram','primary',gen_random_uuid(),'{}',false)",
@@ -261,6 +261,84 @@ async fn persists_partial_acceptance_and_defers_only_unaccepted_sends() -> Resul
             .await?;
         assert_eq!(state, "cancelled");
     }
+    let stale_reply = Uuid::from_u128(2516);
+    seed(&pool, binding, conversation, stale_reply, false).await?;
+    let claim = database
+        .claim_outbox_reply(destination(), clock(&pool).await?, 120)
+        .await?
+        .ok_or("Missing pre-pairing reply")?;
+    assert_eq!(claim.outbox_id, stale_reply);
+    let new_binding = TelegramBinding {
+        external_owner_id: 43,
+        ..binding
+    };
+    let (listener, transport) = bind().await?;
+    let (received, result) = tokio::join!(
+        async {
+            let Ok(Ok((mut stream, _))) =
+                timeout(Duration::from_millis(350), listener.accept()).await
+            else {
+                return Ok::<_, Box<dyn Error>>(false);
+            };
+            let outgoing = request(&mut stream).await?;
+            assert_eq!(outgoing["fields"]["chat_id"], 43);
+            respond(&mut stream, "400 Bad Request", &[], "{}").await?;
+            Ok(true)
+        },
+        transport.dispatch_claimed_reply(&database, new_binding, claim, &[]),
+    );
+    assert!(
+        !received?,
+        "The replacement chat received an earlier conversation's reply"
+    );
+    assert_eq!(result?, ReplyDispatchResult::Cancelled);
+    let state: String = sqlx::query_scalar("SELECT state FROM outbox_messages WHERE id=$1")
+        .bind(stale_reply)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "cancelled");
+    let current_conversation = telegram_conversation_id(owner_id, new_binding.instance_id, 43);
+    sqlx::query(
+        "INSERT INTO conversations(id,owner_id,channel,channel_instance_id,memory_epoch,state,share_owner_memory)
+         VALUES($1,$2,'telegram','primary',gen_random_uuid(),'{}',false)",
+    ).bind(current_conversation).bind(owner_id).execute(&pool).await?;
+    let current_reply = Uuid::from_u128(2517);
+    seed(
+        &pool,
+        new_binding,
+        current_conversation,
+        current_reply,
+        false,
+    )
+    .await?;
+    let claim = database
+        .claim_outbox_reply(destination(), clock(&pool).await?, 120)
+        .await?
+        .ok_or("Missing current reply")?;
+    assert_eq!(claim.outbox_id, current_reply);
+    let (listener, transport) = bind().await?;
+    let (accepted_current, result) = timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            async {
+                for message_id in [704, 705] {
+                    let (mut stream, _) = listener.accept().await?;
+                    assert_eq!(request(&mut stream).await?["fields"]["chat_id"], 43);
+                    respond(&mut stream, "200 OK", &[], &accepted(message_id, 43)).await?;
+                }
+                Ok::<_, Box<dyn Error>>(())
+            },
+            transport.dispatch_claimed_reply(&database, new_binding, claim, &[]),
+        )
+    })
+    .await?;
+    accepted_current?;
+    assert!(matches!(
+        result?,
+        ReplyDispatchResult::Recorded {
+            state: DeliveryState::ProviderAccepted,
+            ..
+        }
+    ));
     println!(
         "Verified durable acceptance, partial evidence, 429 deferral and unsupported media without live calls"
     );
