@@ -4,7 +4,7 @@ use sqlx::{Connection, PgConnection};
 
 use crate::{Database, ReadinessError};
 
-const RUNTIME_LOCK: i64 = 72104620;
+pub(crate) const RUNTIME_LOCK: i64 = 72104620;
 const DATABASE_DEADLINE: Duration = Duration::from_millis(750);
 
 /// The Python runtime and the native worker use the same dedicated PostgreSQL lock.
