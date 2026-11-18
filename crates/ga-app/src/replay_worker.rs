@@ -311,7 +311,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     };
     let backup_work = async {
         if let (Some(settings), Some(worker)) = (&backups, backup_worker) {
-            settings.run(&database, worker).await
+            settings.run(&database, worker, telegram.is_some()).await
         } else {
             future::pending().await
         }

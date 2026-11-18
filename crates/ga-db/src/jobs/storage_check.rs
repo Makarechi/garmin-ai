@@ -113,10 +113,18 @@ impl Database {
         lease: &StorageCheckLease,
         estimate: BackupSpace,
         observed_at: StoredInstant,
+        notify_telegram: bool,
     ) -> Result<(), JobStoreError> {
         let mut report = backup_capacity_report(&estimate);
         report["at"] = Value::String(observed_at.to_string());
         let mut txn = begin(&self.work).await?;
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(STORAGE_QUEUE_LOCK)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !locked {
+            return Err(JobStoreError::PublicationTimedOut);
+        }
         finish_in_transaction(
             &mut txn,
             lease.id,
@@ -133,6 +141,9 @@ impl Database {
         .bind(report.to_string())
         .execute(&mut *txn)
         .await?;
+        if notify_telegram && !estimate.ready() {
+            super::storage_notices::schedule(&mut txn, observed_at).await?;
+        }
         txn.commit().await?;
         Ok(())
     }

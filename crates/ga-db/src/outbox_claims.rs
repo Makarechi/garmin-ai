@@ -13,8 +13,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK,
-    telegram_garmin::GarminProjection,
+    Database, ReadinessError, check_readiness, jobs::storage_notices::StorageNoticeFence,
+    replay::REPLAY_MUTATION_LOCK, telegram_garmin::GarminProjection,
 };
 
 const CANDIDATES_PER_CLAIM: usize = 64;
@@ -78,6 +78,12 @@ impl Candidate {
             memory_epoch: row.try_get("memory_epoch")?,
             owner_memory: row.try_get("share_owner_memory")?,
         })
+    }
+
+    fn storage_notice(&self) -> Option<StorageNoticeFence> {
+        self.fence
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok())
     }
 }
 
@@ -229,6 +235,20 @@ async fn check_fence(
     owner_id: Uuid,
     candidate: &Candidate,
 ) -> Result<FenceStatus, sqlx::Error> {
+    if let Some(notice) = candidate.storage_notice() {
+        let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut **txn)
+            .await?;
+        let now = StoredInstant::try_from(at)
+            .map_err(|_| sqlx::Error::Protocol("Invalid storage notice clock".into()))?;
+        return Ok(
+            if candidate.inbound_id.is_none() && notice.current(txn, now).await? {
+                FenceStatus::Current(None)
+            } else {
+                FenceStatus::Stale
+            },
+        );
+    }
     // SQLAlchemy can persist an explicit None as JSON null.
     let Some(fence) = candidate.fence.as_deref().filter(|value| *value != "null") else {
         return Ok(FenceStatus::Current(None));

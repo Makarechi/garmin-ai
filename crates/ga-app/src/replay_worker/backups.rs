@@ -95,7 +95,12 @@ impl ScheduledBackups {
         }))
     }
 
-    pub(super) async fn run(&self, database: &Database, worker: RuntimeWorkerIdentity) -> ! {
+    pub(super) async fn run(
+        &self,
+        database: &Database,
+        worker: RuntimeWorkerIdentity,
+        notify_telegram: bool,
+    ) -> ! {
         let mut next_plan = Instant::now();
         loop {
             let Ok(now) = clock() else {
@@ -123,14 +128,18 @@ impl ScheduledBackups {
                 Ok(None) => {}
                 Err(error) => eprintln!("{error}"),
             }
-            if let Err(error) = self.check_capacity(database).await {
+            if let Err(error) = self.check_capacity(database, notify_telegram).await {
                 eprintln!("{error}");
             }
             sleep(POLL_INTERVAL).await;
         }
     }
 
-    async fn check_capacity(&self, database: &Database) -> Result<(), ScheduledBackupError> {
+    async fn check_capacity(
+        &self,
+        database: &Database,
+        notify_telegram: bool,
+    ) -> Result<(), ScheduledBackupError> {
         let at = clock().map_err(|_| ScheduledBackupError::Clock)?;
         let Some(lease) = database.claim_storage_check(at, LEASE_SECONDS).await? else {
             return Ok(());
@@ -145,7 +154,7 @@ impl ScheduledBackups {
         {
             Ok(estimate) => {
                 database
-                    .complete_storage_check(&lease, estimate, at)
+                    .complete_storage_check(&lease, estimate, at, notify_telegram)
                     .await?
             }
             Err(error) => {
