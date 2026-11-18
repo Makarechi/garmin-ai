@@ -1,0 +1,153 @@
+use std::time::Duration;
+
+use ga_domain::{
+    channel::{InboundEnvelope, InboundKind, OutboundIntent},
+    timestamp::StoredInstant,
+};
+use serde_json::json;
+use sqlx::Postgres;
+use time::OffsetDateTime;
+
+use super::{
+    TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState, complete,
+    diary::queue_reply, history::prompt,
+};
+use crate::{Database, conversation_memory::ConversationBinding, outbox_enqueue::QueueIntentError};
+
+pub enum TelegramSafetyDecision<'a> {
+    Clear,
+    Urgent {
+        russian: &'a str,
+        english: &'a str,
+        setup_metadata: SetupMetadata,
+    },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum SetupMetadata {
+    None,
+    Name,
+    Field,
+}
+
+pub enum LocalTelegramText<'a> {
+    Safety(TelegramSafetyDecision<'a>),
+    ProviderUnavailable,
+}
+
+impl Database {
+    /// Screen or locally answer one precise owner message without sending it to a provider.
+    pub async fn apply_local_telegram_text(
+        &self,
+        lease: &TelegramInboundLease,
+        work: LocalTelegramText<'_>,
+        configured_locale: &str,
+    ) -> Result<(), TelegramDiaryCommitError> {
+        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+            .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+        let has_report_text = envelope.text().is_some_and(|text| {
+            let text = text.trim();
+            !text.is_empty() && !text.starts_with('/')
+        });
+        let bare_voice = envelope.kind() == InboundKind::Voice
+            && envelope.text().is_none_or(|text| text.trim().is_empty())
+            && matches!(work, LocalTelegramText::ProviderUnavailable);
+        if envelope.channel().channel() != "telegram"
+            || envelope.message_id() != lease.message_id()
+            || !matches!(
+                envelope.kind(),
+                InboundKind::Text | InboundKind::Edit | InboundKind::Voice
+            )
+            || !(has_report_text || bare_voice)
+        {
+            return Err(TelegramDiaryCommitError::UnsupportedMessage);
+        }
+        let binding = ConversationBinding {
+            owner_id: envelope.owner_id(),
+            conversation_id: envelope.conversation_id(),
+        };
+        tokio::time::timeout(Duration::from_millis(1800), async {
+            let mut txn = self.begin_telegram_text(lease, &envelope).await?;
+            let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *txn).await?;
+            let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
+            let reply = match work {
+                LocalTelegramText::Safety(TelegramSafetyDecision::Clear) => None,
+                LocalTelegramText::Safety(TelegramSafetyDecision::Urgent { russian, english, setup_metadata }) => {
+                    let prompt = prompt::inspect(&mut txn, binding, lease, &envelope, now).await?;
+                    if prompt.draft.as_ref().is_some_and(|draft|
+                        setup_metadata == SetupMetadata::Field
+                            || (setup_metadata == SetupMetadata::Name && draft.awaiting_name)) {
+                        None
+                    } else {
+                        let locale: Option<String> = sqlx::query_scalar(
+                            "SELECT locale FROM people WHERE id=$1
+                               AND EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding')",
+                        ).bind(binding.owner_id).fetch_optional(&mut *txn).await?;
+                        let locale = locale.as_deref().unwrap_or(configured_locale);
+                        Some(if locale.split('-').next().is_some_and(|code| code.eq_ignore_ascii_case("ru")) {
+                            russian
+                        } else {
+                            english
+                        })
+                    }
+                }
+                LocalTelegramText::ProviderUnavailable => {
+                    let in_order: bool = sqlx::query_scalar(concat!(
+                        "SELECT ",
+                        include_str!("no_prior_diary.sql"),
+                        " FROM jobs j JOIN inbound_messages i ON i.id=$1 WHERE j.id=$2",
+                    )).bind(lease.message_id()).bind(lease.job_identity().0).fetch_one(&mut *txn).await?;
+                    if !in_order {
+                        return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
+                    }
+                    let prompt = prompt::inspect(&mut txn, binding, lease, &envelope, now).await?;
+                    if let Some(notice) = prompt.notice {
+                        Some(notice)
+                    } else if prompt.draft.is_some() || prompt.pending {
+                        return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
+                    } else if envelope.kind() == InboundKind::Voice {
+                        Some("Голосовые сообщения сейчас недоступны. Показатели доступны через /today, записи — через кнопки.")
+                    } else {
+                        Some("Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today.")
+                    }
+                }
+            };
+            if let Some(text) = reply {
+                write_reply(&mut txn, lease, &envelope, at, text).await?;
+            } else {
+                let (id, token) = lease.job_identity();
+                let released = sqlx::query(
+                    "UPDATE jobs SET status='pending',lease_token=NULL,lease_until=NULL,attempts=attempts-1,
+                       payload=jsonb_set(payload,'{local_safety_checked}','true')
+                     WHERE id=$1 AND lease_token=$2 AND status='running' AND lease_until>clock_timestamp()",
+                ).bind(id).bind(token).execute(&mut *txn).await?;
+                if released.rows_affected() != 1 {
+                    return Err(crate::jobs::JobStoreError::LeaseLost.into());
+                }
+            }
+            txn.commit().await?;
+            Ok(())
+        }).await.map_err(|_| TelegramDiaryCommitError::Database)?
+    }
+}
+
+async fn write_reply(
+    txn: &mut sqlx::Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+    envelope: &InboundEnvelope,
+    now: OffsetDateTime,
+    text: &str,
+) -> Result<(), TelegramDiaryCommitError> {
+    let intent = OutboundIntent::normalize(json!({
+        "owner_id":envelope.owner_id().to_string(),
+        "conversation_id":envelope.conversation_id().to_string(),
+        "channel_instance":{"channel":"telegram","instance_id":envelope.channel().instance_id()},
+        "blocks":[{"text":text}],
+    }))
+    .map_err(|_| TelegramDiaryCommitError::Reply)?;
+    let key = format!("inbound:{}:local-text", lease.message_id());
+    queue_reply(txn, lease, envelope, intent, Some(&key)).await?;
+    complete(txn, lease, now, TelegramInboundState::Processed).await?;
+    Ok(())
+}
