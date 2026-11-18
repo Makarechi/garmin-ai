@@ -3,8 +3,10 @@ pub use backup::DailyBackupLease;
 mod storage_check;
 pub use storage_check::{StorageCheckLease, backup_capacity_report};
 mod replay;
+mod source_plugin;
 pub mod telegram_ack;
 pub mod telegram_inbound;
+pub use source_plugin::SourcePluginLease;
 
 pub use replay::ReplayJobLease;
 

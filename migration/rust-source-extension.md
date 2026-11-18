@@ -42,3 +42,10 @@ Each accepted page commits its raw observations, mapped values, and next cursor 
 The next invocation resumes that cursor after a failure. The paired PostgreSQL fixture
 confirmed an interrupted second page, cancellation during the publication transaction, and
 matching final records and mapped values in Python and Rust.
+
+The regular Rust worker also accepts an explicit JSON map in
+`GA_SOURCE_PLUGIN_EXECUTABLES`, keyed by integration instance ID. Paths must be absolute.
+For example, set it to `{"source:sample:one":"/opt/garmin-ai/extensions/sample-source"}`
+and enable that same source instance in `GA_INTEGRATIONS` and in the owner's source choices.
+The worker queues one poll per UTC hour and retains any cursor from an interrupted poll.
+The built-in Garmin source continues to use its own worker.

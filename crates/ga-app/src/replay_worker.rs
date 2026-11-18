@@ -29,7 +29,7 @@ use ga_fit::{ExportLimits, MAX_FIT_BYTES};
 use time::Time;
 use tokio::{signal, sync::watch, time::Instant};
 
-use crate::configuration;
+use crate::{configuration, extensions::ScheduledSourcePlugins};
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
 const PLAN_BUSY: Duration = Duration::from_secs(30);
@@ -212,6 +212,15 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             }
         })
         .flatten();
+    let sources = worker
+        .then(|| match ScheduledSourcePlugins::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
     let reminders_available = telegram.is_some() && reminder_model_available(&database, clock()?);
     let archive = Arc::new(
         Archive::open_read_only(&config.raw_archive).map_err(|_| ReplayServiceError::Archive)?,
@@ -317,12 +326,20 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             future::pending().await
         }
     };
+    let source_work = async {
+        if let Some(sources) = &sources {
+            sources.run(&database).await
+        } else {
+            future::pending().await
+        }
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
         result = receive => result,
         result = telegram_work => result,
         result = backup_work => result,
+        result = source_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }
