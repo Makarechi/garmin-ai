@@ -64,6 +64,16 @@ pub fn estimate_backup_space(
     destination: &Path,
     export: ExportSize,
 ) -> Result<BackupSpace, ArchiveError> {
+    estimate_backup_space_cancellable(data_dir, token_dir, destination, export, || false)
+}
+
+pub fn estimate_backup_space_cancellable(
+    data_dir: &Path,
+    token_dir: &Path,
+    destination: &Path,
+    export: ExportSize,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<BackupSpace, ArchiveError> {
     let parent = destination.parent().ok_or(ArchiveError::InvalidRoot)?;
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -77,7 +87,8 @@ pub fn estimate_backup_space(
         ExportSize::DatabaseBytes(bytes) => checked(bytes.checked_mul(8))?.max(1024 * 1024),
         ExportSize::EstimatedBytes(bytes) | ExportSize::AlreadyStaged(bytes) => bytes,
     };
-    let archive_bytes = checked(export_bytes.checked_add(source_estimate(data_dir, token_dir)?))?;
+    let archive_bytes =
+        checked(export_bytes.checked_add(source_estimate(data_dir, token_dir, &is_cancelled)?))?;
     let overhead = archive_bytes / 100 + 64 * 1024;
     let local_required = if matches!(export, ExportSize::AlreadyStaged(_)) {
         0
@@ -139,7 +150,11 @@ pub(crate) fn existing_directory(path: &Path) -> Result<(OwnedFd, bool), Archive
     Ok((directory, true))
 }
 
-fn source_estimate(data_dir: &Path, token_dir: &Path) -> Result<u64, ArchiveError> {
+fn source_estimate(
+    data_dir: &Path,
+    token_dir: &Path,
+    is_cancelled: &impl Fn() -> bool,
+) -> Result<u64, ArchiveError> {
     let mut tally = Tally::default();
     let (directory, exists) = existing_directory(data_dir)?;
     if exists {
@@ -155,9 +170,12 @@ fn source_estimate(data_dir: &Path, token_dir: &Path) -> Result<u64, ArchiveErro
         }
     }
     for path in [&data_dir.join("raw"), token_dir] {
+        if is_cancelled() {
+            return Err(ArchiveError::ReadCancelled);
+        }
         let (directory, exists) = existing_directory(path)?;
         if exists {
-            walk(directory, &mut tally)?
+            walk(directory, &mut tally, is_cancelled)?
         }
     }
     let overhead = checked(
@@ -188,9 +206,16 @@ impl Tally {
     }
 }
 
-fn walk(root: OwnedFd, tally: &mut Tally) -> Result<(), ArchiveError> {
+fn walk(
+    root: OwnedFd,
+    tally: &mut Tally,
+    is_cancelled: &impl Fn() -> bool,
+) -> Result<(), ArchiveError> {
     let mut pending = vec![Dir::read_from(root)?];
     while let Some(directory) = pending.last_mut() {
+        if is_cancelled() {
+            return Err(ArchiveError::ReadCancelled);
+        }
         let Some(entry) = directory.next() else {
             pending.pop();
             continue;
