@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ga_db::{
     Database,
     diary::{
@@ -10,19 +12,15 @@ use ga_domain::{
     event_input::{EventInput, ValidationMode},
     event_replay::{ReplayConflict, check_idempotency_key},
     event_schema::CustomEntry,
-    legacy_json::{Utf8Layout, encode},
 };
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+        CallToolRequestParams, Implementation, ProtocolVersion, ServerCapabilities, ServerConfig,
         Tool, ToolAnnotations,
     },
     service::RequestContext,
-    transport::{async_rw::AsyncRwTransport, stdio_pipes},
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -30,6 +28,13 @@ use crate::{
     configuration,
     http::tools::{GarminReadError, ReadTool, range_with_kind, read_garmin},
 };
+
+mod protocol;
+mod response;
+mod streaming;
+
+use protocol::NativeServer;
+use response::ToolResult;
 
 const INSTRUCTIONS: &str = include_str!("../../../src/garmin_ai/prompts/mcp_server.txt");
 const WRITE_TOOLS: &[&str] = &[
@@ -39,7 +44,6 @@ const WRITE_TOOLS: &[&str] = &[
     include_str!("../contracts/mcp-entries-create.json"),
 ];
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
 struct Mcp {
     database: Database,
@@ -47,7 +51,7 @@ struct Mcp {
     timezone: String,
     read_tools: Vec<Tool>,
     write_tools: Vec<Tool>,
-    active_reads: Semaphore,
+    active_reads: Arc<Semaphore>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -80,19 +84,9 @@ pub(crate) async fn run() -> Result<(), &'static str> {
             .map(|schema| serde_json::from_str(schema))
             .collect::<Result<_, _>>()
             .map_err(|_| "The MCP write descriptor is invalid")?,
-        active_reads: Semaphore::new(2),
+        active_reads: Arc::new(Semaphore::new(1)),
     };
-    let (input, output) = stdio_pipes();
-    let transport = AsyncRwTransport::<RoleServer, _, _>::new(input, output)
-        .with_max_line_length(MAX_MESSAGE_BYTES);
-    service
-        .serve(transport)
-        .await
-        .map_err(|_| "MCP initialization failed")?
-        .waiting()
-        .await
-        .map_err(|_| "MCP session stopped unexpectedly")?;
-    Ok(())
+    protocol::serve(service).await
 }
 
 fn read_tool(tool: ReadTool) -> Result<Tool, &'static str> {
@@ -111,7 +105,7 @@ fn read_tool(tool: ReadTool) -> Result<Tool, &'static str> {
     )
 }
 
-impl ServerHandler for Mcp {
+impl Mcp {
     fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::builder().enable_tools().build();
         capabilities.experimental = Some(Default::default());
@@ -124,21 +118,11 @@ impl ServerHandler for Mcp {
             .with_instructions(INSTRUCTIONS.trim())
     }
 
-    async fn list_tools(
-        &self,
-        _: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        let mut tools = self.read_tools.clone();
-        tools.extend(self.write_tools.iter().cloned());
-        Ok(ListToolsResult::with_all_items(tools))
-    }
-
     async fn call_tool(
         &self,
         call: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
+        context: RequestContext<NativeServer>,
+    ) -> ToolResult {
         let args = call.arguments.unwrap_or_default();
         let is_cancelled = || context.ct.is_cancelled();
         let enable_writes = !self.write_tools.is_empty();
@@ -160,11 +144,9 @@ impl ServerHandler for Mcp {
                 None => Err("ValueError"),
             },
         };
-        let mut result = result.unwrap_or_else(|class| CallToolResult::error(vec![ContentBlock::text(format!(
+        result.unwrap_or_else(|class| ToolResult::Error(format!(
             "Operation failed ({class}); reload the record or check arguments. No sensitive details logged.",
-        ))]));
-        result.result_type = None;
-        Ok(result.into())
+        )))
     }
 }
 
@@ -173,7 +155,7 @@ impl Mcp {
         &self,
         mut args: Map<String, Value>,
         is_cancelled: impl Fn() -> bool,
-    ) -> Result<CallToolResult, &'static str> {
+    ) -> Result<ToolResult, &'static str> {
         let Some(Value::Object(changes)) = args.remove("changes") else {
             return Err("ValidationError");
         };
@@ -199,7 +181,7 @@ impl Mcp {
         &self,
         args: Map<String, Value>,
         is_cancelled: impl Fn() -> bool,
-    ) -> Result<CallToolResult, &'static str> {
+    ) -> Result<ToolResult, &'static str> {
         let (event_id, expected_revision) = revision_target(&args)?;
         let deleted = self
             .database
@@ -221,10 +203,12 @@ impl Mcp {
         &self,
         tool: ReadTool,
         args: serde_json::Map<String, Value>,
-    ) -> Result<CallToolResult, &'static str> {
-        let _permit = self
+    ) -> Result<ToolResult, &'static str> {
+        let permit = self
             .active_reads
-            .try_acquire()
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|_| "RuntimeError")?;
         if tool == ReadTool::Freshness {
             if !args.is_empty() {
@@ -243,19 +227,25 @@ impl Mcp {
                 .await
                 .map_err(|error| garmin_error(GarminReadError::Health(error)))?
                 .ok_or("PermissionError")?;
-            return tool_result(result);
+            return ToolResult::from_value(result, Some(permit));
         }
-        let result = read_garmin(&self.database, tool, &args, Some(self.owner))
-            .await
-            .map_err(garmin_error)?;
-        tool_result(result)
+        let result = read_garmin(
+            &self.database,
+            tool,
+            &args,
+            Some(self.owner),
+            &self.timezone,
+        )
+        .await
+        .map_err(garmin_error)?;
+        Ok(ToolResult::data(result, Some(permit)))
     }
 
     async fn create(
         &self,
         args: Map<String, Value>,
         is_cancelled: impl Fn() -> bool,
-    ) -> Result<CallToolResult, &'static str> {
+    ) -> Result<ToolResult, &'static str> {
         let (event, key) = creation_arguments(args, "event")?;
         let input = serde_json::to_vec(&event).map_err(|_| "ValidationError")?;
         let report = EventInput::from_json(&input, MAX_MESSAGE_BYTES, ValidationMode::NewReport)
@@ -283,7 +273,7 @@ impl Mcp {
         &self,
         args: Map<String, Value>,
         is_cancelled: impl Fn() -> bool,
-    ) -> Result<CallToolResult, &'static str> {
+    ) -> Result<ToolResult, &'static str> {
         let (entry, key) = creation_arguments(args, "entry")?;
         if entry["values"].get("type").is_some() {
             return Err("ValueError");
@@ -311,18 +301,20 @@ impl Mcp {
     async fn events(
         &self,
         args: serde_json::Map<String, Value>,
-    ) -> Result<CallToolResult, &'static str> {
+    ) -> Result<ToolResult, &'static str> {
         let (start, end, kind) = range_with_kind(&args).ok_or("ValidationError")?;
-        let _permit = self
+        let permit = self
             .active_reads
-            .try_acquire()
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|_| "RuntimeError")?;
         let page = self
             .database
             .list_mcp_events(self.owner, start, end, kind)
             .await
             .map_err(diary_error)?;
-        tool_result(page.value)
+        ToolResult::from_value(page.value, Some(permit))
     }
 }
 
@@ -380,19 +372,8 @@ fn positive_revision(value: &Value) -> Option<i32> {
     })
 }
 
-fn tool_result(value: Value) -> Result<CallToolResult, &'static str> {
-    let value = if value.is_object() {
-        value
-    } else {
-        json!({"rows": value})
-    };
-    let compact = serde_json::to_vec(&value).map_err(|_| "ValueError")?;
-    let encoded =
-        encode(&compact, Utf8Layout::Ordered, MAX_RESULT_BYTES).map_err(|_| "ValueError")?;
-    let text = String::from_utf8(encoded).map_err(|_| "ValueError")?;
-    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-    result.structured_content = Some(value);
-    Ok(result)
+fn tool_result(value: Value) -> Result<ToolResult, &'static str> {
+    ToolResult::from_value(value, None)
 }
 
 fn garmin_error(error: GarminReadError) -> &'static str {

@@ -1,3 +1,4 @@
+use ga_archive::json_spool::{JsonDocument, JsonSpool};
 use ga_db::{
     Database,
     health_analysis::{
@@ -50,7 +51,8 @@ pub(crate) async fn read_garmin(
     tool: ReadTool,
     arguments: &Map<String, Value>,
     mcp_owner: Option<Uuid>,
-) -> Result<Value, GarminReadError> {
+    configured_timezone: &str,
+) -> Result<JsonDocument, GarminReadError> {
     let mut reader = database.verified_health_reader().await?;
     let query = parse(tool, arguments)?;
     if let Some(owner) = mcp_owner
@@ -61,7 +63,20 @@ pub(crate) async fn read_garmin(
     {
         return Err(GarminReadError::Permission);
     }
-    match query {
+    if let (Some(owner), Query::Lagged(_, other, ..)) = (mcp_owner, &query)
+        && !reader
+            .permits_model_packs(owner, model_metric_packs(other))
+            .await?
+    {
+        return Err(GarminReadError::Permission);
+    }
+    if mcp_owner.is_some()
+        && let Query::EventWindows(kind, ..) = query
+        && !reader.permits_model_event_kind(kind).await?
+    {
+        return Err(GarminReadError::Permission);
+    }
+    let value = match query {
         Query::Snapshot(day) => Ok(reader.snapshot(day).await?),
         Query::Range(start, end) => Ok(reader.range(HealthPeriod::new(start, end)?).await?),
         Query::Activities(start, end, kind) => {
@@ -90,10 +105,26 @@ pub(crate) async fn read_garmin(
         Query::Running(start, end, min, max) => {
             Ok(reader.running_efficiency(start, end, min, max).await?)
         }
+        Query::Lagged(first, second, start, end, lags) => Ok(reader
+            .lagged_association(first, second, HealthPeriod::new(start, end)?, &lags)
+            .await?),
+        Query::EventWindows(kind, metric, start, end) => {
+            return Ok(reader.event_windows(kind, metric, start, end).await?);
+        }
+        Query::Stress(start, end, timezone) => Ok(reader
+            .stress_hours(start, end, timezone, configured_timezone)
+            .await?),
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
-    }
+    }?;
+    let mut document = JsonSpool::default();
+    serde_json::to_writer(&mut document, &value)
+        .map_err(|_| GarminReadError::Health(HealthAnalysisError::Database))?;
+    drop(value);
+    document
+        .finish()
+        .map_err(|_| GarminReadError::Health(HealthAnalysisError::Database))
 }
 
 enum Query<'a> {
@@ -106,6 +137,9 @@ enum Query<'a> {
     Compare(&'a str, [Date; 4]),
     Running(StoredInstant, StoredInstant, f64, f64),
     Series(&'a str, OffsetDateTime, OffsetDateTime, u16),
+    Stress(Date, Date, Option<&'a str>),
+    Lagged(&'a str, &'a str, Date, Date, Vec<i64>),
+    EventWindows(&'a str, &'a str, OffsetDateTime, OffsetDateTime),
 }
 
 impl Query<'_> {
@@ -113,10 +147,13 @@ impl Query<'_> {
         match self {
             Self::Snapshot(_) | Self::Range(..) => MODEL_HEALTH_PACKS,
             Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
-            Self::Baseline(metric, ..) | Self::Compare(metric, ..) | Self::Series(metric, ..) => {
-                model_metric_packs(metric)
-            }
+            Self::Baseline(metric, ..)
+            | Self::Compare(metric, ..)
+            | Self::Series(metric, ..)
+            | Self::Lagged(metric, ..)
+            | Self::EventWindows(_, metric, ..) => model_metric_packs(metric),
             Self::Running(..) => &["training", "sleep", "wellbeing"],
+            Self::Stress(..) => &["wellbeing"],
         }
     }
 }
@@ -177,6 +214,62 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
         }
         ReadTool::RunningEfficiency => running_arguments(arguments),
         ReadTool::MetricSeries => series_arguments(arguments),
+        ReadTool::StressHours
+            if arguments
+                .keys()
+                .all(|key| matches!(key.as_str(), "start" | "end" | "timezone")) =>
+        {
+            let (Some(start), Some(end)) = (day("start"), day("end")) else {
+                return Err(GarminReadError::Arguments);
+            };
+            let timezone = match arguments.get("timezone") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) => Some(value.as_str()),
+                _ => return Err(GarminReadError::Arguments),
+            };
+            Ok(Query::Stress(start, end, timezone))
+        }
+        ReadTool::LaggedAssociation if arguments.len() == 5 => {
+            let first = arguments
+                .get("metric_a")
+                .and_then(Value::as_str)
+                .ok_or(GarminReadError::Arguments)?;
+            let second = arguments
+                .get("metric_b")
+                .and_then(Value::as_str)
+                .ok_or(GarminReadError::Arguments)?;
+            let (Some(start), Some(end)) = (day("start"), day("end")) else {
+                return Err(GarminReadError::Arguments);
+            };
+            let values = arguments
+                .get("lags")
+                .and_then(Value::as_array)
+                .filter(|values| values.len() <= 15)
+                .ok_or(GarminReadError::Arguments)?;
+            let lags = values
+                .iter()
+                .map(lag_input)
+                .collect::<Option<Vec<_>>>()
+                .ok_or(GarminReadError::Arguments)?;
+            Ok(Query::Lagged(first, second, start, end, lags))
+        }
+        ReadTool::EventWindows if arguments.len() == 4 => {
+            let requested = arguments
+                .get("event_type")
+                .and_then(Value::as_str)
+                .ok_or(GarminReadError::Arguments)?;
+            let kind = requested.strip_prefix("system.").unwrap_or(requested);
+            let metric = metric().ok_or(GarminReadError::Arguments)?;
+            let start = arguments
+                .get("start")
+                .and_then(StoredInstant::legacy_input_with_offset)
+                .ok_or(GarminReadError::Arguments)?;
+            let end = arguments
+                .get("end")
+                .and_then(StoredInstant::legacy_input_with_offset)
+                .ok_or(GarminReadError::Arguments)?;
+            Ok(Query::EventWindows(kind, metric, start, end))
+        }
         _ => Err(GarminReadError::Arguments),
     }
 }
@@ -263,4 +356,21 @@ fn activity_arguments(
     };
     let limit = u16::try_from(limit).map_err(|_| GarminReadError::Value)?;
     Ok((id, samples, offset, limit))
+}
+
+fn lag_input(value: &Value) -> Option<i64> {
+    let parsed = match value {
+        Value::Number(_) if value.as_f64()? < 0.0 => {
+            integer_input(&serde_json::json!(-value.as_f64()?)).map(|number| -i64::from(number))
+        }
+        Value::String(text) if text.trim().starts_with('-') => {
+            let magnitude = text.trim().strip_prefix('-')?;
+            if magnitude.starts_with(['+', '-']) || magnitude != magnitude.trim() {
+                return None;
+            }
+            integer_input(&Value::String(magnitude.to_owned())).map(|number| -i64::from(number))
+        }
+        _ => integer_input(value).map(i64::from),
+    }?;
+    (-30..=30).contains(&parsed).then_some(parsed)
 }
