@@ -200,15 +200,30 @@ async fn caffeine_answer(
     question: &Question,
     now: OffsetDateTime,
 ) -> Result<Option<Uuid>, DiaryWriteError> {
+    caffeine_answer_at(
+        txn,
+        &question.evidence,
+        question.sent.unwrap_or(question.earliest),
+        now,
+    )
+    .await
+}
+
+pub(crate) async fn caffeine_answer_at(
+    txn: &mut Transaction<'_, Postgres>,
+    evidence: &Map<String, Value>,
+    reference: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<Option<Uuid>, DiaryWriteError> {
     let day = Date::parse(
-        question.evidence["day"]
-            .as_str()
+        evidence
+            .get("day")
+            .and_then(Value::as_str)
             .ok_or(DiaryWriteError::InvalidRecordedState)?,
         &Iso8601::DATE,
     )
     .map_err(|_| DiaryWriteError::InvalidRecordedState)?;
-    let zone = question
-        .evidence
+    let zone = evidence
         .get("timezone")
         .and_then(Value::as_str)
         .unwrap_or("Europe/Bratislava");
@@ -219,9 +234,7 @@ async fn caffeine_answer(
         zone,
     )
     .ok_or(DiaryWriteError::InvalidRecordedState)?;
-    let visible_until = now
-        .min(right.into())
-        .min(question.sent.unwrap_or(question.earliest));
+    let visible_until = now.min(right.into()).min(reference);
     Ok(sqlx::query_scalar(
         "SELECT id FROM events WHERE NOT deleted AND status='confirmed'
           AND ((kind='caffeine' AND start >= $1 AND start < $2 AND start <= $3)
