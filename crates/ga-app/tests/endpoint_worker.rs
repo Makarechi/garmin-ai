@@ -357,8 +357,55 @@ async fn restores_the_pending_page_and_refuses_a_superseded_response() -> Result
         Duration::from_millis(1300),
     );
     source.activity_offset = Some(0);
+    sqlx::raw_sql(
+        "CREATE SEQUENCE synthetic_archiving_entered;
+         CREATE FUNCTION slow_activity_capture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+            PERFORM nextval('synthetic_archiving_entered');
+            PERFORM pg_sleep(0.45);
+            RETURN NEW;
+         END $$;
+         CREATE TRIGGER slow_activity_capture BEFORE INSERT ON source_payloads
+            FOR EACH ROW WHEN (NEW.endpoint='activities') EXECUTE FUNCTION slow_activity_capture();",
+    ).execute(&fixture.inspect).await?;
+    let verify_renewal = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let entered: bool =
+                    sqlx::query_scalar("SELECT is_called FROM synthetic_archiving_entered")
+                        .fetch_one(&fixture.inspect)
+                        .await?;
+                if entered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Polling observes the uncommitted capture. A separate connection
+            // must still be able to lock the job row, as lease renewal does.
+            let mut renew = fixture.inspect.begin().await?;
+            let alive: Uuid =
+                sqlx::query_scalar("SELECT id FROM jobs WHERE id=$1 FOR UPDATE NOWAIT")
+                    .bind(page.id())
+                    .fetch_one(&mut *renew)
+                    .await?;
+            assert_eq!(alive, page.id());
+            renew.rollback().await
+        })
+        .await??;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let worker = fixture.worker(&source);
+    let (result, renewal) = tokio::join!(worker.run_activity_page(&page), verify_renewal);
+    renewal?;
+    sqlx::raw_sql(
+        "DROP TRIGGER slow_activity_capture ON source_payloads;
+         DROP FUNCTION slow_activity_capture();
+         DROP SEQUENCE synthetic_archiving_entered;",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     assert_eq!(
-        fixture.worker(&source).run_activity_page(&page).await?,
+        result?,
         ActivityPageWork::Publication(ActivityPageResult::Published(DocumentStatus::Normalized)),
     );
     assert_eq!(fixture.job(&page).await?, ("done".into(), 1));

@@ -66,6 +66,12 @@ pub struct PublishActivityPage<'a> {
     pub timezone: &'a str,
 }
 
+#[derive(Clone, Copy)]
+enum LeaseAccess {
+    Observe,
+    Lock,
+}
+
 struct Page {
     payload: Value,
     offset: u32,
@@ -193,7 +199,7 @@ impl Database {
     ) -> Result<ActivityPagePreflight, ActivityScanError> {
         let page = Page::from_lease(lease, authenticated_fingerprint)?;
         let (mut txn, enabled) = self
-            .begin_activity_page(authenticated_fingerprint, lease)
+            .begin_activity_page(authenticated_fingerprint, lease, LeaseAccess::Lock)
             .await?;
         let outcome = match page.current(&mut txn, lease).await? {
             None => ActivityPagePreflight::Superseded,
@@ -226,7 +232,9 @@ impl Database {
         let lease = request.lease;
         let page = Page::from_lease(lease, account)?;
         let body = checked_json_body(request.body, limits).map_err(ActivityScanError::Capture)?;
-        let (mut txn, enabled) = self.begin_activity_page(account, lease).await?;
+        let (mut txn, enabled) = self
+            .begin_activity_page(account, lease, LeaseAccess::Observe)
+            .await?;
         let result = match page.current(&mut txn, lease).await? {
             None => ActivityPageCapture::Superseded,
             Some(state) if !enabled => {
@@ -280,7 +288,11 @@ impl Database {
         }
         let page = Page::from_lease(request.lease, request.authenticated_fingerprint)?;
         let (mut txn, enabled) = self
-            .begin_activity_page(request.authenticated_fingerprint, request.lease)
+            .begin_activity_page(
+                request.authenticated_fingerprint,
+                request.lease,
+                LeaseAccess::Lock,
+            )
             .await?;
         let result = match page.current(&mut txn, request.lease).await? {
             None => ActivityPageResult::Superseded,
@@ -318,7 +330,7 @@ impl Database {
     ) -> Result<(), ActivityScanError> {
         let page = Page::from_lease(lease, authenticated_fingerprint)?;
         let (mut txn, enabled) = self
-            .begin_activity_page(authenticated_fingerprint, lease)
+            .begin_activity_page(authenticated_fingerprint, lease, LeaseAccess::Lock)
             .await?;
         let outcome = match page.current(&mut txn, lease).await? {
             None => JobOutcome::Completed,
@@ -351,6 +363,7 @@ impl Database {
         &self,
         account: &str,
         lease: &GarminJobLease,
+        access: LeaseAccess,
     ) -> Result<(Transaction<'static, Postgres>, bool), ActivityScanError> {
         let mut txn = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
@@ -369,10 +382,11 @@ impl Database {
         if !locked {
             return Err(ActivityScanError::Busy);
         }
-        lease
-            .check_live(&mut txn)
-            .await
-            .map_err(ActivityScanError::Job)?;
+        match access {
+            LeaseAccess::Observe => lease.observe_live(&mut txn).await,
+            LeaseAccess::Lock => lease.check_live(&mut txn).await,
+        }
+        .map_err(ActivityScanError::Job)?;
         let allowed = collection_enabled(&mut txn, owner.owner_id()).await?;
         Ok((txn, allowed))
     }
