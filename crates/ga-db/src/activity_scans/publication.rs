@@ -23,7 +23,7 @@ use crate::{
     check_readiness,
     garmin_freshness::record_freshness,
     garmin_owner::verify_owner_in_transaction,
-    jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome},
+    jobs::{FailureReason, GARMIN_PUBLICATION_SECONDS, GarminJobKind, GarminJobLease, JobOutcome},
     raw_capture::{
         CapturedSource, GARMIN_LEGACY_SOURCE, archive_json, checked_json_body, insert_source,
         lock_legacy_scope,
@@ -70,6 +70,7 @@ pub struct PublishActivityPage<'a> {
 enum LeaseAccess {
     Observe,
     Lock,
+    Publication,
 }
 
 struct Page {
@@ -291,7 +292,7 @@ impl Database {
             .begin_activity_page(
                 request.authenticated_fingerprint,
                 request.lease,
-                LeaseAccess::Lock,
+                LeaseAccess::Publication,
             )
             .await?;
         let result = match page.current(&mut txn, request.lease).await? {
@@ -369,6 +370,12 @@ impl Database {
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
             .await?;
+        if matches!(access, LeaseAccess::Publication) {
+            sqlx::query("SELECT set_config('transaction_timeout',$1,true)")
+                .bind(format!("{GARMIN_PUBLICATION_SECONDS}s"))
+                .execute(&mut *txn)
+                .await?;
+        }
         check_readiness(&mut txn)
             .await
             .map_err(ActivityScanError::Storage)?;
@@ -384,9 +391,15 @@ impl Database {
         }
         match access {
             LeaseAccess::Observe => lease.observe_live(&mut txn).await,
-            LeaseAccess::Lock => lease.check_live(&mut txn).await,
+            LeaseAccess::Lock | LeaseAccess::Publication => lease.check_live(&mut txn).await,
         }
         .map_err(ActivityScanError::Job)?;
+        if matches!(access, LeaseAccess::Publication) {
+            lease
+                .reserve_publication(&mut txn, GARMIN_PUBLICATION_SECONDS + 1)
+                .await
+                .map_err(ActivityScanError::Job)?;
+        }
         let allowed = collection_enabled(&mut txn, owner.owner_id()).await?;
         Ok((txn, allowed))
     }

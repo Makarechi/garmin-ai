@@ -366,8 +366,17 @@ async fn restores_the_pending_page_and_refuses_a_superseded_response() -> Result
             RETURN NEW;
          END $$;
          CREATE TRIGGER slow_activity_capture BEFORE INSERT ON source_payloads
-            FOR EACH ROW WHEN (NEW.endpoint='activities') EXECUTE FUNCTION slow_activity_capture();",
-    ).execute(&fixture.inspect).await?;
+            FOR EACH ROW WHEN (NEW.endpoint='activities') EXECUTE FUNCTION slow_activity_capture();
+         CREATE FUNCTION slow_activity_publication() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_sleep(0.57); RETURN NEW; END $$;
+         CREATE TRIGGER slow_activity_row BEFORE INSERT ON activities FOR EACH ROW
+            EXECUTE FUNCTION slow_activity_publication();
+         CREATE TRIGGER slow_activity_freshness BEFORE INSERT ON app_state
+            FOR EACH ROW WHEN (starts_with(NEW.key,'freshness:activities:'))
+            EXECUTE FUNCTION slow_activity_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     let verify_renewal = async {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -400,7 +409,10 @@ async fn restores_the_pending_page_and_refuses_a_superseded_response() -> Result
     sqlx::raw_sql(
         "DROP TRIGGER slow_activity_capture ON source_payloads;
          DROP FUNCTION slow_activity_capture();
-         DROP SEQUENCE synthetic_archiving_entered;",
+         DROP SEQUENCE synthetic_archiving_entered;
+         DROP TRIGGER slow_activity_row ON activities;
+         DROP TRIGGER slow_activity_freshness ON app_state;
+         DROP FUNCTION slow_activity_publication();",
     )
     .execute(&fixture.inspect)
     .await?;
