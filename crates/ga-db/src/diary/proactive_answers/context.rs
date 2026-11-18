@@ -95,7 +95,7 @@ pub(super) async fn answer(
     Ok(Outcome::Answer(covering))
 }
 
-async fn coverage(
+pub(crate) async fn coverage(
     txn: &mut Transaction<'_, Postgres>,
     left: OffsetDateTime,
     right: OffsetDateTime,
@@ -148,7 +148,7 @@ async fn coverage(
     ))
 }
 
-fn display(instant: OffsetDateTime) -> String {
+pub(crate) fn display(instant: OffsetDateTime) -> String {
     let (hour, minute, second, microseconds) = instant.to_hms_micro();
     let date = instant.date();
     let mut output = format!("{date}T{hour:02}:{minute:02}:{second:02}");
@@ -169,14 +169,31 @@ fn display(instant: OffsetDateTime) -> String {
     output
 }
 
-async fn measurements(
+pub(crate) async fn elevated_windows(
+    txn: &mut Transaction<'_, Postgres>,
+    left: OffsetDateTime,
+    right: OffsetDateTime,
+) -> Result<Vec<(OffsetDateTime, OffsetDateTime)>, sqlx::Error> {
+    sqlx::query_as(include_str!("context/stress_windows.sql"))
+        .bind(left)
+        .bind(right)
+        .fetch_all(&mut **txn)
+        .await
+}
+
+pub(crate) async fn measurements(
     txn: &mut Transaction<'_, Postgres>,
     now: OffsetDateTime,
     left: OffsetDateTime,
     right: OffsetDateTime,
     timezone: &str,
 ) -> Result<Option<(f64, i64, f64)>, DiaryWriteError> {
-    if right > now {
+    if right > now
+        || right <= left
+        || !elevated_windows(txn, left, right)
+            .await?
+            .contains(&(left, right))
+    {
         return Ok(None);
     }
     Ok(sqlx::query_as(include_str!("context/physiology.sql"))
