@@ -6,7 +6,7 @@ use std::{
 
 use rustix::fs::{self, FlockOperation};
 
-use crate::{ArchiveError, FILE_MODE, open_private_root, open_regular, staging};
+use crate::{ArchiveError, FILE_MODE, open_private_root, open_regular, open_root, staging};
 
 const NAME: &str = "garmin_tokens.json";
 const MAX_BYTES: u64 = 64 * 1024;
@@ -19,6 +19,20 @@ pub struct GarminTokenGuard(OwnedFd);
 impl GarminTokenFile {
     pub fn open(directory: &Path) -> Result<Self, ArchiveError> {
         Ok(Self(open_private_root(directory)?))
+    }
+
+    /// Resolve an existing private token file without reading or creating it.
+    pub fn open_existing(directory: &Path) -> Result<Option<Self>, ArchiveError> {
+        let opened = match open_root(directory, false) {
+            Err(ArchiveError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            result => Self(result?),
+        };
+        if opened.try_lock()?.open_existing()?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(opened))
     }
 
     pub fn try_lock(&self) -> Result<GarminTokenGuard, ArchiveError> {

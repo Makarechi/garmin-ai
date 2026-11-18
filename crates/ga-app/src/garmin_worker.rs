@@ -1,3 +1,6 @@
+mod configuration;
+pub use configuration::{GarminConfigurationError, GarminSourceSettings};
+
 use std::{
     error::Error,
     fmt,
