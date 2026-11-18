@@ -11,7 +11,7 @@ use std::{
 
 use flate2::bufread::MultiGzDecoder;
 use rustix::{
-    fs::{self, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags},
+    fs::{self, AtFlags, Mode, OFlags, RenameFlags},
     io::Errno,
 };
 
@@ -23,7 +23,7 @@ use crate::{
         BackupDigest, BackupError, PrivateStageDirectory, authenticate_source, parent_file,
     },
     ensure_directory,
-    staging::Stage,
+    staging::{Stage, remove_contents},
 };
 
 const RECOVERY_TREE: &str = "contents";
@@ -178,24 +178,4 @@ impl Drop for RecoveryTree<'_> {
             let _ = fs::unlinkat(self.parent, RECOVERY_TREE, AtFlags::REMOVEDIR);
         }
     }
-}
-
-fn remove_contents(directory: &OwnedFd) -> io::Result<()> {
-    for entry in Dir::read_from(directory)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if matches!(name.to_bytes(), b"." | b"..") {
-            continue;
-        }
-        let metadata = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
-        let flag = if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
-            let child = fs::openat(directory, name, DIRECTORY_READ, Mode::empty())?;
-            remove_contents(&child)?;
-            AtFlags::REMOVEDIR
-        } else {
-            AtFlags::empty()
-        };
-        fs::unlinkat(directory, name, flag)?;
-    }
-    Ok(())
 }

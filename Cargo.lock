@@ -756,9 +756,11 @@ name = "ga-app"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "clap",
  "dotenvy",
  "fancy-regex",
+ "flate2",
  "ga-archive",
  "ga-db",
  "ga-domain",
