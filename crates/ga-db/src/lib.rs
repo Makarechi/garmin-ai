@@ -25,6 +25,7 @@ pub mod raw_capture;
 pub mod replay;
 pub mod runtime_lease;
 pub mod scenario_packs;
+pub mod schema_migration;
 pub mod share_policy;
 pub mod source_pages;
 pub mod system_definitions;
