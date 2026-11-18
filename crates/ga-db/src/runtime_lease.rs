@@ -16,6 +16,35 @@ pub struct RuntimeLease {
     next_worker_heartbeat: Option<Instant>,
 }
 
+#[derive(Clone, Copy)]
+pub struct RuntimeWorkerIdentity {
+    pid: i32,
+    backend_start: time::OffsetDateTime,
+}
+
+impl RuntimeWorkerIdentity {
+    pub(crate) async fn still_held(
+        self,
+        connection: &mut PgConnection,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM pg_locks lease JOIN pg_stat_activity active ON active.pid=lease.pid
+                WHERE lease.pid=$1 AND active.backend_start=$2
+                  AND lease.locktype='advisory' AND lease.objsubid=1
+                  AND lease.mode='ExclusiveLock' AND lease.granted
+                  AND lease.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                  AND ((lease.classid::bigint<<32)|lease.objid::bigint)=$3
+            )",
+        )
+        .bind(self.pid)
+        .bind(self.backend_start)
+        .bind(RUNTIME_LOCK)
+        .fetch_one(connection)
+        .await
+    }
+}
+
 #[derive(Debug)]
 pub enum RuntimeLeaseError {
     Occupied,
@@ -59,6 +88,21 @@ impl Database {
                 connection,
                 next_worker_heartbeat: None,
             })
+        })
+        .await
+        .map_err(|_| RuntimeLeaseError::Database)?
+    }
+
+    pub async fn worker_identity_held(
+        &self,
+        worker: RuntimeWorkerIdentity,
+    ) -> Result<bool, RuntimeLeaseError> {
+        tokio::time::timeout(DATABASE_DEADLINE, async {
+            let mut connection = self.control.acquire().await?;
+            worker
+                .still_held(&mut connection)
+                .await
+                .map_err(RuntimeLeaseError::from)
         })
         .await
         .map_err(|_| RuntimeLeaseError::Database)?
@@ -113,6 +157,19 @@ impl RuntimeLease {
                 result = &mut operation => return Ok(result),
             }
         }
+    }
+
+    pub async fn worker_identity(&mut self) -> Result<RuntimeWorkerIdentity, RuntimeLeaseError> {
+        let (pid, backend_start) = tokio::time::timeout(
+            DATABASE_DEADLINE,
+            sqlx::query_as(
+                "SELECT pid,backend_start FROM pg_stat_activity WHERE pid=pg_backend_pid()",
+            )
+            .fetch_one(&mut self.connection),
+        )
+        .await
+        .map_err(|_| RuntimeLeaseError::Database)??;
+        Ok(RuntimeWorkerIdentity { pid, backend_start })
     }
 
     /// Recorded onboarding preferences take precedence over bootstrap configuration.

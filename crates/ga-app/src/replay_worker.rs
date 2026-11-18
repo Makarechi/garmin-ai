@@ -1,3 +1,5 @@
+mod backups;
+
 use std::{
     env,
     error::Error,
@@ -201,6 +203,15 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .flatten();
     let database = Database::connect_lazy(&config.database_url)
         .map_err(|_| ReplayServiceError::Configuration)?;
+    let backups = worker
+        .then(|| match backups::ScheduledBackups::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
     let reminders_available = telegram.is_some() && reminder_model_available(&database, clock()?);
     let archive = Arc::new(
         Archive::open_read_only(&config.raw_archive).map_err(|_| ReplayServiceError::Archive)?,
@@ -220,6 +231,16 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             .await
             .map_err(ReplayServiceError::Lease)?;
     }
+    let backup_worker = if backups.is_some() {
+        Some(
+            singleton
+                .worker_identity()
+                .await
+                .map_err(ReplayServiceError::Lease)?,
+        )
+    } else {
+        None
+    };
     #[cfg(unix)]
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
         .map_err(|_| ReplayServiceError::Shutdown)?;
@@ -288,11 +309,19 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         }
         future::pending::<Result<(), ReplayServiceError>>().await
     };
+    let backup_work = async {
+        if let (Some(settings), Some(worker)) = (&backups, backup_worker) {
+            settings.run(&database, worker).await
+        } else {
+            future::pending().await
+        }
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
         result = receive => result,
         result = telegram_work => result,
+        result = backup_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }
