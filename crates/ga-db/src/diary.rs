@@ -13,6 +13,7 @@ pub use custom_registry::{
 
 mod metrics;
 mod proactive_answers;
+pub(crate) use proactive_answers::caffeine_answer_at;
 mod reads;
 mod revisions;
 mod undo;
