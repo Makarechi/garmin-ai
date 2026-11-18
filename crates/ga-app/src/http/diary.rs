@@ -352,7 +352,7 @@ fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ReplayConflict
         .transpose()
 }
 
-async fn authorized<'a>(
+pub(super) async fn authorized<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
     required: &[Scope],
@@ -375,7 +375,7 @@ async fn authorized<'a>(
     Ok((database, owner))
 }
 
-fn access_failure(status: StatusCode) -> Response {
+pub(super) fn access_failure(status: StatusCode) -> Response {
     match status {
         StatusCode::UNAUTHORIZED => unauthorized(),
         StatusCode::FORBIDDEN => forbidden(),

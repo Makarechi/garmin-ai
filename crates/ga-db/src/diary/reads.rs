@@ -297,7 +297,9 @@ impl Database {
         .map_err(|_| DiaryReadError::Database)?
     }
 
-    async fn begin_diary_read(&self) -> Result<Transaction<'static, Postgres>, DiaryReadError> {
+    pub(super) async fn begin_diary_read(
+        &self,
+    ) -> Result<Transaction<'static, Postgres>, DiaryReadError> {
         let mut txn = self
             .work
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
