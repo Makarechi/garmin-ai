@@ -3,6 +3,7 @@ mod pack_export;
 mod settings;
 mod setup;
 
+pub use forms::{FileImportOutcome, FileImportStoreError};
 pub use forms::{FormSubmission, FormSubmitError};
 pub use setup::TrackerSetupStoreError;
 
