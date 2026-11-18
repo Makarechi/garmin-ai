@@ -122,7 +122,7 @@ impl Database {
         .await
     }
 
-    /// Claim the history commands and selectors served by the local diary worker.
+    /// Claim commands and selectors served by the local diary worker.
     pub async fn claim_local_telegram_history(
         &self,
         target: TelegramInboundTarget<'_>,
@@ -134,7 +134,7 @@ impl Database {
             now,
             lease_seconds,
             InboxLane::Diary,
-            Some(&["/history"]),
+            Some(&["/history", "/cancel", "/undo"]),
             true,
         )
         .await
@@ -187,18 +187,20 @@ impl Database {
             .await?;
             let token = Uuid::new_v4();
             let found: Option<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
-                "WITH oldest AS (
+                concat!("WITH oldest AS (
                      SELECT j.id,i.id AS message_id,i.operation_id,i.envelope
                      FROM jobs j JOIN inbound_messages i
                        ON j.dedup_key=concat('telegram:inbound:native:',i.id)
                        AND j.payload->>'inbound_message_id'=i.id::text
+                     CROSS JOIN LATERAL (
+                         SELECT btrim(translate(i.envelope->>'text', $10, repeat(' ',char_length($10)))) AS input
+                     ) command
                      WHERE j.kind=$1 AND j.status IN ('pending','running')
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
                        AND ($9::text[] IS NULL OR (
-                         (NOT $11 OR i.kind IN ('text','voice')) AND split_part(ltrim(translate(
-                           i.envelope->>'text',$10,repeat(' ',char_length($10)))), ' ',1)=ANY($9))
+                         (NOT $11 OR i.kind IN ('text','voice')) AND split_part(command.input,' ',1)=ANY($9))
                          OR ($11 AND i.kind='action' AND (
                            split_part(i.envelope#>>'{action,action_id}','/',1)=ANY(ARRAY[
                              'diary.history.page','diary.history.open','diary.history.delete','diary.history.expired'])
@@ -210,6 +212,12 @@ impl Database {
                                  THEN split_part(i.envelope#>>'{action,action_id}','/',2)::uuid END
                                AND e.revision::text=split_part(i.envelope#>>'{action,action_id}','/',3)))
                          )))
+                       AND (
+                         NOT $11 OR coalesce(split_part(command.input,' ',1),'') NOT IN ('/cancel','/undo')
+                         OR (command.input IN ('/cancel','/undo') AND ",
+                         include_str!("telegram_inbound/no_prior_diary.sql"),
+                         ")
+                       )
                      ORDER BY coalesce((j.payload->>'ordering_epoch')::bigint,0),
                               i.external_event_id::bigint,j.id
                      LIMIT 1
@@ -219,7 +227,7 @@ impl Database {
                  FROM oldest WHERE j.id=oldest.id AND j.attempts<$7
                    AND ((j.status='pending' AND j.run_at<=$4)
                          OR (j.status='running' AND j.lease_until<$4))
-                 RETURNING j.id,oldest.message_id,oldest.operation_id,oldest.envelope::text",
+                 RETURNING j.id,oldest.message_id,oldest.operation_id,oldest.envelope::text"),
             )
             .bind(KIND)
             .bind(target.owner_id)
