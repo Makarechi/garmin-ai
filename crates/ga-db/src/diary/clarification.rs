@@ -187,6 +187,48 @@ pub(crate) async fn clear_history_selection(
     Ok(())
 }
 
+pub(crate) async fn record_history_selection(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    mut state: Value,
+) -> Result<(), ClarificationError> {
+    lock(txn).await?;
+    let scope = scope(txn, binding).await?;
+    let fields = state
+        .as_object_mut()
+        .ok_or(ClarificationError::InvalidRequest)?;
+    fields.insert("channel_instance_id".into(), json!(scope.destination));
+    sqlx::query(
+        "INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(scope.key)
+    .bind(state.to_string())
+    .execute(&mut **txn)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn clear_selected_record(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    id: uuid::Uuid,
+) -> Result<(), ClarificationError> {
+    lock(txn).await?;
+    let scope = scope(txn, binding).await?;
+    sqlx::query(
+        "DELETE FROM app_state WHERE key=$1
+          AND coalesce(value->>'channel_instance_id','telegram:primary')=$2
+          AND value->'event_ids' ? $3",
+    )
+    .bind(scope.key)
+    .bind(scope.destination)
+    .bind(id.to_string())
+    .execute(&mut **txn)
+    .await?;
+    Ok(())
+}
+
 async fn prepare(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationError> {
     sqlx::query("SET LOCAL statement_timeout='750ms'")
         .execute(&mut **txn)

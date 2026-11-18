@@ -1,4 +1,5 @@
 mod labels;
+mod selection;
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -112,6 +113,7 @@ async fn rows(
     destination: &str,
     page: HistoryPage,
     now: StoredInstant,
+    selected: Option<Uuid>,
 ) -> Result<Vec<Record>, sqlx::Error> {
     sqlx::query_as(concat!(
         include_str!("history/rows.sql"),
@@ -120,6 +122,7 @@ async fn rows(
          AND (NOT $2 OR (entry.kind='migraine' AND entry.status='confirmed'
             AND entry.start <= $3 AND (entry.\"end\" IS NULL OR entry.\"end\">$3)))
          AND ($4::timestamptz IS NULL OR (entry.start,entry.id)<($4,$5::uuid))
+         AND ($6::uuid IS NULL OR entry.id=$6)
          ORDER BY entry.start DESC,entry.id DESC LIMIT 11",
     ))
     .bind(destination)
@@ -127,6 +130,7 @@ async fn rows(
     .bind(OffsetDateTime::from(now))
     .bind(page.before.map(|(before, _)| OffsetDateTime::from(before)))
     .bind(page.before.map(|(_, id)| id))
+    .bind(selected)
     .fetch_all(&mut **txn)
     .await
 }
@@ -159,7 +163,14 @@ impl Database {
             let timestamp =
                 StoredInstant::try_from(now).map_err(|_| TelegramDiaryCommitError::Database)?;
             let instance = envelope.channel().instance_id();
-            let records = rows(&mut txn, &format!("telegram:{instance}"), page, timestamp).await?;
+            let records = rows(
+                &mut txn,
+                &format!("telegram:{instance}"),
+                page,
+                timestamp,
+                None,
+            )
+            .await?;
             let intent = history_reply(
                 binding,
                 instance,
