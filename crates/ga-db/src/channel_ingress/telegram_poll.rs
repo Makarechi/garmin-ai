@@ -359,6 +359,18 @@ pub(crate) async fn selection(
             .is_some_and(|fallbacks| fallbacks.contains(&channel)))
 }
 
+pub(crate) async fn telegram_primary(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
+            OR EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding'
+                AND value->'channel'=jsonb_build_object('channel','telegram','instance_id',$1::text))",
+    )
+    .bind(instance).fetch_one(&mut **txn).await
+}
+
 async fn save_event(
     txn: &mut Transaction<'_, Postgres>,
     event: TelegramPollEvent<'_>,

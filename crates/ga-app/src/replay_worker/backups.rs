@@ -84,7 +84,7 @@ mod tests {
         let estimate = async {
             sleep(Duration::from_millis(1600)).await;
             database
-                .complete_storage_check(&lease, BackupSpace { volumes: vec![] }, at, worker)
+                .complete_storage_check(&lease, BackupSpace { volumes: vec![] }, at, worker, false)
                 .await
         };
         tokio::select! {
@@ -170,7 +170,12 @@ impl ScheduledBackups {
         }))
     }
 
-    pub(super) async fn run(&self, database: &Database, worker: RuntimeWorkerIdentity) -> ! {
+    pub(super) async fn run(
+        &self,
+        database: &Database,
+        worker: RuntimeWorkerIdentity,
+        notify_telegram: bool,
+    ) -> ! {
         let mut next_plan = Instant::now();
         loop {
             let Ok(now) = clock() else {
@@ -198,7 +203,7 @@ impl ScheduledBackups {
                 Ok(None) => {}
                 Err(error) => eprintln!("{error}"),
             }
-            if let Err(error) = self.check_capacity(database, worker).await {
+            if let Err(error) = self.check_capacity(database, worker, notify_telegram).await {
                 eprintln!("{error}");
             }
             sleep(POLL_INTERVAL).await;
@@ -209,6 +214,7 @@ impl ScheduledBackups {
         &self,
         database: &Database,
         worker: RuntimeWorkerIdentity,
+        notify_telegram: bool,
     ) -> Result<(), ScheduledBackupError> {
         let at = clock().map_err(|_| ScheduledBackupError::Clock)?;
         let Some(lease) = database.claim_storage_check(at, LEASE_SECONDS).await? else {
@@ -234,7 +240,7 @@ impl ScheduledBackups {
         match result {
             Ok(estimate) => {
                 database
-                    .complete_storage_check(&lease, estimate, at, worker)
+                    .complete_storage_check(&lease, estimate, at, worker, notify_telegram)
                     .await?
             }
             Err(error) => {

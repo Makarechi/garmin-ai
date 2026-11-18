@@ -17,7 +17,9 @@ use super::{
     policy::{decision_in, lock_notification_policy},
 };
 use crate::{
-    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK, check_readiness,
+    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK,
+    channel_ingress::telegram_poll::telegram_primary,
+    check_readiness,
     diary::caffeine_answer_at,
     outbox_claims::ReplyDestination,
     replay::REPLAY_MUTATION_LOCK,
@@ -397,18 +399,6 @@ async fn prepare(
         text,
         formatted,
     })
-}
-
-async fn telegram_primary(
-    txn: &mut Transaction<'_, Postgres>,
-    instance: &str,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
-            OR EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding'
-                AND value->'channel'=jsonb_build_object('channel','telegram','instance_id',$1::text))",
-    )
-    .bind(instance).fetch_one(&mut **txn).await
 }
 
 async fn finish(
