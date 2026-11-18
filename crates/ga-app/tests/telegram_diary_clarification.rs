@@ -116,7 +116,7 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
                 .execute(&pool).await?;
             assert!(matches!(
                 database
-                    .apply_telegram_text_clarification(&lease, started, &case.outbox_text)
+                    .apply_telegram_text_clarification(&lease, started, &case.outbox_text, "ru")
                     .await,
                 Err(TelegramDiaryCommitError::Outbox(_))
             ));
@@ -137,7 +137,7 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
                 .await?;
             assert!(matches!(
                 database
-                    .apply_telegram_text_clarification(&lease, started, &case.outbox_text)
+                    .apply_telegram_text_clarification(&lease, started, &case.outbox_text, "ru")
                     .await,
                 Err(TelegramDiaryCommitError::BindingChanged)
             ));
@@ -147,12 +147,12 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
                 .await?;
         }
         let queued = database
-            .apply_telegram_text_clarification(&lease, started, &case.outbox_text)
+            .apply_telegram_text_clarification(&lease, started, &case.outbox_text, "ru")
             .await?;
         assert!(queued.created);
         assert!(matches!(
             database
-                .apply_telegram_text_clarification(&lease, started, &case.outbox_text)
+                .apply_telegram_text_clarification(&lease, started, &case.outbox_text, "ru")
                 .await,
             Err(TelegramDiaryCommitError::Job(JobStoreError::LeaseLost))
         ));

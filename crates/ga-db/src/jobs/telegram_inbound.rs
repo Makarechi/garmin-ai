@@ -45,6 +45,10 @@ impl TelegramInboundLease {
         self.operation_id
     }
 
+    pub fn job_identity(&self) -> (Uuid, Uuid) {
+        (self.job_id, self.token)
+    }
+
     pub fn envelope_json(&self) -> &str {
         &self.envelope
     }

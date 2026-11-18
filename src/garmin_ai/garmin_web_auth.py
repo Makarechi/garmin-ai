@@ -11,6 +11,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import Lock, Timer
 from urllib.parse import parse_qsl
 
@@ -219,25 +220,6 @@ class GarminWebAuth:
             return "restored"
 
 
-FORM_HTML = """<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Вход в Garmin</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>body{font:16px system-ui;max-width:420px;margin:40px auto;padding:0 20px;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#18232b)}button,input{font:inherit;width:100%;box-sizing:border-box;padding:12px;margin:8px 0}button{background:#007f74;color:white;border:0;border-radius:8px}button:disabled{opacity:.5}#message{min-height:2em}</style></head>
-<body><h1>Восстановить Garmin</h1><p>Введите код, который Garmin отправит на почту. Пароль в этой форме не нужен.</p>
-<button id="start">Отправить код</button><form id="codeForm" hidden><label for="code">Код из письма</label><input id="code" autocomplete="one-time-code" inputmode="numeric" required maxlength="20"><button>Подтвердить</button></form><p id="message" role="status"></p>
-<script>
-const app=window.Telegram&&window.Telegram.WebApp;
-const message=document.getElementById('message');
-if(!app||!app.initData){message.textContent='Откройте форму кнопкой в личном чате с ботом.';document.getElementById('start').disabled=true;}else{app.ready();}
-async function request(path,code){
- message.textContent='Проверяю…';
- try{const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({init_data:app.initData,code})});
- const result=await response.json();
- if(!response.ok){message.textContent=result.detail||'Не удалось завершить вход. Попробуйте снова.';return;}
- if(result.status==='code_required'){document.getElementById('codeForm').hidden=false;document.getElementById('start').textContent='Отправить новый код';message.textContent='Письмо отправлено. Введите код.';}
- else{document.getElementById('codeForm').hidden=true;document.getElementById('start').hidden=true;message.textContent=result.status==='already_connected'?'Garmin уже подключен. Можно закрыть форму.':'Доступ к Garmin восстановлен. Можно закрыть форму.';}
- }catch(_){message.textContent='Нет соединения с сервером. Попробуйте снова.';}
-}
-document.getElementById('start').onclick=()=>request('/garmin-auth/start','');
-document.getElementById('codeForm').onsubmit=e=>{e.preventDefault();request('/garmin-auth/complete',document.getElementById('code').value.trim());};
-</script></body></html>"""
+FORM_HTML = (Path(__file__).with_name("static") / "garmin_auth" / "index.html").read_text(
+    encoding="utf-8"
+)

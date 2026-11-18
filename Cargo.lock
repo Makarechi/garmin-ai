@@ -841,6 +841,7 @@ dependencies = [
  "ga-fit",
  "ga-garmin",
  "ga-model",
+ "hmac",
  "markdown-it-rust-core",
  "reqwest",
  "rmcp",
@@ -856,6 +857,7 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -942,6 +944,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

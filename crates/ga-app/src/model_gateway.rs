@@ -8,7 +8,10 @@ pub use analysis::{
     DiaryAnalysisTools, OfferedReadTool,
 };
 pub use configuration::{ConfiguredModel, ModelEnvironmentError, RuntimeModelSettings};
-pub use interpretation::{DiaryInterpretationError, DiaryInterpretationRequest, ModelDiaryContext};
+pub use interpretation::{
+    DiaryInterpretationError, DiaryInterpretationRequest, ModelDiaryContext,
+    TelegramDiaryInterpretation,
+};
 pub use safety::{ReplySafety, ReplySafetyIntent, SafetyScreenError};
 
 mod runtime;
