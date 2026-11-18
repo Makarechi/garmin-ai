@@ -35,6 +35,13 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Run the account-free synthetic dashboard
+    Demo {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+    },
     /// Estimate local staging and destination capacity for an encrypted backup
     BackupSpace { path: PathBuf },
     /// Preview or redact old completed transport text while retaining replay records
@@ -139,6 +146,12 @@ fn main() -> ExitCode {
         Some(Command::Serve { host, port }) => {
             if http::serve(&host, port).is_err() {
                 eprintln!("Could not run the HTTP server.");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Demo { host, port }) => {
+            if http::demo::serve(&host, port).is_err() {
+                eprintln!("Could not run the demo server.");
                 return ExitCode::FAILURE;
             }
         }

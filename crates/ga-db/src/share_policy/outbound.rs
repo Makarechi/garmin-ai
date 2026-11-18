@@ -21,22 +21,52 @@ pub(crate) async fn intent_sharing_allowed(
     let Some(references) = references.as_array().filter(|parts| parts.len() <= 100) else {
         return Ok(false);
     };
-    let mut evidenced_versions = HashSet::new();
+    let mut definitions = HashSet::new();
+    let mut exact_versions = HashSet::new();
     for reference in references {
         let Some(reference) = reference.as_str() else {
             return Ok(false);
         };
-        let Some(reference_id) = reference.strip_prefix("definition:") else {
+        let (reference_id, recorded) = if let Some(id) = reference.strip_prefix("definition:") {
+            (id, &mut definitions)
+        } else if let Some(id) = reference.strip_prefix("definition-version:") {
+            (id, &mut exact_versions)
+        } else {
             continue;
         };
-        let (Ok(definition), Some(destination)) = (reference_id.parse::<Uuid>(), destination)
+        let Ok(id) = reference_id.parse::<Uuid>() else {
+            return Ok(false);
+        };
+        if reference_id != id.to_string() {
+            return Ok(false);
+        }
+        recorded.insert(id);
+    }
+    if definitions.is_empty() && exact_versions.is_empty() {
+        return Ok(requirements.is_empty());
+    }
+    let Some(destination) = destination else {
+        return Ok(false);
+    };
+    let mut exact_definitions = HashSet::new();
+    let mut evidenced_versions = HashSet::new();
+    for version_id in exact_versions {
+        let definition: Option<Uuid> =
+            sqlx::query_scalar("SELECT definition_id FROM event_definition_versions WHERE id=$1")
+                .bind(version_id)
+                .fetch_optional(&mut **txn)
+                .await?;
+        let Some(definition) = definition.filter(|definition| definitions.contains(definition))
         else {
             return Ok(false);
         };
-        // Revocation matches the stored reference against the canonical UUID.
-        if reference_id != definition.to_string() {
+        if !facts_allowed(txn, version_id, destination).await? {
             return Ok(false);
         }
+        exact_definitions.insert(definition);
+        evidenced_versions.insert(version_id);
+    }
+    for definition in definitions.difference(&exact_definitions) {
         let version: Option<Uuid> = sqlx::query_scalar(
             "SELECT v.id FROM event_definitions d JOIN event_definition_versions v
                 ON v.definition_id=d.id AND v.version=d.current_version WHERE d.id=$1",
@@ -47,16 +77,7 @@ pub(crate) async fn intent_sharing_allowed(
         let Some(version_id) = version else {
             return Ok(false);
         };
-        if !allows(
-            txn,
-            ShareRequirement {
-                version_id,
-                categories: &[ShareCategory::Schema, ShareCategory::Facts],
-            },
-            destination,
-        )
-        .await?
-        {
+        if !facts_allowed(txn, version_id, destination).await? {
             return Ok(false);
         }
         evidenced_versions.insert(version_id);
@@ -71,4 +92,20 @@ pub(crate) async fn intent_sharing_allowed(
                 .categories
                 .contains(&ShareCategory::OriginalText)
     }))
+}
+
+async fn facts_allowed(
+    txn: &mut Transaction<'_, Postgres>,
+    version_id: Uuid,
+    destination: ShareDestination<'_>,
+) -> Result<bool, SharePolicyError> {
+    allows(
+        txn,
+        ShareRequirement {
+            version_id,
+            categories: &[ShareCategory::Schema, ShareCategory::Facts],
+        },
+        destination,
+    )
+    .await
 }

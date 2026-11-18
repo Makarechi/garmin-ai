@@ -5,6 +5,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src/garmin_ai/locales ./src/garmin_ai/locales
 COPY src/garmin_ai/prompts ./src/garmin_ai/prompts
+COPY src/garmin_ai/static/dashboard ./src/garmin_ai/static/dashboard
 COPY migration/contracts ./migration/contracts
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --locked --release -p ga-app --bin garmin-ai-rust \

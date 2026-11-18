@@ -196,7 +196,7 @@ impl Database {
         .map_err(|_| TelegramDiaryCommitError::Database)?
     }
 
-    async fn begin_telegram_text(
+    pub(super) async fn begin_telegram_text(
         &self,
         lease: &TelegramInboundLease,
         envelope: &InboundEnvelope,
