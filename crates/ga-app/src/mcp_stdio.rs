@@ -1,5 +1,13 @@
-use ga_db::{Database, diary::DiaryReadError, health_analysis::HealthAnalysisError};
-use ga_domain::legacy_json::{Utf8Layout, encode};
+use ga_db::{
+    Database,
+    diary::{CreateSystemEvent, DiaryReadError, DiaryWriteError},
+    health_analysis::HealthAnalysisError,
+};
+use ga_domain::{
+    event_input::{EventInput, ValidationMode},
+    event_replay::check_idempotency_key,
+    legacy_json::{Utf8Layout, encode},
+};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -20,6 +28,7 @@ use crate::{
 };
 
 const INSTRUCTIONS: &str = include_str!("../../../src/garmin_ai/prompts/mcp_server.txt");
+const CREATE_TOOL: &str = include_str!("../contracts/mcp-events-create.json");
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -27,21 +36,18 @@ struct Mcp {
     database: Database,
     owner: Uuid,
     read_tools: Vec<Tool>,
+    create_tool: Option<Tool>,
     active_reads: Semaphore,
 }
 
 #[tokio::main(flavor = "current_thread")]
 pub(crate) async fn run() -> Result<(), &'static str> {
     let [url, writes] = configuration::read(["GA_DATABASE_URL", "GA_MCP_ENABLE_WRITES"])?;
-    if let Some(value) = writes {
-        match value.to_ascii_lowercase().as_str() {
-            "0" | "off" | "false" | "f" | "no" | "n" => {}
-            "1" | "on" | "true" | "t" | "yes" | "y" => {
-                return Err("Diary writes are unavailable in this native MCP build");
-            }
-            _ => return Err("GA_MCP_ENABLE_WRITES must be a boolean"),
-        }
-    }
+    let writes = match writes.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("0" | "off" | "false" | "f" | "no" | "n") => false,
+        Some("1" | "on" | "true" | "t" | "yes" | "y") => true,
+        _ => return Err("GA_MCP_ENABLE_WRITES must be a boolean"),
+    };
     let database = Database::connect_lazy(&url.ok_or("Storage configuration is invalid")?)
         .map_err(|_| "Storage configuration is invalid")?;
     let owner = database
@@ -55,6 +61,10 @@ pub(crate) async fn run() -> Result<(), &'static str> {
             .chain(ReadTool::MCP_GARMIN)
             .map(read_tool)
             .collect::<Result<_, _>>()?,
+        create_tool: writes
+            .then(|| serde_json::from_str(CREATE_TOOL))
+            .transpose()
+            .map_err(|_| "The MCP write descriptor is invalid")?,
         active_reads: Semaphore::new(2),
     };
     let (input, output) = stdio_pipes();
@@ -104,16 +114,24 @@ impl ServerHandler for Mcp {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.read_tools.clone()))
+        let mut tools = self.read_tools.clone();
+        tools.extend(self.create_tool.clone());
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
         &self,
         call: CallToolRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let result = match call.name.as_ref() {
             "events" => self.events(call.arguments.unwrap_or_default()).await,
+            "events_create" if self.create_tool.is_some() => {
+                self.create(call.arguments.unwrap_or_default(), || {
+                    context.ct.is_cancelled()
+                })
+                .await
+            }
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
             }
@@ -147,6 +165,43 @@ impl Mcp {
             .await
             .map_err(garmin_error)?;
         tool_result(result)
+    }
+
+    async fn create(
+        &self,
+        mut args: serde_json::Map<String, Value>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<CallToolResult, &'static str> {
+        let Some(event) = args.remove("event") else {
+            return Err("ValidationError");
+        };
+        let Some(Value::String(key)) = args.remove("idempotency_key") else {
+            return Err("ValidationError");
+        };
+        if !args.is_empty() || check_idempotency_key(&key).is_err() {
+            return Err("ValidationError");
+        }
+        let input = serde_json::to_vec(&event).map_err(|_| "ValidationError")?;
+        let report =
+            EventInput::from_json(&input, MAX_MESSAGE_BYTES, ValidationMode::AuditedSnapshot)
+                .and_then(EventInput::into_mcp_report)
+                .map_err(|_| "ValidationError")?;
+        let entry = self
+            .database
+            .create_system_event_unless_cancelled(
+                CreateSystemEvent {
+                    owner_id: self.owner,
+                    authenticated_actor: "mcp",
+                    report: &report,
+                    idempotency_key: Some(&key),
+                    operation_id: None,
+                    clock_uncertainty_seconds: None,
+                },
+                is_cancelled,
+            )
+            .await
+            .map_err(write_error)?;
+        tool_result(entry.snapshot)
     }
 
     async fn events(
@@ -191,6 +246,17 @@ fn garmin_error(error: GarminReadError) -> &'static str {
         GarminReadError::Health(
             HealthAnalysisError::Storage(_) | HealthAnalysisError::Database,
         ) => "RuntimeError",
+        _ => "ValueError",
+    }
+}
+
+fn write_error(error: DiaryWriteError) -> &'static str {
+    match error {
+        DiaryWriteError::UnknownOwner => "PermissionError",
+        DiaryWriteError::Storage(_)
+        | DiaryWriteError::Cancelled
+        | DiaryWriteError::Busy
+        | DiaryWriteError::Database => "RuntimeError",
         _ => "ValueError",
     }
 }
