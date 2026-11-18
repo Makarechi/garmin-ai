@@ -21,7 +21,7 @@ HEADER = "X-Telegram-Bot-Api-Secret-Token"
 def capture(output):
     engine = isolated_engine()
     try:
-        settings = Settings(telegram_webhook_secret=SECRET, telegram_user_id=CHAT)
+        settings = Settings(_env_file=None, telegram_webhook_secret=SECRET, telegram_user_id=CHAT)
         events = []
         message = {
             "message_id": 761,
@@ -82,6 +82,21 @@ def capture(output):
                     )
                 )
             request("disabled", payload={**valid, "update_id": 465})
+        disabled = Settings(
+            _env_file=None, telegram_webhook_secret=SECRET, telegram_user_id=CHAT, integrations=[]
+        )
+        with TestClient(create_app(disabled, engine), raise_server_exceptions=False) as client:
+            response = client.post("/telegram/webhook", headers={HEADER: SECRET}, json=valid)
+            events.append(
+                {
+                    "name": "explicitly_disabled",
+                    "payload": valid,
+                    "auth": "valid",
+                    "large": False,
+                    "status": response.status_code,
+                    "body": response.json(),
+                }
+            )
         output.write_text(json.dumps({"chat": CHAT, "cases": events}), encoding="utf-8")
     finally:
         engine.dispose()
