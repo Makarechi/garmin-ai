@@ -157,10 +157,9 @@ impl Mcp {
             return Err("ValidationError");
         }
         let input = serde_json::to_vec(&event).map_err(|_| "ValidationError")?;
-        let report =
-            EventInput::from_json(&input, MAX_MESSAGE_BYTES, ValidationMode::AuditedSnapshot)
-                .and_then(EventInput::into_mcp_report)
-                .map_err(|_| "ValidationError")?;
+        let report = EventInput::from_json(&input, MAX_MESSAGE_BYTES, ValidationMode::NewReport)
+            .and_then(EventInput::into_mcp_report)
+            .map_err(|_| "ValidationError")?;
         let entry = self
             .database
             .create_system_event_unless_cancelled(
