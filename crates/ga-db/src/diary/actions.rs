@@ -1,5 +1,6 @@
 mod community;
 mod forms;
+mod settings;
 mod setup;
 
 pub use community::{CommunityPackError, community_pack_catalog, parse_community_pack};

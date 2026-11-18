@@ -59,6 +59,10 @@ fn router(state: AppState) -> Router {
             "/source-metric-mappings/{mapping_id}",
             any(source_mappings::item),
         )
+        .route(
+            "/tracker-setups/{tracker_id}/settings",
+            any(tracker_setup::settings),
+        )
         .route("/actions/events/{event_id}", any(tracker_actions::event))
         .route("/forms/{action_id}", any(tracker_actions::form))
         .route("/forms/{action_id}/submit", any(tracker_actions::submit))
