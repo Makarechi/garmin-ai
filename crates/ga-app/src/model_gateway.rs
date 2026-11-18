@@ -1,10 +1,12 @@
 mod analysis;
+mod configuration;
 mod safety;
 
 pub use analysis::{
     AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult, AnalysisToolRead,
     DiaryAnalysisTools, OfferedReadTool,
 };
+pub use configuration::{ConfiguredModel, ModelEnvironmentError, RuntimeModelSettings};
 pub use safety::{ReplySafety, ReplySafetyIntent, SafetyScreenError};
 
 mod runtime;
