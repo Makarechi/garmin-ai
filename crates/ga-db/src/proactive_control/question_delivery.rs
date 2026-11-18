@@ -10,16 +10,18 @@ use super::{
     DiaryQuestionKind, NotificationDecision, NotificationExclusions, NotificationPolicy,
     NotificationReason, ProactiveControlError, ReservedDiaryQuestion,
     diary_questions::{
-        MIGRAINE_DETAILS, MigraineQuestionDetails, diary_question_packs, diary_question_timezone,
-        migraine_question_text,
+        MIGRAINE_DETAILS, MigraineQuestionDetails, context, diary_question_packs,
+        diary_question_timezone, migraine_question_text,
     },
     policy::{decision_in, lock_notification_policy},
 };
 use crate::{
-    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK, check_readiness,
+    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK,
+    activity_documents::PARSER_VERSION,
+    check_readiness,
     diary::caffeine_answer_at,
     outbox_claims::ReplyDestination,
-    replay::REPLAY_MUTATION_LOCK,
+    replay::{REPLAY_MUTATION_LOCK, projection_pending},
     runtime_lease::RuntimeLease,
     share_policy::{CHANNEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK},
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
@@ -162,7 +164,7 @@ impl RuntimeLease {
                    SELECT q.id,marker.value->>'status' AS provider_status,marker.key IS NOT NULL AS started
                    FROM pending_questions q LEFT JOIN app_state marker
                      ON marker.key='outbox:question:' || q.id::text || ':0'
-                   WHERE q.status='sending' AND q.kind IN ('migraine','caffeine')
+                   WHERE q.status='sending' AND q.kind IN ('migraine','caffeine','context')
                  )
                  UPDATE pending_questions q SET
                    status=CASE WHEN NOT p.started OR p.provider_status='pending' THEN 'pending'
@@ -237,7 +239,9 @@ async fn prepare(
     }
     let kind_match = matches!(
         (kind.as_str(), reserved.kind),
-        ("migraine", DiaryQuestionKind::Migraine) | ("caffeine", DiaryQuestionKind::Caffeine),
+        ("migraine", DiaryQuestionKind::Migraine)
+            | ("caffeine", DiaryQuestionKind::Caffeine)
+            | ("context", DiaryQuestionKind::Context),
     );
     if !kind_match || event != reserved.event_id {
         return finished(Unavailable);
@@ -291,6 +295,7 @@ async fn prepare(
     let allowed = match reserved.kind {
         DiaryQuestionKind::Migraine => migraine,
         DiaryQuestionKind::Caffeine => caffeine,
+        DiaryQuestionKind::Context => context::enabled(txn, destination.owner_id).await?,
     };
     let now_at = OffsetDateTime::from(now);
     if !allowed || expires <= now_at {
@@ -331,6 +336,17 @@ async fn prepare(
                 return finished(Cancelled);
             }
             stored
+        }
+        DiaryQuestionKind::Context => {
+            if projection_pending(txn, PARSER_VERSION).await? {
+                release(txn, reserved.id, "pending", None, false).await?;
+                return finished(Unavailable);
+            }
+            let Some(text) = context::refresh(txn, reserved.id, &raw, now_at, &zone).await? else {
+                release(txn, reserved.id, "cancelled", None, false).await?;
+                return finished(Cancelled);
+            };
+            text
         }
     };
     if let Some(retry) = prior.as_ref().and_then(|prior| prior.get("retry_at"))

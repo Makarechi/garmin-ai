@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from garmin_ai.accounts import owner
 from garmin_ai.config import Settings
 from garmin_ai.models import AppState, Measurement, PendingQuestion, TimelineInterval
-from garmin_ai.proactive import generate_questions
+from garmin_ai.proactive import generate_questions, select_question
 from garmin_ai.scenario_packs import ensure_scenario_packs
 
 NOW = datetime(2026, 10, 26, 0, 35, tzinfo=UTC)
@@ -84,7 +84,13 @@ def capture(path):
     try:
         with Session(engine) as session, session.begin():
             person = seed(session)
-            settings = Settings(_env_file=None, timezone="UTC")
+            settings = Settings(
+                _env_file=None,
+                timezone="UTC",
+                proactive_enabled=True,
+                quiet_start_hour=0,
+                quiet_end_hour=0,
+            )
 
             def invoke(at, enabled):
                 generate_questions(
@@ -106,14 +112,24 @@ def capture(path):
             assert snapshot(session.scalars(questions).one()) == generated
             row.status = "cancelled"
             row.evidence = {**row.evidence, "cancel_reason": "synthetic-replay"}
-            invoke(NOW + timedelta(minutes=60), True)
+            selected_at = NOW + timedelta(minutes=60)
+            invoke(selected_at, True)
             reused = snapshot(session.scalars(questions).one())
             assert reused["status"] == "pending" and reused["key"] == generated["key"]
+            selected = snapshot(select_question(session, settings, selected_at))
+            assert selected["status"] == "sending"
+            assert "Неизвестный контекст: 18 мин" in selected["text"]
             session.execute(delete(PendingQuestion))
             session.delete(state)
         path.write_text(
             json.dumps(
-                dict(owner=str(person), now=NOW.isoformat(), generated=generated, reused=reused),
+                dict(
+                    owner=str(person),
+                    now=NOW.isoformat(),
+                    generated=generated,
+                    reused=reused,
+                    selected=selected,
+                ),
                 ensure_ascii=False,
             ),
             encoding="utf-8",
