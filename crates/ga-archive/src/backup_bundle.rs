@@ -196,7 +196,7 @@ impl<R: Read> Read for VerifiedReader<R> {
     }
 }
 
-fn normalized(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn normalized(path: &Path) -> io::Result<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
         if component == Component::ParentDir {
