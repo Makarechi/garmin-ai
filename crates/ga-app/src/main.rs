@@ -3,6 +3,7 @@ mod backup;
 mod backup_space;
 mod configuration;
 mod extensions;
+mod file_import;
 mod garmin_setup;
 mod healthcheck;
 mod http;
@@ -52,6 +53,15 @@ enum Command {
     EnrollAccount {
         #[arg(long, required = true)]
         confirm_existing_owner: bool,
+    },
+    /// Preview or apply a bounded local CSV/JSON tracker import
+    ImportFile {
+        #[arg(value_enum)]
+        mode: file_import::Mode,
+        file: PathBuf,
+        mapping: PathBuf,
+        #[arg(long)]
+        confirm: Option<String>,
     },
     /// Estimate local staging and destination capacity for an encrypted backup
     BackupSpace { path: PathBuf },
@@ -185,6 +195,14 @@ fn main() -> ExitCode {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
+        }
+        Some(Command::ImportFile {
+            mode,
+            file,
+            mapping,
+            confirm,
+        }) => {
+            return file_import::run(mode, &file, &mapping, confirm.as_deref());
         }
         Some(Command::PruneTelegramText {
             older_than_days,
