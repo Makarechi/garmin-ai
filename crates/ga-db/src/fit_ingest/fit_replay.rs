@@ -9,13 +9,14 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    CapturedFit, ENDPOINT, FitIngestError, FitIngestOutcome, FitStageError, LockedFit,
-    PARSER_VERSION, ReplayWatermark, invalidate_replay_outputs, legacy_decode_label,
+    CapturedFit, DocumentError, ENDPOINT, FitIngestError, FitIngestOutcome, FitStageError,
+    LockedFit, PARSER_VERSION, ReplayWatermark, invalidate_replay_outputs, legacy_decode_label,
     permanent_decode_error, put_state, replace_fit_rows,
 };
 use crate::{
     Database,
     jobs::{FailureReason, JobOutcome, JobStoreError, RecordedJobStatus, ReplayJobLease},
+    raw_capture::CaptureError,
     raw_capture::{GARMIN_LEGACY_SOURCE, lock_legacy_scope},
     replay::{
         PreparedReplay, REPLAY_MUTATION_LOCK, ReadReplayInput, ReplayContent, ReplayInputError,
@@ -406,7 +407,12 @@ async fn apply_verified(
         outcome,
         FitIngestOutcome::Normalized { .. } | FitIngestOutcome::Empty
     ) {
-        invalidate_replay_outputs(txn).await?;
+        invalidate_replay_outputs(txn)
+            .await
+            .map_err(|error| match error {
+                DocumentError::Access(CaptureError::Busy) => FitReplayError::Busy,
+                _ => FitReplayError::Database,
+            })?;
     }
     Ok(FitReplayOutcome::Applied(outcome))
 }

@@ -60,7 +60,7 @@ impl TelegramWebhook {
                         .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
             })
             .map(|secret| Sha256::digest(secret).into());
-        let settings = TelegramIngressSettings::for_webhook(chat, integrations)
+        let settings = TelegramIngressSettings::selected(chat, integrations)
             .ok()
             .flatten()
             .map(Arc::new);

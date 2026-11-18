@@ -2,7 +2,7 @@ use std::{env, error::Error, fs, io, str::FromStr};
 
 use ga_db::{
     Database,
-    source_pages::{PreparedSourcePoll, PublicationState, SourcePoll},
+    source_pages::{PreparedSourcePoll, PublicationState, SourcePageError, SourcePoll},
 };
 use ga_domain::{
     source_contract::{SourceCapabilities, SourcePage},
@@ -41,6 +41,7 @@ async fn publishes_source_revisions_and_cursor_as_one_transaction() -> Result<()
         .as_str()
         .ok_or("Missing source hash")?;
     let caps = SourceCapabilities::from_json(&fixture["capabilities"])?;
+    let mut checked_context_fence = false;
     for step in fixture["steps"].as_array().ok_or("Missing steps")? {
         let now: StoredInstant = step["now"]
             .as_str()
@@ -66,6 +67,34 @@ async fn publishes_source_revisions_and_cursor_as_one_transaction() -> Result<()
         } else {
             None
         };
+        if !checked_context_fence
+            && !page.records.is_empty()
+            && matches!(expected_state, "partial" | "complete")
+        {
+            let prior: (i64,i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM metric_observations)",
+            ).fetch_one(&inspect).await?;
+            let mut model = inspect.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock_shared(72104643)")
+                .execute(&mut *model)
+                .await?;
+            let blocked = ready(db.prepare_source_poll(owner, source, now).await?)?;
+            assert!(matches!(
+                db.publish_source_page(blocked, source_hash, caps, &page)
+                    .await,
+                Err(SourcePageError::Busy),
+            ));
+            assert_eq!(
+                ready(db.prepare_source_poll(owner, source, now).await?)?.cursor(),
+                poll.cursor(),
+            );
+            let unchanged: (i64,i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM metric_observations)",
+            ).fetch_one(&inspect).await?;
+            assert_eq!(unchanged, prior);
+            model.rollback().await?;
+            checked_context_fence = true;
+        }
         let status = db.publish_source_page(poll, source_hash, caps, &page).await;
         if expected_state == "error" {
             assert!(
@@ -96,6 +125,7 @@ async fn publishes_source_revisions_and_cursor_as_one_transaction() -> Result<()
     .fetch_one(&inspect)
     .await?;
     assert_eq!(originals, 0);
+    assert!(checked_context_fence);
     Ok(())
 }
 

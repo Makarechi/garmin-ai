@@ -5,6 +5,7 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::garmin_context::{DiaryContextAvailability, availability_in};
 use super::{
     NotificationDecision, NotificationExclusions, NotificationPolicy, ProactiveControlError,
     diary_questions::{
@@ -13,7 +14,7 @@ use super::{
     },
     policy::decision_in,
 };
-use crate::{Database, activity_documents::PARSER_VERSION, replay::projection_pending};
+use crate::Database;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiaryQuestionKind {
@@ -71,8 +72,8 @@ impl Database {
             if decision_in(&mut txn, &policy, now).await? != NotificationDecision::Allow {
                 return Ok(None);
             }
-            let allow_context =
-                include_context && !projection_pending(&mut txn, PARSER_VERSION).await?;
+            let allow_context = include_context
+                && availability_in(&mut txn, now).await? == DiaryContextAvailability::Ready;
             let question = reserve(&mut txn, owner, now, &timezone, allow_context).await?;
             txn.commit().await?;
             Ok(question)

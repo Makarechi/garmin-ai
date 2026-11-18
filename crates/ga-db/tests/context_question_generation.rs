@@ -177,6 +177,26 @@ async fn verify_dispatch(
         .await?;
 
     let question = reserve().await?.ok_or("Missing resumed context question")?;
+    sqlx::query(
+        "INSERT INTO jobs(id,kind,payload,dedup_key,status,run_at,attempts)
+         VALUES(gen_random_uuid(),'garmin_endpoint','{\"endpoint\":\"heart_rate\"}',
+                  'synthetic-context-refresh','pending',$1,0)",
+    )
+    .bind(OffsetDateTime::from(now))
+    .execute(pool)
+    .await?;
+    assert_eq!(
+        database
+            .dispatch_diary_question(destination(), 42, &question, &policy, now, |_| never_send())
+            .await?,
+        QuestionDispatchResult::Unavailable,
+    );
+    assert_eq!(snapshot(pool).await?["status"], "pending");
+    assert!(reserve().await?.is_none());
+    sqlx::query("DELETE FROM jobs WHERE dedup_key='synthetic-context-refresh'")
+        .execute(pool)
+        .await?;
+    let question = reserve().await?.ok_or("Missing context after fresh sync")?;
     let evidence = &selected["evidence"];
     let left: StoredInstant = evidence["start"]
         .as_str()

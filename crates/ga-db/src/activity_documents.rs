@@ -18,7 +18,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    Database, health_projection,
+    Database,
+    conversation_memory::{MemoryError, lock_context_change},
+    health_projection,
     raw_capture::{CaptureError, GARMIN_LEGACY_SOURCE, lock_legacy_scope},
 };
 
@@ -951,7 +953,13 @@ pub(crate) async fn supersede_insights(
 
 pub(crate) async fn invalidate_replay_outputs(
     txn: &mut Transaction<'_, Postgres>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DocumentError> {
+    lock_context_change(txn)
+        .await
+        .map_err(|error| match error {
+            MemoryError::Busy => DocumentError::Access(CaptureError::Busy),
+            _ => DocumentError::Database,
+        })?;
     sqlx::query(
         "WITH chats AS (
              UPDATE conversations SET memory_epoch = gen_random_uuid(),
@@ -971,5 +979,5 @@ pub(crate) async fn invalidate_replay_outputs(
     .bind(json!({"id": Uuid::new_v4().to_string()}).to_string())
     .execute(&mut **txn)
     .await?;
-    supersede_insights(txn).await
+    supersede_insights(txn).await.map_err(Into::into)
 }
