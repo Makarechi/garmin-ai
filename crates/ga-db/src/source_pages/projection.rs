@@ -15,12 +15,44 @@ const MAPPING_LIMIT: i64 = 1000;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MappingDraft {
+pub struct MappingDraft {
     source_instance_id: String,
     metric_version_id: String,
     value_path: Vec<String>,
     unit_path: Vec<String>,
     unit: String,
+}
+
+impl MappingDraft {
+    pub fn from_json(value: &Value) -> Result<Self, SourcePageError> {
+        let mut draft: Self =
+            serde_json::from_value(value.clone()).map_err(|_| SourcePageError::Mapping)?;
+        let version =
+            Uuid::parse_str(&draft.metric_version_id).map_err(|_| SourcePageError::Mapping)?;
+        draft.metric_version_id = version.to_string();
+        if !valid_draft(&draft) {
+            return Err(SourcePageError::Mapping);
+        }
+        Ok(draft)
+    }
+
+    pub fn instance(&self) -> &str {
+        &self.source_instance_id
+    }
+
+    pub(super) fn document(&self) -> Result<Value, SourcePageError> {
+        serde_json::to_value(self).map_err(|_| SourcePageError::Mapping)
+    }
+
+    pub(super) fn version(&self) -> Result<Uuid, SourcePageError> {
+        self.metric_version_id
+            .parse()
+            .map_err(|_| SourcePageError::Mapping)
+    }
+
+    pub(super) fn unit(&self) -> &str {
+        &self.unit
+    }
 }
 
 pub(super) struct ConfirmedMapping {

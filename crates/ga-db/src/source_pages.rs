@@ -1,4 +1,7 @@
+mod mappings;
 mod projection;
+pub use mappings::SourceMappingError;
+pub use projection::MappingDraft as SourceMetricMappingDraft;
 
 use std::{collections::BTreeSet, error::Error, fmt};
 
