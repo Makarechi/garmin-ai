@@ -57,6 +57,34 @@ enum Preparation {
 }
 
 impl Database {
+    /// Use the current pause and primary-channel selection before generating a notification.
+    pub async fn telegram_diary_reminders_enabled(
+        &self,
+        owner: Uuid,
+        instance: &str,
+        default_enabled: bool,
+    ) -> Result<bool, ProactiveControlError> {
+        tokio::time::timeout(STORAGE_DEADLINE, async {
+            let mut txn = self.control.begin().await?;
+            prepare_storage(&mut txn).await?;
+            let enabled: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM people WHERE id=$1)
+                     AND coalesce((SELECT value->'enabled' = 'true'::jsonb
+                         FROM app_state WHERE key='proactive:enabled'),$2)
+                     AND coalesce((SELECT CASE WHEN jsonb_typeof(value->'model_categories')='array'
+                         THEN value->'model_categories' ?| ARRAY['health','diary','audio'] ELSE false END
+                         FROM app_state WHERE key='preferences:onboarding'),true)",
+            )
+            .bind(owner)
+            .bind(default_enabled)
+            .fetch_one(&mut *txn)
+            .await?;
+            Ok(enabled && telegram_primary(&mut txn, instance).await?)
+        })
+        .await
+        .map_err(|_| ProactiveControlError::Database)?
+    }
+
     /// Guard one private Telegram notification through its provider attempt and recorded outcome.
     pub async fn dispatch_diary_question<F>(
         &self,
@@ -273,11 +301,7 @@ async fn prepare(
         }
         NotificationDecision::Allow => {}
     }
-    let primary: bool = sqlx::query_scalar(
-        "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
-            OR EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding'
-                AND value->'channel'=jsonb_build_object('channel','telegram','instance_id',$1::text))",
-    ).bind(destination.instance_id).fetch_one(&mut **txn).await?;
+    let primary = telegram_primary(txn, destination.instance_id).await?;
     let pairing = confirmed_pairing(txn, destination.instance_id, expected_chat).await;
     if matches!(pairing, Err(TelegramBindingError::Busy)) {
         return Err(ProactiveControlError::Busy);
@@ -374,6 +398,18 @@ async fn prepare(
         text,
         formatted,
     })
+}
+
+async fn telegram_primary(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
+            OR EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding'
+                AND value->'channel'=jsonb_build_object('channel','telegram','instance_id',$1::text))",
+    )
+    .bind(instance).fetch_one(&mut **txn).await
 }
 
 async fn finish(

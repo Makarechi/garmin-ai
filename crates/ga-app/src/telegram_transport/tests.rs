@@ -10,6 +10,7 @@ use tokio::{
 
 use super::{TelegramTransport, TelegramTransportError};
 
+mod reminders;
 mod voice;
 
 const FIXTURE_TOKEN: &str = "100:synthetic-transport";
