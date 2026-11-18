@@ -6,6 +6,7 @@ mod garmin_auth;
 mod personal_goals;
 pub(crate) mod tools;
 mod tracker_actions;
+mod tracker_setup;
 mod tracker_sharing;
 mod wearable;
 mod web_chat;
@@ -42,6 +43,8 @@ fn router(state: AppState) -> Router {
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
         .route("/actions", any(tracker_actions::available))
+        .route("/tracker-setups/preview", any(tracker_setup::preview))
+        .route("/tracker-setups", any(tracker_setup::confirm))
         .route("/actions/events/{event_id}", any(tracker_actions::event))
         .route("/forms/{action_id}", any(tracker_actions::form))
         .route("/forms/{action_id}/submit", any(tracker_actions::submit))

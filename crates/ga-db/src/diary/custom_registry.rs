@@ -82,6 +82,16 @@ impl Database {
         contract: &CustomDefinition,
     ) -> Result<StoredCustomDefinition, CustomRegistryError> {
         let mut txn = self.begin_definition_management(request).await?;
+        let definition = Self::draft_custom_definition_in(&mut txn, request, contract).await?;
+        txn.commit().await?;
+        Ok(definition)
+    }
+
+    pub(super) async fn draft_custom_definition_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: ManageCustomDefinition<'_>,
+        contract: &CustomDefinition,
+    ) -> Result<StoredCustomDefinition, CustomRegistryError> {
         let id = Uuid::new_v4();
         let draft = draft_document(contract, request.authenticated_actor);
         let row = sqlx::query_as::<_, DefinitionRow>(
@@ -94,10 +104,9 @@ impl Database {
         .bind(request.owner_id)
         .bind(contract.key())
         .bind(draft.to_string())
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut **txn)
         .await?
         .ok_or(CustomRegistryError::KeyTaken)?;
-        txn.commit().await?;
         Ok(stored(row))
     }
 
@@ -136,7 +145,18 @@ impl Database {
         revision: i32,
     ) -> Result<ActivatedCustomDefinition, CustomRegistryError> {
         let mut txn = self.begin_definition_management(request).await?;
-        let (current, draft) = lock_definition(&mut txn, request.owner_id, id, revision).await?;
+        let version = Self::activate_custom_definition_in(&mut txn, request, id, revision).await?;
+        txn.commit().await?;
+        Ok(version)
+    }
+
+    pub(super) async fn activate_custom_definition_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: ManageCustomDefinition<'_>,
+        id: Uuid,
+        revision: i32,
+    ) -> Result<ActivatedCustomDefinition, CustomRegistryError> {
+        let (current, draft) = lock_definition(txn, request.owner_id, id, revision).await?;
         if !matches!(current.status.as_str(), "draft" | "proposed" | "active") {
             return Err(CustomRegistryError::NoDraft);
         }
@@ -156,7 +176,7 @@ impl Database {
         }
         let number: i32 = sqlx::query_scalar(
             "SELECT coalesce(max(version), 0) + 1 FROM event_definition_versions WHERE definition_id = $1",
-        ).bind(id).fetch_one(&mut *txn).await?;
+        ).bind(id).fetch_one(&mut **txn).await?;
         let version = Uuid::new_v4();
         let value = contract.contract();
         let mut metadata = value["fields"].clone();
@@ -180,21 +200,20 @@ impl Database {
         .bind(version).bind(id).bind(number).bind(value["schema"].to_string()).bind(contract.hash())
         .bind(value["topology"].as_str()).bind(metadata.to_string()).bind(value["labels"].to_string())
         .bind(value["privacy"].as_str()).bind(value["allowed_operations"].to_string())
-        .execute(&mut *txn).await?;
+        .execute(&mut **txn).await?;
 
         let is_tracker: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM tracker_configs WHERE definition_id = $1 AND owner_id = $2)",
-        ).bind(id).bind(request.owner_id).fetch_one(&mut *txn).await?;
+        ).bind(id).bind(request.owner_id).fetch_one(&mut **txn).await?;
         if is_tracker {
-            tracker_metrics::bind_tracker_metrics(&mut txn, request.owner_id, version, &contract)
+            tracker_metrics::bind_tracker_metrics(txn, request.owner_id, version, &contract)
                 .await?;
         }
         let new_definition_revision = sqlx::query_scalar(
             "UPDATE event_definitions
              SET status='active', current_version=$2, draft='null'::jsonb, revision=revision+1, updated_at=clock_timestamp()
              WHERE id=$1 RETURNING revision",
-        ).bind(id).bind(number).fetch_one(&mut *txn).await?;
-        txn.commit().await?;
+        ).bind(id).bind(number).fetch_one(&mut **txn).await?;
         Ok(ActivatedCustomDefinition {
             id: version,
             version: number,
@@ -231,7 +250,7 @@ impl Database {
         Ok(stored(row))
     }
 
-    async fn begin_definition_management(
+    pub(super) async fn begin_definition_management(
         &self,
         request: ManageCustomDefinition<'_>,
     ) -> Result<Transaction<'static, Postgres>, CustomRegistryError> {

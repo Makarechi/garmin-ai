@@ -10,7 +10,7 @@ use super::{ActionRecord, TrackerActionError, localized_label, read_locale};
 use crate::{Database, diary::DiaryReadError};
 
 mod file;
-mod projection;
+pub(super) mod projection;
 mod submit;
 
 pub use file::{FileImportOutcome, FileImportStoreError};
