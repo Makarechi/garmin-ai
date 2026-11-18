@@ -9,7 +9,10 @@ use ga_db::{
     Database,
     action_tokens::{ActionTokenContext, issue_action_token},
     channel_ingress::telegram_poll::TelegramPollError,
-    jobs::RecordedJobStatus,
+    jobs::{
+        RecordedJobStatus,
+        telegram_ack::{TelegramAckTarget, enqueue_telegram_ack},
+    },
 };
 use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};
 use serde_json::json;
@@ -417,6 +420,56 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
             ("synthetic-old".into(), "pending".into())
         ]
     );
+    let mut setup = pool.begin().await?;
+    let target = TelegramAckTarget {
+        owner_id,
+        instance_id: "primary",
+        confirmed_chat: Some(binding.external_owner_id),
+    };
+    assert!(enqueue_telegram_ack(&mut setup, target, 124, "synthetic-policy-overlap", at,).await?);
+    setup.commit().await?;
+    let (listener, transport) = bind().await?;
+    let mut policy = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104621)")
+        .execute(&mut *policy)
+        .await?;
+    assert_eq!(
+        transport.acknowledge_once(&database, binding).await?,
+        Some(RecordedJobStatus::Deferred)
+    );
+    let rescheduled: (String, i32, String) = sqlx::query_as(
+        "SELECT status,attempts,last_error FROM jobs
+         WHERE kind='telegram_native_ack' AND payload->>'callback_id'='synthetic-policy-overlap'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        rescheduled,
+        ("pending".into(), 0, "TelegramPolicyBusy".into())
+    );
+    assert!(
+        timeout(Duration::from_millis(40), listener.accept())
+            .await
+            .is_err()
+    );
+    policy.rollback().await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let server = async {
+        let (mut stream, _) = listener.accept().await?;
+        assert_eq!(
+            request(&mut stream).await?["fields"]["callback_query_id"],
+            "synthetic-policy-overlap"
+        );
+        respond(&mut stream, "200 OK", &[], r#"{"ok":true,"result":true}"#).await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let (server, retry) = timeout(Duration::from_secs(2), async {
+        tokio::join!(server, transport.acknowledge_once(&database, binding))
+    })
+    .await?;
+    server?;
+    assert_eq!(retry?, Some(RecordedJobStatus::Completed));
+
     let previous = lease.owned_telegram_poll_cursor("primary", at).await?;
     assert_eq!(previous.offset, Some(122));
     let (listener, transport) = bind().await?;
