@@ -1,6 +1,7 @@
 mod forms;
 mod setup;
 
+pub use forms::{FileImportOutcome, FileImportStoreError};
 pub use forms::{FormSubmission, FormSubmitError};
 pub use setup::TrackerSetupStoreError;
 
