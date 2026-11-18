@@ -218,6 +218,55 @@ def compare_deletion(python, native, engine, hidden):
         assert client.delete(protected, headers=headers("both")).status_code == 404
 
 
+def compare_tracker_creation(python, native, engine):
+    path = "/entries"
+    entry = {
+        "definition_key": "user.synthetic_private",
+        "start": NOTE["start"],
+        "timezone": "UTC",
+        "values": {"value": 2},
+        "units": {"value": "count"},
+    }
+    for client in (python, native):
+        assert client.post(path, headers=headers("writer"), json=entry).status_code == 403
+        assert (
+            client.post(
+                path, headers=headers("both"), json={**entry, "units": {"value": "steps"}}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                path,
+                headers=headers("both"),
+                json={**entry, "definition_key": "user.synthetic_unknown"},
+            ).status_code
+            == 404
+        )
+    assert counts(engine) == (3, 2)
+
+    for first, second, key in [
+        (python, native, "fixture-python-tracker"),
+        (native, python, "fixture-native-tracker"),
+    ]:
+        request = headers("both", key)
+        recorded = first.post(path, headers=request, json=entry)
+        retried = second.post(path, headers=request, json=entry)
+        assert recorded.status_code == retried.status_code == 200
+        assert retried.json() == recorded.json()
+        stored = retried.json()
+        assert stored["payload"] == {"type": entry["definition_key"], "value": 2}
+        target = f"{PATH}/{stored['id']}"
+        for client in (python, native):
+            assert client.get(target, headers=headers("reader")).status_code == 404
+            changed = client.post(path, headers=request, json={**entry, "values": {"value": 3}})
+            assert changed.status_code == 409
+        assert python.delete(f"{target}?revision=1", headers=headers("both")).status_code == 200
+        for client in (python, native):
+            assert client.post(path, headers=request, json=entry).json() == stored
+    assert counts(engine) == (5, 4)
+
+
 def run(binary):
     engine = isolated_engine()
     try:
@@ -259,6 +308,7 @@ def run(binary):
                 assert line.startswith("Listening on http://127.0.0.1:"), line
                 with httpx.Client(base_url=line.split(" on ", 1)[1], trust_env=False) as native:
                     compare(python, native, engine)
+                    compare_tracker_creation(python, native, engine)
             finally:
                 process.terminate()
                 process.wait(timeout=5)

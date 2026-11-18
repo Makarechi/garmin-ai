@@ -7,12 +7,16 @@ use axum::{
 };
 use ga_db::{
     Database,
-    diary::{CreateSystemEvent, DeleteEvent, DiaryWriteError, event_document},
+    diary::{
+        CreateSystemEvent, DeleteEvent, DiaryWriteError, custom_entries::CreateCustomEntry,
+        event_document,
+    },
 };
 use ga_domain::{
     access::Scope,
     event_input::{EventInput, ValidationMode},
     event_replay::{ReplayConflict, check_idempotency_key},
+    event_schema::CustomEntry,
 };
 use uuid::Uuid;
 
@@ -23,18 +27,34 @@ use super::{
     },
 };
 
+#[derive(Clone, Copy)]
+enum EntryKind {
+    System,
+    Tracker,
+}
+
 pub(super) async fn create(State(state): State<AppState>, request: Request) -> Response {
+    create_request(&state, request, EntryKind::System).await
+}
+
+pub(super) async fn create_custom(State(state): State<AppState>, request: Request) -> Response {
+    create_request(&state, request, EntryKind::Tracker).await
+}
+
+async fn create_request(state: &AppState, request: Request, kind: EntryKind) -> Response {
     let (parts, body) = request.into_parts();
     let response = match parts.method {
         Method::POST => {
             match authorized(
-                &state,
+                state,
                 &parts.headers,
                 &[Scope::ReadDiary, Scope::WriteDiary],
             )
             .await
             {
-                Ok((database, owner)) => create_entry(database, owner, &parts.headers, body).await,
+                Ok((database, owner)) => {
+                    create_entry(database, owner, &parts.headers, body, kind).await
+                }
                 Err(status) => access_failure(status),
             }
         }
@@ -129,6 +149,7 @@ async fn create_entry(
     owner: Uuid,
     headers: &HeaderMap,
     body: Body,
+    kind: EntryKind,
 ) -> Response {
     let idempotency = headers.get("idempotency-key").map(|key| {
         key.as_bytes()
@@ -152,20 +173,39 @@ async fn create_entry(
         }
     };
     let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&body);
-    let Ok(report) = EventInput::from_json(body, MAX_REQUEST_BYTES, ValidationMode::NewReport)
-    else {
-        return invalid_arguments();
+    let written = match kind {
+        EntryKind::System => {
+            let Ok(report) =
+                EventInput::from_json(body, MAX_REQUEST_BYTES, ValidationMode::NewReport)
+            else {
+                return invalid_arguments();
+            };
+            database
+                .create_system_event(CreateSystemEvent {
+                    owner_id: owner,
+                    authenticated_actor: "api",
+                    report: &report,
+                    idempotency_key: idempotency.as_deref(),
+                    operation_id: None,
+                    clock_uncertainty_seconds: None,
+                })
+                .await
+        }
+        EntryKind::Tracker => {
+            let Ok(entry) = CustomEntry::from_json(body, MAX_REQUEST_BYTES) else {
+                return invalid_arguments();
+            };
+            database
+                .create_custom_entry(CreateCustomEntry {
+                    owner_id: owner,
+                    actor: "api",
+                    entry: &entry,
+                    idempotency_key: idempotency.as_deref(),
+                    evidence_refs: &[],
+                })
+                .await
+        }
     };
-    let written = database
-        .create_system_event(CreateSystemEvent {
-            owner_id: owner,
-            authenticated_actor: "api",
-            report: &report,
-            idempotency_key: idempotency.as_deref(),
-            operation_id: None,
-            clock_uncertainty_seconds: None,
-        })
-        .await;
     match written {
         Ok(entry) => event_response(entry.snapshot),
         Err(error) => write_failure(error),
@@ -213,8 +253,12 @@ fn write_failure(error: DiaryWriteError) -> Response {
             StatusCode::CONFLICT,
             "Creation audit unavailable for idempotent replay",
         ),
-        DiaryWriteError::TrackingDisabled => detail(StatusCode::FORBIDDEN, "Operation not allowed"),
+        DiaryWriteError::TrackingDisabled | DiaryWriteError::OperationForbidden => {
+            detail(StatusCode::FORBIDDEN, "Operation not allowed")
+        }
+        DiaryWriteError::EventMissing => detail(StatusCode::NOT_FOUND, "Record not found"),
         DiaryWriteError::Input(_)
+        | DiaryWriteError::CustomInput(_)
         | DiaryWriteError::InvalidRelation
         | DiaryWriteError::Replay(ReplayConflict::InvalidKey) => invalid_arguments(),
         _ => storage_unavailable(),
