@@ -56,7 +56,7 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
     let now = StoredInstant::try_from(at)?;
     let cases: Vec<Value> =
         serde_json::from_slice(&fs::read(env::var("GA_TEST_TELEGRAM_HISTORY")?)?)?;
-    assert_eq!(cases.len(), 3);
+    assert_eq!(cases.len(), 5);
     let mut update = json!({
         "update_id":401,"message":{
             "message_id":61, "from":{"id":42}, "chat":{"id":42,"type":"private"},
@@ -64,6 +64,7 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
         }
     });
     let mut shared_reply = None;
+    let mut delete_token = None;
     for (index, case) in cases.iter().enumerate() {
         let receipt = binding
             .accept_polled_update(&mut runtime, &update, now, true)
@@ -75,7 +76,11 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
             .await?
             .ok_or("Missing history lease")?;
         assert_eq!(lease.message_id(), receipt.message_id);
-        let queued = database.apply_telegram_history_page(&lease).await?;
+        let queued = if index < 3 {
+            database.apply_telegram_history_page(&lease).await?
+        } else {
+            database.apply_telegram_history_selection(&lease).await?
+        };
         let intent: String =
             sqlx::query_scalar("SELECT intent::text FROM outbox_messages WHERE id=$1")
                 .bind(queued.outbox_id)
@@ -84,16 +89,20 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
         let intent = OutboundIntent::normalize(serde_json::from_str(&intent)?)?;
         let reply = prepare_reply(binding, &intent, now)?;
         assert_eq!(json!(reply.parts.join("\n")), case["text"]);
-        assert_eq!(
-            json!(
-                reply
-                    .buttons
-                    .iter()
-                    .map(|button| &button.label)
-                    .collect::<Vec<_>>()
-            ),
-            case["buttons"]
-        );
+        if let Some(buttons) = case.get("buttons") {
+            assert_eq!(
+                &json!(
+                    reply
+                        .buttons
+                        .iter()
+                        .map(|button| &button.label)
+                        .collect::<Vec<_>>()
+                ),
+                buttons
+            );
+        } else {
+            assert!(reply.buttons.is_empty());
+        }
         assert!(
             reply
                 .buttons
@@ -147,6 +156,50 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
             .await?;
             txn.commit().await?;
             update = callback(403, &button);
+        } else if index == 2 {
+            assert_eq!(reply.buttons[0].label, "1: Завершить");
+            assert_eq!(reply.buttons[1].label, "1: Удалить");
+            delete_token = Some(reply.buttons[1].callback_data.clone());
+            update = callback(404, &reply.buttons[0].callback_data);
+        } else if index == 3 {
+            let pending: String = sqlx::query_scalar(
+                "SELECT value::text FROM app_state WHERE key='conversation:pending'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let pending: Value = serde_json::from_str(&pending)?;
+            assert_eq!(pending["event_ids"], json!([case["event_id"]]));
+            assert_eq!(pending["selection_revision"], case["selection_revision"]);
+            assert_eq!(pending["selection_prompt"], reply.buttons[0].callback_data);
+            assert_eq!(pending["action"], "close");
+            assert!(
+                database
+                    .apply_telegram_history_selection(&lease)
+                    .await
+                    .is_err()
+            );
+            update = callback(
+                405,
+                &delete_token.take().ok_or("Missing signed delete action")?,
+            );
+        } else {
+            let selected: Uuid = cases[3]["event_id"]
+                .as_str()
+                .ok_or("Missing record ID")?
+                .parse()?;
+            let (deleted, audit, pending): (bool, bool, bool) = sqlx::query_as(
+                "SELECT e.deleted, EXISTS(SELECT 1 FROM audit_log
+                   WHERE event_id=e.id AND operation_id=$2 AND action='delete' AND actor='telegram:42'),
+                   EXISTS(SELECT 1 FROM app_state WHERE key='conversation:pending')
+                 FROM events e WHERE e.id=$1",
+            ).bind(selected).bind(lease.operation_id()).fetch_one(&pool).await?;
+            assert_eq!((deleted, audit, pending), (true, true, false));
+            assert!(
+                database
+                    .apply_telegram_history_selection(&lease)
+                    .await
+                    .is_err()
+            );
         }
     }
     let (outbox, definition) = shared_reply.ok_or("Expected a history reply with a tracker")?;

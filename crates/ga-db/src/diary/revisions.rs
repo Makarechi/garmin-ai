@@ -49,6 +49,16 @@ impl Database {
             return Err(DiaryWriteError::Cancelled);
         }
         let mut txn = self.begin_diary_write(request.owner_id).await?;
+        let deleted = Self::delete_event_in(&mut txn, request, None).await?;
+        commit_diary_write(txn, is_cancelled).await?;
+        Ok(deleted)
+    }
+
+    pub(crate) async fn delete_event_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: DeleteEvent<'_>,
+        operation: Option<Uuid>,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
         let (revision, deleted, deletion_allowed, query_allowed) =
             sqlx::query_as::<_, (i32, bool, bool, bool)>(
                 "SELECT entry.revision, entry.deleted,
@@ -60,7 +70,7 @@ impl Database {
                  WHERE entry.id = $1 FOR UPDATE OF entry",
             )
             .bind(request.event_id)
-            .fetch_optional(&mut *txn)
+            .fetch_optional(&mut **txn)
             .await?
             .ok_or(DiaryWriteError::EventMissing)?;
         if deleted {
@@ -73,14 +83,14 @@ impl Database {
             return Err(DiaryWriteError::DeletionForbidden);
         }
         let id = request.event_id;
-        let before = load_event(&mut txn, id, false).await?;
-        ensure_unreferenced(&mut txn, id, false).await?;
-        let transition = tombstone(&mut txn, id).await?;
-        let mut deleted = load_event(&mut txn, id, false).await?;
-        metrics::invalidate(&mut txn, id, transition).await?;
-        invalidate_migraine_insights(&mut txn, snapshot_kind(&before.snapshot)?).await?;
+        let before = load_event(txn, id, false).await?;
+        ensure_unreferenced(txn, id, false).await?;
+        let transition = tombstone(txn, id).await?;
+        let mut deleted = load_event(txn, id, false).await?;
+        metrics::invalidate(txn, id, transition).await?;
+        invalidate_migraine_insights(txn, snapshot_kind(&before.snapshot)?).await?;
         sync_migraine_questions(
-            &mut txn,
+            txn,
             request.owner_id,
             id,
             &before.snapshot,
@@ -89,14 +99,14 @@ impl Database {
         )
         .await?;
         append_audit(
-            &mut txn,
+            txn,
             AuditEntry {
                 id,
                 action: "delete",
                 before: Some(&before.snapshot),
                 after: &deleted.snapshot,
                 actor: request.authenticated_actor,
-                operation: None,
+                operation,
                 at: transition,
             },
         )
@@ -104,7 +114,6 @@ impl Database {
         if !query_allowed {
             deleted.snapshot = serde_json::json!({"id": id.to_string(), "revision": deleted.revision, "deleted": true});
         }
-        commit_diary_write(txn, is_cancelled).await?;
         Ok(deleted)
     }
 
