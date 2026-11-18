@@ -4,8 +4,9 @@ mod confirmed;
 mod read_context;
 mod telegram_forget;
 pub use confirmed::ConfirmedAnalysis;
-pub use read_context::AnalysisReadContext;
 pub(crate) use read_context::channel_in as analysis_channel_in;
+pub(crate) use read_context::current_conversation_channel;
+pub use read_context::{AnalysisReadContext, ConversationReadContext};
 pub(crate) use telegram_forget::forget_in as forget_telegram_in;
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
@@ -16,6 +17,9 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK};
+
+// Shared with the Python worker and other native context retirement paths.
+pub(crate) const CONTEXT_DELIVERY_LOCK: i64 = 72_104_643;
 
 const RECENT_MICROS: i64 = 7 * 24 * 60 * 60 * 1_000_000;
 const TURN_LIMIT: usize = 6;
@@ -125,6 +129,7 @@ impl Database {
                 txn.rollback().await?;
                 return Ok(epoch);
             }
+            lock_context_change(&mut txn).await?;
             let epoch = sqlx::query_scalar(
                 "UPDATE conversations SET share_owner_memory=$3,memory_epoch=gen_random_uuid(),updated_at=now()
                  WHERE id=$1 AND owner_id=$2 RETURNING memory_epoch",
@@ -157,10 +162,25 @@ impl Database {
     }
 }
 
+pub(crate) async fn lock_context_change(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), MemoryError> {
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(CONTEXT_DELIVERY_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if locked {
+        Ok(())
+    } else {
+        Err(MemoryError::Busy)
+    }
+}
+
 async fn clear_conversation(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
 ) -> Result<Uuid, MemoryError> {
+    lock_context_change(txn).await?;
     sqlx::query_scalar(
         "UPDATE conversations SET state='{}',memory_epoch=gen_random_uuid(),updated_at=now()
          WHERE id=$1 AND owner_id=$2 RETURNING memory_epoch",

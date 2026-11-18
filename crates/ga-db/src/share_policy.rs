@@ -14,7 +14,11 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    Database, ReadinessError, check_readiness, model_gate::onboarding::onboarding_allows_model,
+    Database, ReadinessError, check_readiness,
+    conversation_memory::{
+        CONTEXT_DELIVERY_LOCK, ConversationReadContext, MemoryError, current_conversation_channel,
+    },
+    model_gate::onboarding::onboarding_allows_model,
     replay::REPLAY_MUTATION_LOCK,
 };
 
@@ -103,6 +107,7 @@ pub struct ShareRequirement<'a> {
 pub struct ModelChannelSharing<'a> {
     pub destination: ShareDestination<'a>,
     pub requirements: &'a [ShareRequirement<'a>],
+    pub conversation: Option<ConversationReadContext<'a>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -262,6 +267,20 @@ impl Database {
             }
         }
         if let Some(channel) = channel {
+            if let Some(context) = channel.conversation {
+                try_shared_lock(&mut txn, CONTEXT_DELIVERY_LOCK).await?;
+                let current = current_conversation_channel(&mut txn, context)
+                    .await
+                    .map_err(|error| match error {
+                        MemoryError::Busy => SharePolicyError::Busy,
+                        _ => SharePolicyError::Database,
+                    })?;
+                if current.is_none_or(|(provider, instance)| {
+                    format!("{provider}:{instance}") != channel.destination.instance()
+                }) {
+                    return Ok(None);
+                }
+            }
             for requirement in channel.requirements {
                 if !allows(&mut txn, *requirement, channel.destination).await? {
                     txn.rollback().await?;
