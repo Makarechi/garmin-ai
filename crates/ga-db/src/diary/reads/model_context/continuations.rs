@@ -35,6 +35,7 @@ pub struct InterpretationContext {
     pub events: InterpretationEvents,
     pub recent_questions: Vec<Value>,
     pub pending_clarification: Option<Value>,
+    pub selection_unavailable: bool,
     pub recent_analysis_question: Option<Value>,
     pub memory_fence: MemoryFence,
 }
@@ -82,7 +83,7 @@ impl Database {
             };
             let recent_questions =
                 continuations.questions(&mut txn, &audience, &packs, now).await?;
-            let pending_clarification =
+            let (pending_clarification, selection_unavailable) =
                 continuations.clarification(&mut txn, &audience, &packs, now, pending).await?;
             let memory = conversation_memory::snapshot(&mut txn,input.binding,input.now,false)
                 .await.map_err(|_| DiaryReadError::ContextChanged)?;
@@ -95,7 +96,7 @@ impl Database {
                 .max_by_key(|question| StoredInstant::from_legacy_input(&question["asked_at"]));
             txn.commit().await?;
             Ok(InterpretationContext {
-                channel,events,recent_questions,pending_clarification,recent_analysis_question,
+                channel,events,recent_questions,pending_clarification,selection_unavailable,recent_analysis_question,
                 memory_fence:memory.fence,
             })
         }).await.map_err(|_| DiaryReadError::Database)?
@@ -198,31 +199,29 @@ impl Continuations<'_> {
         packs: &Option<BTreeSet<String>>,
         now: OffsetDateTime,
         pending: Option<Value>,
-    ) -> Result<Option<Value>, DiaryReadError> {
+    ) -> Result<(Option<Value>, bool), DiaryReadError> {
         let Some(pending) = pending else {
-            return Ok(None);
+            return Ok((None, false));
         };
+        let explicit_target = pending["explicit_selector"] == true
+            && matches!(pending["action"].as_str(), Some("update" | "close"));
         let mut ids = Vec::new();
         if let Some(requested) = pending.get("event_ids") {
             let Some(requested) = requested
                 .as_array()
                 .filter(|ids| ids.len() <= MENTION_LIMIT)
             else {
-                return Ok(None);
+                return Ok((None, explicit_target));
             };
             for id in requested {
                 let Some(id) = id.as_str().and_then(|id| id.parse().ok()) else {
-                    return Ok(None);
+                    return Ok((None, explicit_target));
                 };
                 ids.push(id);
             }
         }
-        let related = related_events(txn, audience, now, &ids).await?;
-        let all_visible = ids.iter().all(|id| related.contains_key(id));
-        for id in ids {
-            if let Some((row, version)) = related.get(&id) {
-                self.add_event(id, row, *version, now);
-            }
+        if explicit_target && ids.len() != 1 {
+            return Ok((None, true));
         }
         let pack = pending["pack"]
             .as_str()
@@ -232,7 +231,20 @@ impl Continuations<'_> {
                 "alcohol" | "note" => Some("general_diary"),
                 _ => None,
             });
-        Ok((all_visible && pack.is_none_or(|pack| permits(packs, pack))).then_some(pending))
+        let related = related_events(txn, audience, now, &ids).await?;
+        let available = ids.iter().all(|id| related.contains_key(id))
+            && pack.is_none_or(|pack| permits(packs, pack));
+        if explicit_target && !available {
+            // The model must never receive fields from a withdrawn record or
+            // confuse the continuation with an independent diary report.
+            return Ok((None, true));
+        }
+        for id in ids {
+            if let Some((row, version)) = related.get(&id) {
+                self.add_event(id, row, *version, now);
+            }
+        }
+        Ok((available.then_some(pending), false))
     }
 
     fn add_event(&mut self, id: Uuid, row: &Value, version: Option<Uuid>, now: OffsetDateTime) {

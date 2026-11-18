@@ -19,7 +19,8 @@ use crate::{
     conversation_memory::ConversationBinding,
     diary::{
         ClarificationClock, ClarificationError, ClarificationReply, CreateAgentLogBatch,
-        DiaryWriteError, StoredSystemEvent, save_clarification_in,
+        DiaryWriteError, StoredSystemEvent, lock_clarification, pending_clarification_in,
+        save_clarification_in,
     },
     jobs::{JobStoreError, begin},
     outbox_enqueue::{QueueIntent, QueueIntentError, QueuedIntent, queue_outbox_intent},
@@ -140,6 +141,7 @@ impl Database {
             }).await.map_err(TelegramDiaryCommitError::Diary)?;
             let intent = reply(&envelope, &events).ok_or(TelegramDiaryCommitError::Reply)?;
             let queued = queue_reply(&mut txn, lease, &envelope, intent, None).await?;
+            complete_reply(&mut txn, lease).await?;
             txn.commit().await?;
             Ok(queued)
         })
@@ -154,6 +156,7 @@ impl Database {
         lease: &TelegramInboundLease,
         processing_started: StoredInstant,
         question: &str,
+        language: &str,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
         let envelope = text_envelope(lease)?;
         let (text, message_at) = report(&envelope)?;
@@ -161,34 +164,64 @@ impl Database {
             owner_id: envelope.owner_id(),
             conversation_id: envelope.conversation_id(),
         };
-        let intent = OutboundIntent::normalize(json!({
-            "owner_id": binding.owner_id.to_string(),
-            "conversation_id": binding.conversation_id.to_string(),
-            "channel_instance": {"channel":"telegram","instance_id":envelope.channel().instance_id()},
-            "blocks": [{"text":question}],
-        }))
-        .map_err(|_| TelegramDiaryCommitError::Reply)?;
+        let clock = ClarificationClock {
+            message_at,
+            conversation_now: processing_started,
+            use_message_time: false,
+        };
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
+            lock_clarification(&mut txn).await.map_err(TelegramDiaryCommitError::Clarification)?;
+            let (_, prior) = pending_clarification_in(&mut txn, binding, clock)
+                .await
+                .map_err(TelegramDiaryCommitError::Clarification)?;
+            let selector = prior.as_ref().filter(|pending| pending["explicit_selector"] == true);
+            let actions = selector.map(|pending| {
+                let action = if pending["action"] == "close" {
+                    "diary.history.open"
+                } else {
+                    "diary.history.page"
+                };
+                let label = if language == "en" {
+                    "That's not it — history"
+                } else {
+                    "Это не оно — история"
+                };
+                json!([{"action_id":action,"label":label,"operation_id":lease.operation_id.to_string()}])
+            }).unwrap_or_else(|| json!([]));
+            let intent = OutboundIntent::normalize(json!({
+                "owner_id": binding.owner_id.to_string(),
+                "conversation_id": binding.conversation_id.to_string(),
+                "channel_instance": {"channel":"telegram","instance_id":envelope.channel().instance_id()},
+                "blocks": [{"text":question}],
+                "actions": actions,
+            })).map_err(|_| TelegramDiaryCommitError::Reply)?;
+            // Telegram edits share their operation with the original message.
+            let key = format!("inbound:{}:clarification", lease.message_id);
+            let queued = queue_reply(&mut txn, lease, &envelope, intent, Some(&key)).await?;
+            let selection_prompt = if selector.is_some() {
+                Some(sqlx::query_scalar::<_, String>(
+                    "SELECT intent#>>'{actions,0,token}' FROM outbox_messages WHERE id=$1",
+                )
+                .bind(queued.outbox_id)
+                .fetch_one(&mut *txn)
+                .await?)
+            } else {
+                None
+            };
             save_clarification_in(
                 &mut txn,
                 binding,
                 ClarificationReply {
-                    clock: ClarificationClock {
-                        message_at,
-                        conversation_now: processing_started,
-                        use_message_time: false,
-                    },
+                    clock,
                     text,
                     question,
-                    selection_prompt: None,
+                    selection_prompt: selection_prompt.as_deref(),
                 },
             )
             .await
             .map_err(TelegramDiaryCommitError::Clarification)?;
-            // Telegram edits share their operation with the original message.
-            let key = format!("inbound:{}:clarification", lease.message_id);
-            let queued = queue_reply(&mut txn, lease, &envelope, intent, Some(&key)).await?;
+            complete_reply(&mut txn, lease).await?;
             txn.commit().await?;
             Ok(queued)
         })
@@ -196,7 +229,7 @@ impl Database {
         .map_err(|_| TelegramDiaryCommitError::Database)?
     }
 
-    async fn begin_telegram_text(
+    pub(super) async fn begin_telegram_text(
         &self,
         lease: &TelegramInboundLease,
         envelope: &InboundEnvelope,
@@ -291,7 +324,7 @@ async fn queue_reply(
     let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **txn)
         .await?;
-    let queued = queue_outbox_intent(
+    queue_outbox_intent(
         txn,
         QueueIntent {
             intent,
@@ -305,10 +338,16 @@ async fn queue_reply(
         },
     )
     .await
-    .map_err(TelegramDiaryCommitError::Outbox)?;
+    .map_err(TelegramDiaryCommitError::Outbox)
+}
+
+async fn complete_reply(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+) -> Result<(), TelegramDiaryCommitError> {
     let completed_at = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **txn)
         .await?;
     complete(txn, lease, completed_at, TelegramInboundState::Processed).await?;
-    Ok(queued)
+    Ok(())
 }

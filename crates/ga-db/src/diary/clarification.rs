@@ -169,6 +169,24 @@ pub(crate) async fn cancel_in(
     Ok(removed.rows_affected() == 1)
 }
 
+pub(crate) async fn clear_history_selection(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+) -> Result<(), ClarificationError> {
+    lock(txn).await?;
+    let scope = scope(txn, binding).await?;
+    sqlx::query(
+        "DELETE FROM app_state WHERE key=$1
+          AND coalesce(value->>'channel_instance_id','telegram:primary')=$2
+          AND value->>'action' IN ('update','close')",
+    )
+    .bind(scope.key)
+    .bind(scope.destination)
+    .execute(&mut **txn)
+    .await?;
+    Ok(())
+}
+
 async fn prepare(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationError> {
     sqlx::query("SET LOCAL statement_timeout='750ms'")
         .execute(&mut **txn)
@@ -178,7 +196,7 @@ async fn prepare(txn: &mut Transaction<'_, Postgres>) -> Result<(), Clarificatio
         .map_err(ClarificationError::Storage)
 }
 
-async fn lock(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationError> {
+pub(crate) async fn lock(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationError> {
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(REPLAY_MUTATION_LOCK)
         .fetch_one(&mut **txn)
@@ -195,7 +213,7 @@ struct Scope {
     destination: String,
 }
 
-pub(super) async fn pending_in(
+pub(crate) async fn pending_in(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     clock: ClarificationClock,
