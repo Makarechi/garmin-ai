@@ -162,6 +162,15 @@ async def compare(binary, root, engine):
         left = {tool.name: document(tool) for tool in (await python.list_tools()).tools}
         right = {tool.name: document(tool) for tool in (await native.list_tools()).tools}
         assert right["events_create"] == left["events_create"]
+        for payload in (
+            {"type": "wellbeing_observation", "energy": 4},
+            {"type": "activity_effort", "activity_id": "synthetic", "perceived_exertion": 4},
+        ):
+            spoofed = {**REPORT, "source": "wearable", "status": "confirmed", "payload": payload}
+            rejected = await create(python, "fixture-wearable-spoof", spoofed)
+            assert rejected["isError"] and "ValidationError" in rejected["content"][0]["text"]
+            assert await create(native, "fixture-wearable-spoof", spoofed) == rejected
+        assert counts(engine) == (0, 0, 0)
         source = await create(python, "fixture-python")
         assert not source["isError"]
         target = await create(native, "fixture-python")
