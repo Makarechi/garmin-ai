@@ -1,4 +1,5 @@
 mod forms;
+pub use forms::{FileImportOutcome, FileImportStoreError};
 pub use forms::{FormSubmission, FormSubmitError};
 
 use std::{error::Error, fmt, time::Duration};

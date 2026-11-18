@@ -4,11 +4,7 @@ use jiter::JsonValue;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::{
-    event_input::known_timezone,
-    legacy_json::{Utf8Layout, encode},
-    sha256_hex,
-};
+use crate::{event_input::known_timezone, legacy_json::write_float, sha256_hex};
 
 use super::ImportFileError;
 
@@ -129,6 +125,30 @@ impl FileMapping {
         self.format
     }
 
+    pub fn definition_key(&self) -> &str {
+        &self.definition_key
+    }
+
+    pub fn source_instance(&self) -> &str {
+        &self.source_instance_id
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device_id
+    }
+
+    pub fn timezone(&self) -> &str {
+        &self.timezone
+    }
+
+    pub fn end_column(&self) -> Option<&str> {
+        self.end_column.as_deref()
+    }
+
+    pub fn units(&self) -> &[(String, String)] {
+        &self.units
+    }
+
     pub fn field_columns(&self) -> &[(String, String)] {
         &self.field_columns
     }
@@ -162,17 +182,67 @@ impl FileMapping {
         if !valid_digest(file_sha256) || !valid_digest(schema_sha256) {
             return Err(ImportFileError::InvalidMapping);
         }
-        let plan = json!({
-            "file_hash": file_sha256,
-            "mapping": self.document(),
-            "schema_hash": schema_sha256,
-            "definition_version_id": definition_version.to_string(),
-        });
-        let serialized = serde_json::to_vec(&plan).map_err(|_| ImportFileError::InvalidMapping)?;
-        let encoded = encode(&serialized, Utf8Layout::Compact, serialized.len())
-            .map_err(|_| ImportFileError::InvalidMapping)?;
-        Ok(sha256_hex(&encoded))
+        let mut plan = self.contract_document(schema_sha256, definition_version);
+        plan["file_hash"] = json!(file_sha256);
+        document_hash(&plan)
     }
+
+    pub fn contract_hash(
+        &self,
+        schema_sha256: &str,
+        definition_version: Uuid,
+    ) -> Result<String, ImportFileError> {
+        if !valid_digest(schema_sha256) {
+            return Err(ImportFileError::InvalidMapping);
+        }
+        document_hash(&self.contract_document(schema_sha256, definition_version))
+    }
+
+    fn contract_document(&self, schema_sha256: &str, definition_version: Uuid) -> Value {
+        json!({"mapping":self.document(),"schema_hash":schema_sha256,
+               "definition_version_id":definition_version.to_string()})
+    }
+}
+
+pub fn document_hash(value: &Value) -> Result<String, ImportFileError> {
+    let mut encoded = Vec::new();
+    write_document(&mut encoded, value)?;
+    Ok(sha256_hex(&encoded))
+}
+
+fn write_document(out: &mut Vec<u8>, value: &Value) -> Result<(), ImportFileError> {
+    let invalid = ImportFileError::InvalidMapping;
+    match value {
+        Value::Object(fields) => {
+            out.push(b'{');
+            let mut fields: Vec<_> = fields.iter().collect();
+            fields.sort_unstable_by_key(|(key, _)| key.as_str());
+            for (index, (key, field)) in fields.into_iter().enumerate() {
+                if index != 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key).map_err(|_| invalid)?;
+                out.push(b':');
+                write_document(out, field)?;
+            }
+            out.push(b'}');
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    out.push(b',');
+                }
+                write_document(out, item)?;
+            }
+            out.push(b']');
+        }
+        Value::Number(number) if number.as_str().contains(['.', 'e', 'E']) => {
+            write_float(out, number.as_f64().ok_or(invalid)?).map_err(|_| invalid)?;
+        }
+        _ => serde_json::to_writer(out, value).map_err(|_| invalid)?,
+    }
+    Ok(())
 }
 
 const KNOWN: &[&str] = &[

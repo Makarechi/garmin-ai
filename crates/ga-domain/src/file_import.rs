@@ -7,6 +7,7 @@ pub use csv::{CsvRows, read_csv_rows};
 pub use json::{JsonRow, JsonRowIssue, read_json_rows};
 pub use mapping::{
     FileFieldInput, FileFormat, FileMappedRow, FileMapping, FileRowIssue, MAX_MAPPING_BYTES,
+    document_hash,
 };
 
 use std::{error::Error, fmt};

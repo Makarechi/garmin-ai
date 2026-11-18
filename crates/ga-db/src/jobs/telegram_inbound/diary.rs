@@ -28,6 +28,8 @@ use crate::{
     telegram_binding::confirmed_pairing,
 };
 
+pub(super) const UNDO_UNAVAILABLE_REPLY: &str = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись.";
+
 #[derive(Debug)]
 pub enum TelegramDiaryCommitError {
     Job(JobStoreError),
@@ -428,9 +430,17 @@ pub(super) async fn complete_reply(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
 ) -> Result<(), TelegramDiaryCommitError> {
+    complete_reply_as(txn, lease, TelegramInboundState::Processed).await
+}
+
+pub(super) async fn complete_reply_as(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+    state: TelegramInboundState,
+) -> Result<(), TelegramDiaryCommitError> {
     let completed_at = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **txn)
         .await?;
-    complete(txn, lease, completed_at, TelegramInboundState::Processed).await?;
+    complete(txn, lease, completed_at, state).await?;
     Ok(())
 }

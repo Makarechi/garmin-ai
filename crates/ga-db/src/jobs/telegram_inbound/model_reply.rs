@@ -9,14 +9,17 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{
-    TelegramDiaryCommitError, TelegramInboundLease, TelegramModelContext,
-    diary::{complete_reply, queue_reply, report, text_envelope},
+    TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState, TelegramModelContext,
+    diary::{
+        UNDO_UNAVAILABLE_REPLY, complete_reply, complete_reply_as, queue_reply, report,
+        text_envelope,
+    },
     model_publication::{CurrentTelegramModelContext, queue, verify},
 };
 use crate::{
     Database,
     conversation_memory::ConversationBinding,
-    diary::{DiaryWriteError, UndoDiaryOperation, cancel_in, undo::undo_and_reconcile},
+    diary::{DiaryWriteError, UndoDiaryOperation, cancel_in, undo::try_undo_and_reconcile},
     outbox_enqueue::QueuedIntent,
 };
 
@@ -58,7 +61,7 @@ impl Database {
                     if latest_undo_anchor(&mut txn, envelope.sender_ref()).await? != offered_audit {
                         return Err(TelegramDiaryCommitError::ModelContextChanged);
                     }
-                    let undone = undo_and_reconcile(
+                    let Some(undone) = try_undo_and_reconcile(
                         &mut txn,
                         &UndoDiaryOperation {
                             owner_id: binding.owner_id,
@@ -67,7 +70,19 @@ impl Database {
                         expected.configured_timezone,
                     )
                     .await
-                    .map_err(TelegramDiaryCommitError::Diary)?;
+                    .map_err(TelegramDiaryCommitError::Diary)?
+                    else {
+                        let queued = queue_local_notice(
+                            &mut txn,
+                            lease,
+                            &envelope,
+                            UNDO_UNAVAILABLE_REPLY,
+                            TelegramInboundState::Invalid,
+                        )
+                        .await?;
+                        txn.commit().await?;
+                        return Ok(queued);
+                    };
                     ModelContinuationReply::Undone(undone.count)
                 }
                 ModelContinuation::Acknowledge { question_id } => {
@@ -96,22 +111,41 @@ impl Database {
         message: &str,
     ) -> Result<(), TelegramDiaryCommitError> {
         let envelope = text_envelope(lease)?;
-        let intent = OutboundIntent::normalize(json!({
-            "owner_id":envelope.owner_id().to_string(),
-            "conversation_id":envelope.conversation_id().to_string(),
-            "channel_instance":{"channel":"telegram","instance_id":envelope.channel().instance_id()},
-            "blocks":[{"text":message}],
-        })).map_err(|_| TelegramDiaryCommitError::Reply)?;
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            queue_reply(&mut txn, lease, &envelope, intent, None).await?;
-            complete_reply(&mut txn, lease).await?;
+            queue_local_notice(
+                &mut txn,
+                lease,
+                &envelope,
+                message,
+                TelegramInboundState::Processed,
+            )
+            .await?;
             txn.commit().await?;
             Ok(())
         })
         .await
         .map_err(|_| TelegramDiaryCommitError::Database)?
     }
+}
+
+async fn queue_local_notice(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+    envelope: &InboundEnvelope,
+    message: &str,
+    state: TelegramInboundState,
+) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+    let intent = OutboundIntent::normalize(json!({
+        "owner_id":envelope.owner_id().to_string(),
+        "conversation_id":envelope.conversation_id().to_string(),
+        "channel_instance":{"channel":"telegram","instance_id":envelope.channel().instance_id()},
+        "blocks":[{"text":message}],
+    }))
+    .map_err(|_| TelegramDiaryCommitError::Reply)?;
+    let queued = queue_reply(txn, lease, envelope, intent, None).await?;
+    complete_reply_as(txn, lease, state).await?;
+    Ok(queued)
 }
 
 pub(super) async fn latest_undo_anchor(
