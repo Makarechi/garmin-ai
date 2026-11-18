@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use ga_domain::{
     channel::{InboundEnvelope, OutboundIntent},
+    model_consent::ModelCategories,
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
@@ -52,7 +53,14 @@ impl Database {
         };
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            let context = verify(&mut txn, lease, &envelope, expected).await?;
+            let context = verify(
+                &mut txn,
+                lease,
+                &envelope,
+                expected,
+                ModelCategories::HEALTH_AND_DIARY,
+            )
+            .await?;
             if context.selection_unavailable {
                 return Err(TelegramDiaryCommitError::ModelContextChanged);
             }

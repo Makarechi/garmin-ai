@@ -4,6 +4,7 @@ use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation, TimeClarification},
     channel::{InboundEnvelope, InboundKind, OutboundIntent},
     event_input::EventSource,
+    model_consent::ModelCategories,
     timestamp::StoredInstant,
 };
 use serde_json::json;
@@ -147,7 +148,7 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             let current = if let Some(expected) = expected {
-                let current = verify(&mut txn, lease, &envelope, expected).await?;
+                let current = verify(&mut txn, lease, &envelope, expected, ModelCategories::HEALTH_AND_DIARY).await?;
                 if current.pending_clarification.is_some() || current.selection_unavailable {
                     return Err(TelegramDiaryCommitError::ExistingContextRequired);
                 }
@@ -244,7 +245,7 @@ impl Database {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             lock_clarification(&mut txn).await.map_err(TelegramDiaryCommitError::Clarification)?;
             let current = if let Some(expected) = expected {
-                Some(verify(&mut txn, lease, &envelope, expected).await?)
+                Some(verify(&mut txn, lease, &envelope, expected, ModelCategories::HEALTH_AND_DIARY).await?)
             } else {
                 None
             };

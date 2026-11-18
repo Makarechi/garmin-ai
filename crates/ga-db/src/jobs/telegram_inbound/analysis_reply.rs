@@ -78,7 +78,7 @@ impl Database {
         };
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            let mut context = verify(&mut txn, lease, &envelope, expected).await?;
+            let mut context = verify(&mut txn, lease, &envelope, expected, ModelCategories::DIARY).await?;
             let current = fence.check(&mut txn, binding, lease.message_id(), lease.operation_id(), &context.memory)
                 .await?.ok_or(TelegramDiaryCommitError::ModelContextChanged)?;
             context.versions.extend(current);

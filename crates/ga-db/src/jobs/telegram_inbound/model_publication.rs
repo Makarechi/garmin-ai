@@ -55,6 +55,7 @@ pub(super) async fn verify(
     lease: &Lease,
     envelope: &InboundEnvelope,
     expected: TelegramModelContext<'_>,
+    required_categories: ModelCategories,
 ) -> Result<CurrentTelegramModelContext, TelegramDiaryCommitError> {
     use TelegramDiaryCommitError::{Database, ModelContextChanged};
     lock_clarification(txn)
@@ -72,9 +73,7 @@ pub(super) async fn verify(
     let timezone = owner_timezone(txn, expected.configured_timezone)
         .await
         .map_err(|_| Database)?;
-    if timezone != expected.timezone
-        || !onboarding_allows_model(txn, ModelCategories::HEALTH_AND_DIARY).await?
-    {
+    if timezone != expected.timezone || !onboarding_allows_model(txn, required_categories).await? {
         return Err(ModelContextChanged);
     }
     let model = ShareDestination::new(DestinationKind::Model, expected.model_instance)
