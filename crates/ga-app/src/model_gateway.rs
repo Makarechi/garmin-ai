@@ -4,8 +4,8 @@ mod interpretation;
 mod safety;
 
 pub use analysis::{
-    AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult, AnalysisToolRead,
-    DiaryAnalysisTools, OfferedReadTool,
+    AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult,
+    AnalysisToolRead, DiaryAnalysisTools, OfferedReadTool,
 };
 pub use configuration::{ConfiguredModel, ModelEnvironmentError, RuntimeModelSettings};
 pub use interpretation::{
@@ -167,12 +167,12 @@ enum Transport {
     Structured(ModelTransport),
 }
 
-enum PreparedRequest {
+pub(crate) enum PreparedRequest {
     Gemini(GeminiModelRequest),
     Structured(StructuredModelRequest),
 }
 
-trait Sender: Sync {
+pub(crate) trait Sender: Sync {
     fn send(
         &self,
         request: &PreparedRequest,
@@ -206,6 +206,9 @@ impl Sender for Transport {
 }
 
 impl<'a> ModelGateway<'a> {
+    pub(crate) fn sender(&self) -> &impl Sender {
+        &self.transport
+    }
     pub fn gemini(
         database: Database,
         selected: SelectedModel<'a>,

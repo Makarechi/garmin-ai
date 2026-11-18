@@ -411,6 +411,27 @@ impl Database {
         .await
         .map_err(|_| JobStoreError::Database)?
     }
+
+    /// Yield an unexpired model claim while the configured provider is cooling down.
+    pub async fn defer_telegram_model_text(
+        &self,
+        lease: &TelegramInboundLease,
+        now: StoredInstant,
+        retry_at: StoredInstant,
+    ) -> Result<(), JobStoreError> {
+        self.finish_job(
+            lease.job_id,
+            lease.token,
+            KIND,
+            now,
+            JobOutcome::Failed {
+                reason: super::FailureReason::ProviderCooldown,
+                retry_at: Some(retry_at),
+            },
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 async fn try_ingress_lock(txn: &mut Transaction<'_, Postgres>) -> Result<bool, JobStoreError> {

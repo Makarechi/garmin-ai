@@ -3,7 +3,10 @@ pub use diary::DiaryAnalysisTools;
 
 use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::Instant};
 
-use ga_db::share_policy::{ShareCategory, ShareRequirement};
+use ga_db::{
+    conversation_memory::ConversationReadContext,
+    share_policy::{ModelChannelSharing, ShareCategory, ShareDestination, ShareRequirement},
+};
 use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError, AnalysisStage},
     analysis_claims::AnswerEvidence,
@@ -15,7 +18,10 @@ use ga_domain::{
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use super::{ActiveModelJob, CurrentModelPolicy, GatewayError, ModelGateway, ModelInput};
+use super::{
+    ActiveModelJob, CurrentModelPolicy, GatewayError, ModelGateway, ModelInput, Sender,
+    runtime::ModelRequestScope,
+};
 
 const PROMPT: &str = include_str!("../../../../src/garmin_ai/prompts/analysis_answer.txt");
 const MAX_PROMPT_JSON: usize = 96_000;
@@ -38,6 +44,20 @@ pub struct AnalysisQuestion<'a> {
     pub personal_goals: &'a Value,
     pub replay_notice: Option<&'a str>,
     pub tools: &'a [OfferedReadTool<'a>],
+}
+
+#[derive(Clone, Copy)]
+pub struct AnalysisDestination<'a> {
+    pub channel: ShareDestination<'a>,
+    pub conversation: ConversationReadContext<'a>,
+    pub tracker_versions: &'a BTreeSet<Uuid>,
+    pub job: ActiveModelJob,
+}
+
+struct AnalysisScope<'a> {
+    requirements: &'a [ShareRequirement<'a>],
+    job: Option<ActiveModelJob>,
+    destination: Option<AnalysisDestination<'a>>,
 }
 
 /// Trusted reader output. Dependency IDs come from storage, outside the model payload.
@@ -113,19 +133,88 @@ impl ModelGateway<'_> {
         requirements: &[ShareRequirement<'_>],
         job: Option<ActiveModelJob>,
     ) -> Result<AnalysisResult, AnalysisError> {
+        self.answer_scope(
+            question,
+            budget,
+            tools,
+            policy,
+            AnalysisScope {
+                requirements,
+                job,
+                destination: None,
+            },
+            &self.transport,
+        )
+        .await
+    }
+
+    pub(crate) async fn answer_for_channel<'policy>(
+        &self,
+        question: AnalysisQuestion<'_>,
+        budget: &mut AnalysisBudget,
+        tools: &impl AnalysisReadTools,
+        policy: impl Fn() -> CurrentModelPolicy<'policy> + Sync,
+        destination: AnalysisDestination<'_>,
+        sender: &impl Sender,
+    ) -> Result<AnalysisResult, AnalysisError> {
+        self.answer_scope(
+            question,
+            budget,
+            tools,
+            policy,
+            AnalysisScope {
+                requirements: &[],
+                job: Some(destination.job),
+                destination: Some(destination),
+            },
+            sender,
+        )
+        .await
+    }
+
+    async fn answer_scope<'policy>(
+        &self,
+        question: AnalysisQuestion<'_>,
+        budget: &mut AnalysisBudget,
+        tools: &impl AnalysisReadTools,
+        policy: impl Fn() -> CurrentModelPolicy<'policy> + Sync,
+        scope: AnalysisScope<'_>,
+        sender: &impl Sender,
+    ) -> Result<AnalysisResult, AnalysisError> {
         let categories = tools.categories();
+        let AnalysisScope {
+            requirements,
+            job,
+            destination,
+        } = scope;
         answer_with(question, budget, tools, |prompt, versions| {
             let policy = &policy;
             async move {
                 let mut current_requirements = requirements.to_vec();
-                current_requirements.extend(versions.into_iter().map(|version_id| {
+                current_requirements.extend(versions.iter().copied().map(|version_id| {
                     ShareRequirement {
                         version_id,
                         categories: &[ShareCategory::Facts],
                     }
                 }));
+                let mut channel_versions = versions;
+                if let Some(destination) = destination {
+                    channel_versions.extend(destination.tracker_versions);
+                }
+                let channel_requirements: Vec<_> = channel_versions
+                    .iter()
+                    .map(|&version_id| ShareRequirement {
+                        version_id,
+                        categories: &[ShareCategory::Schema, ShareCategory::Facts],
+                    })
+                    .collect();
+                let channel = destination.map(|destination| ModelChannelSharing {
+                    destination: destination.channel,
+                    requirements: &channel_requirements,
+                    conversation: Some(destination.conversation),
+                });
                 let returned = self
-                    .execute(
+                    .execute_with_context(
                         ModelInput::Structured {
                             contract: ApprovedModelSchema::AgentStep,
                             instruction: PROMPT.trim(),
@@ -133,8 +222,12 @@ impl ModelGateway<'_> {
                             categories,
                         },
                         policy,
-                        &current_requirements,
-                        job,
+                        ModelRequestScope {
+                            requirements: &current_requirements,
+                            channel,
+                            job,
+                        },
+                        sender,
                     )
                     .await
                     .map_err(AnalysisError::Model)?;

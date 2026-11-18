@@ -4,6 +4,7 @@ mod confirmed;
 mod read_context;
 mod telegram_forget;
 pub use confirmed::ConfirmedAnalysis;
+pub(crate) use confirmed::remember_delivered_in;
 pub(crate) use read_context::channel_in as analysis_channel_in;
 pub(crate) use read_context::current_conversation_channel;
 pub use read_context::{AnalysisReadContext, ConversationReadContext};
@@ -88,6 +89,7 @@ impl Database {
     ) -> Result<MemorySnapshot, MemoryError> {
         tokio::time::timeout(DEADLINE, async {
             let mut txn = self.begin_memory().await?;
+            confirmed::refresh_delivered_in(&mut txn, binding, now).await?;
             let snapshot = snapshot(&mut txn, binding, now, true).await?;
             txn.commit().await?;
             Ok(snapshot)
