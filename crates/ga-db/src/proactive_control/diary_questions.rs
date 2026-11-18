@@ -28,20 +28,26 @@ impl Database {
         default_timezone: &str,
     ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let mut txn = self.work.begin().await?;
-            sqlx::query("SET LOCAL statement_timeout='1500ms'")
-                .execute(&mut *txn)
-                .await?;
-            check_readiness(&mut txn)
-                .await
-                .map_err(ProactiveControlError::Storage)?;
-            lock_notification_policy(&mut txn).await?;
+            let mut txn = self.begin_diary_question_policy().await?;
             let generated = generate_in(&mut txn, owner, now, default_timezone).await?;
             txn.commit().await?;
             Ok(generated)
         })
         .await
         .map_err(|_| ProactiveControlError::Database)?
+    }
+    pub(super) async fn begin_diary_question_policy(
+        &self,
+    ) -> Result<Transaction<'static, Postgres>, ProactiveControlError> {
+        let mut txn = self.work.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='1500ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(ProactiveControlError::Storage)?;
+        lock_notification_policy(&mut txn).await?;
+        Ok(txn)
     }
 }
 
@@ -51,15 +57,7 @@ async fn generate_in(
     now: StoredInstant,
     default_timezone: &str,
 ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
-    let timezone: String = sqlx::query_scalar(
-        "SELECT CASE WHEN EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
-                THEN timezone ELSE $2 END FROM people WHERE id=$1",
-    )
-    .bind(owner)
-    .bind(default_timezone)
-    .fetch_optional(&mut **txn)
-    .await?
-    .ok_or(ProactiveControlError::UnknownOwner)?;
+    let timezone = diary_question_timezone(txn, owner, default_timezone).await?;
     let slot = (now.unix_microseconds() / 1_000_000).div_euclid(1800);
     let skip: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM app_state
@@ -81,15 +79,7 @@ async fn generate_in(
     .bind(slot)
     .execute(&mut **txn)
     .await?;
-    let (migraine_enabled, caffeine_enabled): (bool, bool) = sqlx::query_as(
-        "SELECT
-           count(*)=0 OR coalesce(bool_or(pack_key='migraine' AND tracking_enabled AND reminders_enabled),false),
-           count(*)=0 OR coalesce(bool_or(pack_key='caffeine' AND tracking_enabled AND reminders_enabled),false)
-         FROM module_configs WHERE owner_id=$1",
-    )
-    .bind(owner)
-    .fetch_one(&mut **txn)
-    .await?;
+    let (migraine_enabled, caffeine_enabled) = diary_question_packs(txn, owner).await?;
     let mut generated = GeneratedDiaryQuestions::default();
     if migraine_enabled {
         generated.migraines = generate_migraines(txn, now.into()).await?;
@@ -100,12 +90,47 @@ async fn generate_in(
     Ok(generated)
 }
 
-async fn generate_migraines(
+pub(super) async fn diary_question_timezone(
     txn: &mut Transaction<'_, Postgres>,
-    now: OffsetDateTime,
-) -> Result<u64, ProactiveControlError> {
-    let rows = sqlx::query_as::<_, (Uuid, OffsetDateTime, String, bool, bool)>(
-        "SELECT episode.id,episode.start,episode.timezone,
+    owner: Uuid,
+    fallback: &str,
+) -> Result<String, ProactiveControlError> {
+    sqlx::query_scalar(
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
+                THEN timezone ELSE $2 END FROM people WHERE id=$1",
+    )
+    .bind(owner)
+    .bind(fallback)
+    .fetch_optional(&mut **txn)
+    .await?
+    .ok_or(ProactiveControlError::UnknownOwner)
+}
+
+pub(super) async fn diary_question_packs(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+) -> Result<(bool, bool), ProactiveControlError> {
+    Ok(sqlx::query_as(
+        "SELECT
+           count(*)=0 OR coalesce(bool_or(pack_key='migraine' AND tracking_enabled AND reminders_enabled),false),
+           count(*)=0 OR coalesce(bool_or(pack_key='caffeine' AND tracking_enabled AND reminders_enabled),false)
+         FROM module_configs WHERE owner_id=$1",
+    )
+    .bind(owner)
+    .fetch_one(&mut **txn)
+    .await?)
+}
+
+pub(super) type MigraineQuestionDetails = (
+    Uuid,
+    OffsetDateTime,
+    Option<OffsetDateTime>,
+    String,
+    bool,
+    bool,
+);
+
+pub(super) const MIGRAINE_DETAILS: &str = "SELECT episode.id,episode.start,episode.\"end\",episode.timezone,
            EXISTS (SELECT 1 FROM events medication WHERE NOT medication.deleted
                AND medication.kind='medication' AND medication.status='confirmed'
                AND medication.start<=$1 AND medication.payload->>'reason_event_id'=episode.id::text),
@@ -115,34 +140,28 @@ async fn generate_migraines(
                 AND symptom.start<=$1 AND symptom.payload->>'episode_id'=episode.id::text
                 AND symptom.payload->>'severity' IS NOT NULL))
          FROM events episode WHERE NOT episode.deleted AND episode.kind='migraine'
-           AND episode.status='confirmed' AND (episode.\"end\" IS NULL OR episode.\"end\">$1)
-           AND episode.start BETWEEN $1 - interval '48 hours' AND $1 - interval '2 hours'
-           AND NOT EXISTS (SELECT 1 FROM pending_questions q WHERE q.dedup_key='migraine:' || episode.id::text)",
-    )
-    .bind(now)
-    .fetch_all(&mut **txn)
-    .await?;
+           AND episode.status='confirmed'
+           AND (($2::uuid IS NOT NULL AND episode.id=$2) OR (
+               $2 IS NULL AND (episode.\"end\" IS NULL OR episode.\"end\">$1)
+               AND episode.start BETWEEN $1 - interval '48 hours' AND $1 - interval '2 hours'
+               AND NOT EXISTS (SELECT 1 FROM pending_questions q WHERE q.dedup_key='migraine:' || episode.id::text)
+           ))";
+
+async fn generate_migraines(
+    txn: &mut Transaction<'_, Postgres>,
+    now: OffsetDateTime,
+) -> Result<u64, ProactiveControlError> {
+    let rows = sqlx::query_as::<_, MigraineQuestionDetails>(MIGRAINE_DETAILS)
+        .bind(now)
+        .bind(None::<Uuid>)
+        .fetch_all(&mut **txn)
+        .await?;
     let mut inserted = 0;
-    for (event, start, zone, has_medication, has_severity) in rows {
-        let invalid = || ProactiveControlError::InvalidStoredState;
-        let start = StoredInstant::try_from(start).map_err(|_| invalid())?;
-        let (day, clock) = source_calendar_wall_time(start, &zone).ok_or_else(invalid)?;
-        let mut text = format!(
-            "Мигрень, начавшаяся {:02}.{:02} в {:02}:{:02}, уже закончилась? Если да — примерно во сколько?",
-            day.day(),
-            u8::from(day.month()),
-            clock.hour(),
-            clock.minute()
-        );
-        if !has_medication {
-            text.push_str(" Принимали ли что-нибудь?");
-        }
-        if !has_severity {
-            text.push_str(" Можно также указать силу боли от 0 до 10.");
-        }
+    for episode in rows {
+        let event = episode.0;
         inserted += Question {
             kind: "migraine",
-            text,
+            text: migraine_question_text(&episode)?,
             evidence: json!({"event_id": event.to_string()}),
             priority: 0.95,
             event: Some(event),
@@ -152,6 +171,29 @@ async fn generate_migraines(
         .await?;
     }
     Ok(inserted)
+}
+
+pub(super) fn migraine_question_text(
+    details: &MigraineQuestionDetails,
+) -> Result<String, ProactiveControlError> {
+    let (_, start, _, zone, has_medication, has_severity) = details;
+    let invalid = || ProactiveControlError::InvalidStoredState;
+    let start = StoredInstant::try_from(*start).map_err(|_| invalid())?;
+    let (day, clock) = source_calendar_wall_time(start, zone).ok_or_else(invalid)?;
+    let mut text = format!(
+        "Мигрень, начавшаяся {:02}.{:02} в {:02}:{:02}, уже закончилась? Если да — примерно во сколько?",
+        day.day(),
+        u8::from(day.month()),
+        clock.hour(),
+        clock.minute()
+    );
+    if !has_medication {
+        text.push_str(" Принимали ли что-нибудь?");
+    }
+    if !has_severity {
+        text.push_str(" Можно также указать силу боли от 0 до 10.");
+    }
+    Ok(text)
 }
 
 async fn generate_caffeine(

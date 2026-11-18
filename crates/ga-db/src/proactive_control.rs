@@ -3,9 +3,11 @@
 mod budget;
 mod diary_questions;
 mod policy;
+mod question_selection;
 pub use budget::NotificationExclusions;
 pub use diary_questions::GeneratedDiaryQuestions;
 pub use policy::{NotificationDecision, NotificationPolicy, NotificationReason};
+pub use question_selection::{DiaryQuestionKind, ReservedDiaryQuestion};
 
 use std::{error::Error, fmt, time::Duration};
 

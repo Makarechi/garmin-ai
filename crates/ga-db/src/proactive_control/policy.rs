@@ -18,6 +18,7 @@ use crate::{
     replay::REPLAY_MUTATION_LOCK,
 };
 
+#[derive(Clone, Copy)]
 pub struct NotificationPolicy<'a> {
     pub timezone: &'a str,
     pub default_enabled: bool,
