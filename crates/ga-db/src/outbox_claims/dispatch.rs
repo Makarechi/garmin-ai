@@ -1,6 +1,6 @@
 use std::{error::Error, fmt, future::Future, time::Duration};
 
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{channel::telegram_conversation_id, timestamp::StoredInstant};
 use serde_json::Value;
 use sqlx::{Connection, PgConnection, Postgres, Row, Transaction, postgres::PgRow};
 use time::OffsetDateTime;
@@ -312,7 +312,9 @@ async fn prepare(
         return Ok(Dispatch::Unavailable);
     };
     if let Some(chat) = expected_chat
-        && !telegram_authorized(&mut txn, destination, chat).await?
+        && (candidate.conversation_id
+            != telegram_conversation_id(destination.owner_id, destination.instance_id, chat)
+            || !telegram_authorized(&mut txn, destination, chat).await?)
     {
         close_claim(&mut txn, claim.outbox_id, "cancelled").await?;
         txn.commit().await?;
