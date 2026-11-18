@@ -7,7 +7,7 @@ use ga_db::{
         FailureReason, JobOutcome, JobStoreError, RecordedJobStatus,
         telegram_ack::TelegramAckTarget,
     },
-    runtime_lease::RuntimeLease,
+    runtime_lease::{RuntimeLease, RuntimeLeaseError},
     telegram_cursor::TelegramCursorError,
 };
 use ga_domain::timestamp::StoredInstant;
@@ -33,6 +33,7 @@ pub struct PollBatch {
 #[derive(Debug)]
 pub enum TelegramLoopError {
     Clock,
+    Runtime(RuntimeLeaseError),
     Cursor(TelegramCursorError),
     Transport(TelegramTransportError),
     Ingress(TelegramPollError),
@@ -43,6 +44,7 @@ impl fmt::Display for TelegramLoopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Clock => f.write_str("Telegram worker clock is unavailable"),
+            Self::Runtime(error) => error.fmt(f),
             Self::Cursor(error) => error.fmt(f),
             Self::Transport(error) => error.fmt(f),
             Self::Ingress(error) => error.fmt(f),
@@ -93,9 +95,10 @@ impl TelegramTransport {
         if cursor.reset {
             progress.caught_up_at = None;
         }
-        let updates = self
-            .get_updates(cursor.offset)
+        let updates = lease
+            .while_held(self.get_updates(cursor.offset))
             .await
+            .map_err(TelegramLoopError::Runtime)?
             .map_err(TelegramLoopError::Transport)?;
         let received = wall_clock()?;
         let batch_at = Instant::now();

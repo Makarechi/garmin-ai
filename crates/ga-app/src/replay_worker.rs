@@ -1,13 +1,13 @@
 use std::{
-    env,
     error::Error,
-    fmt, io,
+    fmt, future,
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ga_app::{telegram_settings::TelegramIngressSettings, telegram_transport::TelegramTransport};
 use ga_archive::Archive;
 use ga_db::{
     Database,
@@ -18,6 +18,8 @@ use ga_db::{
 use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
 use ga_fit::{ExportLimits, MAX_FIT_BYTES};
 use tokio::{signal, time::Instant};
+
+use crate::configuration;
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
 const PLAN_BUSY: Duration = Duration::from_secs(30);
@@ -33,6 +35,7 @@ const MAX_ZIP_ENTRIES: NonZeroUsize = match NonZeroUsize::new(4096) {
 pub enum ReplayServiceError {
     Configuration,
     Archive,
+    TelegramConfiguration,
     Clock,
     Shutdown,
     Planning(ReplaySelectionError),
@@ -45,6 +48,7 @@ impl fmt::Display for ReplayServiceError {
         match self {
             Self::Configuration => f.write_str("Archive replay configuration is invalid"),
             Self::Archive => f.write_str("Could not open the existing Garmin archive"),
+            Self::TelegramConfiguration => f.write_str("Telegram worker configuration is invalid"),
             Self::Clock => f.write_str("Archive replay clock cannot be represented"),
             Self::Shutdown => f.write_str("Could not listen for a worker shutdown signal"),
             Self::Planning(error) => error.fmt(f),
@@ -63,33 +67,9 @@ struct Configuration {
 
 impl Configuration {
     fn read() -> Result<Self, ReplayServiceError> {
-        const KEYS: [&str; 3] = ["GA_DATABASE_URL", "GA_DATA_DIR", "GA_TIMEZONE"];
-        let mut values = [None, None, None];
-        match dotenvy::from_path_iter(".env") {
-            Ok(entries) => {
-                for (name, value) in entries.filter_map(Result::ok) {
-                    if let Some(index) = KEYS.iter().position(|key| name.eq_ignore_ascii_case(key))
-                    {
-                        values[index] = Some(value);
-                    }
-                }
-            }
-            Err(dotenvy::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(ReplayServiceError::Configuration),
-        }
-        for (name, value) in env::vars_os() {
-            if let Some(index) = name
-                .to_str()
-                .and_then(|name| KEYS.iter().position(|key| name.eq_ignore_ascii_case(key)))
-            {
-                values[index] = Some(
-                    value
-                        .into_string()
-                        .map_err(|_| ReplayServiceError::Configuration)?,
-                );
-            }
-        }
-        let [url, path, timezone] = values;
+        let [url, path, timezone] =
+            configuration::read(["GA_DATABASE_URL", "GA_DATA_DIR", "GA_TIMEZONE"])
+                .map_err(|_| ReplayServiceError::Configuration)?;
         let database_url = url
             .filter(|url| !url.is_empty())
             .ok_or(ReplayServiceError::Configuration)?;
@@ -109,9 +89,33 @@ impl Configuration {
     }
 }
 
+fn telegram_configuration()
+-> Result<Option<(TelegramIngressSettings, TelegramTransport)>, ReplayServiceError> {
+    let failure = |_| ReplayServiceError::TelegramConfiguration;
+    let [token, user, integrations] = configuration::read([
+        "GA_TELEGRAM_BOT_TOKEN",
+        "GA_TELEGRAM_USER_ID",
+        "GA_INTEGRATIONS",
+    ])
+    .map_err(failure)?;
+    let Some(token) = token.filter(|token| !token.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(settings) =
+        TelegramIngressSettings::selected(user.as_deref(), integrations.as_deref())
+            .map_err(|_| ReplayServiceError::TelegramConfiguration)?
+    else {
+        return Ok(None);
+    };
+    let transport =
+        TelegramTransport::new(&token).map_err(|_| ReplayServiceError::TelegramConfiguration)?;
+    Ok(Some((settings, transport)))
+}
+
 #[tokio::main(flavor = "current_thread")]
-pub async fn run(once: bool) -> Result<(), ReplayServiceError> {
+pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     let config = Configuration::read()?;
+    let telegram = worker.then(telegram_configuration).transpose()?.flatten();
     let database = Database::connect_lazy(&config.database_url)
         .map_err(|_| ReplayServiceError::Configuration)?;
     let archive = Arc::new(
@@ -138,11 +142,36 @@ pub async fn run(once: bool) -> Result<(), ReplayServiceError> {
         #[cfg(not(unix))]
         signal::ctrl_c().await
     };
-    println!("Archive replay worker ready");
+    println!(
+        "{}",
+        if worker {
+            "Garmin AI worker ready"
+        } else {
+            "Archive replay worker ready"
+        }
+    );
+    let receive = async {
+        if let Some((settings, transport)) = &telegram {
+            transport
+                .run_receiver(&database, &mut singleton, settings)
+                .await
+                .map_err(ReplayServiceError::Lease)
+        } else {
+            verify_runtime(&mut singleton).await
+        }
+    };
+    let acknowledge = async {
+        if let Some((settings, transport)) = &telegram {
+            transport.run_acknowledgements(&database, settings).await
+        } else {
+            future::pending::<Result<(), ReplayServiceError>>().await
+        }
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
-        result = verify_runtime(&mut singleton) => result,
+        result = receive => result,
+        result = acknowledge => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

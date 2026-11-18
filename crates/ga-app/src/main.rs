@@ -52,6 +52,8 @@ enum Command {
         #[arg(long)]
         status: bool,
     },
+    /// Run archive replay and Telegram receipt processing
+    Worker,
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
@@ -130,7 +132,13 @@ fn main() -> ExitCode {
             }
         }
         Some(Command::Replay { once }) => {
-            if let Err(error) = replay_worker::run(once) {
+            if let Err(error) = replay_worker::run(once, false) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Worker) => {
+            if let Err(error) = replay_worker::run(false, true) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
