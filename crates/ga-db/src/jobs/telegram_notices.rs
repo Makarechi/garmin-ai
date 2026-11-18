@@ -375,9 +375,6 @@ async fn queue_notice(
 ) -> Result<(), JobStoreError> {
     let clock = OffsetDateTime::from(now);
     let key = fence.key();
-    if !fence.current(&mut txn, now).await? {
-        return Ok(());
-    }
     let operation: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM jobs WHERE kind=$1 AND dedup_key=$2 AND payload @> $3::jsonb
                 AND ((status='pending' AND run_at<=$4)
@@ -400,6 +397,7 @@ async fn queue_notice(
             .map_err(|_| JobStoreError::Database)?
         || !telegram_primary(&mut txn, instance).await?
         || confirmed_pairing(&mut txn, instance, chat).await.ok() != Some(owner)
+        || !fence.current(&mut txn, now).await?
     {
         return Ok(());
     }
@@ -418,6 +416,25 @@ async fn queue_notice(
         "blocks":[{"text":fence.text()}],"expires_at":expires.to_string(),
     }))
     .map_err(|_| JobStoreError::InvalidRecordedState)?;
+    // Preserve the old attempt and free the daily key only for a cancelled send
+    // with no delivery observation that the new destination could duplicate.
+    sqlx::query(
+        "UPDATE outbox_messages o SET dedup_key=concat($1,':cancelled:',o.id)
+         WHERE o.dedup_key=$1 AND o.operation_id=$2 AND o.state='cancelled'
+           AND o.inbound_message_id IS NULL AND o.legacy_key IS NULL
+           AND (o.owner_id,o.conversation_id)<>($3,$4)
+           AND coalesce(o.memory_fence->>'storage_notice_day',o.memory_fence->>'garmin_notice_day')=$5
+           AND NOT EXISTS(SELECT 1 FROM message_delivery_receipts r
+             WHERE r.outbox_message_id=o.id
+               AND r.state IN ('provider_accepted','delivered','read','uncertain'))",
+    )
+    .bind(&key)
+    .bind(operation)
+    .bind(owner)
+    .bind(conversation)
+    .bind(fence.day())
+    .execute(&mut *txn)
+    .await?;
     let queued = queue_outbox_intent(
         &mut txn,
         QueueIntent {

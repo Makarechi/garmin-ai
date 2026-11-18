@@ -174,6 +174,7 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
         .claim_outbox_reply(destination(), now, 60)
         .await?
         .ok_or("Missing queued Garmin notice")?;
+    let stale_id = stale.outbox_id;
     set_connection(&pool, "active", "").await?;
     assert_eq!(
         transport
@@ -181,6 +182,25 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
             .await?,
         ReplyDispatchResult::Cancelled
     );
+
+    let settings = TelegramIngressSettings::selected(
+        Some("43"),
+        Some(r#"[{"id":"channel:telegram:alternate","kind":"channel","provider":"telegram"}]"#),
+    )?
+    .ok_or("Missing new Telegram settings")?;
+    let chat = settings.external_owner_id();
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         VALUES(gen_random_uuid(),$1,'telegram','alternate','43','fixture')",
+    ).bind(owner).execute(&pool).await?;
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding',$1::jsonb)")
+        .bind(
+            json!({"channel":{"channel":"telegram","instance_id":"alternate"},
+                     "source_instance_ids":[SOURCE]})
+            .to_string(),
+        )
+        .execute(&pool)
+        .await?;
 
     let account_key = format!("account-binding:{}", at.date());
     let account_receipt = format!("outbox:{account_key}:0");
@@ -258,6 +278,24 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
         }
     })
     .await??;
+    let old: (String, String) = sqlx::query_as(
+        "SELECT o.state,c.channel_instance_id FROM outbox_messages o JOIN conversations c
+           ON c.id=o.conversation_id WHERE o.id=$1",
+    )
+    .bind(stale_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(old, ("cancelled".into(), "primary".into()));
+    let destinations: Vec<String> = sqlx::query_scalar(
+        "SELECT intent#>>'{channel_instance,instance_id}' FROM outbox_messages
+         WHERE dedup_key IN ($1,$2) AND state='provider_accepted' ORDER BY dedup_key",
+    )
+    .bind(&account_key)
+    .bind(&auth_key)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(destinations, ["alternate", "alternate"]);
+
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT dedup_key,status,payload->>'key' FROM jobs
          WHERE kind='telegram_connection_notice' ORDER BY dedup_key",
