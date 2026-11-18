@@ -61,7 +61,11 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
         time::Duration,
     };
 
-    use ga_db::{Database, jobs::telegram_inbound::TelegramInboundTarget};
+    use ga_db::{
+        Database,
+        diary::{CreateSystemEvent, DeleteEvent},
+        jobs::telegram_inbound::TelegramInboundTarget,
+    };
     use ga_domain::model_response::StructuredModelOutput;
     use ga_model::ModelTransportError;
     use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
@@ -71,6 +75,7 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
 
     struct SyntheticModel {
         calls: AtomicUsize,
+        selected_id: String,
     }
 
     impl Sender for SyntheticModel {
@@ -80,7 +85,7 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
             remaining: Duration,
         ) -> Result<StructuredModelOutput, ModelTransportError> {
             assert!(!remaining.is_zero());
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let PreparedRequest::Gemini(request) = request else {
                 return Err(ModelTransportError::InvalidConfiguration);
             };
@@ -92,21 +97,33 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
             assert_eq!(prompt["text"], "Synthetic reply");
             assert_eq!(prompt["source"], "telegram_text");
             assert_eq!(prompt["timezone"], "Europe/Bratislava");
-            assert_eq!(
-                prompt["context"]["pending_clarification"]["text"],
-                "Synthetic original report"
-            );
-            assert_eq!(prompt["context"]["recent_events"], json!([]));
+            let context = &prompt["context"];
+            if call == 0 {
+                assert_eq!(
+                    context["pending_clarification"]["text"],
+                    "Synthetic original report"
+                );
+                assert_eq!(context["recent_events"][0]["id"], self.selected_id);
+            } else {
+                assert!(context["pending_clarification"].is_null());
+                assert_eq!(context["recent_events"], json!([]));
+            }
+            let result = if call == 2 {
+                r#"{"intent":"safety","confidence":0.99}"#
+            } else {
+                r#"{"intent":"clarify","confidence":0.91,"clarification":"What time did it start?"}"#
+            };
             let response = serde_json::to_vec(&json!({
                 "status":"completed",
                 "steps":[{
                     "type":"model_output",
                     "content":[{
                         "type":"text",
-                        "text":"{\"intent\":\"clarify\",\"confidence\":0.91,\"clarification\":\"What time did it start?\"}"
+                        "text":result
                     }]
                 }],
-            })).map_err(|_| ModelTransportError::InvalidConfiguration)?;
+            }))
+            .map_err(|_| ModelTransportError::InvalidConfiguration)?;
             request
                 .decode_response(&response)
                 .map_err(ModelTransportError::Response)
@@ -141,12 +158,30 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
         .await?;
     let now = StoredInstant::try_from(at)?;
     let earlier = StoredInstant::try_from(at - time::Duration::seconds(60))?.to_string();
+    let selected = AgentInterpretation::from_value(&json!({
+        "intent":"log","confidence":0.99,"events":[{
+            "start":earlier,"timezone":"UTC","payload":{"type":"migraine","severity":4}
+        }]
+    }))?;
+    let selected = database
+        .create_system_event(CreateSystemEvent {
+            owner_id,
+            authenticated_actor: "synthetic-fixture",
+            report: &selected.events()[0],
+            idempotency_key: None,
+            operation_id: None,
+            clock_uncertainty_seconds: None,
+        })
+        .await?;
+    let expires = StoredInstant::try_from(at + time::Duration::minutes(15))?;
     sqlx::query("INSERT INTO app_state(key,value) VALUES('conversation:pending',$1::jsonb)")
         .bind(
             json!({
                 "text":"Synthetic original report","question":"Please clarify",
                 "created_at":earlier,"channel_instance_id":"telegram:primary",
-                "explicit_selector":true,"action":"close","selection_prompt":"h:old"
+                "explicit_selector":true,"action":"close","selection_prompt":"h:old",
+                "event_ids":[selected.id.to_string()],"selection_revision":selected.revision,
+                "selection_expires_at":expires.to_string(),"targets_complete":true,
             })
             .to_string(),
         )
@@ -208,6 +243,7 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
     let gateway = configuration.gateway(database.clone(), false, now)?;
     let model = SyntheticModel {
         calls: AtomicUsize::new(0),
+        selected_id: selected.id.to_string(),
     };
     let input = || TelegramText::from_lease(&lease, "Europe/Bratislava", now);
     let mut budget = AnalysisBudget::new(Instant::now());
@@ -266,14 +302,69 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
             .is_err()
     );
     assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    database
+        .delete_event(DeleteEvent {
+            owner_id,
+            authenticated_actor: "synthetic-fixture",
+            event_id: selected.id,
+            expected_revision: selected.revision,
+        })
+        .await?;
+    let later = StoredInstant::try_from(at + time::Duration::seconds(2))?;
+    binding
+        .accept_polled_update(
+            &mut runtime,
+            &json!({"update_id":302,"message":{
+                "message_id":762,"from":{"id":42},"chat":{"id":42,"type":"private"},
+                "text":"Synthetic reply","date":OffsetDateTime::from(later).unix_timestamp()
+            }}),
+            later,
+            false,
+        )
+        .await?
+        .inbound
+        .ok_or("Missing synthetic reply to a deleted entry")?;
+    let stale = database
+        .claim_telegram_inbound(
+            TelegramInboundTarget {
+                owner_id,
+                instance_id: "primary",
+            },
+            later,
+            60,
+        )
+        .await?
+        .ok_or("Missing stale selection reply")?;
+    assert!(matches!(
+        gateway
+            .interpret_telegram_with(
+                &stale,
+                TelegramText::from_lease(&stale, "Europe/Bratislava", later)?,
+                &mut budget,
+                &|| configuration.current(),
+                &model,
+            )
+            .await,
+        Err(DiaryInterpretationError::ExpiredSelection)
+    ));
+    let safety = gateway
+        .interpret_telegram_with(
+            &stale,
+            TelegramText::from_lease(&stale, "Europe/Bratislava", later)?,
+            &mut budget,
+            &|| configuration.current(),
+            &model,
+        )
+        .await?;
+    assert_eq!(safety.command.intent(), AgentIntent::Safety);
     let callback = json!({
-        "update_id":302,"callback_query":{
+        "update_id":303,"callback_query":{
             "id":"synthetic-selector","data":prompt,"from":{"id":42},
-            "message":{"message_id":762,"chat":{"id":42,"type":"private"}}
+            "message":{"message_id":763,"chat":{"id":42,"type":"private"}}
         }
     });
     let clicked = binding
-        .accept_polled_update(&mut runtime, &callback, now, false)
+        .accept_polled_update(&mut runtime, &callback, later, false)
         .await?
         .inbound
         .ok_or("Missing authenticated history action")?;

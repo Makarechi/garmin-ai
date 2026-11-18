@@ -78,6 +78,7 @@ impl ModelGateway<'_> {
             mut events,
             recent_questions,
             mut pending_clarification,
+            selection_unavailable,
             recent_analysis_question,
             memory_fence,
         } = self
@@ -91,7 +92,7 @@ impl ModelGateway<'_> {
             })
             .await
             .map_err(DiaryInterpretationError::Read)?;
-        let mut expired_selection = false;
+        let mut expired_selection = mentioned.is_empty() && selection_unavailable;
         if mentioned.is_empty()
             && let Some(pending) = pending_clarification.as_ref()
         {
