@@ -97,7 +97,7 @@ def exercise(engine, python, native):
         assert all(reply.status_code == status for reply in replies), (
             arguments,
             status,
-            [reply.text for reply in replies],
+            [(reply.status_code, reply.text[:2000]) for reply in replies],
         )
         if status != 422:
             assert replies[0].json() == replies[1].json(), (

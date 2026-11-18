@@ -7,9 +7,9 @@ WITH samples AS MATERIALIZED (
     ORDER BY source,ts LIMIT 100001
 ), cap AS MATERIALIZED (
     SELECT count(*) > 100000 AS exceeded FROM samples
-), bounded AS MATERIALIZED (
+), bounded AS NOT MATERIALIZED (
     SELECT * FROM samples WHERE NOT (SELECT exceeded FROM cap)
-), following AS MATERIALIZED (
+), following AS (
     SELECT *,lead(ts) OVER source_order AS next_ts,
         lead(source_ref) OVER source_order AS next_ref
     FROM bounded WINDOW source_order AS (PARTITION BY source ORDER BY ts)
@@ -43,7 +43,8 @@ WITH samples AS MATERIALIZED (
 ), source_references AS MATERIALIZED (
     SELECT bucket,source,array_agg(DISTINCT reference ORDER BY reference)
         FILTER (WHERE reference IS NOT NULL) AS refs
-    FROM pieces CROSS JOIN LATERAL unnest(refs) AS reference GROUP BY bucket,source
+    FROM pieces CROSS JOIN LATERAL unnest(refs) AS reference
+    WHERE reference IS NOT NULL GROUP BY bucket,source
 ), covered AS (
     SELECT totals.*,source_references.refs,
         covered/extract(epoch FROM least($6,bucket+make_interval(secs=>$8))

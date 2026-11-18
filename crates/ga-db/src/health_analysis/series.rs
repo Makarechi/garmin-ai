@@ -72,6 +72,9 @@ impl DailyHealthReader {
             return Err(SeriesReadError::Invalid);
         }
         let work = async {
+            sqlx::query("SET LOCAL statement_timeout = '1500ms'")
+                .execute(&mut *self.0)
+                .await?;
             let result = series_in(
                 &mut self.0,
                 metric,
