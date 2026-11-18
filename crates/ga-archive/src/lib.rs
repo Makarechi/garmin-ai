@@ -1,6 +1,7 @@
 pub mod backup_space;
 mod key;
 mod staging;
+pub mod storage_files;
 mod token_file;
 
 pub mod backup_bundle;
