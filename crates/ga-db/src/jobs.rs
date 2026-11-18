@@ -73,6 +73,7 @@ pub enum FailureReason {
     RuntimeError,
     ProviderRequestInvalid,
     TelegramPairingChanged,
+    TelegramPolicyBusy,
     GarminCollectionDisabled,
     GarminAuthenticationRequired,
     InvalidGarminWork,
@@ -86,6 +87,7 @@ impl FailureReason {
             Self::RuntimeError => "RuntimeError",
             Self::ProviderRequestInvalid => "ProviderRequestInvalid",
             Self::TelegramPairingChanged => "TelegramPairingChanged",
+            Self::TelegramPolicyBusy => "TelegramPolicyBusy",
             Self::GarminCollectionDisabled => "GarminCollectionDisabled",
             Self::GarminAuthenticationRequired => "AuthenticationRequired",
             Self::InvalidGarminWork => "ValueError",
@@ -93,7 +95,10 @@ impl FailureReason {
     }
 
     fn refund(self) -> i32 {
-        i32::from(matches!(self, Self::DiaryDeferred | Self::ProviderCooldown))
+        i32::from(matches!(
+            self,
+            Self::DiaryDeferred | Self::ProviderCooldown | Self::TelegramPolicyBusy
+        ))
     }
 }
 

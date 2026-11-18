@@ -8,13 +8,19 @@ use uuid::Uuid;
 
 use super::{ATTEMPT_LIMIT, JobOutcome, JobStoreError, RecordedJobStatus, begin, fail_exhausted};
 use crate::{
-    Database, ReadinessError,
+    Database,
     channel_ingress::telegram_poll::{TelegramPollError, selection},
     telegram_binding::{TelegramBindingError, confirmed_pairing},
 };
 
 const KIND: &str = "telegram_native_ack";
 const LEASE_SECONDS: i32 = 15;
+
+pub enum TelegramAckAuthorization<T> {
+    BindingChanged,
+    Busy,
+    Observed(T),
+}
 
 #[derive(Clone, Copy)]
 pub struct TelegramAckTarget<'a> {
@@ -151,9 +157,9 @@ impl Database {
         lease: &TelegramAckLease,
         target: TelegramAckTarget<'_>,
         request: impl Future<Output = T>,
-    ) -> Result<Option<T>, JobStoreError> {
+    ) -> Result<TelegramAckAuthorization<T>, JobStoreError> {
         let Some(chat) = target.confirmed_chat else {
-            return Ok(None);
+            return Ok(TelegramAckAuthorization::BindingChanged);
         };
         let mut txn = begin(&self.control).await?;
         let stored: Option<(Option<String>,)> = sqlx::query_as(
@@ -171,31 +177,27 @@ impl Database {
         .await?;
         let (stored,) = stored.ok_or(JobStoreError::LeaseLost)?;
         if stored.as_deref() != Some(&chat.to_string()) {
-            return Ok(None);
+            return Ok(TelegramAckAuthorization::BindingChanged);
         }
-        let selected =
-            selection(&mut txn, target.instance_id)
-                .await
-                .map_err(|error| match error {
-                    TelegramPollError::Busy => JobStoreError::Storage(ReadinessError::Unavailable),
-                    _ => JobStoreError::Database,
-                })?;
-        if !selected {
-            return Ok(None);
+        match selection(&mut txn, target.instance_id).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(TelegramAckAuthorization::BindingChanged),
+            Err(TelegramPollError::Busy) => return Ok(TelegramAckAuthorization::Busy),
+            Err(_) => return Err(JobStoreError::Database),
         }
         match confirmed_pairing(&mut txn, target.instance_id, chat).await {
             Ok(owner) if owner == target.owner_id => {}
             Ok(_) | Err(TelegramBindingError::Missing | TelegramBindingError::Mismatch) => {
-                return Ok(None);
+                return Ok(TelegramAckAuthorization::BindingChanged);
             }
             Err(TelegramBindingError::Busy) => {
-                return Err(JobStoreError::Storage(ReadinessError::Unavailable));
+                return Ok(TelegramAckAuthorization::Busy);
             }
             Err(_) => return Err(JobStoreError::Database),
         }
         let result = request.await;
         txn.rollback().await?;
-        Ok(Some(result))
+        Ok(TelegramAckAuthorization::Observed(result))
     }
 }
 
