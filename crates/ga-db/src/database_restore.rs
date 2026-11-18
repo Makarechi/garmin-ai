@@ -104,6 +104,12 @@ impl Database {
         check_empty(&mut txn).await?;
         remove_bootstrap(&mut txn).await?;
         let counts = restore_rows(&mut txn, source, &mut line).await?;
+        if counts
+            .get("inbound_messages")
+            .is_some_and(|&count| count > 0)
+        {
+            restore_inbound_links(&mut txn).await?;
+        }
         validate_restored_events(&mut txn).await?;
         reset_sequences(&mut txn).await?;
         txn.commit().await?;
@@ -235,6 +241,23 @@ async fn remove_bootstrap(txn: &mut Transaction<'_, Postgres>) -> Result<(), Dat
     Ok(())
 }
 
+async fn restore_inbound_links(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), DatabaseRestoreError> {
+    let result = sqlx::query(
+        "UPDATE inbound_messages AS message SET supersedes_id=link.supersedes_id
+         FROM pg_temp.garmin_restore_inbound_links AS link WHERE message.id=link.id",
+    )
+    .execute(&mut **txn)
+    .await;
+    match result {
+        Err(sqlx::Error::Database(error)) if error.is_foreign_key_violation() => {
+            Err(DatabaseRestoreError::InvalidExport)
+        }
+        result => Ok(result.map(|_| ())?),
+    }
+}
+
 struct InsertPlan {
     columns: Vec<String>,
     float_columns: Vec<String>,
@@ -257,6 +280,15 @@ impl InsertPlan {
         if fields.is_empty() {
             return Err(DatabaseRestoreError::Revision);
         }
+        let stage_links = table == "inbound_messages";
+        if stage_links {
+            sqlx::query(
+                "CREATE TEMP TABLE garmin_restore_inbound_links
+                 (id UUID PRIMARY KEY, supersedes_id UUID NOT NULL) ON COMMIT DROP",
+            )
+            .execute(&mut **txn)
+            .await?;
+        }
         let mut columns = Vec::new();
         let mut float_columns = Vec::new();
         let mut projection = Vec::new();
@@ -267,7 +299,9 @@ impl InsertPlan {
             {
                 return Err(DatabaseRestoreError::Revision);
             }
-            projection.push(if is_jsonb {
+            projection.push(if stage_links && name == "supersedes_id" {
+                "NULL::uuid".to_owned()
+            } else if is_jsonb {
                 format!("$1::jsonb->'{name}'")
             } else {
                 format!("restored.\"{name}\"")
@@ -277,10 +311,22 @@ impl InsertPlan {
             }
             columns.push(name);
         }
-        let statement = format!(
-            "INSERT INTO {table} SELECT {} FROM json_populate_record(NULL::{table},$1::json) AS restored",
-            projection.join(","),
-        );
+        let projection = projection.join(",");
+        let statement = if stage_links {
+            format!(
+                "WITH restored AS (
+                     SELECT * FROM json_populate_record(NULL::inbound_messages,$1::json)
+                 ), links AS (
+                     INSERT INTO pg_temp.garmin_restore_inbound_links
+                     SELECT id,supersedes_id FROM restored WHERE supersedes_id IS NOT NULL
+                 ) INSERT INTO inbound_messages SELECT {projection} FROM restored"
+            )
+        } else {
+            format!(
+                "INSERT INTO {table} SELECT {projection}
+                 FROM json_populate_record(NULL::{table},$1::json) AS restored"
+            )
+        };
         Ok(Self {
             columns,
             float_columns,

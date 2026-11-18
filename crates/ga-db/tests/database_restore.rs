@@ -45,6 +45,12 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
     let wrong_footer = format!("{rows}\n{wrong_counts}\n");
     let malformed_json = fixture.replacen("\"revision\": 2", "\"revision\": NaN", 1);
     assert_ne!(malformed_json, fixture);
+    let missing_predecessor = fixture.replacen(
+        "\"supersedes_id\": \"00000000-0000-0000-0000-000000000322\"",
+        "\"supersedes_id\": \"00000000-0000-0000-0000-000000000999\"",
+        1,
+    );
+    assert_ne!(missing_predecessor, fixture);
 
     for lock in [72104620_i64, 72104622, 72104625] {
         let mut active = inspect.begin().await?;
@@ -66,6 +72,7 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
         (format!("{rows}\n"), false),
         (wrong_footer, false),
         (malformed_json, false),
+        (missing_predecessor, false),
         (format!("{fixture}\n{{}}\n"), false),
     ];
     for (input, revision) in invalid {
@@ -85,7 +92,8 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
         );
         let unchanged: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM app_state WHERE key='bootstrap:restore-test')
-             AND NOT EXISTS(SELECT 1 FROM events) AND NOT EXISTS(SELECT 1 FROM health_days)",
+             AND NOT EXISTS(SELECT 1 FROM events) AND NOT EXISTS(SELECT 1 FROM health_days)
+             AND NOT EXISTS(SELECT 1 FROM inbound_messages)",
         )
         .fetch_one(&mut inspect)
         .await?;
@@ -111,6 +119,14 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
     assert_eq!(counts.len(), 30);
     assert_eq!(counts["events"], 1);
     assert_eq!(counts["audit_log"], 1);
+    assert_eq!(counts["inbound_messages"], 3);
+    let links: Vec<(i32, i32)> = sqlx::query_as(
+        "SELECT child.revision,parent.revision FROM inbound_messages child
+         JOIN inbound_messages parent ON parent.id=child.supersedes_id ORDER BY child.revision",
+    )
+    .fetch_all(&mut inspect)
+    .await?;
+    assert_eq!(links, vec![(2, 1), (3, 2)]);
     assert!(matches!(
         operation
             .restore_current_database(&mut Cursor::new(&fixture))
