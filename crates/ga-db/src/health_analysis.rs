@@ -1,5 +1,6 @@
 mod activity_reads;
 mod device_history;
+mod lagged;
 mod read_daily;
 mod running;
 mod series;

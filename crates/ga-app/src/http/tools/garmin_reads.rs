@@ -61,6 +61,13 @@ pub(crate) async fn read_garmin(
     {
         return Err(GarminReadError::Permission);
     }
+    if let (Some(owner), Query::Lagged(_, other, ..)) = (mcp_owner, &query)
+        && !reader
+            .permits_model_packs(owner, model_metric_packs(other))
+            .await?
+    {
+        return Err(GarminReadError::Permission);
+    }
     match query {
         Query::Snapshot(day) => Ok(reader.snapshot(day).await?),
         Query::Range(start, end) => Ok(reader.range(HealthPeriod::new(start, end)?).await?),
@@ -90,6 +97,9 @@ pub(crate) async fn read_garmin(
         Query::Running(start, end, min, max) => {
             Ok(reader.running_efficiency(start, end, min, max).await?)
         }
+        Query::Lagged(first, second, start, end, lags) => Ok(reader
+            .lagged_association(first, second, HealthPeriod::new(start, end)?, &lags)
+            .await?),
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
@@ -106,6 +116,7 @@ enum Query<'a> {
     Compare(&'a str, [Date; 4]),
     Running(StoredInstant, StoredInstant, f64, f64),
     Series(&'a str, OffsetDateTime, OffsetDateTime, u16),
+    Lagged(&'a str, &'a str, Date, Date, Vec<i64>),
 }
 
 impl Query<'_> {
@@ -113,9 +124,10 @@ impl Query<'_> {
         match self {
             Self::Snapshot(_) | Self::Range(..) => MODEL_HEALTH_PACKS,
             Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
-            Self::Baseline(metric, ..) | Self::Compare(metric, ..) | Self::Series(metric, ..) => {
-                model_metric_packs(metric)
-            }
+            Self::Baseline(metric, ..)
+            | Self::Compare(metric, ..)
+            | Self::Series(metric, ..)
+            | Self::Lagged(metric, ..) => model_metric_packs(metric),
             Self::Running(..) => &["training", "sleep", "wellbeing"],
         }
     }
@@ -177,6 +189,30 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
         }
         ReadTool::RunningEfficiency => running_arguments(arguments),
         ReadTool::MetricSeries => series_arguments(arguments),
+        ReadTool::LaggedAssociation if arguments.len() == 5 => {
+            let first = arguments
+                .get("metric_a")
+                .and_then(Value::as_str)
+                .ok_or(GarminReadError::Arguments)?;
+            let second = arguments
+                .get("metric_b")
+                .and_then(Value::as_str)
+                .ok_or(GarminReadError::Arguments)?;
+            let (Some(start), Some(end)) = (day("start"), day("end")) else {
+                return Err(GarminReadError::Arguments);
+            };
+            let values = arguments
+                .get("lags")
+                .and_then(Value::as_array)
+                .filter(|values| values.len() <= 15)
+                .ok_or(GarminReadError::Arguments)?;
+            let lags = values
+                .iter()
+                .map(lag_input)
+                .collect::<Option<Vec<_>>>()
+                .ok_or(GarminReadError::Arguments)?;
+            Ok(Query::Lagged(first, second, start, end, lags))
+        }
         _ => Err(GarminReadError::Arguments),
     }
 }
@@ -263,4 +299,21 @@ fn activity_arguments(
     };
     let limit = u16::try_from(limit).map_err(|_| GarminReadError::Value)?;
     Ok((id, samples, offset, limit))
+}
+
+fn lag_input(value: &Value) -> Option<i64> {
+    let parsed = match value {
+        Value::Number(_) if value.as_f64()? < 0.0 => {
+            integer_input(&serde_json::json!(-value.as_f64()?)).map(|number| -i64::from(number))
+        }
+        Value::String(text) if text.trim().starts_with('-') => {
+            let magnitude = text.trim().strip_prefix('-')?;
+            if magnitude.starts_with(['+', '-']) || magnitude != magnitude.trim() {
+                return None;
+            }
+            integer_input(&Value::String(magnitude.to_owned())).map(|number| -i64::from(number))
+        }
+        _ => integer_input(value).map(i64::from),
+    }?;
+    (-30..=30).contains(&parsed).then_some(parsed)
 }

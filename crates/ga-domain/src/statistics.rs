@@ -60,6 +60,39 @@ pub fn standardized_difference(
         .map(|difference| difference / pooled)
 }
 
+/// Descriptive Pearson correlation for at least ten paired observations.
+pub fn pearson(first: &[f64], second: &[f64]) -> Option<f64> {
+    if first.len() != second.len() || first.len() < 10 {
+        return None;
+    }
+    let center = |values: &[f64]| {
+        let average = mean(values);
+        values
+            .iter()
+            .map(|value| value - average)
+            .collect::<Vec<_>>()
+    };
+    let first = center(first);
+    let second = center(second);
+    let products = |left: &[f64], right: &[f64]| {
+        let products = left
+            .iter()
+            .zip(right)
+            .map(|(a, b)| a * b)
+            .collect::<Vec<_>>();
+        pairwise_sum(&products) / (left.len() - 1) as f64
+    };
+    let variance_a = products(&first, &first);
+    let variance_b = products(&second, &second);
+    if variance_a <= 0.0 || variance_b <= 0.0 {
+        return None;
+    }
+    let correlation = products(&first, &second) / variance_a.sqrt() / variance_b.sqrt();
+    correlation
+        .is_finite()
+        .then(|| correlation.clamp(-1.0, 1.0))
+}
+
 fn mean(values: &[f64]) -> f64 {
     pairwise_sum(values) / values.len() as f64
 }
