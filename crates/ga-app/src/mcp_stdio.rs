@@ -245,9 +245,15 @@ impl Mcp {
                 .ok_or("PermissionError")?;
             return tool_result(result);
         }
-        let result = read_garmin(&self.database, tool, &args, Some(self.owner))
-            .await
-            .map_err(garmin_error)?;
+        let result = read_garmin(
+            &self.database,
+            tool,
+            &args,
+            Some(self.owner),
+            &self.timezone,
+        )
+        .await
+        .map_err(garmin_error)?;
         tool_result(result)
     }
 

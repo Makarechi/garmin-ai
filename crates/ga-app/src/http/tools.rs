@@ -36,13 +36,14 @@ pub(crate) enum ReadTool {
     ComparePeriods,
     RunningEfficiency,
     MetricSeries,
+    StressHours,
     LaggedAssociation,
     EventWindows,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 11] = [
+    pub(crate) const GARMIN_READS: [Self; 12] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -52,10 +53,11 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::StressHours,
         Self::LaggedAssociation,
         Self::EventWindows,
     ];
-    const IMPLEMENTED: [Self; 15] = [
+    const IMPLEMENTED: [Self; 16] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -67,6 +69,7 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::StressHours,
         Self::LaggedAssociation,
         Self::EventWindows,
         Self::Sleep,
@@ -87,6 +90,7 @@ impl ReadTool {
             Self::ComparePeriods => "analysis_compare_periods",
             Self::RunningEfficiency => "analysis_running_efficiency",
             Self::MetricSeries => "metric_series",
+            Self::StressHours => "analysis_stress_by_hour",
             Self::LaggedAssociation => "analysis_lagged_association",
             Self::EventWindows => "analysis_event_windows",
             Self::Sleep => "analysis_sleep",
@@ -208,6 +212,13 @@ impl ReadTool {
                     "metric":{"title":"Metric","type":"string"},
                     "start":datetime("Start"),"end":datetime("End")}),
                 &["event_type", "metric", "start", "end"][..],
+            ),
+            Self::StressHours => (
+                "Rank local clock hours by the share of observed Garmin stress time at score 51 or higher, with coverage and missing-hour limits. At most 31 days inclusive; diary entries are not required.",
+                "analysis_stress_by_hourArgs",
+                json!({"start":date("Start"),"end":date("End"),
+                    "timezone":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Timezone"}}),
+                &["start", "end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
@@ -346,7 +357,15 @@ async fn execute_read_tool(
         };
     }
     if ReadTool::GARMIN_READS.contains(&tool) {
-        return match read_garmin(&database, tool, &arguments, None).await {
+        return match read_garmin(
+            &database,
+            tool,
+            &arguments,
+            None,
+            &state.configured_timezone,
+        )
+        .await
+        {
             Ok(value) => Json(value).into_response(),
             Err(GarminReadError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
             Err(GarminReadError::Health(error)) => health_failure(error),
@@ -654,6 +673,7 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         HealthAnalysisError::CalendarBoundary
         | HealthAnalysisError::DateRange
         | HealthAnalysisError::UnknownMetric
+        | HealthAnalysisError::InvalidTimezone
         | HealthAnalysisError::Overlap
         | HealthAnalysisError::SleepRange
         | HealthAnalysisError::SleepNapLimit

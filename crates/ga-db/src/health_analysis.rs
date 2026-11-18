@@ -5,6 +5,7 @@ mod lagged;
 mod read_daily;
 mod running;
 mod series;
+mod stress;
 pub use series::SeriesReadError;
 mod sleep_analysis;
 mod sleep_timing;
