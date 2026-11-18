@@ -1,3 +1,5 @@
+mod backup;
+pub use backup::DailyBackupLease;
 mod replay;
 pub mod telegram_ack;
 pub mod telegram_inbound;
