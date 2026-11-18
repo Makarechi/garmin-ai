@@ -10,6 +10,21 @@ use uuid::Uuid;
 use crate::timestamp::StoredInstant;
 
 const MAX_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
+const TELEGRAM_NAMESPACE: Uuid = Uuid::from_u128(0x5ddd62fc_6890_44b6_86a2_20f77524378f);
+
+pub fn telegram_conversation_id(owner: Uuid, instance: &str, chat: impl fmt::Display) -> Uuid {
+    Uuid::new_v5(
+        &TELEGRAM_NAMESPACE,
+        format!("{owner}:telegram:{instance}:{chat}").as_bytes(),
+    )
+}
+
+pub fn legacy_telegram_action_id(update_id: i64) -> Uuid {
+    Uuid::new_v5(
+        &TELEGRAM_NAMESPACE,
+        format!("action:{update_id}").as_bytes(),
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InboundError {

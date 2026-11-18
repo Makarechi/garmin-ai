@@ -11,14 +11,12 @@ use ga_db::{
     runtime_lease::RuntimeLease,
 };
 use ga_domain::{
-    channel::{InboundEnvelope, InboundKind},
+    channel::{InboundEnvelope, InboundKind, legacy_telegram_action_id, telegram_conversation_id},
     telegram_control::TelegramControl,
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-const TELEGRAM_NAMESPACE: Uuid = Uuid::from_u128(0x5ddd62fc_6890_44b6_86a2_20f77524378f);
 
 #[derive(Clone, Copy)]
 pub struct TelegramBinding<'a> {
@@ -300,10 +298,7 @@ impl AuthenticatedTelegramUpdate<'_, '_> {
         let owner = self.binding.owner_id;
         let instance = self.binding.instance_id;
         let chat = self.binding.external_owner_id;
-        Uuid::new_v5(
-            &TELEGRAM_NAMESPACE,
-            format!("{owner}:telegram:{instance}:{chat}").as_bytes(),
-        )
+        telegram_conversation_id(owner, instance, chat)
     }
 
     /// Keep callback timing evidence separate from the provider-controlled JSON.
@@ -387,10 +382,7 @@ impl AuthenticatedTelegramUpdate<'_, '_> {
             }
             CallbackResolution::Legacy { time_known } => {
                 let data = self.callback_data().filter(|value| !value.is_empty());
-                let operation = Uuid::new_v5(
-                    &TELEGRAM_NAMESPACE,
-                    format!("action:{}", self.update_id).as_bytes(),
-                );
+                let operation = legacy_telegram_action_id(self.update_id);
                 Ok((
                     json!({
                         "action_id":data.unwrap_or("legacy"),
