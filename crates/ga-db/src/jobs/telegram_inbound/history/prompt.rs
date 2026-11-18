@@ -13,18 +13,21 @@ use crate::{
     replay::REPLAY_MUTATION_LOCK,
 };
 
-pub(super) struct PromptState {
-    pub(super) notice: Option<&'static str>,
-    pub(super) draft: Option<SetupDraft>,
+pub(in crate::jobs::telegram_inbound) struct PromptState {
+    pub(in crate::jobs::telegram_inbound) notice: Option<&'static str>,
+    pub(in crate::jobs::telegram_inbound) draft: Option<SetupDraft>,
+    pub(in crate::jobs::telegram_inbound) pending: bool,
+    pub(in crate::jobs::telegram_inbound) guided_form: bool,
 }
 
-pub(super) struct SetupDraft {
-    pub(super) key: String,
-    pub(super) russian: bool,
-    pub(super) predates_step: bool,
+pub(in crate::jobs::telegram_inbound) struct SetupDraft {
+    pub(in crate::jobs::telegram_inbound) key: String,
+    pub(in crate::jobs::telegram_inbound) russian: bool,
+    pub(in crate::jobs::telegram_inbound) awaiting_name: bool,
+    pub(in crate::jobs::telegram_inbound) predates_step: bool,
 }
 
-pub(super) async fn blocked(
+pub(in crate::jobs::telegram_inbound) async fn blocked(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     lease: &TelegramInboundLease,
@@ -34,7 +37,7 @@ pub(super) async fn blocked(
     Ok(inspect(txn, binding, lease, envelope, at).await?.notice)
 }
 
-pub(super) async fn inspect(
+pub(in crate::jobs::telegram_inbound) async fn inspect(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     lease: &TelegramInboundLease,
@@ -83,6 +86,14 @@ pub(super) async fn inspect(
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;
     }
+    let guided_form = pending.as_ref().is_some_and(|form| {
+        form["definition_version_id"].is_string()
+            || form["chat_form"].is_object()
+            || form["chat_close"].is_object()
+            || form["button"].as_str().is_some_and(|button| {
+                button == "tracker_select" || form["explicit_selector"] != true
+            })
+    });
     let key = format!("tracker:chat-setup:{destination}");
     let draft: Option<(String, OffsetDateTime)> =
         sqlx::query_as("SELECT value::text,updated_at FROM app_state WHERE key=$1")
@@ -129,6 +140,7 @@ pub(super) async fn inspect(
             setup = Some(SetupDraft {
                 key,
                 russian,
+                awaiting_name: draft["name"].is_null(),
                 predates_step: last_update.is_some_and(|last| order <= (last_epoch, last)),
             });
         } else if active(clock) {
@@ -137,6 +149,8 @@ pub(super) async fn inspect(
                     "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
                 ),
                 draft: None,
+                pending: pending.is_some(),
+                guided_form,
             });
         }
     }
@@ -148,13 +162,17 @@ pub(super) async fn inspect(
     }) {
         return Ok(PromptState {
             notice: Some("Сообщение отправлено до текущего выбора. Откройте актуальное меню."),
-            draft: None,
+            draft: setup,
+            pending: true,
+            guided_form,
         });
     }
     Ok(PromptState {
         notice: (setup.is_some() && envelope.kind() == InboundKind::Action)
             .then_some("Сначала завершите настройку трекера или отправьте /cancel."),
         draft: setup,
+        pending: pending.is_some(),
+        guided_form,
     })
 }
 

@@ -69,7 +69,7 @@ impl Question {
     }
 }
 
-pub(super) async fn reconcile(
+pub(crate) async fn reconcile(
     txn: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     now: OffsetDateTime,

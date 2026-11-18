@@ -13,7 +13,10 @@ use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};
 use time::OffsetDateTime;
 
 use super::{TelegramSendOutcome, TelegramTransport};
-use crate::{telegram_input::TelegramBinding, telegram_reply::TelegramReplyError};
+use crate::{
+    garmin_worker::GarminReauthNoticeSettings, telegram_input::TelegramBinding,
+    telegram_reply::TelegramReplyError,
+};
 
 // The Python delivery worker uses the same fallback when no retry time is provided.
 const UNSUPPORTED_RETRY: Duration = Duration::from_secs(15 * 60);
@@ -27,21 +30,39 @@ impl TelegramTransport {
         claim: ReplyClaim,
         requirements: &[ShareRequirement<'_>],
     ) -> Result<ReplyDispatchResult, ReplyDispatchError> {
+        self.dispatch_runtime_reply(database, binding, claim, requirements, None)
+            .await
+    }
+
+    pub(in crate::telegram_transport) async fn dispatch_runtime_reply(
+        &self,
+        database: &Database,
+        binding: TelegramBinding<'_>,
+        claim: ReplyClaim,
+        requirements: &[ShareRequirement<'_>],
+        garmin_notice: Option<&GarminReauthNoticeSettings>,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError> {
         let destination = ReplyDestination {
             owner_id: binding.owner_id,
             channel: "telegram",
             instance_id: binding.instance_id,
         };
         database
-            .dispatch_telegram_outbox_reply(
+            .dispatch_telegram_runtime_reply(
                 destination,
                 binding.external_owner_id,
                 claim,
                 requirements,
-                |body| async move {
+                |mut body, source| async move {
+                    let launch = garmin_notice
+                        .filter(|notice| source.as_deref() == Some(notice.source.as_str()))
+                        .and_then(|notice| notice.launch.as_ref());
+                    if launch.is_some() {
+                        body["blocks"] = serde_json::json!([{"text":"Garmin требует повторного входа. Откройте защищённую форму и введите почтовый код подтверждения. История и дневник доступны."}]);
+                    }
                     let intent = OutboundIntent::normalize(body).ok()?;
                     let started = clock()?;
-                    let result = self.send_neutral_reply(binding, &intent, started).await;
+                    let result = self.send_reply(binding, &intent, started, launch).await;
                     let observed_at = clock()?;
                     let (state, provider_reference, detail) = match result {
                         Ok(TelegramSendOutcome::Accepted {

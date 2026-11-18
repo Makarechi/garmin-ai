@@ -19,8 +19,10 @@ pub use custom_registry::{
 mod metrics;
 mod proactive_answers;
 pub(crate) use proactive_answers::caffeine_answer_at;
+pub(crate) use proactive_answers::reconcile as reconcile_answers;
 mod reads;
 mod revisions;
+pub(crate) use revisions::{corrected_report, lock_update_target, update_system_event_in};
 pub(crate) mod undo;
 mod wearable;
 
@@ -484,7 +486,7 @@ type EventSnapshotRow = (
     OffsetDateTime,
 );
 
-async fn load_event(
+pub(crate) async fn load_event(
     txn: &mut Transaction<'_, Postgres>,
     id: Uuid,
     reused: bool,

@@ -363,7 +363,7 @@ impl Database {
     }
 }
 
-fn text_envelope(
+pub(super) fn text_envelope(
     lease: &TelegramInboundLease,
 ) -> Result<InboundEnvelope, TelegramDiaryCommitError> {
     let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
@@ -377,7 +377,9 @@ fn text_envelope(
     Ok(envelope)
 }
 
-fn report(envelope: &InboundEnvelope) -> Result<(&str, StoredInstant), TelegramDiaryCommitError> {
+pub(super) fn report(
+    envelope: &InboundEnvelope,
+) -> Result<(&str, StoredInstant), TelegramDiaryCommitError> {
     let text = envelope
         .text()
         .filter(|text| !text.trim().is_empty())
@@ -422,7 +424,7 @@ pub(super) async fn queue_reply(
     .map_err(TelegramDiaryCommitError::Outbox)
 }
 
-async fn complete_reply(
+pub(super) async fn complete_reply(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
 ) -> Result<(), TelegramDiaryCommitError> {
