@@ -4,6 +4,7 @@ mod diary;
 mod exports;
 mod garmin_auth;
 mod personal_goals;
+mod source_mappings;
 pub(crate) mod tools;
 mod tracker_actions;
 mod tracker_setup;
@@ -43,6 +44,15 @@ fn router(state: AppState) -> Router {
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
         .route("/actions", any(tracker_actions::available))
+        .route(
+            "/source-metric-mappings/preview",
+            any(source_mappings::preview),
+        )
+        .route("/source-metric-mappings", any(source_mappings::collection))
+        .route(
+            "/source-metric-mappings/{mapping_id}",
+            any(source_mappings::item),
+        )
         .route("/tracker-setups/preview", any(tracker_setup::preview))
         .route("/tracker-setups", any(tracker_setup::confirm))
         .route(
