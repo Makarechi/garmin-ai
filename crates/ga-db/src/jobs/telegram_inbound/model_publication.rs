@@ -37,6 +37,7 @@ pub struct TelegramModelContext<'a> {
 
 pub(super) struct CurrentTelegramModelContext {
     memory: MemoryFence,
+    pub(super) offered: Vec<Value>,
     versions: BTreeSet<Uuid>,
     pub(super) pending_clarification: Option<Value>,
     pub(super) selection_unavailable: bool,
@@ -112,6 +113,7 @@ pub(super) async fn verify(
     }
     Ok(CurrentTelegramModelContext {
         memory: current.memory_fence,
+        offered: current.events.entries,
         versions: current.events.channel_versions,
         pending_clarification: current.pending_clarification,
         selection_unavailable: current.selection_unavailable,

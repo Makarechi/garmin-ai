@@ -17,6 +17,7 @@ pub(in crate::jobs::telegram_inbound) struct PromptState {
     pub(in crate::jobs::telegram_inbound) notice: Option<&'static str>,
     pub(in crate::jobs::telegram_inbound) draft: Option<SetupDraft>,
     pub(in crate::jobs::telegram_inbound) pending: bool,
+    pub(in crate::jobs::telegram_inbound) guided_form: bool,
 }
 
 pub(in crate::jobs::telegram_inbound) struct SetupDraft {
@@ -84,6 +85,14 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;
     }
+    let guided_form = pending.as_ref().is_some_and(|form| {
+        form["definition_version_id"].is_string()
+            || form["chat_form"].is_object()
+            || form["chat_close"].is_object()
+            || form["button"].as_str().is_some_and(|button| {
+                button == "tracker_select" || form["explicit_selector"] != true
+            })
+    });
     let key = format!("tracker:chat-setup:{destination}");
     let draft: Option<(String, OffsetDateTime)> =
         sqlx::query_as("SELECT value::text,updated_at FROM app_state WHERE key=$1")
@@ -139,6 +148,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
                 ),
                 draft: None,
                 pending: pending.is_some(),
+                guided_form,
             });
         }
     }
@@ -152,6 +162,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             notice: Some("Сообщение отправлено до текущего выбора. Откройте актуальное меню."),
             draft: setup,
             pending: true,
+            guided_form,
         });
     }
     Ok(PromptState {
@@ -159,6 +170,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             .then_some("Сначала завершите настройку трекера или отправьте /cancel."),
         draft: setup,
         pending: pending.is_some(),
+        guided_form,
     })
 }
 
