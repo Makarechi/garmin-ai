@@ -143,6 +143,7 @@ fn omits_deselected_models_and_rejects_out_of_scope_secret_names() -> Result<(),
         "config":{"model":"synthetic","structured_output":true},
         "secret_refs":{"api_key":"GA_DATABASE_URL"}});
     let scenarios = [
+        (vec![], Ok(false)),
         (vec![other], Ok(false)),
         (
             vec![active.clone(), active],

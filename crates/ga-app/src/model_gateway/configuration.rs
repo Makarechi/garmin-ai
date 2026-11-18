@@ -100,7 +100,9 @@ impl RuntimeModelSettings {
     ) -> Result<Option<Self>, ModelEnvironmentError> {
         use ModelEnvironmentError::Invalid;
 
-        let integrations = variable("GA_INTEGRATIONS")?
+        let raw_integrations = variable("GA_INTEGRATIONS")?;
+        let explicit = raw_integrations.is_some();
+        let integrations = raw_integrations
             .map(|raw| serde_json::from_str::<Vec<Value>>(&raw).map_err(|_| Invalid))
             .transpose()?
             .unwrap_or_default();
@@ -119,7 +121,7 @@ impl RuntimeModelSettings {
             }
         }
         let configured = match enabled_models.as_slice() {
-            [] if integrations.is_empty() => None,
+            [] if !explicit => None,
             [] => return Ok(None),
             [spec] => Some(*spec),
             _ => return Err(ModelEnvironmentError::Multiple),

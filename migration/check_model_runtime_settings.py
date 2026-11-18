@@ -44,6 +44,7 @@ def run():
         else:
             raise AssertionError("The replaced credential still authorized the original client")
         model.close()
+    assert configured_model_instance(legacy.model_copy(update={"integrations": []})) is None
     channel = {"id": "channel:telegram:synthetic", "kind": "channel", "provider": "telegram"}
     assert (
         configured_model_instance(
