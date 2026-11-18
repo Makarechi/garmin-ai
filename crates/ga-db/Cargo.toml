@@ -15,7 +15,7 @@ ga-fit = { path = "../ga-fit" }
 getrandom = "0.4.3"
 hmac = { version = "0.13.0", default-features = false, features = ["zeroize"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
+serde_json = { version = "1.0.154", features = ["arbitrary_precision", "raw_value"] }
 sha2 = { version = "0.11.1", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false, features = [
     "postgres",
