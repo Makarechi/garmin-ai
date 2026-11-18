@@ -47,9 +47,11 @@ CASES = (
     ("activity_details", {"activity_id": "absent"}),
     ("device_history", {**ACTIVITY_RANGE, "limit": 2}),
     ("personal_baseline", BASELINE),
+    ("personal_baseline", {**BASELINE, "metric": "sleep_score"}),
     ("personal_baseline", {**BASELINE, "metric": "unsupported"}),
     ("personal_baseline", {**BASELINE, "start": "not a day"}),
     ("analysis_compare_periods", PERIODS),
+    ("analysis_compare_periods", {**PERIODS, "metric": "sleep_score"}),
     ("analysis_compare_periods", {**PERIODS, "b_start": "2026-10-24"}),
     ("analysis_compare_periods", {**PERIODS, "a_start": "2026-10-25"}),
 )
@@ -77,25 +79,35 @@ async def capture(command, arguments, root, env, label):
 
 async def compare(binary, root, engine):
     env = {"GA_DATABASE_URL": engine.url.render_as_string(hide_password=False)}
-    for revoked in (False, True):
-        if revoked:
+    for state in ("initial", "revoked", "sleep_hidden"):
+        if state != "initial":
             with engine.begin() as connection:
+                categories = ["diary"] if state == "revoked" else ["diary", "health"]
                 connection.execute(
                     text("""
                     INSERT INTO app_state(key,value)
-                    VALUES ('preferences:onboarding', jsonb_build_object('model_categories',ARRAY['diary']))
+                    VALUES ('preferences:onboarding', jsonb_build_object('model_categories',CAST(:categories AS text[])))
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value
-                """)
+                    """),
+                    {"categories": categories},
                 )
+                if state == "sleep_hidden":
+                    connection.execute(
+                        text("""
+                        INSERT INTO module_configs(id,owner_id,pack_key,tracking_enabled,collection_enabled,
+                                                   reminders_enabled,visible,llm_enabled,settings,revision)
+                        SELECT gen_random_uuid(),id,pack,true,true,true,true,pack<>'sleep','{}',1
+                        FROM people CROSS JOIN unnest(ARRAY['general_diary','sleep','training','wellbeing']) AS pack
+                        ON CONFLICT (owner_id,pack_key) DO UPDATE SET llm_enabled=EXCLUDED.llm_enabled
+                        """)
+                    )
         expected = await capture(sys.executable, ["-c", PYTHON_SERVER], root, env, "python")
         actual = await capture(str(binary), ["mcp"], root, env, "native")
         assert expected[0] == actual[0]
         for (name, arguments), left, right in zip(CASES, expected[1], actual[1], strict=True):
             assert left == right, (name, arguments, left["isError"], right["isError"])
-        if revoked:
-            assert all(case["isError"] for case in actual[1])
-        else:
-            assert sum(not case["isError"] for case in actual[1]) == 10
+        successes = {"initial": 12, "revoked": 0, "sleep_hidden": 7}
+        assert sum(not case["isError"] for case in actual[1]) == successes[state]
 
 
 def main():
@@ -111,7 +123,7 @@ def main():
             asyncio.run(compare(args.binary.resolve(strict=True), Path(directory), engine))
     finally:
         engine.dispose()
-    print(f"Verified {2 * len(CASES)} pinned MCP Garmin read and revocation cases")
+    print(f"Verified {3 * len(CASES)} pinned MCP Garmin read and permission cases")
 
 
 if __name__ == "__main__":

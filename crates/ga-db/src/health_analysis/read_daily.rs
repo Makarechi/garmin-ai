@@ -78,6 +78,28 @@ impl DailyHealthReader {
         Ok(current && onboarding_allows_model(&mut self.0, ModelCategories::HEALTH).await?)
     }
 
+    /// Check every required pack in the same snapshot as the outgoing model data.
+    pub async fn permits_model_packs(
+        &mut self,
+        owner: Uuid,
+        packs: &[&str],
+    ) -> Result<bool, HealthAnalysisError> {
+        Ok(sqlx::query_scalar(
+            "SELECT NOT EXISTS(SELECT FROM module_configs WHERE owner_id=$1)
+                OR NOT EXISTS(
+                    SELECT FROM unnest($2::text[]) AS required(key)
+                    WHERE NOT EXISTS(
+                        SELECT FROM module_configs
+                        WHERE owner_id=$1 AND pack_key=required.key AND llm_enabled
+                    )
+                )",
+        )
+        .bind(owner)
+        .bind(packs)
+        .fetch_one(&mut *self.0)
+        .await?)
+    }
+
     /// Return recorded summaries for this inclusive calendar range.
     pub async fn range(mut self, period: HealthPeriod) -> Result<Value, HealthAnalysisError> {
         let mut rows = Vec::new();

@@ -42,7 +42,10 @@ pub(crate) async fn read_garmin(
     let mut reader = database.verified_health_reader().await?;
     let query = parse(tool, arguments)?;
     if let Some(owner) = mcp_owner
-        && !reader.permits_model_health(owner).await?
+        && (!reader.permits_model_health(owner).await?
+            || !reader
+                .permits_model_packs(owner, query.model_packs())
+                .await?)
     {
         return Err(GarminReadError::Permission);
     }
@@ -83,6 +86,46 @@ enum Query<'a> {
     Devices(StoredInstant, StoredInstant, u16),
     Baseline(&'a str, Date, Date),
     Compare(&'a str, [Date; 4]),
+}
+
+impl Query<'_> {
+    fn model_packs(&self) -> &'static [&'static str] {
+        match self {
+            Self::Snapshot(_) | Self::Range(..) => HEALTH_PACKS,
+            Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
+            Self::Baseline(metric, ..) | Self::Compare(metric, ..) => metric_packs(metric),
+        }
+    }
+}
+
+const HEALTH_PACKS: &[&str] = &["general_diary", "sleep", "training", "wellbeing"];
+
+fn metric_packs(metric: &str) -> &'static [&'static str] {
+    let metric = metric.strip_prefix("system.").unwrap_or(metric);
+    match metric {
+        "hydration_ml" => &["general_diary"],
+        "steps"
+        | "steps_bucket"
+        | "active_calories"
+        | "intensity_minutes"
+        | "training_status"
+        | "training_readiness_score"
+        | "recovery_time_minutes" => &["training"],
+        "heart_rate_bpm" | "spo2_pct" | "respiration_rpm" | "resting_hr" => &["wellbeing"],
+        _ if ["sleep_", "deep_", "rem_", "light_", "awake_"]
+            .iter()
+            .any(|prefix| metric.starts_with(prefix)) =>
+        {
+            &["sleep"]
+        }
+        _ if ["hrv_", "stress_", "body_battery_"]
+            .iter()
+            .any(|prefix| metric.starts_with(prefix)) =>
+        {
+            &["wellbeing"]
+        }
+        _ => HEALTH_PACKS,
+    }
 }
 
 fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, GarminReadError> {
