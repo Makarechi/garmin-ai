@@ -8,7 +8,10 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK};
+use crate::{
+    Database, ReadinessError, check_readiness, jobs::storage_notices::StorageNoticeFence,
+    replay::REPLAY_MUTATION_LOCK,
+};
 
 const RECOVERY_BATCH: i64 = 100;
 
@@ -271,8 +274,11 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.work.begin().await?;
             prepare_write(&mut txn).await?;
-            let state: String = sqlx::query_scalar(
-                "SELECT state FROM outbox_messages WHERE id=$1 AND owner_id=$2 FOR UPDATE",
+            let (state, fence, instance): (String, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT state,memory_fence::text,
+                    CASE WHEN intent#>>'{channel_instance,channel}'='telegram'
+                      THEN intent#>>'{channel_instance,instance_id}' END
+                 FROM outbox_messages WHERE id=$1 AND owner_id=$2 FOR UPDATE",
             )
             .bind(outbox_id)
             .bind(owner_id)
@@ -280,6 +286,11 @@ impl Database {
             .await?
             .ok_or(DeliveryError::MissingIntent)?;
             if state != DeliveryState::Uncertain.label() {
+                return Err(DeliveryError::RequiresReconciliation);
+            }
+            if let Some(notice) = fence.as_deref().and_then(|value| serde_json::from_str::<StorageNoticeFence>(value).ok())
+                && !notice.reopen(&mut txn, instance.as_deref().ok_or(DeliveryError::InvalidReceipt)?).await?
+            {
                 return Err(DeliveryError::RequiresReconciliation);
             }
             sqlx::query("UPDATE outbox_messages SET state='queued',next_attempt_at=NULL,updated_at=clock_timestamp() WHERE id=$1")

@@ -131,12 +131,20 @@ impl Database {
         estimate: BackupSpace,
         observed_at: StoredInstant,
         worker: RuntimeWorkerIdentity,
+        notify_telegram: bool,
     ) -> Result<(), JobStoreError> {
         let mut report = backup_capacity_report(&estimate);
         report["at"] = Value::String(observed_at.to_string());
         let mut txn = begin(&self.work).await?;
         if !worker.still_held(&mut txn).await? {
             return Err(JobStoreError::LeaseLost);
+        }
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(STORAGE_QUEUE_LOCK)
+            .fetch_one(&mut *txn)
+            .await?;
+        if !locked {
+            return Err(JobStoreError::PublicationTimedOut);
         }
         finish_in_transaction(
             &mut txn,
@@ -154,6 +162,9 @@ impl Database {
         .bind(report.to_string())
         .execute(&mut *txn)
         .await?;
+        if notify_telegram && !estimate.ready() {
+            super::storage_notices::schedule(&mut txn, observed_at).await?;
+        }
         txn.commit().await?;
         Ok(())
     }

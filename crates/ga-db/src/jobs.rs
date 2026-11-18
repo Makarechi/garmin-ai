@@ -1,6 +1,7 @@
 mod backup;
 pub use backup::DailyBackupLease;
 mod storage_check;
+pub(crate) mod storage_notices;
 pub use storage_check::{StorageCheckLease, backup_capacity_report};
 mod replay;
 pub mod telegram_ack;

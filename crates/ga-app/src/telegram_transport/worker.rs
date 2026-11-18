@@ -29,6 +29,7 @@ const CONTROL_LEASE_SECONDS: u32 = 5;
 const HISTORY_LEASE_SECONDS: u32 = 10;
 const DELIVERY_LEASE_SECONDS: u32 = 90;
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(10);
+const STORAGE_NOTICE_INTERVAL: Duration = Duration::from_secs(2);
 const SEND_RETRY_MICROSECONDS: i64 = 1_000_000;
 
 impl TelegramTransport {
@@ -247,6 +248,7 @@ impl TelegramTransport {
     /// Deliver durable ordinary replies and hold unknown provider outcomes for reconciliation.
     pub async fn run_replies(&self, database: &Database, settings: &TelegramIngressSettings) -> ! {
         let mut recover_at = Instant::now();
+        let mut storage_notice_at = Instant::now();
         loop {
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
@@ -261,6 +263,17 @@ impl TelegramTransport {
                         .recover_expired_telegram_outbox(&destination, now)
                         .await;
                     recover_at = Instant::now() + RECOVERY_INTERVAL;
+                }
+                if Instant::now() >= storage_notice_at {
+                    let _ = database
+                        .queue_telegram_storage_notice(
+                            binding.owner_id,
+                            binding.instance_id,
+                            binding.external_owner_id,
+                            now,
+                        )
+                        .await;
+                    storage_notice_at = Instant::now() + STORAGE_NOTICE_INTERVAL;
                 }
                 if let Ok(Some(claim)) = database
                     .claim_outbox_reply(destination, now, DELIVERY_LEASE_SECONDS)
