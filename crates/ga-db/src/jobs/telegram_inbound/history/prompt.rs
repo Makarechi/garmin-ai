@@ -13,6 +13,17 @@ use crate::{
     replay::REPLAY_MUTATION_LOCK,
 };
 
+pub(super) struct PromptState {
+    pub(super) notice: Option<&'static str>,
+    pub(super) draft: Option<SetupDraft>,
+}
+
+pub(super) struct SetupDraft {
+    pub(super) key: String,
+    pub(super) russian: bool,
+    pub(super) predates_step: bool,
+}
+
 pub(super) async fn blocked(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
@@ -20,6 +31,16 @@ pub(super) async fn blocked(
     envelope: &InboundEnvelope,
     at: StoredInstant,
 ) -> Result<Option<&'static str>, TelegramDiaryCommitError> {
+    Ok(inspect(txn, binding, lease, envelope, at).await?.notice)
+}
+
+pub(super) async fn inspect(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    lease: &TelegramInboundLease,
+    envelope: &InboundEnvelope,
+    at: StoredInstant,
+) -> Result<PromptState, TelegramDiaryCommitError> {
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(REPLAY_MUTATION_LOCK)
         .fetch_one(&mut **txn)
@@ -62,12 +83,13 @@ pub(super) async fn blocked(
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;
     }
+    let key = format!("tracker:chat-setup:{destination}");
     let draft: Option<(String, OffsetDateTime)> =
         sqlx::query_as("SELECT value::text,updated_at FROM app_state WHERE key=$1")
-            .bind(format!("tracker:chat-setup:{destination}"))
+            .bind(&key)
             .fetch_optional(&mut **txn)
             .await?;
-    let mut setup = false;
+    let mut setup = None;
     if let Some((value, updated)) = draft {
         let draft: Value =
             serde_json::from_str(&value).map_err(|_| TelegramDiaryCommitError::Database)?;
@@ -90,11 +112,32 @@ pub(super) async fn blocked(
             started.is_none_or(|started| started <= now)
                 && activity.is_some_and(|activity| activity >= now - Duration::hours(24))
         };
-        setup = !predates && active(message);
-        if !setup && active(clock) {
-            return Ok(Some(
-                "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
-            ));
+        if !predates && active(message) {
+            let last_update = draft["last_provider_update_id"]
+                .as_i64()
+                .or_else(|| draft["started_provider_update_id"].as_i64());
+            let last_epoch = draft["last_ordering_epoch"]
+                .as_i64()
+                .or_else(|| draft["started_ordering_epoch"].as_i64())
+                .unwrap_or(0);
+            let russian = draft["locale"].as_str().is_some_and(|locale| {
+                locale
+                    .split('-')
+                    .next()
+                    .is_some_and(|code| code.eq_ignore_ascii_case("ru"))
+            });
+            setup = Some(SetupDraft {
+                key,
+                russian,
+                predates_step: last_update.is_some_and(|last| order <= (last_epoch, last)),
+            });
+        } else if active(clock) {
+            return Ok(PromptState {
+                notice: Some(
+                    "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
+                ),
+                draft: None,
+            });
         }
     }
     if pending.as_ref().is_some_and(|pending| {
@@ -103,12 +146,16 @@ pub(super) async fn blocked(
             || !pending["chat_form"].is_null())
             && predates_prompt(pending, order, message, received)
     }) {
-        return Ok(Some(
-            "Сообщение отправлено до текущего выбора. Откройте актуальное меню.",
-        ));
+        return Ok(PromptState {
+            notice: Some("Сообщение отправлено до текущего выбора. Откройте актуальное меню."),
+            draft: None,
+        });
     }
-    Ok((setup && envelope.kind() == InboundKind::Action)
-        .then_some("Сначала завершите настройку трекера или отправьте /cancel."))
+    Ok(PromptState {
+        notice: (setup.is_some() && envelope.kind() == InboundKind::Action)
+            .then_some("Сначала завершите настройку трекера или отправьте /cancel."),
+        draft: setup,
+    })
 }
 
 fn predates_prompt(

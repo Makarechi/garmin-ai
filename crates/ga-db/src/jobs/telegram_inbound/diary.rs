@@ -10,6 +10,7 @@ use serde_json::json;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
+use super::model_publication::{TelegramModelContext, verify};
 use super::{
     KIND, TelegramInboundLease, TelegramInboundState, complete, superseded, try_ingress_lock,
 };
@@ -35,6 +36,7 @@ pub enum TelegramDiaryCommitError {
     ClarificationRequired,
     TimeClarification(TimeClarification),
     ExistingContextRequired,
+    ModelContextChanged,
     MedicationEvidenceRequired,
     Reply,
     Diary(DiaryWriteError),
@@ -59,6 +61,7 @@ impl fmt::Display for TelegramDiaryCommitError {
             Self::ExistingContextRequired => {
                 f.write_str("This report requires a current, explicitly offered record")
             }
+            Self::ModelContextChanged => f.write_str("The context used by the model has changed"),
             Self::MedicationEvidenceRequired => {
                 f.write_str("Medication reports require explicit intake evidence")
             }
@@ -86,6 +89,28 @@ impl Database {
         &self,
         lease: &TelegramInboundLease,
         command: &AgentInterpretation,
+        reply: impl FnOnce(&InboundEnvelope, &[StoredSystemEvent]) -> Option<OutboundIntent>,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        self.apply_text_log(lease, command, None, reply).await
+    }
+
+    /// Commit a model log only while the exact permitted context and inbox are current.
+    pub async fn apply_telegram_model_log(
+        &self,
+        lease: &TelegramInboundLease,
+        command: &AgentInterpretation,
+        expected: TelegramModelContext<'_>,
+        reply: impl FnOnce(&InboundEnvelope, &[StoredSystemEvent]) -> Option<OutboundIntent>,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        self.apply_text_log(lease, command, Some(expected), reply)
+            .await
+    }
+
+    async fn apply_text_log(
+        &self,
+        lease: &TelegramInboundLease,
+        command: &AgentInterpretation,
+        expected: Option<TelegramModelContext<'_>>,
         reply: impl FnOnce(&InboundEnvelope, &[StoredSystemEvent]) -> Option<OutboundIntent>,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
         if command.intent() != AgentIntent::Log || command.confidence() < 0.85 {
@@ -119,6 +144,15 @@ impl Database {
 
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
+            let current = if let Some(expected) = expected {
+                let current = verify(&mut txn, &envelope, expected).await?;
+                if current.pending_clarification.is_some() || current.selection_unavailable {
+                    return Err(TelegramDiaryCommitError::ExistingContextRequired);
+                }
+                Some(current)
+            } else {
+                None
+            };
             if envelope.kind() == InboundKind::Edit {
                 let already_written: bool = sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM audit_log WHERE operation_id=$1 AND action='create')",
@@ -140,7 +174,11 @@ impl Database {
                 idempotency_prefix: &key,
             }).await.map_err(TelegramDiaryCommitError::Diary)?;
             let intent = reply(&envelope, &events).ok_or(TelegramDiaryCommitError::Reply)?;
-            let queued = queue_reply(&mut txn, lease, &envelope, intent, None).await?;
+            let queued = if let Some(current) = current {
+                super::model_publication::queue(&mut txn, lease, current, intent).await?
+            } else {
+                queue_reply(&mut txn, lease, &envelope, intent, None).await?
+            };
             complete_reply(&mut txn, lease).await?;
             txn.commit().await?;
             Ok(queued)
@@ -158,6 +196,37 @@ impl Database {
         question: &str,
         language: &str,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        self.apply_text_clarification(lease, processing_started, question, language, None)
+            .await
+    }
+
+    /// A question derived from protected context keeps that context's authorization.
+    pub async fn apply_telegram_model_clarification(
+        &self,
+        lease: &TelegramInboundLease,
+        processing_started: StoredInstant,
+        question: &str,
+        language: &str,
+        expected: TelegramModelContext<'_>,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        self.apply_text_clarification(
+            lease,
+            processing_started,
+            question,
+            language,
+            Some(expected),
+        )
+        .await
+    }
+
+    async fn apply_text_clarification(
+        &self,
+        lease: &TelegramInboundLease,
+        processing_started: StoredInstant,
+        question: &str,
+        language: &str,
+        expected: Option<TelegramModelContext<'_>>,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
         let envelope = text_envelope(lease)?;
         let (text, message_at) = report(&envelope)?;
         let binding = ConversationBinding {
@@ -172,9 +241,17 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             lock_clarification(&mut txn).await.map_err(TelegramDiaryCommitError::Clarification)?;
-            let (_, prior) = pending_clarification_in(&mut txn, binding, clock)
-                .await
-                .map_err(TelegramDiaryCommitError::Clarification)?;
+            let current = if let Some(expected) = expected {
+                Some(verify(&mut txn, &envelope, expected).await?)
+            } else {
+                None
+            };
+            let prior = if let Some(current) = &current {
+                current.active_clarification()
+            } else {
+                pending_clarification_in(&mut txn, binding, clock).await
+                    .map_err(TelegramDiaryCommitError::Clarification)?.1
+            };
             let selector = prior.as_ref().filter(|pending| pending["explicit_selector"] == true);
             let actions = selector.map(|pending| {
                 let action = if pending["action"] == "close" {
@@ -198,7 +275,11 @@ impl Database {
             })).map_err(|_| TelegramDiaryCommitError::Reply)?;
             // Telegram edits share their operation with the original message.
             let key = format!("inbound:{}:clarification", lease.message_id);
-            let queued = queue_reply(&mut txn, lease, &envelope, intent, Some(&key)).await?;
+            let queued = if let Some(current) = current {
+                super::model_publication::queue(&mut txn, lease, current, intent).await?
+            } else {
+                queue_reply(&mut txn, lease, &envelope, intent, Some(&key)).await?
+            };
             let selection_prompt = if selector.is_some() {
                 Some(sqlx::query_scalar::<_, String>(
                     "SELECT intent#>>'{actions,0,token}' FROM outbox_messages WHERE id=$1",
@@ -307,7 +388,7 @@ fn report(envelope: &InboundEnvelope) -> Result<(&str, StoredInstant), TelegramD
     Ok((text, reference))
 }
 
-async fn queue_reply(
+pub(super) async fn queue_reply(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,

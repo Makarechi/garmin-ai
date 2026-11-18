@@ -211,8 +211,55 @@ async fn owner_event_reply_and_inbox_commit_together() -> Result<(), Box<dyn Err
     sqlx::query("ALTER TABLE outbox_messages DROP CONSTRAINT synthetic_outbox_failure")
         .execute(&pool)
         .await?;
+    use ga_db::{
+        conversation_memory::ConversationBinding,
+        diary::{ClarificationClock, InterpretationContextQuery},
+        jobs::telegram_inbound::TelegramModelContext,
+        share_policy::{DestinationKind, ShareDestination},
+    };
+    let message_at = StoredInstant::try_from(OffsetDateTime::from_unix_timestamp(
+        sent_at.unix_timestamp(),
+    )?)?;
+    let model = "model:gemini:primary";
+    let context = database
+        .interpretation_context(InterpretationContextQuery {
+            binding: ConversationBinding {
+                owner_id: owner,
+                conversation_id: ga_domain::channel::telegram_conversation_id(owner, "primary", 42),
+            },
+            model: ShareDestination::new(DestinationKind::Model, model)?,
+            now: message_at,
+            clarification_clock: ClarificationClock {
+                message_at,
+                conversation_now: now,
+                use_message_time: false,
+            },
+            mentioned_events: &[],
+        })
+        .await?;
+    let digest = context.digest()?;
+    let expected = TelegramModelContext {
+        timezone: "UTC",
+        configured_timezone: "UTC",
+        model_instance: model,
+        mentioned_events: &[],
+        digest: &digest,
+    };
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding',$1::jsonb)")
+        .bind(json!({"channel":{"channel":"telegram","instance_id":"primary"},"model_categories":["health"]}).to_string())
+        .execute(&pool).await?;
+    assert!(matches!(
+        database
+            .apply_telegram_model_log(&lease, &command, expected, build)
+            .await,
+        Err(TelegramDiaryCommitError::ModelContextChanged)
+    ));
+    assert_eq!(counts(&pool).await?, (0, 0, 0, 0));
+    sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+        .execute(&pool)
+        .await?;
     let queued = database
-        .apply_telegram_text_log(&lease, &command, build)
+        .apply_telegram_model_log(&lease, &command, expected, build)
         .await?;
     assert!(queued.created);
     assert!(matches!(

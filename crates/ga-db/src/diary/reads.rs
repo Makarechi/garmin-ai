@@ -114,6 +114,7 @@ macro_rules! select_events {
 
 mod export;
 mod model_context;
+pub(crate) use model_context::interpretation_context_in;
 pub use model_context::{
     InterpretationContext, InterpretationContextQuery, InterpretationEvents,
     InterpretationEventsQuery,
