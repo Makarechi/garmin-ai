@@ -2,6 +2,7 @@ mod activity_reads;
 mod device_history;
 mod event_windows;
 mod lagged;
+mod migraine;
 mod read_daily;
 mod running;
 mod series;
@@ -83,6 +84,7 @@ pub enum HealthAnalysisError {
     SleepRange,
     SleepNapLimit,
     SleepSessionLimit,
+    MigraineEpisodeLimit,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -98,6 +100,7 @@ impl fmt::Display for HealthAnalysisError {
             Self::InvalidTimezone => "The analysis timezone is invalid",
             Self::InvalidKnowledgeCutoff => "As-known cutoff cannot follow the event",
             Self::SleepRange => "Sleep analysis requires at most 31 calendar days",
+            Self::MigraineEpisodeLimit => "Limit migraine comparison to at most 200 observed episode days; narrow the date range",
             Self::SleepNapLimit => "Sleep analysis exceeds 200 naps; narrow the interval",
             Self::SleepSessionLimit => {
                 "Nap intervals span too many main sessions; inspect their dates"

@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import sys
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,6 +13,7 @@ from capture_reference import isolated_engine
 from check_event_windows import seed_events
 from check_lagged_association import seed_days
 from check_mcp_stdio import PYTHON_SERVER, document
+from check_migraine_windows import seed_migraine
 from check_stress_hours import seed_stress
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -50,6 +52,10 @@ CASES = (
         },
     ),
     ("analysis_stress_by_hour", {"start": "2026-09-01", "end": "2026-09-03", "timezone": "UTC"}),
+    (
+        "analysis_migraine_windows",
+        {"metric": "sleep_score", "start": "2020-01-01", "end": "2022-09-27", "timezone": "UTC"},
+    ),
 )
 
 
@@ -92,7 +98,7 @@ def difference(expected, actual, path=()):
         return None
     if (
         path
-        and path[-1] == "pearson_r"
+        and (path[-1] in {"pearson_r", "mean", "median", "sd"} or "ci95" in path)
         and isinstance(expected, float)
         and isinstance(actual, float)
     ):
@@ -108,7 +114,14 @@ async def compare(binary, engine, root):
         "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
         "GA_TIMEZONE": "UTC",
     }
-    phases = ("default", "health_only", "diary_only", "wellbeing_disabled", "diary_pack_disabled")
+    phases = (
+        "default",
+        "health_only",
+        "diary_only",
+        "wellbeing_disabled",
+        "diary_pack_disabled",
+        "migraine_disabled",
+    )
     for phase in phases:
         with Session(engine) as session, session.begin():
             if phase != "default":
@@ -123,10 +136,14 @@ async def compare(binary, engine, root):
                     ),
                     {"value": json.dumps({"model_categories": categories})},
                 )
-            if phase in ("wellbeing_disabled", "diary_pack_disabled"):
+            if phase in ("wellbeing_disabled", "diary_pack_disabled", "migraine_disabled"):
                 ensure_scenario_packs(session)
                 session.execute(text("UPDATE module_configs SET llm_enabled=true"))
-                key = "wellbeing" if phase == "wellbeing_disabled" else "general_diary"
+                key = {
+                    "wellbeing_disabled": "wellbeing",
+                    "diary_pack_disabled": "general_diary",
+                    "migraine_disabled": "migraine",
+                }[phase]
                 session.execute(
                     text("UPDATE module_configs SET llm_enabled=false WHERE pack_key=:key"),
                     {"key": key},
@@ -139,15 +156,17 @@ async def compare(binary, engine, root):
         if phase == "default":
             assert all(not row["isError"] for row in results)
         elif phase == "health_only":
-            assert results[1]["isError"]
+            assert results[1]["isError"] and results[4]["isError"]
         elif phase == "diary_only":
             assert all(row["isError"] for row in results)
         elif phase == "wellbeing_disabled":
             assert results[2]["isError"] and results[3]["isError"]
+        elif phase == "migraine_disabled":
+            assert results[4]["isError"]
         else:
             assert results[1]["isError"]
     print(
-        "Matched four analytics descriptors, results, model categories, second-metric packs and event-pack gates"
+        "Matched five analytics descriptors, results, model categories, second-metric packs and event-pack gates"
     )
 
 
@@ -160,6 +179,7 @@ def main():
         seed_events(engine)
         seed_days(engine)
         seed_stress(engine)
+        seed_migraine(engine, base=date(2020, 1, 1))
         with TemporaryDirectory() as directory:
             asyncio.run(compare(args.binary.resolve(strict=True), engine, Path(directory)))
     finally:

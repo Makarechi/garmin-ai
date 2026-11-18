@@ -42,11 +42,12 @@ pub(crate) enum ReadTool {
     StressHours,
     LaggedAssociation,
     EventWindows,
+    MigraineWindows,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 12] = [
+    pub(crate) const GARMIN_READS: [Self; 13] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -59,8 +60,9 @@ impl ReadTool {
         Self::StressHours,
         Self::LaggedAssociation,
         Self::EventWindows,
+        Self::MigraineWindows,
     ];
-    const IMPLEMENTED: [Self; 16] = [
+    const IMPLEMENTED: [Self; 17] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -75,6 +77,7 @@ impl ReadTool {
         Self::StressHours,
         Self::LaggedAssociation,
         Self::EventWindows,
+        Self::MigraineWindows,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -96,6 +99,7 @@ impl ReadTool {
             Self::StressHours => "analysis_stress_by_hour",
             Self::LaggedAssociation => "analysis_lagged_association",
             Self::EventWindows => "analysis_event_windows",
+            Self::MigraineWindows => "analysis_migraine_windows",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -222,6 +226,14 @@ impl ReadTool {
                 json!({"start":date("Start"),"end":date("End"),
                     "timezone":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Timezone"}}),
                 &["start", "end"][..],
+            ),
+            Self::MigraineWindows => (
+                "Match logged migraine days to weekday controls with explicit limitations and sample sizes.",
+                "analysis_migraine_windowsArgs",
+                json!({"metric":{"title":"Metric","type":"string"},
+                    "start":date("Start"),"end":date("End"),
+                    "timezone":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Timezone"}}),
+                &["metric", "start", "end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
@@ -680,6 +692,7 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         | HealthAnalysisError::Overlap
         | HealthAnalysisError::SleepRange
         | HealthAnalysisError::SleepNapLimit
+        | HealthAnalysisError::MigraineEpisodeLimit
         | HealthAnalysisError::SleepSessionLimit => invalid_arguments(),
         _ => storage_unavailable(),
     }

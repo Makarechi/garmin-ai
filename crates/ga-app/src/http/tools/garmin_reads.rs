@@ -70,11 +70,17 @@ pub(crate) async fn read_garmin(
     {
         return Err(GarminReadError::Permission);
     }
-    if mcp_owner.is_some()
-        && let Query::EventWindows(kind, ..) = query
-        && !reader.permits_model_event_kind(kind).await?
-    {
-        return Err(GarminReadError::Permission);
+    if mcp_owner.is_some() {
+        let kind = match &query {
+            Query::EventWindows(kind, ..) => Some(*kind),
+            Query::Migraine(..) => Some("migraine"),
+            _ => None,
+        };
+        if let Some(kind) = kind
+            && !reader.permits_model_event_kind(kind).await?
+        {
+            return Err(GarminReadError::Permission);
+        }
     }
     let value = match query {
         Query::Snapshot(day) => Ok(reader.snapshot(day).await?),
@@ -114,6 +120,14 @@ pub(crate) async fn read_garmin(
         Query::Stress(start, end, timezone) => Ok(reader
             .stress_hours(start, end, timezone, configured_timezone)
             .await?),
+        Query::Migraine(metric, start, end, timezone) => Ok(reader
+            .migraine_comparison(
+                metric,
+                HealthPeriod::new(start, end)?,
+                timezone,
+                configured_timezone,
+            )
+            .await?),
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
@@ -140,6 +154,7 @@ enum Query<'a> {
     Stress(Date, Date, Option<&'a str>),
     Lagged(&'a str, &'a str, Date, Date, Vec<i64>),
     EventWindows(&'a str, &'a str, OffsetDateTime, OffsetDateTime),
+    Migraine(&'a str, Date, Date, Option<&'a str>),
 }
 
 impl Query<'_> {
@@ -151,6 +166,7 @@ impl Query<'_> {
             | Self::Compare(metric, ..)
             | Self::Series(metric, ..)
             | Self::Lagged(metric, ..)
+            | Self::Migraine(metric, ..)
             | Self::EventWindows(_, metric, ..) => model_metric_packs(metric),
             Self::Running(..) => &["training", "sleep", "wellbeing"],
             Self::Stress(..) => &["wellbeing"],
@@ -228,6 +244,22 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
                 _ => return Err(GarminReadError::Arguments),
             };
             Ok(Query::Stress(start, end, timezone))
+        }
+        ReadTool::MigraineWindows
+            if arguments
+                .keys()
+                .all(|key| matches!(key.as_str(), "metric" | "start" | "end" | "timezone")) =>
+        {
+            let (Some(metric), Some(start), Some(end)) = (metric(), day("start"), day("end"))
+            else {
+                return Err(GarminReadError::Arguments);
+            };
+            let timezone = match arguments.get("timezone") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) => Some(value.as_str()),
+                _ => return Err(GarminReadError::Arguments),
+            };
+            Ok(Query::Migraine(metric, start, end, timezone))
         }
         ReadTool::LaggedAssociation if arguments.len() == 5 => {
             let first = arguments

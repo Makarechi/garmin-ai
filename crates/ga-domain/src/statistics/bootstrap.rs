@@ -10,6 +10,48 @@ pub struct MeanDifference {
     pub method: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PairedDifference {
+    pub ci95: Option<[f64; 2]>,
+    pub sign_permutation_p: Option<f64>,
+}
+
+/// Reproduce the migraine comparison's consecutive seeded bootstrap and sign draws.
+pub fn paired_mean_difference(differences: &[f64]) -> PairedDifference {
+    if differences.len() < 10 {
+        return PairedDifference {
+            ci95: None,
+            sign_permutation_p: None,
+        };
+    }
+    let mut stream = BootstrapRandom::seed_42();
+    let mut sample = vec![0.0; differences.len()];
+    let mut distribution = [0.0; 2000];
+    for result in &mut distribution {
+        for value in &mut sample {
+            *value = differences[stream.below(differences.len())];
+        }
+        *result = mean(&sample);
+    }
+    distribution.sort_unstable_by(f64::total_cmp);
+    let observed = mean(differences).abs();
+    let mut extreme = 0;
+    for _ in 0..2000 {
+        for (value, &difference) in sample.iter_mut().zip(differences) {
+            let sign = if stream.below(2) == 0 { -1.0 } else { 1.0 };
+            *value = sign * difference;
+        }
+        extreme += usize::from(mean(&sample).abs() >= observed);
+    }
+    PairedDifference {
+        ci95: Some([
+            quantile(&distribution, 0.025),
+            quantile(&distribution, 0.975),
+        ]),
+        sign_permutation_p: Some((extreme + 1) as f64 / 2001.0),
+    }
+}
+
 /// Reproduce the app's seeded circular block bootstrap using one sample buffer.
 /// The supported app queries bound each period before calling this routine.
 pub fn block_mean_difference(first: &[f64], second: &[f64]) -> MeanDifference {
