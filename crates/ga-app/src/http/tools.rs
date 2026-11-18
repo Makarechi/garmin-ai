@@ -39,12 +39,13 @@ pub(crate) enum ReadTool {
     ComparePeriods,
     RunningEfficiency,
     MetricSeries,
+    LaggedAssociation,
     EventWindows,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 10] = [
+    pub(crate) const GARMIN_READS: [Self; 11] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -54,9 +55,10 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::LaggedAssociation,
         Self::EventWindows,
     ];
-    const IMPLEMENTED: [Self; 14] = [
+    const IMPLEMENTED: [Self; 15] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -68,6 +70,7 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::LaggedAssociation,
         Self::EventWindows,
         Self::Sleep,
         Self::DeviceHistory,
@@ -87,6 +90,7 @@ impl ReadTool {
             Self::ComparePeriods => "analysis_compare_periods",
             Self::RunningEfficiency => "analysis_running_efficiency",
             Self::MetricSeries => "metric_series",
+            Self::LaggedAssociation => "analysis_lagged_association",
             Self::EventWindows => "analysis_event_windows",
             Self::Sleep => "analysis_sleep",
         }
@@ -190,6 +194,15 @@ impl ReadTool {
                     "timing_only":{"type":"boolean","title":"Timing Only","default":false}
                 }),
                 &["start", "end"][..],
+            ),
+            Self::LaggedAssociation => (
+                "Exploratory daily correlations at specified calendar-day lags; association is not causation.",
+                "analysis_lagged_associationArgs",
+                json!({"metric_a":{"title":"Metric A","type":"string"},
+                    "metric_b":{"title":"Metric B","type":"string"},
+                    "start":date("Start"),"end":date("End"),
+                    "lags":{"title":"Lags","type":"array","items":{"type":"integer"}}}),
+                &["metric_a", "metric_b", "start", "end", "lags"][..],
             ),
             Self::EventWindows => (
                 "Compute measured physiology in -48h through +24h windows around diary events.",
