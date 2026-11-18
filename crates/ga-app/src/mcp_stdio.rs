@@ -229,9 +229,15 @@ impl Mcp {
                 .ok_or("PermissionError")?;
             return ToolResult::from_value(result, Some(permit));
         }
-        let result = read_garmin(&self.database, tool, &args, Some(self.owner))
-            .await
-            .map_err(garmin_error)?;
+        let result = read_garmin(
+            &self.database,
+            tool,
+            &args,
+            Some(self.owner),
+            &self.timezone,
+        )
+        .await
+        .map_err(garmin_error)?;
         Ok(ToolResult::data(result, Some(permit)))
     }
 
