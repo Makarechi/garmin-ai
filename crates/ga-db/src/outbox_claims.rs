@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK,
-    telegram_today::TodayProjection,
+    telegram_garmin::GarminProjection,
 };
 
 const CANDIDATES_PER_CLAIM: usize = 64;
@@ -85,13 +85,14 @@ impl Candidate {
 struct MemoryFence {
     target_epoch: String,
     source_epochs: BTreeMap<String, String>,
-    telegram_today: Option<TodayProjection>,
+    telegram_today: Option<GarminProjection>,
+    telegram_status: Option<GarminProjection>,
     telegram_debug: Option<[Value; 5]>,
 }
 
 enum FenceStatus {
     Stale,
-    Current(Option<TodayProjection>),
+    Current(Option<GarminProjection>),
 }
 
 pub(crate) async fn control_reply_fence(
@@ -236,12 +237,14 @@ async fn check_fence(
     };
     let owner_control = match (
         fence.telegram_today.is_some(),
+        fence.telegram_status.is_some(),
         fence.telegram_debug.is_some(),
     ) {
-        (true, false) => Some(TelegramControl::Today),
-        (false, true) => Some(TelegramControl::Debug),
-        (false, false) => None,
-        (true, true) => return Ok(FenceStatus::Stale),
+        (true, false, false) => Some(TelegramControl::Today),
+        (false, true, false) => Some(TelegramControl::Status),
+        (false, false, true) => Some(TelegramControl::Debug),
+        (false, false, false) => None,
+        _ => return Ok(FenceStatus::Stale),
     };
     if owner_control.is_none()
         && (fence.target_epoch.parse().ok() != Some(candidate.memory_epoch)
@@ -316,5 +319,7 @@ async fn check_fence(
             return Ok(FenceStatus::Stale);
         }
     }
-    Ok(FenceStatus::Current(fence.telegram_today))
+    Ok(FenceStatus::Current(
+        fence.telegram_today.or(fence.telegram_status),
+    ))
 }
