@@ -55,7 +55,8 @@ async fn generates_only_current_diary_questions() -> Result<(), Box<dyn Error>> 
         database.generate_diary_questions(owner, now, "UTC").await?,
         GeneratedDiaryQuestions {
             migraines: 2,
-            caffeine: 1
+            caffeine: 1,
+            context: 0,
         },
     );
     assert_eq!(
@@ -120,7 +121,8 @@ async fn generates_only_current_diary_questions() -> Result<(), Box<dyn Error>> 
             .await?,
         GeneratedDiaryQuestions {
             migraines: 1,
-            caffeine: 0
+            caffeine: 0,
+            context: 0,
         },
     );
     let waiting: Uuid = fixture.waiting.parse()?;

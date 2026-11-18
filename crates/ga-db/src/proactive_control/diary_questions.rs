@@ -11,12 +11,17 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{ProactiveControlError, policy::lock_notification_policy};
-use crate::{Database, check_readiness};
+use crate::{
+    Database, activity_documents::PARSER_VERSION, check_readiness, replay::projection_pending,
+};
+
+mod context;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct GeneratedDiaryQuestions {
     pub migraines: u64,
     pub caffeine: u64,
+    pub context: u64,
 }
 
 impl Database {
@@ -27,9 +32,35 @@ impl Database {
         now: StoredInstant,
         default_timezone: &str,
     ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
+        self.generate_questions(owner, now, default_timezone, false)
+            .await
+    }
+
+    /// Include the context questions when the caller's observations have refreshed successfully.
+    /// An in-progress Garmin replay keeps the context portion of the slot open.
+    pub async fn generate_diary_questions_with_context(
+        &self,
+        owner: Uuid,
+        now: StoredInstant,
+        default_timezone: &str,
+    ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
+        self.generate_questions(owner, now, default_timezone, true)
+            .await
+    }
+
+    async fn generate_questions(
+        &self,
+        owner: Uuid,
+        now: StoredInstant,
+        default_timezone: &str,
+        include_context: bool,
+    ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut txn = self.begin_diary_question_policy().await?;
-            let generated = generate_in(&mut txn, owner, now, default_timezone).await?;
+            let allow_context =
+                include_context && !projection_pending(&mut txn, PARSER_VERSION).await?;
+            let generated =
+                generate_in(&mut txn, owner, now, default_timezone, allow_context).await?;
             txn.commit().await?;
             Ok(generated)
         })
@@ -56,27 +87,30 @@ async fn generate_in(
     owner: Uuid,
     now: StoredInstant,
     default_timezone: &str,
+    allow_context: bool,
 ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
     let timezone = diary_question_timezone(txn, owner, default_timezone).await?;
-    let slot = (now.unix_microseconds() / 1_000_000).div_euclid(1800);
+    let slot = now.unix_microseconds().div_euclid(1_800_000_000);
     let skip: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM app_state
             WHERE (key='proactive:enabled' AND value->'enabled'='false'::jsonb)
-               OR (key='proactive:generation' AND value->'slot'=to_jsonb($1::bigint)))",
+               OR (key='proactive:generation' AND value->'slot'=to_jsonb($1::bigint)
+                   AND (NOT $2 OR coalesce(value->'context_complete','true'::jsonb)='true'::jsonb)))",
     )
     .bind(slot)
+    .bind(allow_context)
     .fetch_one(&mut **txn)
     .await?;
     if skip {
         return Ok(GeneratedDiaryQuestions::default());
     }
-    // Leave the same window eligible for the existing Garmin context generator.
     sqlx::query(
         "INSERT INTO app_state(key,value)
-         VALUES('proactive:generation',jsonb_build_object('slot',$1::bigint,'context_complete',false))
+         VALUES('proactive:generation',jsonb_build_object('slot',$1::bigint,'context_complete',$2::boolean))
          ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=clock_timestamp()",
     )
     .bind(slot)
+    .bind(allow_context)
     .execute(&mut **txn)
     .await?;
     let (migraine_enabled, caffeine_enabled) = diary_question_packs(txn, owner).await?;
@@ -86,6 +120,9 @@ async fn generate_in(
     }
     if caffeine_enabled {
         generated.caffeine = generate_caffeine(txn, now, &timezone).await?;
+    }
+    if allow_context {
+        generated.context = context::generate(txn, owner, now.into(), &timezone).await?;
     }
     Ok(generated)
 }
@@ -276,7 +313,12 @@ impl Question {
             "INSERT INTO pending_questions(id,kind,text,evidence,priority,dedup_key,event_id,
                 earliest_send_at,expires_at,attempts,status)
              VALUES(gen_random_uuid(),$1,$2,$3::jsonb,$4,$5,$6,$7,$7+interval '48 hours',0,'pending')
-             ON CONFLICT (dedup_key) DO NOTHING",
+             ON CONFLICT (dedup_key) DO UPDATE SET text=EXCLUDED.text, evidence=EXCLUDED.evidence,
+                priority=EXCLUDED.priority, earliest_send_at=EXCLUDED.earliest_send_at,
+                expires_at=EXCLUDED.expires_at, status='pending'
+             WHERE EXCLUDED.kind='context' AND pending_questions.kind='context'
+                AND pending_questions.status='cancelled' AND pending_questions.sent_at IS NULL
+                AND pending_questions.evidence->>'cancel_reason' IS DISTINCT FROM 'owner_pause'",
         )
         .bind(self.kind)
         .bind(self.text)
