@@ -17,7 +17,7 @@ use rmcp::{
     service::RequestContext,
     transport::{async_rw::AsyncRwTransport, stdio_pipes},
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -29,6 +29,7 @@ use crate::{
 const INSTRUCTIONS: &str = include_str!("../../../src/garmin_ai/prompts/mcp_server.txt");
 const WRITE_TOOLS: &[&str] = &[
     include_str!("../contracts/mcp-events-create.json"),
+    include_str!("../contracts/mcp-events-update.json"),
     include_str!("../contracts/mcp-events-delete.json"),
 ];
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -131,6 +132,7 @@ impl ServerHandler for Mcp {
         let result = match call.name.as_ref() {
             "events" => self.events(args).await,
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
+            "events_update" if enable_writes => self.update(args, is_cancelled).await,
             "events_delete" if enable_writes => self.delete(args, is_cancelled).await,
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
@@ -146,23 +148,38 @@ impl ServerHandler for Mcp {
 }
 
 impl Mcp {
-    async fn delete(
+    async fn update(
         &self,
-        args: serde_json::Map<String, Value>,
+        mut args: Map<String, Value>,
         is_cancelled: impl Fn() -> bool,
     ) -> Result<CallToolResult, &'static str> {
-        if args.len() != 2 {
+        let Some(Value::Object(changes)) = args.remove("changes") else {
+            return Err("ValidationError");
+        };
+        if !(1..=30).contains(&changes.len()) {
             return Err("ValidationError");
         }
-        let event_id = args
-            .get("event_id")
-            .and_then(Value::as_str)
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .ok_or("ValidationError")?;
-        let expected_revision = args
-            .get("revision")
-            .and_then(positive_revision)
-            .ok_or("ValidationError")?;
+        let (event_id, expected_revision) = revision_target(&args)?;
+        let updated = self
+            .database
+            .correct_mcp_event_unless_cancelled(
+                self.owner,
+                event_id,
+                expected_revision,
+                changes,
+                is_cancelled,
+            )
+            .await
+            .map_err(write_error)?;
+        tool_result(updated.snapshot)
+    }
+
+    async fn delete(
+        &self,
+        args: Map<String, Value>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<CallToolResult, &'static str> {
+        let (event_id, expected_revision) = revision_target(&args)?;
         let deleted = self
             .database
             .delete_event_unless_cancelled(
@@ -233,6 +250,22 @@ impl Mcp {
     }
 }
 
+fn revision_target(args: &Map<String, Value>) -> Result<(Uuid, i32), &'static str> {
+    if args.len() != 2 {
+        return Err("ValidationError");
+    }
+    let event = args
+        .get("event_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or("ValidationError")?;
+    let revision = args
+        .get("revision")
+        .and_then(positive_revision)
+        .ok_or("ValidationError")?;
+    Ok((event, revision))
+}
+
 fn positive_revision(value: &Value) -> Option<i32> {
     let revision = match value {
         Value::Number(number) => number.as_f64()?,
@@ -269,9 +302,16 @@ fn tool_result(value: Value) -> Result<CallToolResult, &'static str> {
 
 fn write_error(error: DiaryWriteError) -> &'static str {
     match error {
-        DiaryWriteError::UnknownOwner | DiaryWriteError::DeletionForbidden => "PermissionError",
+        DiaryWriteError::UnknownOwner
+        | DiaryWriteError::DeletionForbidden
+        | DiaryWriteError::OperationForbidden
+        | DiaryWriteError::TrackingDisabled => "PermissionError",
+        DiaryWriteError::Input(_) => "ValidationError",
         DiaryWriteError::EventMissing => "LookupError",
-        DiaryWriteError::RevisionChanged | DiaryWriteError::LinkedObservations => "Conflict",
+        DiaryWriteError::RevisionChanged
+        | DiaryWriteError::LinkedObservations
+        | DiaryWriteError::SelfReference(_)
+        | DiaryWriteError::SymptomBounds => "Conflict",
         DiaryWriteError::Storage(_)
         | DiaryWriteError::Cancelled
         | DiaryWriteError::Busy

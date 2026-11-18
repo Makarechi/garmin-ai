@@ -1,8 +1,8 @@
 use ga_domain::{
-    event_input::{EventInput, EventStatus},
+    event_input::{EventInput, EventStatus, InvalidEvent, ValidationMode},
     timestamp::StoredInstant,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -118,54 +118,187 @@ impl Database {
             .validate_for_write()
             .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let (revision, deleted, namespace) = sqlx::query_as::<_, (i32, bool, Option<String>)>(
-            "SELECT entry.revision, entry.deleted, definition.namespace
+        let (revision, namespace, _) = lock_update_target(&mut txn, request.event_id).await?;
+        if revision != request.expected_revision {
+            return Err(DiaryWriteError::RevisionChanged);
+        }
+        let before = load_event(&mut txn, request.event_id, false).await?;
+        let corrected = update_system_event_in(
+            &mut txn,
+            request,
+            before,
+            namespace.as_deref(),
+            [None, None],
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(corrected)
+    }
+
+    /// Merge an MCP correction into the locked current revision, then apply the ordinary audit.
+    pub async fn correct_mcp_event_unless_cancelled(
+        &self,
+        owner_id: Uuid,
+        event_id: Uuid,
+        expected_revision: i32,
+        changes: Map<String, Value>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        if is_cancelled() {
+            return Err(DiaryWriteError::Cancelled);
+        }
+        let mut txn = self.begin_diary_write(owner_id).await?;
+        let (revision, namespace, change_allowed) = lock_update_target(&mut txn, event_id).await?;
+        if namespace.as_deref() == Some("user") {
+            return Err(DiaryWriteError::CustomEntry);
+        }
+        if !change_allowed {
+            return Err(DiaryWriteError::OperationForbidden);
+        }
+        let before = load_event(&mut txn, event_id, false).await?;
+        let (report, display_times) = corrected_report(&before.snapshot, changes)?;
+        if revision != expected_revision {
+            return Err(DiaryWriteError::RevisionChanged);
+        }
+        let corrected = update_system_event_in(
+            &mut txn,
+            UpdateSystemEvent {
+                owner_id,
+                authenticated_actor: "mcp",
+                event_id,
+                expected_revision,
+                report: &report,
+                operation_id: None,
+            },
+            before,
+            namespace.as_deref(),
+            display_times,
+        )
+        .await?;
+        commit_diary_write(txn, is_cancelled).await?;
+        Ok(corrected)
+    }
+}
+
+async fn lock_update_target(
+    txn: &mut Transaction<'_, Postgres>,
+    event_id: Uuid,
+) -> Result<(i32, Option<String>, bool), DiaryWriteError> {
+    let (revision, deleted, namespace, change_allowed) = sqlx::query_as::<_, (i32, bool, Option<String>, bool)>(
+            "SELECT entry.revision, entry.deleted, definition.namespace,
+                    entry.definition_version_id IS NULL OR
+                    coalesce(version.allowed_operations ?& ARRAY['update','query'], false)
              FROM events AS entry
              LEFT JOIN event_definition_versions AS version ON version.id = entry.definition_version_id
              LEFT JOIN event_definitions AS definition ON definition.id = version.definition_id
              WHERE entry.id = $1 FOR UPDATE OF entry",
         )
-        .bind(request.event_id)
-        .fetch_optional(&mut *txn)
+        .bind(event_id)
+        .fetch_optional(&mut **txn)
         .await?
         .ok_or(DiaryWriteError::EventMissing)?;
-        if deleted {
-            return Err(DiaryWriteError::EventMissing);
-        }
-        if revision != request.expected_revision {
-            return Err(DiaryWriteError::RevisionChanged);
-        }
-        let before = load_event(&mut txn, request.event_id, false).await?;
-        let old_kind = before.snapshot["kind"]
-            .as_str()
-            .ok_or(DiaryWriteError::InvalidRecordedState)?;
-        let kind = report.payload().kind();
-        if old_kind != kind {
-            check_pack(&mut txn, request.owner_id, kind, false).await?;
-        }
-        if namespace.as_deref() == Some("user") {
-            return Err(DiaryWriteError::CustomEntry);
-        }
-        reject_self_reference(report, request.event_id)?;
-        validate_relation(&mut txn, report).await?;
-        check_episode_links(&mut txn, request.event_id, old_kind, report).await?;
-        let definition = ensure_system_definition_in(&mut txn, kind)
-            .await
-            .map_err(DiaryWriteError::Definition)?;
+    if deleted {
+        return Err(DiaryWriteError::EventMissing);
+    }
+    Ok((revision, namespace, change_allowed))
+}
 
-        let recorded: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *txn)
-            .await?;
-        let provenance = report
-            .provenance(
-                Some(request.authenticated_actor),
-                definition.topology,
-                stored_instant(recorded)?,
-                None,
-            )
-            .map_err(DiaryWriteError::Clock)?;
-        let transition: OffsetDateTime = sqlx::query_scalar(
-            "UPDATE events
+fn corrected_report(
+    before: &Value,
+    changes: Map<String, Value>,
+) -> Result<(EventInput, [Option<String>; 2]), DiaryWriteError> {
+    if changes.is_empty() {
+        return Err(DiaryWriteError::UnsupportedCorrection);
+    }
+    let display_times = ["start", "end"].map(|field| {
+        let (_, input) = StoredInstant::legacy_input_with_json(changes.get(field)?)?;
+        Some(match input.strip_suffix('Z') {
+            Some(utc) => format!("{utc}+00:00"),
+            None => input,
+        })
+    });
+    let mut report: Map<String, Value> = [
+        "start",
+        "end",
+        "timezone",
+        "source",
+        "status",
+        "confidence",
+        "original_text",
+        "payload",
+    ]
+    .into_iter()
+    .map(|key| (key.to_owned(), before[key].clone()))
+    .collect();
+    for (field, value) in changes {
+        match field.as_str() {
+            "start" | "end" | "timezone" => {
+                report.insert(field, value);
+            }
+            "payload" => {
+                let Value::Object(patch) = value else {
+                    return Err(DiaryWriteError::UnsupportedCorrection);
+                };
+                if patch
+                    .get("type")
+                    .is_some_and(|kind| kind != &before["kind"])
+                {
+                    return Err(DiaryWriteError::UnsupportedCorrection);
+                }
+                let payload = report
+                    .get_mut("payload")
+                    .and_then(Value::as_object_mut)
+                    .ok_or(DiaryWriteError::InvalidRecordedState)?;
+                payload.extend(patch);
+            }
+            _ => return Err(DiaryWriteError::UnsupportedCorrection),
+        }
+    }
+    let bytes = serde_json::to_vec(&report)
+        .map_err(|_| DiaryWriteError::Input(InvalidEvent::InvalidObject))?;
+    let report = EventInput::from_json(&bytes, 1024 * 1024, ValidationMode::NewReport)
+        .map_err(DiaryWriteError::Input)?;
+    Ok((report, display_times))
+}
+
+async fn update_system_event_in(
+    txn: &mut Transaction<'_, Postgres>,
+    request: UpdateSystemEvent<'_>,
+    before: StoredSystemEvent,
+    namespace: Option<&str>,
+    display_times: [Option<String>; 2],
+) -> Result<StoredSystemEvent, DiaryWriteError> {
+    let report = request.report;
+    let old_kind = before.snapshot["kind"]
+        .as_str()
+        .ok_or(DiaryWriteError::InvalidRecordedState)?;
+    let kind = report.payload().kind();
+    if old_kind != kind {
+        check_pack(txn, request.owner_id, kind, false).await?;
+    }
+    if namespace == Some("user") {
+        return Err(DiaryWriteError::CustomEntry);
+    }
+    reject_self_reference(report, request.event_id)?;
+    validate_relation(txn, report).await?;
+    check_episode_links(txn, request.event_id, old_kind, report).await?;
+    let definition = ensure_system_definition_in(txn, kind)
+        .await
+        .map_err(DiaryWriteError::Definition)?;
+
+    let recorded: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **txn)
+        .await?;
+    let provenance = report
+        .provenance(
+            Some(request.authenticated_actor),
+            definition.topology,
+            stored_instant(recorded)?,
+            None,
+        )
+        .map_err(DiaryWriteError::Clock)?;
+    let transition: OffsetDateTime = sqlx::query_scalar(
+        "UPDATE events
              SET definition_version_id = $2, kind = $3, start = $4, \"end\" = $5, timezone = $6,
                  source = $7, confidence = $8, status = $9, original_text = $10,
                  payload = $11::jsonb, topology = $12, envelope_version = 1,
@@ -174,60 +307,65 @@ impl Database {
                  validation_status = $18, recorded_at = $19, ingested_at = $19,
                  revision = revision + 1, updated_at = clock_timestamp()
              WHERE id = $1 RETURNING updated_at",
-        )
-        .bind(request.event_id)
-        .bind(definition.id)
-        .bind(kind)
-        .bind(OffsetDateTime::from(report.start()))
-        .bind(report.end().map(OffsetDateTime::from))
-        .bind(report.timezone())
-        .bind(report.source().label())
-        .bind(report.confidence())
-        .bind(report.status().label())
-        .bind(report.original_text())
-        .bind(report.payload().json().to_string())
-        .bind(provenance.topology.label())
-        .bind(provenance.time_precision)
-        .bind(provenance.assertion_kind)
-        .bind(provenance.producer)
-        .bind(provenance.transport)
-        .bind(provenance.author)
-        .bind(provenance.validation_status)
-        .bind(recorded)
-        .fetch_one(&mut *txn)
-        .await?;
-        invalidate_migraine_insights(&mut txn, old_kind).await?;
-        if old_kind != kind {
-            invalidate_migraine_insights(&mut txn, kind).await?;
-        }
-        let corrected = load_event(&mut txn, request.event_id, false).await?;
-        sync_migraine_questions(
-            &mut txn,
-            request.owner_id,
-            request.event_id,
-            &before.snapshot,
-            &corrected.snapshot,
-            transition,
-        )
-        .await?;
-        append_audit(
-            &mut txn,
-            AuditEntry {
-                id: request.event_id,
-                action: "update",
-                before: Some(&before.snapshot),
-                after: &corrected.snapshot,
-                actor: request.authenticated_actor,
-                operation: request.operation_id,
-                at: transition,
-            },
-        )
-        .await?;
-        metrics::invalidate(&mut txn, request.event_id, transition).await?;
-        metrics::project_event(&mut txn, request.event_id, &corrected.snapshot, transition).await?;
-        txn.commit().await?;
-        Ok(corrected)
+    )
+    .bind(request.event_id)
+    .bind(definition.id)
+    .bind(kind)
+    .bind(OffsetDateTime::from(report.start()))
+    .bind(report.end().map(OffsetDateTime::from))
+    .bind(report.timezone())
+    .bind(report.source().label())
+    .bind(report.confidence())
+    .bind(report.status().label())
+    .bind(report.original_text())
+    .bind(report.payload().json().to_string())
+    .bind(provenance.topology.label())
+    .bind(provenance.time_precision)
+    .bind(provenance.assertion_kind)
+    .bind(provenance.producer)
+    .bind(provenance.transport)
+    .bind(provenance.author)
+    .bind(provenance.validation_status)
+    .bind(recorded)
+    .fetch_one(&mut **txn)
+    .await?;
+    invalidate_migraine_insights(txn, old_kind).await?;
+    if old_kind != kind {
+        invalidate_migraine_insights(txn, kind).await?;
     }
+    let mut corrected = load_event(txn, request.event_id, false).await?;
+    for (field, displayed) in ["start", "end"].into_iter().zip(display_times) {
+        if let Some(displayed) = displayed
+            && !corrected.snapshot[field].is_null()
+        {
+            corrected.snapshot[field] = Value::String(displayed);
+        }
+    }
+    sync_migraine_questions(
+        txn,
+        request.owner_id,
+        request.event_id,
+        &before.snapshot,
+        &corrected.snapshot,
+        transition,
+    )
+    .await?;
+    append_audit(
+        txn,
+        AuditEntry {
+            id: request.event_id,
+            action: "update",
+            before: Some(&before.snapshot),
+            after: &corrected.snapshot,
+            actor: request.authenticated_actor,
+            operation: request.operation_id,
+            at: transition,
+        },
+    )
+    .await?;
+    metrics::invalidate(txn, request.event_id, transition).await?;
+    metrics::project_event(txn, request.event_id, &corrected.snapshot, transition).await?;
+    Ok(corrected)
 }
 
 fn reject_self_reference(report: &EventInput, event: Uuid) -> Result<(), DiaryWriteError> {
