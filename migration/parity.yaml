@@ -264,7 +264,11 @@
         "tests/test_schedule_coalescing.py",
         "tests/test_partial_reconciliation.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_garmin_periodic.py",
+        "migration/check_activity_scan_page.py",
+        "migration/check_history_sync_status.py"
+      ],
       "data_contracts": [
         "Durable backfill windows, activity generations and overlap, bounded scheduling and partial or empty responses."
       ],
@@ -272,10 +276,12 @@
         "Only scheduled, selected Garmin sources can enqueue collection."
       ],
       "resource_scenario": "Initial history backfill, repeated nightly and weekly reconcile",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R16",
-      "known_limits": [],
+      "known_limits": [
+        "Periodic scheduling, activity scans and history windows matched synthetic Python cases. Full unattended recovery and sustained backlog acceptance remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -392,7 +398,11 @@
         "tests/test_metric_definitions.py",
         "tests/test_temporal.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_replay_status.py",
+        "migration/check_replay_selection.py",
+        "crates/ga-app/tests/replay_worker.rs"
+      ],
       "data_contracts": [
         "Parser-version identity, replay checkpoint, failed revisions, historical timezone and invalidation."
       ],
@@ -400,10 +410,12 @@
         "Replay only approved local archive and associated owner; fenced partial outputs remain unavailable."
       ],
       "resource_scenario": "Full offline replay, corruption and restart",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R16",
-      "known_limits": [],
+      "known_limits": [
+        "Synthetic database and worker comparisons cover pending, failed and completed projections. The full replay acceptance workload and cutover rehearsal remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -467,7 +479,11 @@
         "tests/test_caffeine_dose.py",
         "tests/test_diary_forms.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_diary_creation.py",
+        "migration/check_diary_reads.py",
+        "migration/check_event_replays.py"
+      ],
       "data_contracts": [
         "Typed event payloads, interval semantics, incomplete medications and dose uncertainty."
       ],
@@ -475,10 +491,12 @@
         "Diary read and write scopes for facts; source and role restrictions survive normalization."
       ],
       "resource_scenario": "Long diary history across local midnight and DST",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R17",
-      "known_limits": [],
+      "known_limits": [
+        "Database comparisons cover immutable creation replay and canonical diary pagination. Full coverage of diary capture through user channels remains pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -523,7 +541,11 @@
         "tests/test_operations_mcp.py",
         "tests/test_universal_characterization.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_diary_undo.py",
+        "migration/check_agent_diary_batch.py",
+        "crates/ga-app/tests/telegram_diary_commit.rs"
+      ],
       "data_contracts": [
         "Idempotency, optimistic revisions, grouped undo, soft deletion and atomic changes."
       ],
@@ -531,10 +553,12 @@
         "Owner or scoped diary mutation with audit; revision conflict on stale writes."
       ],
       "resource_scenario": "Concurrent retries and grouped undo",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R17",
-      "known_limits": [],
+      "known_limits": [
+        "Stored revisions, undo, and batched audit have synthetic database evidence. Full HTTP and channel mutation flows remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -1069,7 +1093,11 @@
         "tests/test_pairing.py",
         "tests/test_poll_recovery.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_legacy_telegram_schema.py",
+        "crates/ga-app/src/telegram_transport/tests/poller.rs",
+        "crates/ga-app/tests/telegram_webhook.rs"
+      ],
       "data_contracts": [
         "Poll/Webhook ordering, callback ACK, neutral shadow and legacy modes, voice and text, owner history and setup."
       ],
@@ -1077,10 +1105,12 @@
         "Authenticated private owner, validated webhook secret and instance-bound/revision-bound callbacks."
       ],
       "resource_scenario": "Backlog, callback ACK, voice cap and concurrent control",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R27",
-      "known_limits": [],
+      "known_limits": [
+        "Native ingress and callback acknowledgement have loopback HTTP evidence. Full owner diary, voice, forms and live private bot smoke remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -1113,7 +1143,11 @@
         "tests/test_dialogue.py",
         "tests/test_hf09_entrypoint_parity.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_channel_ingress.py",
+        "crates/ga-app/tests/telegram_inbox_leases.rs",
+        "crates/ga-app/tests/telegram_reply.rs"
+      ],
       "data_contracts": [
         "Inbox, conversations, instance-scoped outbox, leases, action tokens, provider acceptance vs read receipt."
       ],
@@ -1121,10 +1155,12 @@
         "Bind channel actor and action to installation, owner and destination; adapter may expose only limited capabilities."
       ],
       "resource_scenario": "Ordered drain and retries across restart",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R26",
-      "known_limits": [],
+      "known_limits": [
+        "Synthetic cases cover durable inbox claims, reply receipts and a replaced pairing. Browser read receipts and cutover with pending delivery remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -1211,7 +1247,11 @@
         "tests/test_wearable.py",
         "tests/test_access_scopes.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_mcp_stdio.py",
+        "migration/check_activity_reads.py",
+        "migration/check_wearable_http.py"
+      ],
       "data_contracts": [
         "Route and tool validation, JSON shapes, stdio protocol, opt-in MCP writes and wearable identity."
       ],
@@ -1219,10 +1259,12 @@
         "Bearer scopes, read-only MCP by default, narrow wearable write keys and cancellation before transaction commit."
       ],
       "resource_scenario": "Core API/MCP cold startup and control requests under load",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R29",
-      "known_limits": [],
+      "known_limits": [
+        "Pinned Python client initialization and diary reads, HTTP health reads, and bidirectional wearable upload retries have synthetic evidence. The complete MCP catalog and HTTP contract comparison remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -1319,7 +1361,12 @@
         "tests/test_calendar_context.py",
         "tests/test_hf01_channel_consent.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_model_diary_policy.py",
+        "migration/check_analysis_diary_tool.py",
+        "migration/check_wearable_http.py",
+        "crates/ga-app/tests/telegram_reply.rs"
+      ],
       "data_contracts": [
         "Distinct write/management/read scopes, category consent, destination-scoped share, redaction and revocation fences."
       ],
@@ -1327,10 +1374,12 @@
         "Owner control of export/share and provider selection, default deny for private metadata or unsupported actions."
       ],
       "resource_scenario": "Revocation during concurrent send and malicious schema input",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R23",
-      "known_limits": [],
+      "known_limits": [
+        "These synthetic cases cover model diary policy, write-only wearable intake and blocked delivery after replacement of the Telegram pairing. Full cross-channel consent, role and revocation acceptance remains pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -1367,7 +1416,11 @@
         "tests/test_agent_telegram.py",
         "tests/test_release_gate.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "crates/ga-app/tests/replay_worker.rs",
+        "crates/ga-app/tests/telegram_inbox_leases.rs",
+        "crates/ga-app/src/telegram_transport/tests/poller.rs"
+      ],
       "data_contracts": [
         "Durable job types, deduplication, claim/renew/finish, fencing, heartbeat and bounded scheduling."
       ],
@@ -1375,10 +1428,12 @@
         "Single side-effect owner, storage locks/maintenance and worker identity checks before effects."
       ],
       "resource_scenario": "Heartbeat, renewal, drain and backlog while heavy tasks run",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R09",
-      "known_limits": [],
+      "known_limits": [
+        "Native replay and Telegram loops have synthetic evidence for singleton ownership, shutdown and database session loss. Full job supervision, recovery load and unattended operation remain pending."
+      ],
       "approved_deviations": []
     },
     {
@@ -1489,7 +1544,12 @@
         "tests/test_deployment.py",
         "tests/test_operation_recovery.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_backup_commands.py",
+        "migration/check_native_schema.py",
+        "migration/check_backup_space.py",
+        "migration/check_postgres_readiness.py"
+      ],
       "data_contracts": [
         "Readiness and metrics, backup/export/restore, erasure and resume, migration chain, storage alerts, installation."
       ],
@@ -1497,10 +1557,12 @@
         "Admin operations or authenticated local CLI. Destructive commands require exact confirmation and storage fencing."
       ],
       "resource_scenario": "Backup during activity, low disk, off-host restore and upgrade",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "operational",
       "owner_task": "R32",
-      "known_limits": [],
+      "known_limits": [
+        "Native backup and recovery matched Python across 30 synthetic database tables and preserved interrupted backups. Historical migrations and readiness have disposable database evidence. Packaging, erasure, retention, and cutover acceptance remain pending."
+      ],
       "approved_deviations": []
     }
   ]
