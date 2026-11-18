@@ -2,6 +2,8 @@ mod activity_reads;
 mod device_history;
 mod read_daily;
 mod running;
+mod series;
+pub use series::SeriesReadError;
 mod sleep_analysis;
 mod sleep_timing;
 
@@ -24,7 +26,7 @@ use std::{error::Error, fmt};
 use ga_domain::statistics::{block_mean_difference, describe, standardized_difference};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
-use time::{Date, Month};
+use time::{Date, Month, OffsetDateTime};
 
 use crate::{
     Database, ReadinessError,
@@ -38,6 +40,30 @@ pub(crate) use freshness_report::data_freshness_in;
 pub use freshness_report::{MODEL_HEALTH_PACKS, model_metric_packs};
 
 const MAX_RANGE_DAYS: i64 = 3660;
+
+fn isoformat(at: OffsetDateTime) -> String {
+    let fraction = if at.microsecond() == 0 {
+        String::new()
+    } else {
+        format!(".{:06}", at.microsecond())
+    };
+    let seconds = at.offset().whole_seconds();
+    let absolute = seconds.unsigned_abs();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let mut offset = format!("{sign}{:02}:{:02}", absolute / 3600, absolute / 60 % 60);
+    if !absolute.is_multiple_of(60) {
+        offset.push_str(&format!(":{:02}", absolute % 60));
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}{offset}",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum HealthAnalysisError {

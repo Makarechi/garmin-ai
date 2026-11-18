@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use ga_domain::timestamp::StoredInstant;
 use serde_json::{Value, json};
 use sqlx::{FromRow, Row, postgres::PgRow};
-use time::{Duration, OffsetDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime};
 
 use super::{
     ActivityReadError, DailyHealthReader, HealthAnalysisError, MAX_RANGE_DAYS, TemporalPurpose,
-    check_calendar_bounds, temporal::temporal_features_in,
+    check_calendar_bounds, isoformat, temporal::temporal_features_in,
 };
 
 const MAX_RUNS: usize = 2000;
@@ -173,22 +173,4 @@ impl DailyHealthReader {
         document["rows"] = Value::Array(rows);
         Ok(document)
     }
-}
-
-fn isoformat(at: OffsetDateTime) -> String {
-    let at = at.to_offset(UtcOffset::UTC);
-    let suffix = if at.microsecond() == 0 {
-        String::new()
-    } else {
-        format!(".{:06}", at.microsecond())
-    };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{suffix}+00:00",
-        at.year(),
-        u8::from(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second()
-    )
 }
