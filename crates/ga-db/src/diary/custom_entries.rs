@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::{
     AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, commit_diary_write,
-    creation_audit, load_event, metrics, stored_instant,
+    creation_audit, event_document, load_event, metrics, stored_instant,
 };
 use crate::Database;
 
@@ -141,6 +141,32 @@ impl Database {
         &self,
         request: UpdateCustomEntry<'_>,
     ) -> Result<StoredCustomEntry, DiaryWriteError> {
+        self.update_custom_entry_with_visibility(request, [None, None])
+            .await
+            .map(|(stored, _)| stored)
+    }
+
+    /// Return the corrected record only if its recorded version permits queries.
+    pub async fn update_custom_entry_document(
+        &self,
+        request: UpdateCustomEntry<'_>,
+    ) -> Result<Value, DiaryWriteError> {
+        let display_times = request.entry.display_times();
+        let (stored, queryable) = self
+            .update_custom_entry_with_visibility(request, display_times)
+            .await?;
+        if queryable {
+            event_document(stored.snapshot).map_err(|_| DiaryWriteError::InvalidRecordedState)
+        } else {
+            Ok(json!({"id":stored.id.to_string(), "revision":stored.revision}))
+        }
+    }
+
+    async fn update_custom_entry_with_visibility(
+        &self,
+        request: UpdateCustomEntry<'_>,
+        display_times: [Option<&str>; 2],
+    ) -> Result<(StoredCustomEntry, bool), DiaryWriteError> {
         let mut txn = self.begin_diary_write(request.owner_id).await?;
         let (version, revision, timezone): (Uuid, i32, String) = sqlx::query_as(
             "SELECT definition_version_id,revision,timezone FROM events
@@ -175,7 +201,17 @@ impl Database {
             .bind(document.to_string())
             .execute(&mut *txn)
             .await?;
-        let written = load_event(&mut txn, request.id, false).await?;
+        let mut written = load_event(&mut txn, request.id, false).await?;
+        for (field, display) in ["start", "end"].into_iter().zip(display_times) {
+            if let Some(display) = display
+                && !written.snapshot[field].is_null()
+            {
+                written.snapshot[field] = Value::String(match display.strip_suffix('Z') {
+                    Some(utc) => format!("{utc}+00:00"),
+                    None => display.to_owned(),
+                });
+            }
+        }
         append_audit(
             &mut txn,
             AuditEntry {
@@ -192,7 +228,7 @@ impl Database {
         metrics::invalidate(&mut txn, request.id, at).await?;
         metrics::project_event(&mut txn, request.id, &written.snapshot, at).await?;
         txn.commit().await?;
-        Ok(written)
+        Ok((written, contract.operations["query"] == true))
     }
 }
 

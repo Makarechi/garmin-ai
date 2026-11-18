@@ -7,7 +7,7 @@ use axum::{
 };
 use ga_db::{
     diary::DiaryReadError,
-    health_analysis::{HealthAnalysisError, HealthPeriod, NapPolicy, TimelineError},
+    health_analysis::{HealthAnalysisError, NapPolicy, TimelineError},
 };
 use ga_domain::{
     access::{ReadToolInput, Scopes},
@@ -38,12 +38,14 @@ pub(crate) enum ReadTool {
 }
 
 impl ReadTool {
-    pub(crate) const MCP_GARMIN: [Self; 5] = [
+    pub(crate) const GARMIN_READS: [Self; 7] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
         Self::ActivityDetails,
         Self::DeviceHistory,
+        Self::Baseline,
+        Self::ComparePeriods,
     ];
     const IMPLEMENTED: [Self; 11] = [
         Self::Snapshot,
@@ -295,7 +297,7 @@ async fn execute_read_tool(
             Err(error) => health_failure(error),
         };
     }
-    if ReadTool::MCP_GARMIN.contains(&tool) {
+    if ReadTool::GARMIN_READS.contains(&tool) {
         return match read_garmin(&database, tool, &arguments, None).await {
             Ok(value) => Json(value).into_response(),
             Err(GarminReadError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
@@ -323,37 +325,6 @@ async fn execute_read_tool(
                 reader
                     .owner_sleep_analysis(start, end, &state.configured_timezone, policy)
                     .await
-            }
-        }
-        ReadTool::Baseline if arguments.len() == 3 => {
-            let (Some(metric), Some(start), Some(end)) = (
-                arguments.get("metric").and_then(Value::as_str),
-                arguments.get("start").and_then(date_input),
-                arguments.get("end").and_then(date_input),
-            ) else {
-                return invalid_arguments();
-            };
-            match HealthPeriod::new(start, end) {
-                Ok(period) => reader.personal_baseline(metric, period).await,
-                Err(error) => Err(error),
-            }
-        }
-        ReadTool::ComparePeriods if arguments.len() == 5 => {
-            let (Some(metric), Some(a_start), Some(a_end), Some(b_start), Some(b_end)) = (
-                arguments.get("metric").and_then(Value::as_str),
-                arguments.get("a_start").and_then(date_input),
-                arguments.get("a_end").and_then(date_input),
-                arguments.get("b_start").and_then(date_input),
-                arguments.get("b_end").and_then(date_input),
-            ) else {
-                return invalid_arguments();
-            };
-            match (
-                HealthPeriod::new(a_start, a_end),
-                HealthPeriod::new(b_start, b_end),
-            ) {
-                (Ok(first), Ok(second)) => reader.compare_periods(metric, first, second).await,
-                (Err(error), _) | (_, Err(error)) => Err(error),
             }
         }
         ReadTool::Timeline if arguments.len() == 2 => {
@@ -447,7 +418,7 @@ fn bool_input(value: &Value) -> Option<bool> {
     }
 }
 
-fn integer_input(value: &Value) -> Option<u32> {
+pub(super) fn integer_input(value: &Value) -> Option<u32> {
     match value {
         Value::Bool(value) => Some(u32::from(*value)),
         Value::Number(_) => {

@@ -1,5 +1,8 @@
 //! Owner pause and resume commands shared with the existing Telegram and web state.
 
+mod budget;
+pub use budget::NotificationExclusions;
+
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
@@ -115,13 +118,7 @@ pub(crate) async fn set_in(
     command: ProactiveCommand,
     enabled: bool,
 ) -> Result<ProactiveControl, ProactiveControlError> {
-    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(OWNER_ONBOARDING_LOCK)
-        .fetch_one(&mut **txn)
-        .await?;
-    if !locked {
-        return Err(ProactiveControlError::Busy);
-    }
+    lock_policy(txn).await?;
     let previous: Option<String> =
         sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='proactive:enabled'")
             .fetch_optional(&mut **txn)
@@ -210,6 +207,18 @@ pub(crate) async fn set_in(
         enabled: effective,
         changed: apply,
     })
+}
+
+async fn lock_policy(txn: &mut Transaction<'_, Postgres>) -> Result<(), ProactiveControlError> {
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(OWNER_ONBOARDING_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if locked {
+        Ok(())
+    } else {
+        Err(ProactiveControlError::Busy)
+    }
 }
 
 fn is_web(value: &Value) -> bool {

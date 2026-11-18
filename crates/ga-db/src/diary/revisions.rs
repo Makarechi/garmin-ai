@@ -123,12 +123,15 @@ impl Database {
             return Err(DiaryWriteError::RevisionChanged);
         }
         let before = load_event(&mut txn, request.event_id, false).await?;
+        let display_times = report
+            .display_times()
+            .map(|time| time.map(display_timestamp));
         let corrected = update_system_event_in(
             &mut txn,
             request,
             before,
             namespace.as_deref(),
-            [None, None],
+            display_times,
         )
         .await?;
         txn.commit().await?;
@@ -212,10 +215,7 @@ fn corrected_report(
     }
     let display_times = ["start", "end"].map(|field| {
         let (_, input) = StoredInstant::legacy_input_with_json(changes.get(field)?)?;
-        Some(match input.strip_suffix('Z') {
-            Some(utc) => format!("{utc}+00:00"),
-            None => input,
-        })
+        Some(display_timestamp(&input))
     });
     let mut report: Map<String, Value> = [
         "start",
@@ -259,6 +259,13 @@ fn corrected_report(
     let report = EventInput::from_json(&bytes, 1024 * 1024, ValidationMode::NewReport)
         .map_err(DiaryWriteError::Input)?;
     Ok((report, display_times))
+}
+
+fn display_timestamp(input: &str) -> String {
+    match input.strip_suffix('Z') {
+        Some(utc) => format!("{utc}+00:00"),
+        None => input.to_owned(),
+    }
 }
 
 async fn update_system_event_in(

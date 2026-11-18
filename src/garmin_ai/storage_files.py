@@ -83,6 +83,8 @@ def exclusive_files(settings, *, allow_erased=False):
             lock_descriptor(descriptor)
         except BlockingIOError as exc:
             raise ValueError("Stop the worker, login or probe before this operation") from exc
+        if (directory / "erasing").exists(follow_symlinks=False):
+            raise ValueError("Complete the interrupted native erasure before using storage")
         if not allow_erased and any(
             (directory / marker).exists() for marker in ("erased", "activating")
         ):
