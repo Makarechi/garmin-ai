@@ -8,7 +8,7 @@ use axum::{
 use ga_db::{
     Database,
     diary::{
-        CreateSystemEvent, DiaryWriteError,
+        CreateSystemEvent, DeleteEvent, DiaryWriteError,
         custom_entries::{CreateCustomEntry, UpdateCustomEntry},
         event_document,
     },
@@ -131,25 +131,82 @@ async fn create_request(state: &AppState, request: Request, kind: EntryKind) -> 
 pub(super) async fn entry(
     Path(id): Path<String>,
     State(state): State<AppState>,
-    method: Method,
-    headers: HeaderMap,
+    request: Request,
 ) -> Response {
-    let response = if method == Method::GET {
-        match authorized(&state, &headers, &[Scope::ReadDiary]).await {
-            Ok((database, owner)) => match id.parse() {
-                Ok(id) => match database.owner_event(owner, id).await {
-                    Ok(Some(value)) => Json(value).into_response(),
-                    Ok(None) => detail(StatusCode::NOT_FOUND, "Record not found"),
-                    Err(_) => storage_unavailable(),
-                },
-                Err(_) => invalid_arguments(),
-            },
-            Err(status) => access_failure(status),
-        }
-    } else {
-        method_not_allowed("GET")
+    let (parts, _) = request.into_parts();
+    let required: &[Scope] = match parts.method {
+        Method::GET => &[Scope::ReadDiary],
+        Method::DELETE => &[Scope::ReadDiary, Scope::WriteDiary],
+        _ => return private_cache(method_not_allowed("GET, DELETE"), &parts.headers),
     };
-    private_cache(response, &headers)
+    let response = match authorized(&state, &parts.headers, required).await {
+        Ok((database, owner)) => match id.parse() {
+            Ok(id) if parts.method == Method::DELETE => {
+                delete_entry(database, owner, id, parts.uri.query()).await
+            }
+            Ok(id) => match database.owner_event(owner, id).await {
+                Ok(Some(value)) => Json(value).into_response(),
+                Ok(None) => record_missing(),
+                Err(_) => storage_unavailable(),
+            },
+            Err(_) => invalid_arguments(),
+        },
+        Err(status) => access_failure(status),
+    };
+    private_cache(response, &parts.headers)
+}
+
+async fn delete_entry(database: &Database, owner: Uuid, id: Uuid, query: Option<&str>) -> Response {
+    let expected = query.and_then(|raw| {
+        form_urlencoded::parse(raw.as_bytes())
+            .filter_map(|(key, value)| (key == "revision").then_some(value))
+            .last()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|revision| *revision >= 1)
+    });
+    let Some(expected_revision) = expected else {
+        return invalid_arguments();
+    };
+    match database
+        .delete_event(DeleteEvent {
+            owner_id: owner,
+            authenticated_actor: "api",
+            event_id: id,
+            expected_revision,
+        })
+        .await
+    {
+        Ok(deleted) if deleted.snapshot.get("kind").is_none() => {
+            Json(deleted.snapshot).into_response()
+        }
+        Ok(deleted) => event_response(deleted.snapshot),
+        Err(DiaryWriteError::EventMissing) => record_missing(),
+        Err(DiaryWriteError::RevisionChanged) => detail(
+            StatusCode::CONFLICT,
+            "Event changed; reload before deleting",
+        ),
+        Err(DiaryWriteError::DeletionForbidden) => {
+            detail(StatusCode::FORBIDDEN, "Operation not allowed")
+        }
+        Err(DiaryWriteError::LinkedObservations) => detail(
+            StatusCode::CONFLICT,
+            "Detach linked medication or symptom observations before removing or changing this migraine",
+        ),
+        Err(_) => storage_unavailable(),
+    }
+}
+
+fn record_missing() -> Response {
+    detail(StatusCode::NOT_FOUND, "Record not found")
+}
+
+fn event_response(snapshot: serde_json::Value) -> Response {
+    match event_document(snapshot) {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => storage_unavailable(),
+    }
 }
 
 async fn create_entry(
@@ -210,10 +267,7 @@ async fn create_entry(
         }
     };
     match written {
-        Ok(entry) => match event_document(entry.snapshot) {
-            Ok(value) => Json(value).into_response(),
-            Err(_) => storage_unavailable(),
-        },
+        Ok(entry) => event_response(entry.snapshot),
         Err(error) => write_failure(error),
     }
 }

@@ -13,7 +13,7 @@ use std::{
 
 use openssl::symm::{Cipher, Crypter, Mode as CipherMode};
 use rustix::{
-    fs::{self, AtFlags, FileType, Mode, OFlags},
+    fs::{self, AtFlags, FileType, Mode, OFlags, RenameFlags},
     io::Errno,
     process::geteuid,
 };
@@ -85,6 +85,15 @@ pub fn write_encrypted_backup(
     key: &[u8; 32],
     build: impl FnOnce(&mut dyn Write) -> io::Result<()>,
 ) -> Result<BackupDigest, BackupError> {
+    write_encrypted_backup_guarded(destination, key, build, || Ok(()))
+}
+
+pub(crate) fn write_encrypted_backup_guarded(
+    destination: &Path,
+    key: &[u8; 32],
+    build: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+    before_publish: impl FnOnce() -> io::Result<()>,
+) -> Result<BackupDigest, BackupError> {
     write_destination(destination, true, |file| {
         let mut nonce = [0; NONCE_BYTES];
         getrandom::fill(&mut nonce).map_err(|_| BackupError::Entropy)?;
@@ -96,6 +105,7 @@ pub fn write_encrypted_backup(
         if expected != verified {
             return Err(BackupError::Authentication);
         }
+        before_publish()?;
         Ok(verified)
     })
 }
@@ -319,7 +329,7 @@ fn read_frame(source: &mut File, data: &mut [u8]) -> Result<(), BackupError> {
     })
 }
 
-pub(crate) fn open_source(path: &Path) -> Result<File, BackupError> {
+pub fn open_source(path: &Path) -> Result<File, BackupError> {
     let (directory, name) = parent_file(path, false)?;
     let metadata = fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
@@ -378,11 +388,18 @@ pub(crate) fn parent_file(path: &Path, create: bool) -> Result<(OwnedFd, &OsStr)
     Ok((directory, name))
 }
 
-fn write_destination(
+pub fn write_private_export<T>(
+    destination: &Path,
+    write: impl FnOnce(&mut File) -> Result<T, BackupError>,
+) -> Result<T, BackupError> {
+    write_destination(destination, false, write)
+}
+
+fn write_destination<T>(
     destination: &Path,
     readable: bool,
-    write: impl FnOnce(&mut File) -> Result<BackupDigest, BackupError>,
-) -> Result<BackupDigest, BackupError> {
+    write: impl FnOnce(&mut File) -> Result<T, BackupError>,
+) -> Result<T, BackupError> {
     let (parent, name) = open_destination(destination)?;
     let directory = PrivateStageDirectory::create(&parent)?;
     let mut stage = if readable {
@@ -410,6 +427,19 @@ fn write_destination(
     ) {
         Ok(()) => {}
         Err(Errno::EXIST) => return Err(BackupError::Exists),
+        Err(Errno::OPNOTSUPP | Errno::NOSYS | Errno::PERM) => {
+            match fs::renameat_with(
+                &directory.handle,
+                stage.name.as_str(),
+                &parent,
+                name,
+                RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => {}
+                Err(Errno::EXIST | Errno::NOTEMPTY) => return Err(BackupError::Exists),
+                Err(error) => return Err(error.into()),
+            }
+        }
         Err(error) => return Err(error.into()),
     }
     drop(stage);

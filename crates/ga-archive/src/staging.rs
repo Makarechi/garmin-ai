@@ -93,3 +93,23 @@ impl Drop for Stage<'_> {
         let _ = fs::unlinkat(self.directory, self.name.as_str(), AtFlags::empty());
     }
 }
+
+pub(crate) fn remove_contents(directory: &OwnedFd) -> std::io::Result<()> {
+    for entry in fs::Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let metadata = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        let flag = if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
+            let child = fs::openat(directory, name, DIRECTORY_READ, Mode::empty())?;
+            remove_contents(&child)?;
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        fs::unlinkat(directory, name, flag)?;
+    }
+    Ok(())
+}

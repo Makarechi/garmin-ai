@@ -1,0 +1,7 @@
+# R32 native backup and recovery commands
+
+The native commands `backup`, `export`, `unpack-backup` and `restore-db` use the existing backup settings and formats. The complete backup coordinates with the worker and token writer, verifies archive references from the database snapshot and checks free space before and after staging. The authenticated package is published only while the source lease remains valid. A separate recovery directory receives authenticated files. Logical restore accepts an empty migrated database and keeps the local activation marker until the database commit succeeds.
+
+`migration/check_backup_commands.py` exercised a Linux ARM64 binary and pinned Python `ee3a14a48a6ad30c1085951bac2f53c9088c2450` using four new PostgreSQL databases. Python recovered the native package and Rust recovered the Python package. The test compared the recovered files and typed rows across 30 tables and verified that native standalone export can be restored. A deliberately interrupted backup left the previous encrypted copy intact. The next run cleared the private database staging directory and completed. A corrupted gzip export kept the original database and erase marker intact, and the importer refused an existing populated database. An injected commit failure left the old database and both local protection markers intact. Removing the fault allowed the retry to recover storage and clear the markers.
+
+These checks cover the current logical schema. Recovering exports from older database revisions belongs to the native schema compatibility work.
