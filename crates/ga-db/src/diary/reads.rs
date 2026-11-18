@@ -7,7 +7,7 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, Month, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{EventSnapshotRow, event_snapshot};
+use super::{EventSnapshotRow, event_snapshot, load_event};
 use crate::{
     Database, ReadinessError, check_readiness,
     conversation_memory::{AnalysisReadContext, analysis_channel_in},
@@ -89,6 +89,42 @@ struct ModelAudience<'a> {
 }
 
 impl Database {
+    /// Read one entry with visibility evaluated against its recorded definition version.
+    pub async fn owner_event(
+        &self,
+        owner: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Value>, DiaryReadError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.begin_diary_read().await?;
+            let visible: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT FROM events AS event WHERE event.id=$2 AND NOT event.deleted
+                      AND EXISTS(SELECT FROM people WHERE singleton AND id=$1)
+                      AND (event.definition_version_id IS NULL OR EXISTS(
+                        SELECT FROM event_definition_versions AS version
+                        WHERE version.id=event.definition_version_id
+                          AND version.allowed_operations ? 'query')))",
+            )
+            .bind(owner)
+            .bind(id)
+            .fetch_one(&mut *txn)
+            .await?;
+            let result = if visible {
+                let stored = load_event(&mut txn, id, false)
+                    .await
+                    .map_err(|_| DiaryReadError::InvalidEvent)?;
+                Some(event_document(stored.snapshot)?)
+            } else {
+                None
+            };
+            txn.commit().await?;
+            Ok(result)
+        })
+        .await
+        .map_err(|_| DiaryReadError::Database)?
+    }
+
     /// Page the owner's diary. This result is intended for the owner read path.
     pub async fn list_owner_events(
         &self,
@@ -436,7 +472,14 @@ async fn read_events(
 }
 
 fn serialize(row: EventSnapshotRow, can_update: bool) -> Result<Value, DiaryReadError> {
-    let mut event = event_snapshot(row).map_err(|_| DiaryReadError::InvalidEvent)?;
+    let snapshot = event_snapshot(row).map_err(|_| DiaryReadError::InvalidEvent)?;
+    let mut event = event_document(snapshot)?;
+    event["can_update"] = json!(can_update);
+    Ok(event)
+}
+
+/// Add the API's canonical evidence and status fields to a stored diary record.
+pub fn event_document(mut event: Value) -> Result<Value, DiaryReadError> {
     let confidence = event["confidence"]
         .as_f64()
         .ok_or(DiaryReadError::InvalidEvent)?;
@@ -460,7 +503,6 @@ fn serialize(row: EventSnapshotRow, can_update: bool) -> Result<Value, DiaryRead
     let open = event["topology"] == "open_interval" && event["end"].is_null();
     event["ongoing"] = json!(open);
     event["missing_end"] = json!(open);
-    event["can_update"] = json!(can_update);
     if event["kind"] == "caffeine" {
         event["caffeine_total"] = caffeine_total(&event["payload"])?;
     }
