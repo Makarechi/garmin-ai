@@ -21,7 +21,9 @@ use crate::{
     jobs::{JobStoreError, begin},
     outbox_enqueue::{QueueIntent, QueueIntentError, QueuedIntent, queue_outbox_intent},
     proactive_control::{ProactiveCommand, ProactiveControlError, set_in},
+    replay::REPLAY_MUTATION_LOCK,
     telegram_binding::{TelegramBindingError, confirmed_pairing},
+    telegram_today,
 };
 
 #[derive(Debug)]
@@ -78,6 +80,7 @@ impl Database {
             Some(
                 command @ (TelegramControl::Pause
                 | TelegramControl::Resume
+                | TelegramControl::Today
                 | TelegramControl::ForgetConversation),
             ) => command,
             _ => return Err(TelegramControlError::Unsupported),
@@ -101,7 +104,18 @@ impl Database {
                 return Err(TelegramControlError::BindingChanged);
             }
             let ordering_epoch = control_epoch(&mut txn, lease).await?;
+            let mut projection = None;
             let text = match command {
+                TelegramControl::Today => {
+                    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                        .bind(REPLAY_MUTATION_LOCK).fetch_one(&mut *txn).await?;
+                    if !locked {
+                        return Err(TelegramControlError::Database);
+                    }
+                    let (text, fence) = telegram_today::capture(&mut txn, conversation).await?;
+                    projection = Some(fence);
+                    text
+                }
                 TelegramControl::ForgetConversation => {
                     forget_telegram_in(&mut txn, ConversationBinding { owner_id: owner, conversation_id: conversation })
                         .await.map_err(TelegramControlError::Memory)?;
@@ -139,6 +153,10 @@ impl Database {
                 intent, operation_id:lease.operation_id, inbound_id:Some(lease.message_id),
                 dedup_key:None, requirements:&[], now:timestamp,
             }).await.map_err(TelegramControlError::Outbox)?;
+            if outbox.created && let Some(projection) = projection {
+                sqlx::query("UPDATE outbox_messages SET memory_fence=$2::jsonb WHERE id=$1")
+                    .bind(outbox.outbox_id).bind(projection).execute(&mut *txn).await?;
+            }
             // Recheck expiry after storage work, while every side effect is still reversible.
             let final_clock: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn).await?;

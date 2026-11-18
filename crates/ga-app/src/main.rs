@@ -3,6 +3,7 @@ mod backup;
 mod backup_space;
 mod configuration;
 mod http;
+mod mcp_stdio;
 mod migrate;
 mod replay_worker;
 mod retention;
@@ -64,6 +65,8 @@ enum Command {
         source: PathBuf,
         destination: PathBuf,
     },
+    /// Serve MCP tools over standard input and output
+    Mcp,
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
@@ -155,6 +158,12 @@ fn main() -> ExitCode {
             destination,
         }) => {
             return backup_result(backup::unpack(&source, &destination));
+        }
+        Some(Command::Mcp) => {
+            if let Err(error) = mcp_stdio::run() {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
         }
         Some(Command::Replay { once }) => {
             if let Err(error) = replay_worker::run(once) {

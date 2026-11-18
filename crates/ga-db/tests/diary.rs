@@ -1,4 +1,10 @@
-use std::{env, error::Error, io, str::FromStr};
+use std::{
+    env,
+    error::Error,
+    io,
+    str::FromStr,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use ga_db::{
     Database,
@@ -70,6 +76,18 @@ async fn creates_diary_event_audit_and_metric_together_and_replays_the_original(
         .await?;
     assert!(legacy.reused);
     assert_eq!(legacy.revision, 1);
+
+    let previous = counts(&inspect).await?;
+    let checks = AtomicUsize::new(0);
+    assert!(matches!(
+        db.create_system_event_unless_cancelled(request("synthetic-rust-event"), || {
+            checks.fetch_add(1, Ordering::Relaxed) != 0
+        })
+        .await,
+        Err(DiaryWriteError::Cancelled)
+    ));
+    assert_eq!(checks.load(Ordering::Relaxed), 2);
+    assert_eq!(counts(&inspect).await?, previous);
 
     let entry = db
         .create_system_event(request("synthetic-rust-event"))

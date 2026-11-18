@@ -1,5 +1,5 @@
 mod personal_goals;
-mod tools;
+pub(crate) mod tools;
 mod tracker_sharing;
 
 use std::{env, io, sync::Arc};

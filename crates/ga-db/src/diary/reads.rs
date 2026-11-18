@@ -118,10 +118,44 @@ impl Database {
         &self,
         query: ModelDiaryQuery<'_>,
     ) -> Result<ModelDiaryPage, DiaryReadError> {
-        let (start, end) = model_window(&query)?;
+        let window = model_window(&query)?;
+        self.list_scoped_events(query, Some(window)).await
+    }
+
+    /// The local MCP model uses its own consent destination. The original
+    /// tool evaluates its diary grant before checking the date window.
+    pub async fn list_mcp_events(
+        &self,
+        owner_id: Uuid,
+        start: StoredInstant,
+        end: StoredInstant,
+        kind: Option<&str>,
+    ) -> Result<ModelDiaryPage, DiaryReadError> {
+        let model = ShareDestination::new(DestinationKind::Model, "model:mcp:local")
+            .map_err(|_| DiaryReadError::InvalidDestination)?;
+        self.list_scoped_events(
+            ModelDiaryQuery {
+                owner_id,
+                start,
+                end,
+                kind,
+                limit: 500,
+                model,
+                channel: None,
+            },
+            None,
+        )
+        .await
+    }
+
+    async fn list_scoped_events(
+        &self,
+        query: ModelDiaryQuery<'_>,
+        validated_window: Option<(OffsetDateTime, OffsetDateTime)>,
+    ) -> Result<ModelDiaryPage, DiaryReadError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
-            let page = model_events_in(&mut txn, query, start, end).await?;
+            let page = model_events_in(&mut txn, query, validated_window).await?;
             txn.commit().await?;
             Ok(page)
         })
@@ -175,8 +209,8 @@ impl Database {
                 kind: range.kind,
                 limit: range.limit,
             };
-            let (start, end) = model_window(&query)?;
-            let page = model_events_in(&mut txn, query, start, end).await?;
+            let window = model_window(&query)?;
+            let page = model_events_in(&mut txn, query, Some(window)).await?;
             txn.commit().await?;
             Ok(page)
         })
@@ -239,10 +273,13 @@ fn model_window(
 async fn model_events_in(
     txn: &mut Transaction<'_, Postgres>,
     query: ModelDiaryQuery<'_>,
-    start: OffsetDateTime,
-    end: OffsetDateTime,
+    validated_window: Option<(OffsetDateTime, OffsetDateTime)>,
 ) -> Result<ModelDiaryPage, DiaryReadError> {
     model_diary_allowed(txn, query.owner_id).await?;
+    let (start, end) = match validated_window {
+        Some(window) => window,
+        None => model_window(&query)?,
+    };
     let audience = ModelAudience {
         model: query.model.instance(),
         channel: query.channel.map(ShareDestination::instance),

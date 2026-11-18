@@ -3,13 +3,18 @@ pub use dispatch::{ReplyDispatchError, ReplyDispatchResult, ReplyObservation, Re
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{
+    channel::InboundEnvelope, telegram_control::TelegramControl, timestamp::StoredInstant,
+};
 use serde::Deserialize;
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK};
+use crate::{
+    Database, ReadinessError, check_readiness, replay::REPLAY_MUTATION_LOCK,
+    telegram_today::TodayProjection,
+};
 
 const CANDIDATES_PER_CLAIM: usize = 64;
 
@@ -79,6 +84,12 @@ impl Candidate {
 struct MemoryFence {
     target_epoch: String,
     source_epochs: BTreeMap<String, String>,
+    telegram_today: Option<TodayProjection>,
+}
+
+enum FenceStatus {
+    Stale,
+    Current(Option<TodayProjection>),
 }
 
 impl Database {
@@ -134,7 +145,10 @@ async fn next_claim(
         let Some(candidate) = candidate(txn, destination, now).await? else {
             return Ok(None);
         };
-        if !valid_fence(txn, destination.owner_id, &candidate).await? {
+        if matches!(
+            check_fence(txn, destination.owner_id, &candidate).await?,
+            FenceStatus::Stale
+        ) {
             sqlx::query(
                 "UPDATE outbox_messages SET state='cancelled',updated_at=now() WHERE id=$1",
             )
@@ -190,31 +204,33 @@ async fn candidate(
     .await
 }
 
-async fn valid_fence(
+async fn check_fence(
     txn: &mut Transaction<'_, Postgres>,
     owner_id: Uuid,
     candidate: &Candidate,
-) -> Result<bool, sqlx::Error> {
+) -> Result<FenceStatus, sqlx::Error> {
     // SQLAlchemy can persist an explicit None as JSON null.
     let Some(fence) = candidate.fence.as_deref().filter(|value| *value != "null") else {
-        return Ok(true);
+        return Ok(FenceStatus::Current(None));
     };
     let Ok(fence) = serde_json::from_str::<MemoryFence>(fence) else {
-        return Ok(false);
+        return Ok(FenceStatus::Stale);
     };
-    if fence.target_epoch.parse().ok() != Some(candidate.memory_epoch)
-        || (!candidate.owner_memory && !fence.source_epochs.is_empty())
+    let today = fence.telegram_today.is_some();
+    if !today
+        && (fence.target_epoch.parse().ok() != Some(candidate.memory_epoch)
+            || (!candidate.owner_memory && !fence.source_epochs.is_empty()))
     {
-        return Ok(false);
+        return Ok(FenceStatus::Stale);
     }
-    if candidate.owner_memory {
+    if candidate.owner_memory && !today {
         let sources: Option<BTreeMap<Uuid, Uuid>> = fence
             .source_epochs
             .into_iter()
             .map(|(id, epoch)| Some((id.parse().ok()?, epoch.parse().ok()?)))
             .collect();
         let Some(sources) = sources else {
-            return Ok(false);
+            return Ok(FenceStatus::Stale);
         };
         let sources: BTreeMap<_, _> = sources
             .into_iter()
@@ -230,19 +246,36 @@ async fn valid_fence(
         .fetch_one(&mut **txn)
         .await?;
         if !bound {
-            return Ok(false);
+            return Ok(FenceStatus::Stale);
         }
     }
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM inbound_messages i
+    let inbound: Option<(bool, Option<String>)> = sqlx::query_as(
+        "SELECT i.legacy_telegram_update_id IS NULL AND i.revision=(SELECT max(revision) FROM inbound_messages
+                WHERE owner_id=$2 AND conversation_id=$3 AND operation_id=$4),
+                CASE WHEN $5 THEN i.envelope::text END
+          FROM inbound_messages i
           WHERE i.id=$1 AND i.owner_id=$2 AND i.conversation_id=$3 AND i.operation_id=$4
-            AND i.revision=(SELECT max(revision) FROM inbound_messages
-                WHERE owner_id=$2 AND conversation_id=$3 AND operation_id=$4))",
+        ",
     )
     .bind(candidate.inbound_id)
     .bind(owner_id)
     .bind(candidate.conversation_id)
     .bind(candidate.operation_id)
-    .fetch_one(&mut **txn)
-    .await
+    .bind(today)
+    .fetch_optional(&mut **txn)
+    .await?;
+    let Some((true, envelope)) = inbound else {
+        return Ok(FenceStatus::Stale);
+    };
+    if today
+        && envelope
+            .as_deref()
+            .and_then(|raw| InboundEnvelope::parse(raw.as_bytes()).ok())
+            .as_ref()
+            .and_then(TelegramControl::from_envelope)
+            != Some(TelegramControl::Today)
+    {
+        return Ok(FenceStatus::Stale);
+    }
+    Ok(FenceStatus::Current(fence.telegram_today))
 }

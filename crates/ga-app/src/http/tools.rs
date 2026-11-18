@@ -446,7 +446,11 @@ fn device_arguments(arguments: &Map<String, Value>) -> Option<(StoredInstant, St
     ))
 }
 
-fn range_with_kind(
+pub(crate) fn event_tool_description() -> Value {
+    ReadTool::Events.catalog_entry()
+}
+
+pub(crate) fn range_with_kind(
     arguments: &Map<String, Value>,
 ) -> Option<(StoredInstant, StoredInstant, Option<&str>)> {
     if arguments
