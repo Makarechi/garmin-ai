@@ -116,7 +116,7 @@ pub fn estimate_backup_space(
     Ok(BackupSpace { volumes })
 }
 
-fn existing_directory(path: &Path) -> Result<(OwnedFd, bool), ArchiveError> {
+pub(crate) fn existing_directory(path: &Path) -> Result<(OwnedFd, bool), ArchiveError> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {

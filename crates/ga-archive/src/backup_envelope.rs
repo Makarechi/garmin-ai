@@ -131,15 +131,15 @@ fn authenticate_source(
 }
 
 #[derive(PartialEq, Eq)]
-struct Revision {
+pub(crate) struct Revision {
     device: u64,
     inode: u64,
-    bytes: u64,
+    pub(crate) bytes: u64,
     modified: (i64, i64),
     changed: (i64, i64),
 }
 
-fn revision(file: &File) -> Result<Revision, BackupError> {
+pub(crate) fn revision(file: &File) -> Result<Revision, BackupError> {
     let metadata = file.metadata()?;
     Ok(Revision {
         device: metadata.dev(),
@@ -319,7 +319,7 @@ fn read_frame(source: &mut File, data: &mut [u8]) -> Result<(), BackupError> {
     })
 }
 
-fn open_source(path: &Path) -> Result<File, BackupError> {
+pub(crate) fn open_source(path: &Path) -> Result<File, BackupError> {
     let (directory, name) = parent_file(path, false)?;
     let metadata = fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
