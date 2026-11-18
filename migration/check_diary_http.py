@@ -496,12 +496,118 @@ def compare_undo(python, native, engine):
             }
 
 
+def compare_system_updates(python, native, engine):
+    hidden = hidden_id(engine, "user.synthetic_edit_refused")
+    deleted = python.post(PATH, headers=headers("both", "fixture-python"), json=NOTE).json()
+    deleted_endpoint = f"{PATH}/{deleted['id']}"
+    amended = {
+        **NOTE,
+        "start": "2026-10-25T02:15:00.123456+02:00",
+        "original_text": "Синтетическое уточнение",
+        "payload": {**NOTE["payload"], "description": "synthetic correction"},
+    }
+    request = {"revision": 1, "event": amended}
+    target = python.post(PATH, headers=headers("both"), json=NOTE).json()
+    identity = UUID(target["id"])
+    endpoint = f"{PATH}/{identity}"
+    for client in (python, native):
+        for role, status in [(None, 401), ("reader", 403), ("writer", 403)]:
+            assert client.put(endpoint, headers=headers(role), json=request).status_code == status
+        missing = client.put(deleted_endpoint, headers=headers("both"), json=request)
+        assert missing.status_code == 404 and missing.json() == {"detail": "Record not found"}
+        assert (
+            client.put(f"{PATH}/{hidden}", headers=headers("both"), json=request).status_code == 422
+        )
+        stale = client.put(endpoint, headers=headers("both"), json={**request, "revision": 2})
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Event changed; reload before editing"}
+        self_reference = {
+            **amended,
+            "payload": {
+                "type": "medication",
+                "name": "synthetic medication",
+                "reason_event_id": str(identity),
+            },
+        }
+        invalid_relation = client.put(
+            endpoint, headers=headers("both"), json={"revision": 1, "event": self_reference}
+        )
+        assert invalid_relation.status_code == 409
+        assert invalid_relation.json() == {"detail": "A medication cannot reference itself"}
+        assert client.get(endpoint, headers=headers("reader")).json() == target
+
+    updated = native.put(endpoint, headers=headers("both"), json=request)
+    assert updated.status_code == 200 and updated.headers["cache-control"] == "no-store"
+    document = updated.json()
+    assert document["revision"] == 2 and document["start"] == amended["start"]
+    assert document["canonical"]["observed"]["start"] == amended["start"]
+    assert document["payload"]["description"] == amended["payload"]["description"]
+    assert document["original_text"] == amended["original_text"]
+    assert (
+        native.get(endpoint, headers=headers("reader")).json()
+        == python.get(endpoint, headers=headers("reader")).json()
+    )
+    for client in (python, native):
+        assert client.put(endpoint, headers=headers("both"), json=request).status_code == 409
+    with engine.connect() as connection:
+        audits = connection.execute(
+            text("SELECT action,actor,before,after FROM audit_log WHERE event_id=:id ORDER BY id"),
+            {"id": identity},
+        ).all()
+    assert [(audit.action, audit.actor) for audit in audits] == [
+        ("create", "api"),
+        ("update", "api"),
+    ]
+    assert audits[1].before == audits[0].after
+    assert audits[1].after["revision"] == 2 and audits[1].after["start"] == amended["start"]
+
+    python_target = python.post(PATH, headers=headers("both"), json=NOTE).json()
+    reference = python.put(f"{PATH}/{python_target['id']}", headers=headers("both"), json=request)
+    assert reference.status_code == 200
+    expected = reference.json()
+    for name in ("id", "created_at", "updated_at", "recorded_at", "ingested_at"):
+        document.pop(name)
+        expected.pop(name)
+    for name in ("recorded_at", "ingested_at"):
+        document["canonical"].pop(name)
+        expected["canonical"].pop(name)
+    assert document == expected
+
+    point = {
+        **NOTE,
+        "start": "2026-10-25T02:15:00.123456+02:00",
+        "payload": {"type": "wellbeing_observation", "energy": 6},
+    }
+    for client in (python, native):
+        created = python.post(PATH, headers=headers("both"), json=point)
+        assert created.status_code == 200
+        point_id = UUID(created.json()["id"])
+        point_endpoint = f"{PATH}/{point_id}"
+        corrected = client.put(
+            point_endpoint,
+            headers=headers("both"),
+            json={
+                "revision": 1,
+                "event": {**point, "end": "2026-10-25T00:15:00.123456Z"},
+            },
+        )
+        assert corrected.status_code == 200 and corrected.json()["end"] is None
+        with engine.connect() as connection:
+            ending = connection.execute(
+                text("SELECT after->'end' FROM audit_log WHERE event_id=:id AND action='update'"),
+                {"id": point_id},
+            ).scalar_one()
+        assert ending is None
+        saved = client.get(point_endpoint, headers=headers("reader"))
+        assert saved.status_code == 200 and saved.json()["end"] is None
+
+
 def run(binary):
     engine = isolated_engine()
     try:
         with Session(engine) as session, session.begin():
             packs = ensure_scenario_packs(session, legacy_install=False)
-            for key in ("caffeine", "wellbeing", "general_diary"):
+            for key in ("caffeine", "migraine", "wellbeing", "general_diary"):
                 row = packs[key]
                 configure_scenario_pack(
                     session,
@@ -541,6 +647,7 @@ def run(binary):
                     compare(python, native, engine)
                     compare_tracker_creation(python, native, engine)
                     compare_tracker_updates(python, native, engine)
+                    compare_system_updates(python, native, engine)
                     compare_undo(python, native, engine)
             finally:
                 process.terminate()

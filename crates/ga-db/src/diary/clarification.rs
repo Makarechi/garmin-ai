@@ -232,17 +232,25 @@ async fn load(
         .await?;
     let Some(row) = row else { return Ok(None) };
     let value: Value = serde_json::from_str(&row).map_err(|_| ClarificationError::InvalidState)?;
+    Ok(clarification_active_at(&value, &scope.destination, clock).then_some(value))
+}
+
+pub(crate) fn clarification_active_at(
+    value: &Value,
+    scope: &str,
+    clock: ClarificationClock,
+) -> bool {
     let Some(fields) = value.as_object() else {
-        return Ok(None);
+        return false;
     };
     let destination = fields
         .get("channel_instance_id")
         .map_or(Some("telegram:primary"), Value::as_str);
-    if destination != Some(&scope.destination) {
-        return Ok(None);
+    if destination != Some(scope) {
+        return false;
     }
     let Some(created) = fields.get("created_at") else {
-        return Ok(None);
+        return false;
     };
     let Some(at) = fields
         .get("preset_selected_at")
@@ -250,7 +258,7 @@ async fn load(
         .as_str()
         .and_then(|text| text.parse::<StoredInstant>().ok())
     else {
-        return Ok(None);
+        return false;
     };
     let message_clock =
         clock.use_message_time || fields.get("explicit_selector") == Some(&Value::Bool(true));
@@ -259,9 +267,7 @@ async fn load(
     } else {
         clock.conversation_now
     };
-    let recent =
-        (0..=TWO_HOURS_MICROS).contains(&(now.unix_microseconds() - at.unix_microseconds()));
-    Ok(recent.then_some(value))
+    (0..=TWO_HOURS_MICROS).contains(&(now.unix_microseconds() - at.unix_microseconds()))
 }
 
 fn append(
