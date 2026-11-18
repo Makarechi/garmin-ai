@@ -7,7 +7,7 @@ mod specification;
 mod tracker_setup;
 pub use entry::{CustomEntry, CustomEntryError, ResolvedCustomEntry};
 pub use specification::{CustomDefinition, CustomDefinitionError};
-pub use tracker_setup::{TrackerSetupDraft, TrackerSetupError};
+pub use tracker_setup::{TrackerSettingsUpdate, TrackerSetupDraft, TrackerSetupError};
 
 pub use custom::{CustomSchemaError, validate_custom_schema};
 

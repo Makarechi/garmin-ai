@@ -39,6 +39,58 @@ pub struct TrackerSetupDraft {
     hash: String,
 }
 
+pub struct TrackerSettingsUpdate {
+    pub revision: Number,
+    pub shortcut: Option<String>,
+    pub reminder_enabled: bool,
+    pub reminder_time: Option<String>,
+    pub reminder_timezone: String,
+}
+
+impl TrackerSettingsUpdate {
+    pub fn from_json(value: &Value) -> Result<Self, TrackerSetupError> {
+        use TrackerSetupError::Invalid;
+        let raw = fields(
+            value,
+            &[
+                "revision",
+                "shortcut",
+                "reminder_enabled",
+                "reminder_time",
+                "reminder_timezone",
+            ],
+        )?;
+        let revision = raw
+            .get("revision")
+            .and_then(Value::as_number)
+            .ok_or(Invalid)?;
+        let integer = revision.to_string();
+        if !integer.bytes().all(|byte| byte.is_ascii_digit())
+            || integer.parse::<BigInt>().map_err(|_| Invalid)? < BigInt::from(1)
+        {
+            return Err(Invalid);
+        }
+        let shortcut = optional_name(raw.get("shortcut"), 0, 64)?;
+        let reminder_time = optional_name(raw.get("reminder_time"), 5, 5)?;
+        let reminder_enabled =
+            legacy_boolean(raw.get("reminder_enabled").ok_or(Invalid)?).ok_or(Invalid)?;
+        let reminder_timezone = text_or(raw.get("reminder_timezone"), "UTC")?;
+        if !known_timezone(reminder_timezone)
+            || reminder_time.is_some_and(|value| !clock(value))
+            || reminder_enabled && reminder_time.is_none()
+        {
+            return Err(Invalid);
+        }
+        Ok(Self {
+            revision: revision.clone(),
+            shortcut: shortcut.map(str::to_owned),
+            reminder_enabled,
+            reminder_time: reminder_time.map(str::to_owned),
+            reminder_timezone: reminder_timezone.to_owned(),
+        })
+    }
+}
+
 impl TrackerSetupDraft {
     pub fn from_json(value: &Value) -> Result<Self, TrackerSetupError> {
         use TrackerSetupError::Invalid;
