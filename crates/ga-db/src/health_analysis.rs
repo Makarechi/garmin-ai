@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod freshness_report;
+pub(crate) use freshness_report::data_freshness_in;
 pub use freshness_report::{MODEL_HEALTH_PACKS, model_metric_packs};
 
 const MAX_RANGE_DAYS: i64 = 3660;

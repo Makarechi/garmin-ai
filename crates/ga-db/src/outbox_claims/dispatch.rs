@@ -16,7 +16,7 @@ use crate::{
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{CHANNEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed},
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
-    telegram_today::REPLAY_NOTICE,
+    telegram_garmin::REPLAY_NOTICE,
 };
 
 const DATABASE_DEADLINE: Duration = Duration::from_millis(1500);

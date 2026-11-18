@@ -103,6 +103,7 @@ impl Database {
             Some(&[
                 "/forget_conversation",
                 "/today",
+                "/status",
                 "/pause",
                 "/resume",
                 "/help",

@@ -146,7 +146,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .owner_timezone()
         .await
         .map_err(ReplayServiceError::Lease)?
-        .unwrap_or(config.timezone);
+        .unwrap_or_else(|| config.timezone.clone());
     if worker {
         singleton
             .publish_worker_heartbeat()
@@ -196,7 +196,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         {
             tokio::select! {
                 result = transport.run_acknowledgements(&database, settings) => result,
-                result = transport.run_owner_controls(&database, settings, *question_budget) => result,
+                result = transport.run_owner_controls(&database, settings, *question_budget, &config.timezone) => result,
                 result = transport.run_replies(&database, settings) => result,
             }
         }
