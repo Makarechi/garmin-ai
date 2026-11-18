@@ -122,6 +122,10 @@ def exercise(engine, python, native):
     ]
     expected = (200, 409, 200, 200, 200)
     results = []
+    missing = f"/tracker-setups/{uuid4()}/settings"
+    for client in (python, native):
+        response = client.put(missing, json=bodies[0], headers={"Authorization": f"Bearer {ADMIN}"})
+        assert response.status_code == 404 and response.json() == {"detail": "Record not found"}
     for client, tracker in zip((python, native), trackers, strict=True):
         path = f"/tracker-setups/{tracker}/settings"
 

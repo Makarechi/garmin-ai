@@ -159,9 +159,7 @@ fn invalid() -> Response {
 
 fn failure(error: TrackerSetupStoreError) -> Response {
     match error {
-        TrackerSetupStoreError::TrackerMissing => {
-            detail(StatusCode::NOT_FOUND, "Tracker not found")
-        }
+        TrackerSetupStoreError::TrackerMissing => detail(StatusCode::NOT_FOUND, "Record not found"),
         TrackerSetupStoreError::SettingsChanged => detail(
             StatusCode::CONFLICT,
             "Tracker settings changed; reload before editing",
