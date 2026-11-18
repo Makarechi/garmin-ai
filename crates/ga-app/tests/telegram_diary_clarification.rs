@@ -18,6 +18,7 @@ use uuid::Uuid;
 #[derive(Deserialize)]
 struct Case {
     update_id: i64,
+    edits: Option<i64>,
     message_at: String,
     processing_started: String,
     text: String,
@@ -71,7 +72,8 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
     let cases: Vec<Case> = serde_json::from_slice(&fs::read(env::var(
         "GA_TEST_TELEGRAM_DIARY_CLARIFICATION",
     )?)?)?;
-    assert_eq!(cases.len(), 2);
+    assert_eq!(cases.len(), 3);
+    let mut previous = None;
     for (index, case) in cases.iter().enumerate() {
         let message_at: OffsetDateTime = case.message_at.parse::<StoredInstant>()?.into();
         let started = case.processing_started.parse()?;
@@ -79,25 +81,32 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
             .fetch_one(&pool)
             .await?;
         let now = StoredInstant::try_from(now)?;
+        let mut message = json!({
+            "message_id":case.edits.unwrap_or(case.update_id),
+            "from":{"id":42},
+            "chat":{"id":42,"type":"private"},
+            "date":message_at.unix_timestamp(),
+            "text":case.text
+        });
+        let update = if case.edits.is_some() {
+            message["edit_date"] = json!(message_at.unix_timestamp());
+            json!({"update_id":case.update_id,"edited_message":message})
+        } else {
+            json!({"update_id":case.update_id,"message":message})
+        };
         let receipt = binding
-            .accept_polled_update(
-                &mut runtime,
-                &json!({
-                    "update_id":case.update_id,
-                    "message":{
-                        "message_id":case.update_id,
-                        "from":{"id":42},
-                        "chat":{"id":42,"type":"private"},
-                        "date":message_at.unix_timestamp(),
-                        "text":case.text
-                    }
-                }),
-                now,
-                false,
-            )
+            .accept_polled_update(&mut runtime, &update, now, false)
             .await?
             .inbound
             .ok_or("Missing authenticated message")?;
+        if case.edits.is_some() {
+            assert_eq!(receipt.supersedes_id, previous.map(|(message, _)| message));
+            assert_eq!(
+                Some(receipt.operation_id),
+                previous.map(|(_, operation)| operation)
+            );
+        }
+        previous = Some((receipt.message_id, receipt.operation_id));
         let lease = database
             .claim_telegram_inbound(target, now, 60)
             .await?
@@ -151,7 +160,8 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
             "SELECT state.value::text,i.status,o.intent#>>'{blocks,0,text}'
                FROM app_state state CROSS JOIN inbound_messages i
                CROSS JOIN outbox_messages o
-              WHERE state.key='conversation:pending' AND i.id=$1 AND o.id=$2",
+              WHERE state.key='conversation:pending' AND i.id=$1 AND o.id=$2
+                AND o.inbound_message_id=i.id",
         )
         .bind(receipt.message_id)
         .bind(queued.outbox_id)
@@ -161,6 +171,10 @@ async fn stores_clarification_with_its_reply_and_current_inbox_lease() -> Result
         assert_eq!(status, "processed");
         assert_eq!(reply, case.outbox_text);
     }
+    let distinct_outbox: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_messages")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(distinct_outbox, 3);
     let separate: String = sqlx::query_scalar(
         "SELECT value::text FROM app_state WHERE key='conversation:pending:telegram:secondary'",
     )
