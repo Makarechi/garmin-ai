@@ -172,6 +172,36 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .bind(owner)
         .execute(&pool)
         .await?;
+    let mut replay = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(72104619)")
+        .execute(&mut *replay)
+        .await?;
+    match database.apply_telegram_owner_control(&pause, 3).await {
+        Err(
+            error @ TelegramControlError::Outbox(ga_db::outbox_enqueue::QueueIntentError::Busy),
+        ) => {
+            assert!(error.is_busy());
+        }
+        _ => return Err("Expected retryable outbox lock contention".into()),
+    }
+    database.defer_telegram_owner_control(&pause, now).await?;
+    let unavailable: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT FROM app_state WHERE key='proactive:enabled')
+            AND NOT EXISTS(SELECT FROM outbox_messages WHERE inbound_message_id=$1)
+            AND EXISTS(SELECT FROM jobs
+                       WHERE payload->>'inbound_message_id'=$1::uuid::text
+                         AND status='pending' AND attempts=0 AND last_error='TelegramPolicyBusy')",
+    )
+    .bind(pause.message_id())
+    .fetch_one(&pool)
+    .await?;
+    assert!(unavailable);
+    replay.rollback().await?;
+    let after_retry = StoredInstant::from_unix_microseconds(now.unix_microseconds() + 300_000)?;
+    let pause = database
+        .claim_telegram_control(target, after_retry, 60)
+        .await?
+        .ok_or("Missing rescheduled pause")?;
     assert!(
         database
             .apply_telegram_owner_control(&pause, 3)

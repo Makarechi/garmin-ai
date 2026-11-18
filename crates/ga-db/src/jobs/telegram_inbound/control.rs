@@ -68,6 +68,7 @@ impl TelegramControlError {
                 | Self::Pairing(TelegramBindingError::Busy)
                 | Self::Memory(MemoryError::Busy)
                 | Self::Proactive(ProactiveControlError::Busy)
+                | Self::Outbox(QueueIntentError::Busy)
         )
     }
 }
