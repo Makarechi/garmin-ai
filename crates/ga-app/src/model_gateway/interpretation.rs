@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, error::Error, fmt, time::Instant};
 
-use ga_db::share_policy::ShareRequirement;
+use ga_db::{diary::DiaryReadError, share_policy::ShareRequirement};
 use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation, InterpretationError},
     analysis_budget::{AnalysisBudget, AnalysisBudgetError, AnalysisStage},
@@ -18,8 +18,11 @@ use uuid::Uuid;
 
 use super::{
     ActiveModelJob, AnalysisError, CurrentModelPolicy, GatewayError, ModelGateway, ModelInput,
-    analysis::ordered,
+    Sender, analysis::ordered, runtime::ModelRequestScope,
 };
+
+mod telegram;
+pub use telegram::TelegramDiaryInterpretation;
 
 const EXTRACT: &str = include_str!("../../../../src/garmin_ai/prompts/diary_extract.txt");
 const OWNER_TEXT_LIMIT: usize = 16_000;
@@ -48,6 +51,9 @@ pub struct DiaryInterpretationRequest<'a> {
 
 #[derive(Debug)]
 pub enum DiaryInterpretationError {
+    InvalidTelegramMessage,
+    ExpiredSelection,
+    Read(DiaryReadError),
     RequiresSafetyScreen,
     HistoryTooLarge,
     InvalidContext,
@@ -60,6 +66,11 @@ pub enum DiaryInterpretationError {
 impl fmt::Display for DiaryInterpretationError {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidTelegramMessage => {
+                output.write_str("Invalid stored Telegram diary message")
+            }
+            Self::Read(error) => error.fmt(output),
+            Self::ExpiredSelection => output.write_str("Saved diary record selection expired"),
             Self::RequiresSafetyScreen => {
                 output.write_str("Owner text requires the bounded safety screen")
             }
@@ -93,6 +104,28 @@ impl ModelGateway<'_> {
         requirements: &[ShareRequirement<'_>],
         job: Option<ActiveModelJob>,
     ) -> Result<AgentInterpretation, DiaryInterpretationError> {
+        self.interpret_with(
+            request,
+            budget,
+            &policy,
+            ModelRequestScope {
+                requirements,
+                channel: None,
+                job,
+            },
+            &self.transport,
+        )
+        .await
+    }
+
+    async fn interpret_with<'policy, S: Sender>(
+        &self,
+        request: DiaryInterpretationRequest<'_>,
+        budget: &mut AnalysisBudget,
+        policy: &(impl Fn() -> CurrentModelPolicy<'policy> + Sync),
+        scope: ModelRequestScope<'_>,
+        sender: &S,
+    ) -> Result<AgentInterpretation, DiaryInterpretationError> {
         let prompt = PreparedPrompt::new(request)?;
         let remaining = budget.record_model_call(
             AnalysisStage::Interpretation,
@@ -102,7 +135,7 @@ impl ModelGateway<'_> {
         )?;
         let response = tokio::time::timeout(
             remaining,
-            self.execute(
+            self.execute_with_context(
                 ModelInput::Structured {
                     contract: ApprovedModelSchema::Interpretation,
                     instruction: EXTRACT.trim(),
@@ -110,8 +143,8 @@ impl ModelGateway<'_> {
                     categories: ModelCategories::HEALTH_AND_DIARY,
                 },
                 policy,
-                requirements,
-                job,
+                scope,
+                sender,
             ),
         )
         .await
