@@ -47,26 +47,36 @@ async fn migrates_only_a_supported_disposable_schema() -> Result<(), Box<dyn Err
                 Err(SchemaMigrationError::Occupied)
             ));
         }
-        "rollback" => {
-            assert_eq!(
-                database.schema_status().await?,
+        case @ ("rollback" | "rollback_ingestion") => {
+            let expected = if case == "rollback_ingestion" {
+                SchemaState::BeforeIngestionTime
+            } else {
                 SchemaState::BeforeRevisions
-            );
+            };
+            assert_eq!(database.schema_status().await?, expected);
             assert!(database.migrate_schema().await.is_err());
-            assert_eq!(
-                database.schema_status().await?,
-                SchemaState::BeforeRevisions
-            );
+            assert_eq!(database.schema_status().await?, expected);
             let table: bool = sqlx::query_scalar(
                 "SELECT to_regclass('public.measurement_revisions') IS NOT NULL",
             )
             .fetch_one(&mut inspect)
             .await?;
             assert!(!table);
+            if case == "rollback_ingestion" {
+                let columns: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT FROM information_schema.columns WHERE table_schema='public'
+                     AND ((table_name='measurements' AND column_name='ingested_at') OR
+                          (table_name='metric_definition_versions' AND column_name='category_domain')))",
+                )
+                .fetch_one(&mut inspect)
+                .await?;
+                assert!(!columns);
+            }
         }
         other => {
             let expected = match other {
                 "fresh" => SchemaState::Empty,
+                "before_ingestion" => SchemaState::BeforeIngestionTime,
                 "before_revisions" => SchemaState::BeforeRevisions,
                 "before_fence" => SchemaState::BeforeFence,
                 _ => return Err("Unrecognized fixture case".into()),
