@@ -128,6 +128,31 @@ async fn create_request(state: &AppState, request: Request, kind: EntryKind) -> 
     private_cache(response, &parts.headers)
 }
 
+pub(super) async fn undo(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    let response = if method == Method::POST {
+        match authorized(&state, &headers, &[Scope::ReadDiary, Scope::WriteDiary]).await {
+            Ok((database, owner)) => match idempotency_key(&headers) {
+                Ok(key) => match database
+                    .undo_api_diary(owner, key.as_deref(), &state.configured_timezone)
+                    .await
+                {
+                    Ok(receipt) => Json(receipt).into_response(),
+                    Err(error) => write_failure(error),
+                },
+                Err(_) => invalid_arguments(),
+            },
+            Err(status) => access_failure(status),
+        }
+    } else {
+        method_not_allowed("POST")
+    };
+    private_cache(response, &headers)
+}
+
 pub(super) async fn entry(
     Path(id): Path<String>,
     State(state): State<AppState>,
@@ -216,18 +241,9 @@ async fn create_entry(
     body: Body,
     kind: EntryKind,
 ) -> Response {
-    let idempotency = headers.get("idempotency-key").map(|key| {
-        key.as_bytes()
-            .iter()
-            .map(|byte| char::from(*byte))
-            .collect::<String>()
-    });
-    if idempotency
-        .as_deref()
-        .is_some_and(|key| check_idempotency_key(key).is_err())
-    {
+    let Ok(idempotency) = idempotency_key(headers) else {
         return invalid_arguments();
-    }
+    };
     let body = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(data) => data,
         Err(_) => return report_too_large(),
@@ -270,6 +286,21 @@ async fn create_entry(
         Ok(entry) => event_response(entry.snapshot),
         Err(error) => write_failure(error),
     }
+}
+
+fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ReplayConflict> {
+    headers
+        .get("idempotency-key")
+        .map(|key| {
+            let key: String = key
+                .as_bytes()
+                .iter()
+                .map(|byte| char::from(*byte))
+                .collect();
+            check_idempotency_key(&key)?;
+            Ok(key)
+        })
+        .transpose()
 }
 
 async fn authorized<'a>(
@@ -327,6 +358,19 @@ fn write_failure(error: DiaryWriteError) -> Response {
         DiaryWriteError::RevisionChanged => {
             detail(StatusCode::CONFLICT, "Event changed; reload before editing")
         }
+        DiaryWriteError::NothingToUndo => detail(StatusCode::NOT_FOUND, "Record not found"),
+        DiaryWriteError::UndoConflict => detail(
+            StatusCode::CONFLICT,
+            "The last operation has already been changed or undone",
+        ),
+        DiaryWriteError::LinkedObservations => detail(
+            StatusCode::CONFLICT,
+            "Detach linked medication or symptom observations before removing or changing this migraine",
+        ),
+        DiaryWriteError::SymptomBounds => detail(
+            StatusCode::CONFLICT,
+            "Episode bounds would strand linked symptom observations",
+        ),
         DiaryWriteError::Input(_)
         | DiaryWriteError::CustomEntry
         | DiaryWriteError::CustomInput(_)

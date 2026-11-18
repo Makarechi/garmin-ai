@@ -2,17 +2,26 @@ use std::time::Duration;
 
 use ga_db::{
     Database,
+    jobs::telegram_inbound::TelegramInboundTarget,
+    outbox_claims::ReplyDestination,
     runtime_lease::{RuntimeLease, RuntimeLeaseError},
 };
+use ga_domain::timestamp::StoredInstant;
 use tokio::time::{Instant, sleep};
 
-use super::{PollProgress, TelegramLoopError, TelegramTransport, TelegramTransportError};
+use super::{
+    PollProgress, TelegramLoopError, TelegramTransport, TelegramTransportError, poller::wall_clock,
+};
 use crate::telegram_settings::TelegramIngressSettings;
 
 const MODE_REFRESH: Duration = Duration::from_secs(30);
 const INACTIVE_RETRY: Duration = Duration::from_secs(2);
 const EMPTY_POLL_RETRY: Duration = Duration::from_millis(250);
 const ACK_IDLE: Duration = Duration::from_millis(250);
+const CONTROL_LEASE_SECONDS: u32 = 5;
+const DELIVERY_LEASE_SECONDS: u32 = 90;
+const RECOVERY_INTERVAL: Duration = Duration::from_secs(10);
+const SEND_RETRY_MICROSECONDS: i64 = 1_000_000;
 
 impl TelegramTransport {
     /// Receive bursts in order on the session that owns the singleton worker lock.
@@ -82,6 +91,89 @@ impl TelegramTransport {
                 Err(_) => INACTIVE_RETRY,
             };
             sleep(wait).await;
+        }
+    }
+
+    /// Handle local commands on a separate lane while external analysis or polling waits.
+    pub async fn run_owner_controls(
+        &self,
+        database: &Database,
+        settings: &TelegramIngressSettings,
+        question_budget: u16,
+    ) -> ! {
+        loop {
+            if let (Ok(binding), Ok(now)) =
+                (settings.confirmed_binding(database).await, wall_clock())
+            {
+                let target = TelegramInboundTarget {
+                    owner_id: binding.owner_id,
+                    instance_id: binding.instance_id,
+                };
+                if let Ok(Some(lease)) = database
+                    .claim_local_telegram_control(target, now, CONTROL_LEASE_SECONDS)
+                    .await
+                {
+                    match database
+                        .apply_telegram_owner_control(&lease, question_budget)
+                        .await
+                    {
+                        Ok(_) => continue,
+                        Err(error) if error.is_busy() => {
+                            if let Ok(now) = wall_clock() {
+                                let _ = database.defer_telegram_owner_control(&lease, now).await;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            sleep(ACK_IDLE).await;
+        }
+    }
+
+    /// Deliver durable ordinary replies and hold unknown provider outcomes for reconciliation.
+    pub async fn run_replies(&self, database: &Database, settings: &TelegramIngressSettings) -> ! {
+        let mut recover_at = Instant::now();
+        loop {
+            if let (Ok(binding), Ok(now)) =
+                (settings.confirmed_binding(database).await, wall_clock())
+            {
+                let destination = ReplyDestination {
+                    owner_id: binding.owner_id,
+                    channel: "telegram",
+                    instance_id: binding.instance_id,
+                };
+                if Instant::now() >= recover_at {
+                    let _ = database
+                        .recover_expired_telegram_outbox(&destination, now)
+                        .await;
+                    recover_at = Instant::now() + RECOVERY_INTERVAL;
+                }
+                if let Ok(Some(claim)) = database
+                    .claim_outbox_reply(destination, now, DELIVERY_LEASE_SECONDS)
+                    .await
+                {
+                    if self
+                        .dispatch_claimed_reply(database, binding, claim, &[])
+                        .await
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    if let Ok(observed) = wall_clock()
+                        && let Ok(retry_at) = StoredInstant::from_unix_microseconds(
+                            observed
+                                .unix_microseconds()
+                                .saturating_add(SEND_RETRY_MICROSECONDS),
+                        )
+                    {
+                        let _ = database
+                            .defer_unsent_reply(binding.owner_id, claim, retry_at)
+                            .await;
+                    }
+                }
+            }
+            sleep(ACK_IDLE).await;
         }
     }
 }
