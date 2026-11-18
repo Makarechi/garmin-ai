@@ -34,6 +34,13 @@ const DEADLINE: Duration = Duration::from_secs(45);
 const PLAN_INTERVAL: Duration = Duration::from_secs(30);
 const JOB_INTERVAL: Duration = Duration::from_secs(1);
 
+pub(crate) fn configured_source_fingerprint(input: Option<&str>, id: &str) -> Option<String> {
+    SourceSettings::selected(input, id)
+        .ok()??
+        .source_hash()
+        .ok()
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SourceSettings {
@@ -98,6 +105,7 @@ impl SourceSettings {
                 .values()
                 .any(|value| value.is_null() || value.is_array() || value.is_object())
             || source.secret_refs.len() > 16
+            || !source.valid_secret_references()
         {
             return Err(ExtensionError::Configuration);
         }
@@ -114,19 +122,6 @@ impl SourceSettings {
     fn context(&self) -> Result<Value, ExtensionError> {
         let mut secrets = Map::new();
         for (name, reference) in &self.secret_refs {
-            let valid = |text: &str, max: usize, allowed: fn(&u8) -> bool| {
-                let mut bytes = text.bytes();
-                text.len() <= max
-                    && bytes.next().is_some_and(|first| allowed(&first))
-                    && bytes.all(|byte| allowed(&byte) || byte.is_ascii_digit() || byte == b'_')
-            };
-            if !valid(name, 64, u8::is_ascii_lowercase)
-                || !reference
-                    .strip_prefix("GA_PLUGIN_")
-                    .is_some_and(|suffix| valid(suffix, 128, u8::is_ascii_uppercase))
-            {
-                return Err(ExtensionError::Configuration);
-            }
             let value = env::var(reference)
                 .ok()
                 .filter(|value| !value.is_empty())
@@ -134,6 +129,21 @@ impl SourceSettings {
             secrets.insert(name.to_owned(), Value::String(value));
         }
         Ok(json!({"config": self.config, "secrets": secrets}))
+    }
+
+    fn valid_secret_references(&self) -> bool {
+        let valid = |text: &str, max: usize, allowed: fn(&u8) -> bool| {
+            let mut bytes = text.bytes();
+            text.len() <= max
+                && bytes.next().is_some_and(|first| allowed(&first))
+                && bytes.all(|byte| allowed(&byte) || byte.is_ascii_digit() || byte == b'_')
+        };
+        self.secret_refs.iter().all(|(name, reference)| {
+            valid(name, 64, u8::is_ascii_lowercase)
+                && reference
+                    .strip_prefix("GA_PLUGIN_")
+                    .is_some_and(|suffix| valid(suffix, 128, u8::is_ascii_uppercase))
+        })
     }
 }
 

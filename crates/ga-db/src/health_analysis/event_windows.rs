@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::{io::Write, time::Duration};
+
+use ga_archive::json_spool::{JsonDocument, JsonSpool};
 
 use ga_domain::{legacy_metrics::legacy_metric_contracts, model_consent::ModelCategories};
 use serde_json::{Value, json};
@@ -36,7 +38,7 @@ impl DailyHealthReader {
         metric: &str,
         start: OffsetDateTime,
         end: OffsetDateTime,
-    ) -> Result<Value, SeriesReadError> {
+    ) -> Result<JsonDocument, SeriesReadError> {
         check_calendar_bounds(
             start.to_offset(UtcOffset::UTC).date(),
             end.to_offset(UtcOffset::UTC).date(),
@@ -66,8 +68,29 @@ impl DailyHealthReader {
             if episodes.len() > 100 {
                 return Err(SeriesReadError::Invalid);
             }
-            let mut rows = Vec::with_capacity(episodes.len());
-            for (id, at) in episodes {
+            let header = json!({
+                "event_type":kind,"metric":metric,"episodes":episodes.len(),"metric_contract":contract,
+                "limitations":[
+                    "Catalog aggregation applies per source; sparse gauges have unknown means",
+                    "No event or no samples is missing evidence, never evidence of absence",
+                ],
+            });
+            let mut prefix =
+                serde_json::to_vec(&header).map_err(|_| HealthAnalysisError::Database)?;
+            prefix.pop();
+            let mut encoded = JsonSpool::default();
+            encoded
+                .write_all(&prefix)
+                .map_err(|_| HealthAnalysisError::Database)?;
+            encoded
+                .write_all(b",\"rows\":[")
+                .map_err(|_| HealthAnalysisError::Database)?;
+            for (index, (id, at)) in episodes.into_iter().enumerate() {
+                if index != 0 {
+                    encoded
+                        .write_all(b",")
+                        .map_err(|_| HealthAnalysisError::Database)?;
+                }
                 let mut windows = Vec::with_capacity(5);
                 for (low, high) in [(-48, -24), (-24, -12), (-12, -6), (-6, 0), (0, 24)] {
                     let left = at + time::Duration::hours(low);
@@ -93,18 +116,16 @@ impl DailyHealthReader {
                 }
                 let mut episode = json!({"event_id":id.to_string(),"start":isoformat(at)});
                 episode["windows"] = Value::Array(windows);
-                rows.push(episode);
+                serde_json::to_writer(&mut encoded, &episode)
+                    .map_err(|_| HealthAnalysisError::Database)?;
             }
             self.0.commit().await?;
-            let mut result = json!({
-                "event_type":kind,"metric":metric,"episodes":rows.len(),"metric_contract":contract,
-                "limitations":[
-                    "Catalog aggregation applies per source; sparse gauges have unknown means",
-                    "No event or no samples is missing evidence, never evidence of absence",
-                ],
-            });
-            result["rows"] = Value::Array(rows);
-            Ok(result)
+            encoded
+                .write_all(b"]}")
+                .map_err(|_| HealthAnalysisError::Database)?;
+            encoded
+                .finish()
+                .map_err(|_| SeriesReadError::Analysis(HealthAnalysisError::Database))
         };
         tokio::time::timeout(Duration::from_secs(15), work)
             .await
