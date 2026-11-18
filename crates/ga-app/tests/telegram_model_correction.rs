@@ -329,11 +329,46 @@ async fn model_correction_rejects_a_newer_entry_and_publishes_only_current_field
         .await?;
     assert!(deleted);
 
+    let repeated = message(&mut runtime, 903, "Undo it again").await?;
+    let TelegramModelAdmission::Ready { undo_anchor, .. } = database
+        .admit_telegram_model_text(&repeated, "UTC", "en")
+        .await?
+    else {
+        return Err("Repeated undo was not admitted".into());
+    };
+    assert_eq!(undo_anchor, fresh);
+    let digest = database
+        .interpretation_context(context_query()?)
+        .await?
+        .digest()?;
+    let queued = database
+        .apply_telegram_model_continuation(
+            &repeated,
+            proof(&digest),
+            ModelContinuation::Undo {
+                offered_audit: undo_anchor,
+            },
+            reply,
+        )
+        .await?;
+    let terminal: (String, String) = sqlx::query_as(
+        "SELECT i.status,o.intent#>>'{blocks,0,text}' FROM outbox_messages o
+         JOIN inbound_messages i ON i.id=o.inbound_message_id WHERE o.id=$1",
+    )
+    .bind(queued.outbox_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal.0, "invalid");
+    assert_eq!(
+        terminal.1,
+        "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
+    );
+
     let question = Uuid::new_v4();
     sqlx::query("INSERT INTO pending_questions(id,kind,text,evidence,priority,earliest_send_at,expires_at,sent_at,status,dedup_key,attempts)
         VALUES($1,'context','Synthetic question','{}',1,$2,$3,$2,'sent','synthetic-acknowledgement',0)")
         .bind(question).bind(at-Duration::minutes(1)).bind(at+Duration::hours(1)).execute(&pool).await?;
-    let answer = message(&mut runtime, 903, "I cannot tell").await?;
+    let answer = message(&mut runtime, 904, "I cannot tell").await?;
     let context = database.interpretation_context(context_query()?).await?;
     assert!(
         context
@@ -371,5 +406,42 @@ async fn model_correction_rejects_a_newer_entry_and_publishes_only_current_field
             .fetch_one(&pool)
             .await?;
     assert_eq!(status, ("acknowledged".into(), "unknown".into()));
+    sqlx::query("DELETE FROM audit_log WHERE actor='telegram:42'")
+        .execute(&pool)
+        .await?;
+    let empty = message(&mut runtime, 905, "Undo my previous change").await?;
+    let TelegramModelAdmission::Ready { undo_anchor, .. } = database
+        .admit_telegram_model_text(&empty, "UTC", "en")
+        .await?
+    else {
+        return Err("Empty undo was not admitted".into());
+    };
+    assert!(undo_anchor.is_none());
+    let digest = database
+        .interpretation_context(context_query()?)
+        .await?
+        .digest()?;
+    let queued = database
+        .apply_telegram_model_continuation(
+            &empty,
+            proof(&digest),
+            ModelContinuation::Undo {
+                offered_audit: None,
+            },
+            reply,
+        )
+        .await?;
+    let terminal: (String, String) = sqlx::query_as(
+        "SELECT i.status,o.intent#>>'{blocks,0,text}' FROM outbox_messages o
+         JOIN inbound_messages i ON i.id=o.inbound_message_id WHERE o.id=$1",
+    )
+    .bind(queued.outbox_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal.0, "invalid");
+    assert_eq!(
+        terminal.1,
+        "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
+    );
     Ok(())
 }
