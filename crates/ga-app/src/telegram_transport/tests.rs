@@ -10,6 +10,7 @@ use tokio::{
 
 use super::{TelegramTransport, TelegramTransportError};
 
+mod garmin_notices;
 mod reminders;
 mod storage_notices;
 mod voice;

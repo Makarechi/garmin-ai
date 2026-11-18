@@ -90,3 +90,52 @@ fn valid_id(value: &str) -> bool {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.:-".contains(&byte)
         })
 }
+
+/// Validate the administrator-configured URL for the Garmin authentication page.
+pub fn garmin_auth_url(value: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(value).ok()?;
+    (url.scheme() == "https"
+        && url.host().is_some()
+        && url.path() == "/garmin-auth"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+}
+
+pub struct GarminReauthNoticeSettings {
+    pub(crate) source: String,
+    pub(crate) launch: Option<reqwest::Url>,
+}
+
+impl GarminReauthNoticeSettings {
+    pub fn resolve(
+        integrations: Option<&str>,
+        token_directory: &Path,
+        launch: Option<&str>,
+        email: Option<&str>,
+        password_secret: Option<String>,
+    ) -> Result<Option<Self>, GarminConfigurationError> {
+        let Some(source) = garmin_auth_source(integrations, token_directory)? else {
+            return Ok(None);
+        };
+        let launch = launch.and_then(garmin_auth_url).filter(|_| {
+            email.is_some_and(|value| !value.is_empty())
+                && password_secret.is_some_and(|value| {
+                    ga_garmin::managed_password::GarminPasswordSecret::pinned(value).is_ok()
+                })
+        });
+        Ok(Some(Self { source, launch }))
+    }
+}
+
+pub fn garmin_auth_source(
+    integrations: Option<&str>,
+    token_directory: &Path,
+) -> Result<Option<String>, GarminConfigurationError> {
+    if integrations.is_none() {
+        return Ok(Some(LEGACY_SOURCE.to_owned()));
+    }
+    Ok(GarminSourceSettings::resolve(integrations, token_directory)?.map(|source| source.instance))
+}

@@ -18,7 +18,9 @@ use tokio::{
 use super::{
     PollProgress, TelegramLoopError, TelegramTransport, TelegramTransportError, poller::wall_clock,
 };
-use crate::telegram_settings::TelegramIngressSettings;
+use crate::{
+    garmin_worker::GarminReauthNoticeSettings, telegram_settings::TelegramIngressSettings,
+};
 
 const MODE_REFRESH: Duration = Duration::from_secs(30);
 const WEBHOOK_BACKLOG_INTERVAL: Duration = Duration::from_secs(1);
@@ -29,7 +31,7 @@ const CONTROL_LEASE_SECONDS: u32 = 5;
 const HISTORY_LEASE_SECONDS: u32 = 10;
 const DELIVERY_LEASE_SECONDS: u32 = 90;
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(10);
-const STORAGE_NOTICE_INTERVAL: Duration = Duration::from_secs(2);
+const NOTICE_INTERVAL: Duration = Duration::from_secs(2);
 const SEND_RETRY_MICROSECONDS: i64 = 1_000_000;
 
 impl TelegramTransport {
@@ -247,8 +249,18 @@ impl TelegramTransport {
 
     /// Deliver durable ordinary replies and hold unknown provider outcomes for reconciliation.
     pub async fn run_replies(&self, database: &Database, settings: &TelegramIngressSettings) -> ! {
+        self.run_replies_with_garmin_notices(database, settings, None)
+            .await
+    }
+
+    pub async fn run_replies_with_garmin_notices(
+        &self,
+        database: &Database,
+        settings: &TelegramIngressSettings,
+        garmin_notice: Option<&GarminReauthNoticeSettings>,
+    ) -> ! {
         let mut recover_at = Instant::now();
-        let mut storage_notice_at = Instant::now();
+        let mut notice_at = Instant::now();
         loop {
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
@@ -264,7 +276,7 @@ impl TelegramTransport {
                         .await;
                     recover_at = Instant::now() + RECOVERY_INTERVAL;
                 }
-                if Instant::now() >= storage_notice_at {
+                if Instant::now() >= notice_at {
                     let _ = database
                         .queue_telegram_storage_notice(
                             binding.owner_id,
@@ -273,14 +285,25 @@ impl TelegramTransport {
                             now,
                         )
                         .await;
-                    storage_notice_at = Instant::now() + STORAGE_NOTICE_INTERVAL;
+                    if let Some(notice) = garmin_notice {
+                        let _ = database
+                            .queue_telegram_garmin_notice(
+                                binding.owner_id,
+                                binding.instance_id,
+                                binding.external_owner_id,
+                                &notice.source,
+                                now,
+                            )
+                            .await;
+                    }
+                    notice_at = Instant::now() + NOTICE_INTERVAL;
                 }
                 if let Ok(Some(claim)) = database
                     .claim_outbox_reply(destination, now, DELIVERY_LEASE_SECONDS)
                     .await
                 {
                     if self
-                        .dispatch_claimed_reply(database, binding, claim, &[])
+                        .dispatch_runtime_reply(database, binding, claim, &[], garmin_notice)
                         .await
                         .is_ok()
                     {

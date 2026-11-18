@@ -163,7 +163,7 @@ impl Database {
         .execute(&mut *txn)
         .await?;
         if notify_telegram && !estimate.ready() {
-            super::storage_notices::schedule(&mut txn, observed_at).await?;
+            super::telegram_notices::schedule(&mut txn, observed_at).await?;
         }
         txn.commit().await?;
         Ok(())
