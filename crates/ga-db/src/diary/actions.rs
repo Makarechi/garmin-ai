@@ -1,3 +1,5 @@
+mod forms;
+
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::language_tags::normalize_language_tag;
@@ -12,6 +14,8 @@ use crate::Database;
 pub enum TrackerActionError {
     Diary(DiaryReadError),
     Missing,
+    InactiveContract,
+    EntryChanged,
     InvalidLocale,
     InvalidContract,
 }
@@ -21,6 +25,8 @@ impl fmt::Display for TrackerActionError {
         match self {
             Self::Diary(error) => error.fmt(f),
             Self::Missing => f.write_str("Record not found"),
+            Self::InactiveContract => f.write_str("Form contract is no longer active; reload it"),
+            Self::EntryChanged => f.write_str("Entry changed; reload its form"),
             Self::InvalidLocale => f.write_str("Invalid language tag"),
             Self::InvalidContract => f.write_str("Recorded tracker form is unavailable"),
         }

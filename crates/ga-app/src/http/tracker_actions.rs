@@ -76,9 +76,38 @@ pub(super) async fn event(
     private_cache(response, &headers)
 }
 
+pub(super) async fn form(
+    method: Method,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: Uri,
+) -> Response {
+    let response = if method != Method::GET {
+        method_not_allowed("GET")
+    } else {
+        match authorized(&state, &headers, &[Scope::ReadDiary]).await {
+            Ok((database, owner)) => database
+                .tracker_generated_form(
+                    owner,
+                    &id,
+                    request_locale(&uri).as_deref(),
+                    &state.configured_locale,
+                )
+                .await
+                .map_or_else(action_failure, |form| Json(form).into_response()),
+            Err(status) => access_failure(status),
+        }
+    };
+    private_cache(response, &headers)
+}
+
 fn action_failure(error: TrackerActionError) -> Response {
     let status = match error {
         TrackerActionError::Missing => StatusCode::NOT_FOUND,
+        TrackerActionError::InactiveContract | TrackerActionError::EntryChanged => {
+            StatusCode::CONFLICT
+        }
         TrackerActionError::InvalidLocale => StatusCode::UNPROCESSABLE_ENTITY,
         TrackerActionError::Diary(_) | TrackerActionError::InvalidContract => {
             StatusCode::SERVICE_UNAVAILABLE
