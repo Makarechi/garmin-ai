@@ -91,6 +91,43 @@ impl StorageNoticeFence {
         .await
     }
 
+    /// An explicit, authorized retry must also be safe if Python resumes the queue.
+    pub(crate) async fn reopen(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        instance: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let key = self.key();
+        let (blocked, at): (bool, OffsetDateTime) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM app_state WHERE key=$1 AND value->>'status'='sent')
+                 OR EXISTS(SELECT 1 FROM jobs WHERE dedup_key=$2 AND kind=$3
+                   AND status='running' AND lease_until>clock_timestamp()),
+                   clock_timestamp()",
+        )
+        .bind(self.receipt())
+        .bind(&key)
+        .bind(KIND)
+        .fetch_one(&mut **txn)
+        .await?;
+        if blocked {
+            return Ok(false);
+        }
+        let when = StoredInstant::try_from(at)
+            .map_err(|_| sqlx::Error::Protocol("Invalid storage notice clock".into()))?;
+        self.retry(txn, instance, when).await?;
+        sqlx::query(
+            "UPDATE jobs SET status='pending',run_at=$2,completed_at=NULL,last_error=NULL,
+                        attempts=0,lease_token=NULL,lease_until=NULL
+                     WHERE dedup_key=$1 AND kind=$3",
+        )
+        .bind(&key)
+        .bind(at)
+        .bind(KIND)
+        .execute(&mut **txn)
+        .await?;
+        Ok(true)
+    }
+
     pub(crate) async fn complete(
         &self,
         txn: &mut Transaction<'_, Postgres>,

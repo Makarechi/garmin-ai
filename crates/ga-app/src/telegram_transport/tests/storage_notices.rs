@@ -6,7 +6,7 @@ use ga_db::{
     outbox_claims::{ReplyDestination, ReplyDispatchResult},
     runtime_lease::RuntimeWorkerIdentity,
 };
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{access::Scope, timestamp::StoredInstant};
 use serde_json::json;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
@@ -172,6 +172,45 @@ async fn warns_about_storage_only_while_current_and_preserves_the_receipt()
         .await?;
     assert_eq!(silent, ReplyDispatchResult::Cancelled);
     capacity(&database, worker, at, 12, false).await?;
+    database
+        .queue_telegram_storage_notice(owner, "primary", chat, now)
+        .await?;
+    let claim = database
+        .claim_outbox_reply(destination(), now, 60)
+        .await?
+        .ok_or("No warning to reconcile")?;
+    let uncertain = database
+        .dispatch_telegram_outbox_reply(destination(), chat, claim, &[], |_| async { None })
+        .await?;
+    assert!(matches!(
+        uncertain,
+        ReplyDispatchResult::Recorded {
+            state: ga_db::delivery::DeliveryState::Uncertain,
+            ..
+        }
+    ));
+    assert!(
+        database
+            .claim_outbox_reply(destination(), now, 60)
+            .await?
+            .is_none()
+    );
+    database
+        .requeue_uncertain_delivery(
+            [Scope::ManageIntegrations].into_iter().collect(),
+            owner,
+            claim.outbox_id,
+        )
+        .await?;
+    let legacy: (String, String) = sqlx::query_as(
+        "SELECT (SELECT value->>'status' FROM app_state WHERE key=$1),
+                (SELECT status FROM jobs WHERE dedup_key=$2 AND kind='telegram_storage_notice')",
+    )
+    .bind(&receipt)
+    .bind(format!("storage-notice:{}", at.date()))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(legacy, ("pending".into(), "pending".into()));
 
     let (listener, transport) = bind().await?;
     let server = async {
