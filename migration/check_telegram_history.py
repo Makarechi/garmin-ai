@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.events import EventInput, create_event
+from garmin_ai.models import AppState
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 from garmin_ai.telegram_history import history_page, selected_action
 from garmin_ai.tracker_forms import (
@@ -125,8 +126,22 @@ def capture(destination):
             session.flush()
             second = capture_page(session, selected_action(session, next_page, now, "owner"))
             open_only = capture_page(session, history_page(session, now, open_only=True))
+            open_actions = session.info["reply_keyboard"]["inline_keyboard"][0]
+            session.flush()
+            chosen = capture_page(
+                session, selected_action(session, open_actions[0]["callback_data"], now, "owner")
+            )
+            pending = session.get(AppState, "conversation:pending")
+            chosen["event_id"] = pending.value["event_ids"][0]
+            chosen["selection_revision"] = pending.value["selection_revision"]
+            session.flush()
+            removed = selected_action(session, open_actions[1]["callback_data"], now, "owner")
+            session.flush()
+            assert session.get(AppState, "conversation:pending") is None
             session.rollback()
-        destination.write_text(json.dumps([first, second, open_only], ensure_ascii=False))
+        destination.write_text(
+            json.dumps([first, second, open_only, chosen, {"text": removed}], ensure_ascii=False)
+        )
     finally:
         engine.dispose()
 

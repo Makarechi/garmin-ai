@@ -41,7 +41,7 @@ def running_worker(binary, root, config, **overrides):
                 assert worker.wait(timeout=5) == 0
 
 
-def wait_for_backup(engine, worker, key, status, attempts):
+def wait_for_job(engine, worker, key, status, attempts, state_key="backup:last_success"):
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         assert worker.poll() is None
@@ -49,15 +49,15 @@ def wait_for_backup(engine, worker, key, status, attempts):
             state = connection.execute(
                 text("""
                     SELECT j.status,j.attempts,s.value,j.last_error
-                    FROM jobs j LEFT JOIN app_state s ON s.key='backup:last_success'
+                    FROM jobs j LEFT JOIN app_state s ON s.key=:state_key
                     WHERE j.dedup_key=:key
                 """),
-                {"key": key},
+                {"key": key, "state_key": state_key},
             ).one_or_none()
         if state and (state.status, state.attempts) == (status, attempts):
             return state.value, state.last_error
         time.sleep(0.15)
-    raise AssertionError(f"Backup job did not reach {status} at attempt {attempts}: {state!r}")
+    raise AssertionError(f"{key} did not reach {status} at attempt {attempts}: {state!r}")
 
 
 def rerun(engine, key):
@@ -80,12 +80,26 @@ def verify(binary, root, engine):
     raw.parent.chmod(0o700)
     (config.data_dir / "raw").chmod(0o700)
     config.backup_dir.mkdir(mode=0o700)
-    date = datetime.now(UTC).date()
+    now = datetime.now(UTC)
+    date = now.date()
     key = f"backup:{date}"
+    capacity_key = f"storage-check:{int(now.timestamp()) // 21600}"
     archive = config.backup_dir / f"garmin-ai-{date}.enc"
     with running_worker(binary, root, config) as worker:
-        first, error = wait_for_backup(engine, worker, key, "done", 1)
+        first, error = wait_for_job(engine, worker, key, "done", 1)
         assert first["path"] == str(archive) and error is None
+        capacity, error = wait_for_job(
+            engine, worker, capacity_key, "done", 1, "storage:backup-capacity"
+        )
+        assert error is None
+        assert capacity["estimate_only"] is True and capacity["reserve_bytes"] == 256 * 1024 * 1024
+        assert capacity["status"] in {"ready", "insufficient"}
+        assert set(capacity) == {"at", "estimate_only", "reserve_bytes", "status", "volumes"}
+        assert all(
+            set(volume) == {"role", "free_bytes", "required_bytes"}
+            for volume in capacity["volumes"]
+        )
+        assert not (config.backup_dir / "capacity-check.enc").exists()
     assert archive.stat().st_mode & 0o777 == 0o600
     recovered = root / "scheduled-recovered"
     assert run_cli(binary, root, config, "unpack-backup", archive, recovered) == "Backup unpacked."
@@ -104,19 +118,23 @@ def verify(binary, root, engine):
     rerun(engine, key)
     wrong_key = base64.urlsafe_b64encode(b"x" * 32).decode()
     with running_worker(binary, root, config, GA_BACKUP_KEY=wrong_key) as worker:
-        success, error = wait_for_backup(engine, worker, key, "pending", 1)
+        success, error = wait_for_job(engine, worker, key, "pending", 1)
         assert success is None and error
     assert old.is_file() and recent.is_file() and link.is_symlink()
     assert (archive.read_bytes(), archive.stat().st_mtime_ns) == original
 
     rerun(engine, key)
     with running_worker(binary, root, config) as worker:
-        reused, error = wait_for_backup(engine, worker, key, "done", 1)
+        reused, error = wait_for_job(engine, worker, key, "done", 1)
         assert error is None and reused == first
+        after_restart, error = wait_for_job(
+            engine, worker, capacity_key, "done", 1, "storage:backup-capacity"
+        )
+        assert error is None and after_restart == capacity
     assert (archive.read_bytes(), archive.stat().st_mtime_ns) == original
     assert recent.is_file() and not old.exists() and link.is_symlink()
     assert unrelated.read_bytes() == b"Unrelated synthetic file"
-    print("Verified scheduled encrypted backup, wrong-key retry, unchanged reuse and retention")
+    print("Verified scheduled backup, restart recovery, retention and safe capacity reporting")
 
 
 def main():

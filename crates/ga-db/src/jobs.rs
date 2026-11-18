@@ -1,5 +1,7 @@
 mod backup;
 pub use backup::DailyBackupLease;
+mod storage_check;
+pub use storage_check::{StorageCheckLease, backup_capacity_report};
 mod replay;
 pub mod telegram_ack;
 pub mod telegram_inbound;

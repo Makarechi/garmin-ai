@@ -1,10 +1,13 @@
+mod browser;
 pub(crate) mod demo;
 mod diary;
+mod exports;
 mod garmin_auth;
 mod personal_goals;
 pub(crate) mod tools;
 mod tracker_sharing;
 mod wearable;
+mod web_chat;
 
 use std::{env, io, sync::Arc};
 
@@ -39,12 +42,15 @@ fn router(state: AppState) -> Router {
         .route("/events", any(diary::create))
         .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))
+        .route("/exports/diary", any(exports::diary))
         .route("/entries", any(diary::create_custom))
         .route("/entries/{event_id}", any(diary::edit_custom))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
         .route("/preferences/goals", any(personal_goals::preferences))
         .route("/wearable/marks", any(wearable::marks))
+        .route("/web-chat/messages", any(web_chat::messages))
+        .route("/web-chat/messages/{id}/read", any(web_chat::mark_read))
         .route(
             "/tracker-sharing-consents",
             any(tracker_sharing::collection),
@@ -54,6 +60,7 @@ fn router(state: AppState) -> Router {
             "/tracker-sharing-consents/{definition}/{kind}/{instance}",
             any(tracker_sharing::revoke),
         )
+        .merge(browser::routes())
         .fallback(missing)
         .with_state(state)
 }
