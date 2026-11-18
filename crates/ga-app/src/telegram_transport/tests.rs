@@ -11,6 +11,7 @@ use tokio::{
 use super::{TelegramTransport, TelegramTransportError};
 
 mod reminders;
+mod storage_notices;
 mod voice;
 
 const FIXTURE_TOKEN: &str = "100:synthetic-transport";

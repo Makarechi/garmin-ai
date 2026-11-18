@@ -129,6 +129,20 @@ impl Archive {
         })
     }
 
+    /// Detect retained data without following redirects or creating an archive.
+    pub fn has_retained_entries(path: &Path) -> Result<bool, ArchiveError> {
+        let (root, exists) = backup_space::existing_directory(path)?;
+        if !exists {
+            return Ok(false);
+        }
+        for entry in fs::Dir::read_from(root)? {
+            if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn open_reader(&self, key: &ArchiveKey) -> Result<File, ArchiveError> {
         let (prefix, name) = key.path_parts();
         let directory = fs::openat(&self.root, prefix, DIRECTORY_READ, Mode::empty())?;

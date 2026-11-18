@@ -2,8 +2,11 @@ use std::time::Duration;
 
 use ga_db::{
     Database,
-    jobs::telegram_inbound::TelegramInboundTarget,
+    jobs::telegram_inbound::{
+        TelegramDiaryCommitError, TelegramInboundState, TelegramInboundTarget,
+    },
     outbox_claims::ReplyDestination,
+    outbox_enqueue::QueueIntentError,
     runtime_lease::{RuntimeLease, RuntimeLeaseError},
 };
 use ga_domain::timestamp::StoredInstant;
@@ -23,8 +26,10 @@ const INACTIVE_RETRY: Duration = Duration::from_secs(2);
 const EMPTY_POLL_RETRY: Duration = Duration::from_millis(250);
 const ACK_IDLE: Duration = Duration::from_millis(250);
 const CONTROL_LEASE_SECONDS: u32 = 5;
+const HISTORY_LEASE_SECONDS: u32 = 10;
 const DELIVERY_LEASE_SECONDS: u32 = 90;
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(10);
+const STORAGE_NOTICE_INTERVAL: Duration = Duration::from_secs(2);
 const SEND_RETRY_MICROSECONDS: i64 = 1_000_000;
 
 impl TelegramTransport {
@@ -201,9 +206,49 @@ impl TelegramTransport {
         }
     }
 
+    pub async fn run_history(&self, database: &Database, settings: &TelegramIngressSettings) -> ! {
+        loop {
+            if let (Ok(binding), Ok(now)) =
+                (settings.confirmed_binding(database).await, wall_clock())
+            {
+                let target = TelegramInboundTarget {
+                    owner_id: binding.owner_id,
+                    instance_id: binding.instance_id,
+                };
+                if let Ok(Some(lease)) = database
+                    .claim_local_telegram_history(target, now, HISTORY_LEASE_SECONDS)
+                    .await
+                {
+                    match database.apply_telegram_history(&lease).await {
+                        Ok(_) => continue,
+                        Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy)) => {
+                            if let Ok(now) = wall_clock() {
+                                let _ = database.defer_telegram_owner_control(&lease, now).await;
+                            }
+                        }
+                        Err(TelegramDiaryCommitError::UnsupportedMessage) => {
+                            if let Ok(now) = wall_clock() {
+                                let _ = database
+                                    .finish_telegram_inbound(
+                                        &lease,
+                                        now,
+                                        TelegramInboundState::Invalid,
+                                    )
+                                    .await;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            sleep(ACK_IDLE).await;
+        }
+    }
+
     /// Deliver durable ordinary replies and hold unknown provider outcomes for reconciliation.
     pub async fn run_replies(&self, database: &Database, settings: &TelegramIngressSettings) -> ! {
         let mut recover_at = Instant::now();
+        let mut storage_notice_at = Instant::now();
         loop {
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
@@ -218,6 +263,17 @@ impl TelegramTransport {
                         .recover_expired_telegram_outbox(&destination, now)
                         .await;
                     recover_at = Instant::now() + RECOVERY_INTERVAL;
+                }
+                if Instant::now() >= storage_notice_at {
+                    let _ = database
+                        .queue_telegram_storage_notice(
+                            binding.owner_id,
+                            binding.instance_id,
+                            binding.external_owner_id,
+                            now,
+                        )
+                        .await;
+                    storage_notice_at = Instant::now() + STORAGE_NOTICE_INTERVAL;
                 }
                 if let Ok(Some(claim)) = database
                     .claim_outbox_reply(destination, now, DELIVERY_LEASE_SECONDS)

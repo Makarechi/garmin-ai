@@ -177,7 +177,7 @@ pub(crate) async fn current_source_selected(
         .map_err(Into::into)
 }
 
-async fn record_transport_in(
+pub(crate) async fn record_transport_in(
     txn: &mut Transaction<'_, Postgres>,
     at: StoredInstant,
     outcome: GarminTransportOutcome,

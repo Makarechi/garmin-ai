@@ -13,6 +13,7 @@ use crate::{
     channel_ingress::telegram_poll::{CHANNEL_SELECTION_LOCK, TelegramPollError, selection},
     check_readiness,
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
+    jobs::{STORAGE_QUEUE_LOCK, storage_notices::StorageNoticeFence},
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{CHANNEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed},
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
@@ -79,6 +80,7 @@ enum Dispatch {
         token: Uuid,
         deadline: Instant,
         clock: (StoredInstant, Instant),
+        storage_notice: Option<StorageNoticeFence>,
     },
 }
 
@@ -179,7 +181,7 @@ impl Database {
         })
         .await
         .map_err(|_| ReplyDispatchError::Database)??;
-        let (intent, token, deadline, (wall, started)) = match dispatch {
+        let (intent, token, deadline, (wall, started), storage_notice) = match dispatch {
             Dispatch::Unavailable => return Ok(ReplyDispatchResult::ClaimUnavailable),
             Dispatch::Cancelled => return Ok(ReplyDispatchResult::Cancelled),
             Dispatch::Started {
@@ -187,8 +189,12 @@ impl Database {
                 token,
                 deadline,
                 clock,
-            } => (intent, token, deadline, clock),
+                storage_notice,
+            } => (intent, token, deadline, clock, storage_notice),
         };
+        let notice = storage_notice
+            .as_ref()
+            .map(|notice| (notice, destination.instance_id));
         let outcome = tokio::time::timeout_at(deadline, async {
             if Instant::now() >= deadline {
                 return None;
@@ -207,12 +213,13 @@ impl Database {
             let retry_at = retry_at.max(inferred_clock());
             let deferred = tokio::time::timeout(
                 DATABASE_DEADLINE,
-                defer(
+                defer_after_send(
                     &mut connection,
                     destination.owner_id,
                     claim.outbox_id,
                     token,
                     retry_at,
+                    notice,
                 ),
             )
             .await;
@@ -246,6 +253,7 @@ impl Database {
                 claim.outbox_id,
                 token,
                 &observation,
+                notice,
             ),
         )
         .await;
@@ -321,7 +329,11 @@ async fn prepare(
         return Ok(Dispatch::Cancelled);
     }
     let share_target = format!("{}:{}", destination.channel, destination.instance_id);
-    let fence = check_fence(&mut txn, destination.owner_id, &candidate).await?;
+    let storage_notice = candidate.storage_notice();
+    if storage_notice.is_some() {
+        acquire_shared(&mut txn, STORAGE_QUEUE_LOCK).await?;
+    }
+    let fence = check_fence(&mut txn, destination, &candidate).await?;
     let ready = match (serde_json::from_str::<Value>(&raw), fence) {
         (Ok(mut intent), FenceStatus::Current(projection))
             if matches_intent(&intent, destination, &candidate)
@@ -380,12 +392,18 @@ async fn prepare(
     let remaining = Duration::try_from(expiry.map_or(until, |expiry| until.min(expiry)) - now)
         .map_err(|_| ReplyDispatchError::Database)?;
     let wall = StoredInstant::try_from(now).map_err(|_| ReplyDispatchError::Database)?;
+    if let Some(notice) = &storage_notice {
+        notice
+            .start(&mut txn, destination.instance_id, wall)
+            .await?;
+    }
     txn.commit().await?;
     Ok(Dispatch::Started {
         intent,
         token,
         deadline: started + remaining,
         clock: (wall, started),
+        storage_notice,
     })
 }
 
@@ -484,6 +502,7 @@ async fn persist(
     outbox_id: Uuid,
     lease_token: Uuid,
     observation: &ReplyObservation,
+    notice: Option<(&StorageNoticeFence, &str)>,
 ) -> Result<Uuid, ReplyDispatchError> {
     let mut txn = connection.begin().await?;
     let result = record_delivery_receipt(
@@ -505,6 +524,16 @@ async fn persist(
     .await;
     match result {
         Ok(id) => {
+            if let Some((notice, instance)) = notice {
+                notice
+                    .complete(
+                        &mut txn,
+                        instance,
+                        observation.state,
+                        observation.provider_reference.as_deref(),
+                    )
+                    .await?;
+            }
             txn.commit().await?;
             Ok(id)
         }
@@ -513,4 +542,24 @@ async fn persist(
             Err(ReplyDispatchError::Database)
         }
     }
+}
+
+async fn defer_after_send(
+    connection: &mut PgConnection,
+    owner: Uuid,
+    outbox: Uuid,
+    token: Uuid,
+    retry_at: StoredInstant,
+    notice: Option<(&StorageNoticeFence, &str)>,
+) -> Result<bool, sqlx::Error> {
+    let Some((notice, instance)) = notice else {
+        return defer(connection, owner, outbox, token, retry_at).await;
+    };
+    let mut txn = connection.begin().await?;
+    let deferred = defer(&mut txn, owner, outbox, token, retry_at).await?;
+    if deferred {
+        notice.retry(&mut txn, instance, retry_at).await?;
+    }
+    txn.commit().await?;
+    Ok(deferred)
 }

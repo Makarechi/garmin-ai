@@ -30,7 +30,7 @@ use ga_fit::{ExportLimits, MAX_FIT_BYTES};
 use time::Time;
 use tokio::{signal, sync::watch, time::Instant};
 
-use crate::configuration;
+use crate::{configuration, extensions::ScheduledSourcePlugins};
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
 const PLAN_BUSY: Duration = Duration::from_secs(30);
@@ -222,6 +222,15 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             }
         })
         .flatten();
+    let sources = worker
+        .then(|| match ScheduledSourcePlugins::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
     let reminders_available = telegram.is_some() && reminder_model_available(&database, clock()?);
     let archive = Arc::new(
         Archive::open_read_only(&config.raw_archive).map_err(|_| ReplayServiceError::Archive)?,
@@ -308,6 +317,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             tokio::select! {
                 result = transport.run_acknowledgements(&database, settings) => result,
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
+                result = transport.run_history(&database, settings) => result,
                 result = transport.run_replies(&database, settings) => result,
                 result = async {
                     if reminders_available {
@@ -335,7 +345,14 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     };
     let backup_work = async {
         if let (Some(settings), Some(worker)) = (&backups, backup_worker) {
-            settings.run(&database, worker).await
+            settings.run(&database, worker, telegram.is_some()).await
+        } else {
+            future::pending().await
+        }
+    };
+    let source_work = async {
+        if let Some(sources) = &sources {
+            sources.run(&database).await
         } else {
             future::pending().await
         }
@@ -347,6 +364,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         result = telegram_work => result,
         result = garmin_work => result,
         result = backup_work => result,
+        result = source_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

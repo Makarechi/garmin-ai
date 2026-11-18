@@ -46,20 +46,7 @@ impl Database {
         &self,
     ) -> Result<StorageMaintenance, StorageMaintenanceError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut connection =
-                PgConnection::connect_with(self.control.connect_options().as_ref()).await?;
-            sqlx::query("SET search_path=pg_catalog,public")
-                .execute(&mut connection)
-                .await?;
-            for lock in [RUNTIME_LOCK, STORAGE_LIFECYCLE_LOCK, OWNER_ENROLLMENT_LOCK] {
-                let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-                    .bind(lock)
-                    .fetch_one(&mut connection)
-                    .await?;
-                if !acquired {
-                    return Err(StorageMaintenanceError::Busy);
-                }
-            }
+            let mut connection = self.locked_maintenance_connection().await?;
             let has_ledger: bool =
                 sqlx::query_scalar("SELECT to_regclass('public.alembic_version') IS NOT NULL")
                     .fetch_one(&mut connection)
@@ -78,6 +65,26 @@ impl Database {
         })
         .await
         .map_err(|_| StorageMaintenanceError::Database)?
+    }
+
+    pub(crate) async fn locked_maintenance_connection(
+        &self,
+    ) -> Result<PgConnection, StorageMaintenanceError> {
+        let mut connection =
+            PgConnection::connect_with(self.control.connect_options().as_ref()).await?;
+        sqlx::query("SET search_path=pg_catalog,public")
+            .execute(&mut connection)
+            .await?;
+        for lock in [RUNTIME_LOCK, STORAGE_LIFECYCLE_LOCK, OWNER_ENROLLMENT_LOCK] {
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(lock)
+                .fetch_one(&mut connection)
+                .await?;
+            if !acquired {
+                return Err(StorageMaintenanceError::Busy);
+            }
+        }
+        Ok(connection)
     }
 }
 
