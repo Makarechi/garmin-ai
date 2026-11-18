@@ -22,6 +22,7 @@ use crate::{
 
 const LOCK: &str = "storage.lock";
 const MARKERS: [&str; 2] = ["erased", "activating"];
+const ERASING: &str = "erasing";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum StorageAccess {
@@ -33,6 +34,7 @@ pub enum StorageAccess {
 pub enum StorageFilesError {
     Occupied,
     Disabled,
+    ErasureIncomplete,
     Unsafe,
     Overlap,
     Filesystem(ArchiveError),
@@ -43,6 +45,9 @@ impl fmt::Display for StorageFilesError {
         f.write_str(match self {
             Self::Occupied => "Stop the worker, login or probe before this operation",
             Self::Disabled => "Restore or resume storage after erasure",
+            Self::ErasureIncomplete => {
+                "Complete the interrupted erasure before re-enabling storage"
+            }
             Self::Unsafe => "Storage lock path redirects or is not a regular file",
             Self::Overlap => "Backup, lock, and private source directories must be independent",
             Self::Filesystem(_) => "Storage coordination is unavailable",
@@ -99,7 +104,7 @@ impl StorageFilesGuard {
         let directory = open_directory(directory)?;
         let lock = acquire_lock(&directory, LOCK)?;
         if access == StorageAccess::Active {
-            for marker in MARKERS {
+            for marker in MARKERS.into_iter().chain([ERASING]) {
                 match fs::statat(&directory, marker, AtFlags::SYMLINK_NOFOLLOW) {
                     Ok(_) => return Err(StorageFilesError::Disabled),
                     Err(Errno::NOENT) => {}
@@ -118,20 +123,58 @@ impl StorageFilesGuard {
         if self.access != StorageAccess::Recovery {
             return Err(StorageFilesError::Unsafe);
         }
+        match fs::statat(&self.directory, ERASING, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => return Err(StorageFilesError::ErasureIncomplete),
+            Err(Errno::NOENT) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.write_marker(
+            "activating",
+            b"Activation in progress; resume explicitly after interruption.\n",
+        )?;
+        Ok(StorageActivation { guard: self })
+    }
+
+    pub fn begin_erasure(&self) -> Result<StorageErasure<'_>, StorageFilesError> {
+        if self.access != StorageAccess::Recovery {
+            return Err(StorageFilesError::Unsafe);
+        }
+        self.write_marker("erased", b"Storage explicitly erased.\n")?;
+        self.write_marker(
+            ERASING,
+            b"Erasure in progress; repeat erasure after interruption.\n",
+        )?;
+        Ok(StorageErasure { guard: self })
+    }
+
+    fn write_marker(&self, name: &str, content: &[u8]) -> Result<(), StorageFilesError> {
         let mut staging = Stage::create(&self.directory)?;
         staging
             .file
-            .write_all(b"Activation in progress; resume explicitly after interruption.\n")
+            .write_all(content)
             .map_err(ArchiveError::from)?;
         staging.file.sync_all().map_err(ArchiveError::from)?;
         fs::renameat(
             &self.directory,
             staging.name.as_str(),
             &self.directory,
-            "activating",
+            name,
         )?;
         fs::fsync(&self.directory)?;
-        Ok(StorageActivation { guard: self })
+        Ok(())
+    }
+}
+
+/// The legacy erased marker continues to fence the store after erasure completes.
+pub struct StorageErasure<'a> {
+    guard: &'a StorageFilesGuard,
+}
+
+impl StorageErasure<'_> {
+    pub fn complete(self) -> Result<(), StorageFilesError> {
+        fs::unlinkat(&self.guard.directory, ERASING, AtFlags::empty())?;
+        fs::fsync(&self.guard.directory)?;
+        Ok(())
     }
 }
 
