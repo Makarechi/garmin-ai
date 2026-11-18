@@ -13,6 +13,8 @@ Use a separate Compose project with its own database and storage. Set `GA_APP_IM
 `GA_POSTGRES_PASSWORD`, and `GA_CONTAINER_DATABASE_URL` for that project. The database host within
 the Compose network is `db` and the database name is `garmin_ai`. Use the existing
 `postgresql+psycopg://` URL form. `GA_API_PORT` controls the loopback port on the host.
+Set `GA_INTEGRATIONS` and `GA_TELEGRAM_USER_ID` in the Compose project environment so the API
+and worker use the same bot selection. `GA_WORKER_ENV_FILE` can supply worker-only settings.
 
 `docker compose -f compose.rust.yml up --detach --wait` waits for PostgreSQL and migration before
 starting the application. HTTP readiness and worker health use their native probes.
