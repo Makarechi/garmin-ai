@@ -1,4 +1,5 @@
 mod authorization;
+mod backup;
 mod backup_space;
 mod configuration;
 mod http;
@@ -52,6 +53,17 @@ enum Command {
     Migrate {
         #[arg(long)]
         status: bool,
+    },
+    /// Create a verified encrypted backup outside the source directories
+    Backup { path: PathBuf },
+    /// Export the logical database to a private compressed file
+    Export { path: PathBuf },
+    /// Recover an exported snapshot into an empty migrated database
+    RestoreDb { path: PathBuf },
+    /// Authenticate and extract an encrypted backup to a new directory
+    UnpackBackup {
+        source: PathBuf,
+        destination: PathBuf,
     },
     /// Serve MCP tools over standard input and output
     Mcp,
@@ -134,6 +146,21 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        Some(Command::Backup { path }) => {
+            return backup_result(backup::create(&path));
+        }
+        Some(Command::Export { path }) => {
+            return backup_result(backup::export(&path));
+        }
+        Some(Command::RestoreDb { path }) => {
+            return backup_result(backup::restore(&path));
+        }
+        Some(Command::UnpackBackup {
+            source,
+            destination,
+        }) => {
+            return backup_result(backup::unpack(&source, &destination));
+        }
         Some(Command::Mcp) => {
             if let Err(error) = mcp_stdio::run() {
                 eprintln!("{error}");
@@ -155,6 +182,16 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn backup_result(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn usage_error() -> ExitCode {

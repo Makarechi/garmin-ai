@@ -27,6 +27,7 @@ pub mod statistics;
 pub mod telegram_control;
 pub mod text_offsets;
 pub mod timestamp;
+pub mod wearable;
 
 use sha2::{Digest, Sha256};
 
