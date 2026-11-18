@@ -22,9 +22,10 @@ from garmin_ai.db import make_engine
 from garmin_ai.mcp_server import build_server
 
 async def serve():
-    engine = make_engine(Settings(_env_file=None))
+    settings = Settings(_env_file=None)
+    engine = make_engine(settings)
     try:
-        server = build_server(engine, timezone="UTC")
+        server = build_server(engine, timezone="UTC", enable_writes=settings.mcp_enable_writes)
         async with stdio_server() as (reader, writer):
             await server.run(reader, writer, server.create_initialization_options())
     finally:
@@ -116,21 +117,6 @@ async def compare(binary, root, engine):
     with engine.connect() as connection:
         unchanged = connection.scalar(text("SELECT count(*) FROM events WHERE NOT deleted"))
         assert unchanged == 1204
-    blocked = subprocess.run(
-        [binary, "mcp"],
-        cwd=root,
-        env={**env, "GA_MCP_ENABLE_WRITES": "true"},
-        input="",
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert (
-        blocked.returncode == 1
-        and not blocked.stdout
-        and "writes are unavailable" in blocked.stderr
-    )
     await check_frame_limit(binary, root, env)
     with engine.begin() as connection:
         connection.execute(

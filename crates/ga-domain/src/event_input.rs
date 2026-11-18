@@ -204,6 +204,13 @@ impl EventInput {
         Ok(())
     }
 
+    /// Bind a parsed local MCP report to its authenticated producer.
+    pub fn into_mcp_report(mut self) -> Result<Self, InvalidEvent> {
+        self.source = EventSource::Mcp;
+        self.verify_context(ValidationMode::NewReport)?;
+        Ok(self)
+    }
+
     /// Apply authenticated message evidence to a new diary report.
     pub fn for_agent_report(
         &self,

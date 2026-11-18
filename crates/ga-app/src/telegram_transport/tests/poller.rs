@@ -1,5 +1,6 @@
 use super::{bind, request, respond};
 use crate::telegram_input::{CallbackResolution, TelegramBinding};
+use crate::telegram_settings::TelegramIngressSettings;
 use crate::telegram_transport::TelegramLoopError;
 
 use std::{env, error::Error, str::FromStr, time::Duration};
@@ -16,6 +17,163 @@ use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
 use tokio::time::timeout;
 use uuid::Uuid;
+
+#[tokio::test]
+#[ignore = "runs the live worker loops against a synthetic Telegram server and disposable TimescaleDB"]
+async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
+-> Result<(), Box<dyn Error>> {
+    let url = env::var("GA_TEST_DATABASE_URL")?;
+    let options =
+        PgConnectOptions::from_str(&url.replacen("postgresql+psycopg://", "postgresql://", 1))?
+            .disable_statement_logging();
+    let target = options
+        .get_database()
+        .filter(|name| name.ends_with("_test"))
+        .ok_or("Expected disposable database")?;
+    let pool = PgPool::connect_with(options.clone()).await?;
+    let actual: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(actual, target);
+    let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    let mut runtime = database.acquire_runtime_lease().await?;
+    assert!(database.acquire_runtime_lease().await.is_err());
+    let settings = TelegramIngressSettings::selected(Some("1234567890123"), None)?
+        .ok_or("Expected Telegram integration")?;
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         SELECT gen_random_uuid(),id,'telegram','primary','1234567890123','fixture' FROM people",
+    ).execute(&pool).await?;
+
+    let (listener, transport) = bind().await?;
+    let webhook = async {
+        let (mut request_stream, _) = listener.accept().await?;
+        assert_eq!(
+            request(&mut request_stream).await?["endpoint"],
+            "getWebhookInfo"
+        );
+        respond(
+            &mut request_stream,
+            "200 OK",
+            &[],
+            r#"{"ok":true,"result":{"url":"https://synthetic.invalid/telegram"}}"#,
+        )
+        .await?;
+        assert!(
+            timeout(Duration::from_millis(350), listener.accept())
+                .await
+                .is_err()
+        );
+        Ok::<_, Box<dyn Error>>(())
+    };
+    timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            result = webhook => result,
+            result = transport.run_receiver(&database, &mut runtime, &settings) =>
+                Err(format!("Webhook receiver exited: {result:?}").into()),
+        }
+    })
+    .await??;
+
+    let chat = settings.external_owner_id();
+    let message = json!({
+        "message_id":76, "chat":{"type":"private","id":chat},
+        "from":{"id":chat}, "text":"synthetic Telegram input"
+    });
+    let (listener, transport) = bind().await?;
+    let (poll_started, wait_for_poll) = tokio::sync::oneshot::channel();
+    let server = async {
+        let (mut status, _) = listener.accept().await?;
+        assert_eq!(request(&mut status).await?["endpoint"], "getWebhookInfo");
+        respond(
+            &mut status,
+            "200 OK",
+            &[],
+            r#"{"ok":true,"result":{"url":""}}"#,
+        )
+        .await?;
+        let (mut first, _) = listener.accept().await?;
+        assert_eq!(request(&mut first).await?["endpoint"], "getUpdates");
+        let updates = json!({"ok":true,"result":[
+            {"update_id":40,"message":message},
+            {"update_id":41,"callback_query":{"id":"synthetic-worker-ack","data":"expired",
+                                             "message":message,"from":{"id":chat}}}
+        ]});
+        respond(&mut first, "200 OK", &[], &updates.to_string()).await?;
+        let (mut long_poll, _) = listener.accept().await?;
+        let next = request(&mut long_poll).await?;
+        assert_eq!(next["endpoint"], "getUpdates");
+        assert_eq!(next["fields"]["offset"], 42);
+        poll_started
+            .send(())
+            .map_err(|_| "Missing callback worker")?;
+        let (mut ack, _) = timeout(Duration::from_secs(2), listener.accept()).await??;
+        let ack_request = request(&mut ack).await?;
+        assert_eq!(ack_request["endpoint"], "answerCallbackQuery");
+        assert_eq!(
+            ack_request["fields"]["callback_query_id"],
+            "synthetic-worker-ack"
+        );
+        respond(&mut ack, "200 OK", &[], r#"{"ok":true,"result":true}"#).await?;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let finished: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT FROM jobs WHERE kind='telegram_native_ack' AND status='done')",
+                ).fetch_one(&pool).await?;
+                if finished {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await??;
+        let terminated: bool = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks
+             WHERE locktype='advisory' AND mode='ExclusiveLock' AND granted
+               AND classid=0 AND objid=72104620 AND objsubid=1
+               AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(terminated);
+        let mut remainder = Vec::new();
+        use tokio::io::AsyncReadExt;
+        timeout(
+            Duration::from_millis(2200),
+            long_poll.read_to_end(&mut remainder),
+        )
+        .await??;
+        assert!(remainder.is_empty());
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let callback = async {
+        wait_for_poll.await?;
+        transport.run_acknowledgements(&database, &settings).await
+    };
+    let receiver = transport.run_receiver(&database, &mut runtime, &settings);
+    let completion = async {
+        tokio::select! {
+            result = receiver => {
+                assert!(result.is_err());
+                Ok::<_, Box<dyn Error>>(())
+            }
+            result = callback => result,
+        }
+    };
+    let (server, completion) = timeout(Duration::from_secs(8), async {
+        tokio::join!(server, completion)
+    })
+    .await?;
+    server?;
+    completion?;
+    let retained: Vec<String> = sqlx::query_scalar(
+        "SELECT external_event_id FROM inbound_messages ORDER BY external_event_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(retained, ["40"]);
+    assert!(database.acquire_runtime_lease().await.is_ok());
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "runs a local Telegram wire fixture against disposable pinned TimescaleDB"]
