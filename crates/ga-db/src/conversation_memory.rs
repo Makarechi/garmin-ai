@@ -162,7 +162,9 @@ impl Database {
     }
 }
 
-async fn lock_context_change(txn: &mut Transaction<'_, Postgres>) -> Result<(), MemoryError> {
+pub(crate) async fn lock_context_change(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), MemoryError> {
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(CONTEXT_DELIVERY_LOCK)
         .fetch_one(&mut **txn)
