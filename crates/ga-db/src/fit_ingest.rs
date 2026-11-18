@@ -22,7 +22,10 @@ use crate::{
     activity_documents::{invalidate_replay_outputs, put_state},
     check_readiness,
     fit_staging::{FitStageError, StagedFitProjection},
-    jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome, JobStoreError},
+    jobs::{
+        FailureReason, GARMIN_PUBLICATION_SECONDS, GarminJobKind, GarminJobLease, JobOutcome,
+        JobStoreError,
+    },
     raw_capture::{
         CaptureError, GARMIN_LEGACY_SOURCE, authorize_legacy_mutation, lock_legacy_scope,
     },
@@ -38,6 +41,11 @@ pub struct LegacyFitCapture<'a> {
     pub activity_id: &'a str,
     pub authenticated_fingerprint: &'a str,
     pub fetched_at: StoredInstant,
+}
+
+pub struct LeasedFitLimits {
+    pub archive: PutLimits,
+    pub projection: ExportLimits,
 }
 
 /// Receipt for an original export recorded under the current owner and activity.
@@ -165,6 +173,30 @@ impl Database {
         put_limits: PutLimits,
         export_limits: ExportLimits,
     ) -> Result<FitIngestOutcome, FitIngestError> {
+        self.ingest_leased_legacy_fit_before_publish(
+            request,
+            lease,
+            source,
+            archive,
+            LeasedFitLimits {
+                archive: put_limits,
+                projection: export_limits,
+            },
+            || {},
+        )
+        .await
+    }
+
+    /// Signal when the bounded commit begins, after slow archiving and decoding.
+    pub async fn ingest_leased_legacy_fit_before_publish(
+        &self,
+        request: LegacyFitCapture<'_>,
+        lease: &GarminJobLease,
+        source: impl Read + Seek + Send + 'static,
+        archive: Arc<Archive>,
+        limits: LeasedFitLimits,
+        before_publish: impl FnOnce(),
+    ) -> Result<FitIngestOutcome, FitIngestError> {
         verify_job_scope(
             lease,
             request.activity_id,
@@ -175,12 +207,18 @@ impl Database {
                 request,
                 source,
                 Arc::clone(&archive),
-                put_limits,
+                limits.archive,
                 Some(lease),
             )
             .await?;
-        self.apply_export(&capture, archive, export_limits, Some(lease))
-            .await
+        self.apply_export(
+            &capture,
+            archive,
+            limits.projection,
+            Some(lease),
+            before_publish,
+        )
+        .await
     }
 
     /// Record a failed download without erasing the last success or normalized result.
@@ -240,7 +278,7 @@ impl Database {
         let state = format!("fit-version:{}", request.activity_id);
         lock_fit_scope(&mut txn, request.authenticated_fingerprint, &state).await?;
         if let Some(lease) = lease {
-            lease.check_live(&mut txn).await?;
+            lease.observe_live(&mut txn).await?;
         }
         let (mut txn, key, bytes) = tokio::task::spawn_blocking(move || {
             let bytes = source.seek(SeekFrom::End(0)).map_err(ArchiveError::from)?;
@@ -319,7 +357,8 @@ impl Database {
         archive: Arc<Archive>,
         limits: ExportLimits,
     ) -> Result<FitIngestOutcome, FitIngestError> {
-        self.apply_export(capture, archive, limits, None).await
+        self.apply_export(capture, archive, limits, None, || {})
+            .await
     }
 
     async fn apply_export(
@@ -328,10 +367,20 @@ impl Database {
         archive: Arc<Archive>,
         limits: ExportLimits,
         lease: Option<&GarminJobLease>,
+        before_publish: impl FnOnce(),
     ) -> Result<FitIngestOutcome, FitIngestError> {
         let mut txn = self.fit_transaction().await?;
-        let current = LockedFit::open(&mut txn, capture, lease).await?;
+        lock_fit_scope(&mut txn, &capture.owner, &capture.state_key()).await?;
+        if let Some(lease) = lease {
+            lease.observe_live(&mut txn).await?;
+        }
+        let current = LockedFit::load(&mut txn, capture).await?;
         if let Some(outcome) = current.short_circuit(&mut txn, capture).await? {
+            before_publish();
+            if let Some(lease) = lease {
+                lease.check_live(&mut txn).await?;
+                reserve_fit_publication(&mut txn, Some(lease)).await?;
+            }
             return commit_outcome(txn, capture, lease, outcome).await;
         }
         txn.commit().await?;
@@ -343,23 +392,38 @@ impl Database {
         })
         .await
         .map_err(|_| FitIngestError::ArchiveTaskFailed)??;
-        match self.stage_fit_projection(source, limits).await {
-            Ok(staged) => publish_staged(staged, capture, lease).await,
-            Err(FitStageError::Decode(error)) if permanent_decode_error(error) => {
-                let mut txn = self.fit_transaction().await?;
-                let current = LockedFit::open(&mut txn, capture, lease).await?;
-                let early = current.short_circuit(&mut txn, capture).await?;
-                let outcome = match early {
-                    Some(outcome) => outcome,
-                    None => {
-                        current
-                            .record_error(&mut txn, capture, legacy_decode_label(error))
-                            .await?
-                    }
-                };
-                commit_outcome(txn, capture, lease, outcome).await
+        let staged = self.stage_fit_projection(source, limits).await;
+        before_publish();
+        let publish = async {
+            match staged {
+                Ok(staged) => publish_staged(staged, capture, lease).await,
+                Err(FitStageError::Decode(error)) if permanent_decode_error(error) => {
+                    let mut txn = self.fit_transaction().await?;
+                    let current = LockedFit::open(&mut txn, capture, lease).await?;
+                    reserve_fit_publication(&mut txn, lease).await?;
+                    let early = current.short_circuit(&mut txn, capture).await?;
+                    let outcome = match early {
+                        Some(outcome) => outcome,
+                        None => {
+                            current
+                                .record_error(&mut txn, capture, legacy_decode_label(error))
+                                .await?
+                        }
+                    };
+                    commit_outcome(txn, capture, lease, outcome).await
+                }
+                Err(error) => Err(FitIngestError::Stage(error)),
             }
-            Err(error) => Err(FitIngestError::Stage(error)),
+        };
+        if lease.is_some() {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(GARMIN_PUBLICATION_SECONDS as u64),
+                publish,
+            )
+            .await
+            .map_err(|_| FitIngestError::Lease(JobStoreError::PublicationTimedOut))?
+        } else {
+            publish.await
         }
     }
 
@@ -753,6 +817,18 @@ async fn update_raw(
     Ok(())
 }
 
+async fn reserve_fit_publication(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: Option<&GarminJobLease>,
+) -> Result<(), FitIngestError> {
+    if let Some(lease) = lease {
+        lease
+            .reserve_publication(txn, GARMIN_PUBLICATION_SECONDS + 1)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn publish_staged(
     staged: StagedFitProjection,
     capture: &CapturedFit,
@@ -761,6 +837,7 @@ async fn publish_staged(
     let inventory = staged.inventory();
     let mut txn = staged.transaction;
     let current = LockedFit::open(&mut txn, capture, lease).await?;
+    reserve_fit_publication(&mut txn, lease).await?;
     if let Some(outcome) = current.short_circuit(&mut txn, capture).await? {
         return commit_outcome(txn, capture, lease, outcome).await;
     }

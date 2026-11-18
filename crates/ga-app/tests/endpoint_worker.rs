@@ -361,8 +361,67 @@ async fn restores_the_pending_page_and_refuses_a_superseded_response() -> Result
         Duration::from_millis(1300),
     );
     source.activity_offset = Some(0);
+    sqlx::raw_sql(
+        "CREATE SEQUENCE synthetic_archiving_entered;
+         CREATE FUNCTION slow_activity_capture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+            PERFORM nextval('synthetic_archiving_entered');
+            PERFORM pg_sleep(0.45);
+            RETURN NEW;
+         END $$;
+         CREATE TRIGGER slow_activity_capture BEFORE INSERT ON source_payloads
+            FOR EACH ROW WHEN (NEW.endpoint='activities') EXECUTE FUNCTION slow_activity_capture();
+         CREATE FUNCTION slow_activity_publication() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_sleep(0.57); RETURN NEW; END $$;
+         CREATE TRIGGER slow_activity_row BEFORE INSERT ON activities FOR EACH ROW
+            EXECUTE FUNCTION slow_activity_publication();
+         CREATE TRIGGER slow_activity_freshness BEFORE INSERT ON app_state
+            FOR EACH ROW WHEN (starts_with(NEW.key,'freshness:activities:'))
+            EXECUTE FUNCTION slow_activity_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
+    let verify_renewal = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let entered: bool =
+                    sqlx::query_scalar("SELECT is_called FROM synthetic_archiving_entered")
+                        .fetch_one(&fixture.inspect)
+                        .await?;
+                if entered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Polling observes the uncommitted capture. A separate connection
+            // must still be able to lock the job row, as lease renewal does.
+            let mut renew = fixture.inspect.begin().await?;
+            let alive: Uuid =
+                sqlx::query_scalar("SELECT id FROM jobs WHERE id=$1 FOR UPDATE NOWAIT")
+                    .bind(page.id())
+                    .fetch_one(&mut *renew)
+                    .await?;
+            assert_eq!(alive, page.id());
+            renew.rollback().await
+        })
+        .await??;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let worker = fixture.worker(&source);
+    let (result, renewal) = tokio::join!(worker.run_activity_page(&page), verify_renewal);
+    renewal?;
+    sqlx::raw_sql(
+        "DROP TRIGGER slow_activity_capture ON source_payloads;
+         DROP FUNCTION slow_activity_capture();
+         DROP SEQUENCE synthetic_archiving_entered;
+         DROP TRIGGER slow_activity_row ON activities;
+         DROP TRIGGER slow_activity_freshness ON app_state;
+         DROP FUNCTION slow_activity_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     assert_eq!(
-        fixture.worker(&source).run_activity_page(&page).await?,
+        result?,
         ActivityPageWork::Publication(ActivityPageResult::Published(DocumentStatus::Normalized)),
     );
     assert_eq!(fixture.job(&page).await?, ("done".into(), 1));
@@ -532,11 +591,62 @@ async fn downloads_fit_in_private_staging_and_preserves_the_last_complete_export
         interrupted: false,
     };
     let first = claim(1).await?;
+    sqlx::raw_sql(
+        "CREATE SEQUENCE synthetic_fit_capture_entered;
+         CREATE FUNCTION slow_fit_capture() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+            PERFORM nextval('synthetic_fit_capture_entered');
+            PERFORM pg_sleep(0.45);
+            RETURN NEW;
+         END $$;
+         CREATE TRIGGER slow_fit_capture BEFORE INSERT ON source_payloads
+            FOR EACH ROW WHEN (NEW.endpoint='activity_fit') EXECUTE FUNCTION slow_fit_capture();
+         CREATE FUNCTION slow_fit_publication() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_sleep(1.18); RETURN NEW; END $$;
+         CREATE TRIGGER slow_fit_publication BEFORE INSERT ON activity_parts FOR EACH ROW
+            EXECUTE FUNCTION slow_fit_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
+    let verify_renewal = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let entered: bool =
+                    sqlx::query_scalar("SELECT is_called FROM synthetic_fit_capture_entered")
+                        .fetch_one(&fixture.inspect)
+                        .await?;
+                if entered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let mut renew = fixture.inspect.begin().await?;
+            let alive: Uuid =
+                sqlx::query_scalar("SELECT id FROM jobs WHERE id=$1 FOR UPDATE NOWAIT")
+                    .bind(first.id())
+                    .fetch_one(&mut *renew)
+                    .await?;
+            assert_eq!(alive, first.id());
+            renew.rollback().await
+        })
+        .await??;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let worker = fixture.worker(&good);
+    let (result, renewal) =
+        tokio::join!(worker.run_activity_export(&first, limits), verify_renewal);
+    renewal?;
+    sqlx::raw_sql(
+        "DROP TRIGGER slow_fit_capture ON source_payloads;
+         DROP FUNCTION slow_fit_capture();
+         DROP SEQUENCE synthetic_fit_capture_entered;
+         DROP TRIGGER slow_fit_publication ON activity_parts;
+         DROP FUNCTION slow_fit_publication();",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     assert_eq!(
-        fixture
-            .worker(&good)
-            .run_activity_export(&first, limits)
-            .await?,
+        result?,
         ActivityFitWork::Publication(FitIngestOutcome::Normalized { rows: 1 }),
     );
     assert_eq!(good.calls.load(Ordering::Relaxed), 1);
