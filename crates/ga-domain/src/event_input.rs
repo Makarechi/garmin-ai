@@ -377,6 +377,15 @@ pub fn source_calendar_minutes(
 
 /// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
 pub fn local_midnight(day: time::Date, timezone: &str) -> Option<StoredInstant> {
+    local_wall_time(day, time::Time::MIDNIGHT, timezone)
+}
+
+/// Interpret a saved wall clock time with Python ZoneInfo's default overlap and gap handling.
+pub fn local_wall_time(
+    day: time::Date,
+    clock: time::Time,
+    timezone: &str,
+) -> Option<StoredInstant> {
     let zone = jiff::tz::db().get(timezone).ok()?;
     let day = jiff::civil::Date::new(
         i16::try_from(day.year()).ok()?,
@@ -384,9 +393,12 @@ pub fn local_midnight(day: time::Date, timezone: &str) -> Option<StoredInstant> 
         day.day() as i8,
     )
     .ok()?;
-    let midnight = zone
-        .to_ambiguous_timestamp(day.at(0, 0, 0, 0))
-        .compatible()
-        .ok()?;
-    StoredInstant::from_unix_microseconds(midnight.as_microsecond()).ok()
+    let wall = day.at(
+        clock.hour() as i8,
+        clock.minute() as i8,
+        clock.second() as i8,
+        clock.nanosecond() as i32,
+    );
+    let instant = zone.to_ambiguous_timestamp(wall).compatible().ok()?;
+    StoredInstant::from_unix_microseconds(instant.as_microsecond()).ok()
 }

@@ -1,7 +1,9 @@
 use ga_domain::{
     event_input::{EventInput, ValidationMode},
     event_provenance::{EventTopology, restore_legacy_provenance},
+    event_replay::{ReplayConflict, check_idempotency_key},
     event_schema::validate_entry_values,
+    sha256_hex,
 };
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
@@ -10,14 +12,16 @@ use uuid::Uuid;
 
 use super::{
     AuditEntry, DiaryWriteError, append_audit, invalidate_migraine_insights, load_event, metrics,
-    relation_id,
+    proactive_answers, relation_id,
     revisions::{
         ensure_unreferenced, snapshot_instant, snapshot_kind, snapshot_text,
         sync_migraine_questions, tombstone, validate_symptom_bounds,
     },
     stored_instant, validate_stored_relation,
 };
-use crate::{Database, system_definitions::ensure_system_definition_in};
+use crate::{
+    Database, health_analysis::owner_timezone, system_definitions::ensure_system_definition_in,
+};
 
 pub struct UndoDiaryOperation<'a> {
     pub owner_id: Uuid,
@@ -40,8 +44,71 @@ impl Database {
         request: UndoDiaryOperation<'_>,
     ) -> Result<UndoneDiaryOperation, DiaryWriteError> {
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let audits = sqlx::query_as::<_, RecordedAudit>(
-            "WITH latest AS (
+        let result = apply_undo(&mut txn, &request).await?;
+        txn.commit().await?;
+        Ok(result)
+    }
+
+    /// Undo an HTTP write and keep the original API receipt and question effects atomically.
+    pub async fn undo_api_diary(
+        &self,
+        owner: Uuid,
+        idempotency_key: Option<&str>,
+        configured_timezone: &str,
+    ) -> Result<Value, DiaryWriteError> {
+        let key = idempotency_key
+            .map(|key| {
+                check_idempotency_key(key).map_err(DiaryWriteError::Replay)?;
+                Ok::<_, DiaryWriteError>(format!("api:undo:{}", sha256_hex(key.as_bytes())))
+            })
+            .transpose()?;
+        let mut txn = self.begin_diary_write(owner).await?;
+        if let Some(key) = key.as_deref()
+            && let Some(existing) =
+                sqlx::query_scalar::<_, String>("SELECT value::text FROM app_state WHERE key=$1")
+                    .bind(key)
+                    .fetch_optional(&mut *txn)
+                    .await?
+        {
+            let receipt = serde_json::from_str(&existing)
+                .map_err(|_| DiaryWriteError::Replay(ReplayConflict::AuditUnavailable))?;
+            txn.commit().await?;
+            return Ok(receipt);
+        }
+        let result = apply_undo(
+            &mut txn,
+            &UndoDiaryOperation {
+                owner_id: owner,
+                authenticated_actor: "api",
+            },
+        )
+        .await?;
+        let timezone = owner_timezone(&mut txn, configured_timezone)
+            .await
+            .map_err(|_| DiaryWriteError::Database)?;
+        let now = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *txn)
+            .await?;
+        proactive_answers::reconcile(&mut txn, owner, now, &timezone).await?;
+        let receipt = json!({"id":result.id.to_string(), "revision":result.revision, "deleted":result.deleted});
+        if let Some(key) = key.as_deref() {
+            sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
+                .bind(key)
+                .bind(receipt.to_string())
+                .execute(&mut *txn)
+                .await?;
+        }
+        txn.commit().await?;
+        Ok(receipt)
+    }
+}
+
+async fn apply_undo(
+    txn: &mut Transaction<'_, Postgres>,
+    request: &UndoDiaryOperation<'_>,
+) -> Result<UndoneDiaryOperation, DiaryWriteError> {
+    let audits = sqlx::query_as::<_, RecordedAudit>(
+        "WITH latest AS (
                  SELECT id, operation_id FROM audit_log WHERE actor = $1 AND action != 'undo'
                  ORDER BY id DESC LIMIT 1
              )
@@ -50,20 +117,17 @@ impl Database {
                 ON entry.id = latest.id OR entry.operation_id = latest.operation_id
              WHERE entry.actor = $1 AND entry.action != 'undo'
              ORDER BY entry.id DESC",
-        )
-        .bind(request.authenticated_actor)
-        .fetch_all(&mut *txn)
-        .await?;
-        let count = audits.len();
-        let mut first = None;
-        for audit in audits {
-            let changed = undo_audit(&mut txn, &request, audit, count).await?;
-            first.get_or_insert(changed);
-        }
-        let first = first.ok_or(DiaryWriteError::NothingToUndo)?;
-        txn.commit().await?;
-        Ok(first)
+    )
+    .bind(request.authenticated_actor)
+    .fetch_all(&mut **txn)
+    .await?;
+    let count = audits.len();
+    let mut first = None;
+    for audit in audits {
+        let changed = undo_audit(txn, request, audit, count).await?;
+        first.get_or_insert(changed);
     }
+    first.ok_or(DiaryWriteError::NothingToUndo)
 }
 
 async fn undo_audit(
