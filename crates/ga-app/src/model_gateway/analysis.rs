@@ -1,3 +1,6 @@
+mod diary;
+pub use diary::DiaryAnalysisTools;
+
 use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::Instant};
 
 use ga_db::share_policy::{ShareCategory, ShareRequirement};
@@ -46,6 +49,7 @@ pub struct AnalysisToolRead {
 /// Read-only adapter tied to the owner, the offered arguments, and the current
 /// revision of the evidence. Tool names in model-provided data grant no access.
 pub trait AnalysisReadTools: Sync {
+    fn categories(&self) -> ModelCategories;
     fn context_current(&self) -> impl Future<Output = bool> + Send;
     fn read(
         &self,
@@ -109,8 +113,7 @@ impl ModelGateway<'_> {
         requirements: &[ShareRequirement<'_>],
         job: Option<ActiveModelJob>,
     ) -> Result<AnalysisResult, AnalysisError> {
-        let categories = ModelCategories::from_labels(["health", "diary"])
-            .ok_or(AnalysisError::InvalidDocument)?;
+        let categories = tools.categories();
         answer_with(question, budget, tools, |prompt, versions| {
             let policy = &policy;
             async move {

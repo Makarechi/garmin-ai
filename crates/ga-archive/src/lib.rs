@@ -8,6 +8,7 @@ pub mod backup_bundle;
 pub mod backup_envelope;
 pub mod backup_unpack;
 pub mod backup_workspace;
+pub mod erasure_files;
 
 use std::{
     env,

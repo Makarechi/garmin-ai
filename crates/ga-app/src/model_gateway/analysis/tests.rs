@@ -17,6 +17,10 @@ struct Reader {
 }
 
 impl AnalysisReadTools for Reader {
+    fn categories(&self) -> ModelCategories {
+        ModelCategories::HEALTH_AND_DIARY
+    }
+
     async fn context_current(&self) -> bool {
         self.current.load(Ordering::SeqCst)
     }
