@@ -16,7 +16,10 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    Database, ReadinessError, activity_documents::invalidate_replay_outputs, check_readiness,
+    Database, ReadinessError,
+    activity_documents::{DocumentError, invalidate_replay_outputs},
+    check_readiness,
+    raw_capture::CaptureError,
 };
 
 const WRITER_LOCK: i64 = 72104619;
@@ -296,7 +299,12 @@ impl Database {
             .await?;
         }
         if changed {
-            invalidate_replay_outputs(&mut txn).await?;
+            invalidate_replay_outputs(&mut txn)
+                .await
+                .map_err(|error| match error {
+                    DocumentError::Access(CaptureError::Busy) => SourcePageError::Busy,
+                    _ => SourcePageError::Database,
+                })?;
         }
         write_state(&mut txn, &poll.cursor_key, &snapshot).await?;
         if is_cancelled() {

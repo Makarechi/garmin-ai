@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     Database,
-    activity_documents::{invalidate_replay_outputs, put_state},
+    activity_documents::{DocumentError, invalidate_replay_outputs, put_state},
     check_readiness,
     fit_staging::{FitStageError, StagedFitProjection},
     jobs::{
@@ -728,7 +728,12 @@ impl LockedFit {
             && self.source_parser != PARSER_VERSION
             && (self.source_parser > 0 || matches!(self.source_status.as_str(), "error" | "stale"))
         {
-            invalidate_replay_outputs(txn).await?;
+            invalidate_replay_outputs(txn)
+                .await
+                .map_err(|error| match error {
+                    DocumentError::Access(error) => FitIngestError::Access(error),
+                    _ => FitIngestError::Database,
+                })?;
         }
         if !mode.preserve_attempt && !mode.retained {
             put_state(

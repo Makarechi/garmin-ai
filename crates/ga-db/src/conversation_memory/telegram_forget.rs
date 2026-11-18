@@ -5,7 +5,6 @@ use super::{ConversationBinding, DEADLINE, MemoryError, clear_conversation, reti
 use crate::Database;
 
 const OWNER_SETTINGS_LOCK: i64 = 72_104_621;
-const LEGACY_CONTEXT_LOCK: i64 = 72_104_643;
 
 impl Database {
     /// Clear current neutral Telegram memory and the old owner's Telegram
@@ -46,14 +45,6 @@ pub(crate) async fn forget_in(
     if !policy {
         return Err(MemoryError::Busy);
     }
-    let context: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(LEGACY_CONTEXT_LOCK)
-        .fetch_one(&mut **txn)
-        .await?;
-    if !context {
-        return Err(MemoryError::Busy);
-    }
-
     let epoch = clear_conversation(txn, binding).await?;
     retire_dependencies(txn, binding).await?;
     sqlx::query(

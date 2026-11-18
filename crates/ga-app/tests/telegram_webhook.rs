@@ -53,6 +53,19 @@ async fn matches_webhook_auth_replays_and_storage_backpressure() -> Result<(), B
     .await?;
     let receiver =
         TelegramWebhook::from_settings(Some(database.clone()), Some(SECRET), Some(&chat), None);
+    let disabled = TelegramWebhook::from_settings(
+        Some(database.clone()),
+        Some(SECRET),
+        Some(&chat),
+        Some("[]"),
+    );
+    let disabled_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let disabled_endpoint = format!(
+        "http://{}/telegram/webhook",
+        disabled_listener.local_addr()?
+    );
+    let disabled_server =
+        tokio::spawn(async move { axum::serve(disabled_listener, disabled.router()).await });
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let endpoint = format!("http://{}/telegram/webhook", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, receiver.router()).await });
@@ -81,7 +94,12 @@ async fn matches_webhook_auth_replays_and_storage_backpressure() -> Result<(), B
             sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"channel\":null,\"fallback_channels\":[]}')")
                 .execute(&pool).await?;
         }
-        let mut request = client.post(&endpoint);
+        let route = if name == "explicitly_disabled" {
+            &disabled_endpoint
+        } else {
+            &endpoint
+        };
+        let mut request = client.post(route);
         request = match case["auth"].as_str() {
             Some("valid") => request.header(HEADER, SECRET),
             Some("wrong") => request.header(HEADER, "fixture-wrong"),
@@ -136,6 +154,7 @@ async fn matches_webhook_auth_replays_and_storage_backpressure() -> Result<(), B
             .await?;
     assert!(!offset);
     server.abort();
+    disabled_server.abort();
 
     let paired = database.confirmed_telegram_owner("primary", 42).await?;
     sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")

@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 
 from garmin_ai.config import Settings
-from garmin_ai.integrations import channel_instance_id, configured_telegram_ingress_instance
+from garmin_ai.integrations import (
+    channel_instance_id,
+    configured_instance,
+)
 
 
 def capture(output):
@@ -26,14 +29,17 @@ def capture(output):
     ]
     expected = []
     for name, owner, integrations in cases:
-        settings = Settings(telegram_user_id=owner, integrations=integrations or [])
-        instance = configured_telegram_ingress_instance(settings)
+        supplied = {} if integrations is None else {"integrations": integrations}
+        settings = Settings(
+            _env_file=None, telegram_user_id=owner, telegram_bot_token="synthetic-bot", **supplied
+        )
+        polling = configured_instance(settings, "channel", "telegram") if owner else None
         expected.append(
             {
                 "name": name,
                 "owner": str(owner),
                 "integrations": None if integrations is None else json.dumps(integrations),
-                "namespace": None if instance is None else channel_instance_id(instance),
+                "namespace": None if polling is None else channel_instance_id(polling),
             }
         )
     output.write_text(json.dumps(expected), encoding="utf-8")

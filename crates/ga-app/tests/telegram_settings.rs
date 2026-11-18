@@ -7,6 +7,13 @@ use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use uuid::Uuid;
 
 #[test]
+fn explicitly_empty_list_disables_native_polling() -> Result<(), TelegramSettingsError> {
+    assert!(TelegramIngressSettings::selected(Some("42"), Some("[]"))?.is_none());
+    assert!(TelegramIngressSettings::selected(Some("42"), None)?.is_some());
+    Ok(())
+}
+
+#[test]
 #[ignore = "uses the pinned Python integration selection recording"]
 fn matches_configured_telegram_namespaces() -> Result<(), Box<dyn Error>> {
     let fixture: Vec<Value> =

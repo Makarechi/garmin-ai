@@ -6,8 +6,12 @@ use sqlx::{Executor, Postgres};
 
 use crate::{
     Database, ReadinessError, check_readiness,
-    garmin_owner::{OwnerVerificationError, verify_owner_in_transaction},
+    garmin_owner::{
+        OwnerVerificationError, stored_garmin_fingerprint, verify_owner_in_transaction,
+    },
     jobs::STORAGE_QUEUE_LOCK,
+    scenario_packs::source_instance_selected,
+    share_policy::OWNER_ONBOARDING_LOCK,
 };
 
 const GARMIN_STATE_KEY: &str = "integration:garmin";
@@ -29,6 +33,13 @@ pub enum GarminTransportOutcome {
 pub enum GarminRequestPause {
     Reauthentication,
     Cooldown(StoredInstant),
+}
+
+pub enum GarminSourceAdmission {
+    Unselected,
+    Unbound,
+    Paused(GarminRequestPause),
+    Ready { fingerprint: String },
 }
 
 pub struct RecordedGarminTransport {
@@ -69,6 +80,50 @@ impl From<sqlx::Error> for GarminIntegrationError {
 }
 
 impl Database {
+    /// Read the currently selected source, owner binding and pause state before
+    /// the worker opens a local Garmin session or schedules any provider work.
+    pub async fn garmin_source_admission(
+        &self,
+        instance: &str,
+        now: StoredInstant,
+    ) -> Result<GarminSourceAdmission, GarminIntegrationError> {
+        if instance.is_empty() || instance.len() > 200 {
+            return Err(GarminIntegrationError::InvalidState);
+        }
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SET LOCAL statement_timeout='750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(GarminIntegrationError::Storage)?;
+            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
+                .bind(OWNER_ONBOARDING_LOCK)
+                .fetch_one(&mut *txn)
+                .await?;
+            if !locked {
+                return Err(GarminIntegrationError::Busy);
+            }
+            if !source_instance_selected(&mut txn, instance).await? {
+                return Ok(GarminSourceAdmission::Unselected);
+            }
+            let Some(fingerprint) = stored_garmin_fingerprint(&mut txn)
+                .await
+                .map_err(GarminIntegrationError::Owner)?
+            else {
+                return Ok(GarminSourceAdmission::Unbound);
+            };
+            if let Some(pause) = garmin_pause(&mut *txn, now).await? {
+                return Ok(GarminSourceAdmission::Paused(pause));
+            }
+            txn.commit().await?;
+            Ok(GarminSourceAdmission::Ready { fingerprint })
+        })
+        .await
+        .map_err(|_| GarminIntegrationError::Database)?
+    }
+
     /// Check a durable pause again before starting an already leased request.
     pub async fn garmin_request_pause(
         &self,

@@ -4,8 +4,8 @@ use ga_db::{
     Database,
     outbox_claims::ReplyDestination,
     proactive_control::{
-        DiaryQuestionOutcome, NotificationExclusions, NotificationPolicy, ProactiveControlError,
-        ReservedDiaryQuestion,
+        DiaryContextAvailability, DiaryQuestionOutcome, NotificationExclusions, NotificationPolicy,
+        ProactiveControlError, ReservedDiaryQuestion,
     },
 };
 use ga_domain::{
@@ -91,12 +91,29 @@ impl TelegramTransport {
                 return Ok(false);
             }
             let now = clock()?;
-            database
-                .generate_diary_questions(binding.owner_id, now, policy.timezone)
-                .await?;
-            *current = database
-                .reserve_diary_question(binding.owner_id, policy, now)
-                .await?;
+            *current = match database.diary_context_availability(now).await? {
+                DiaryContextAvailability::WaitingForSync => return Ok(false),
+                DiaryContextAvailability::Withheld => {
+                    database
+                        .generate_diary_questions(binding.owner_id, now, policy.timezone)
+                        .await?;
+                    database
+                        .reserve_diary_question(binding.owner_id, policy, now)
+                        .await?
+                }
+                DiaryContextAvailability::Ready => {
+                    database
+                        .generate_diary_questions_with_context(
+                            binding.owner_id,
+                            now,
+                            policy.timezone,
+                        )
+                        .await?;
+                    database
+                        .reserve_diary_question_with_context(binding.owner_id, policy, now)
+                        .await?
+                }
+            };
         }
         let Some(question) = current.as_ref() else {
             return Ok(false);
