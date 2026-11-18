@@ -16,6 +16,9 @@
 !src/garmin_ai/locales/*.json
 !src/garmin_ai/prompts/
 !src/garmin_ai/prompts/*.txt
+!src/garmin_ai/static/
+!src/garmin_ai/static/garmin_auth/
+!src/garmin_ai/static/garmin_auth/index.html
 !migration/
 !migration/contracts/
 !migration/contracts/*.json

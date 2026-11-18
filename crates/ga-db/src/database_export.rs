@@ -64,7 +64,7 @@ pub(crate) const TABLES: &[(&str, &str)] = export_tables![
     "metric_observations",
 ];
 
-const TOKEN_PUBLICATION_LOCK: i64 = 72_104_626;
+pub(crate) const TOKEN_PUBLICATION_LOCK: i64 = 72_104_626;
 
 pub struct BackupSnapshot {
     pub counts: ExportCounts,
