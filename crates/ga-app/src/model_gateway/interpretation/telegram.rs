@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use ga_db::{
     conversation_memory::{ConversationBinding, ConversationReadContext, MemoryFence},
     diary::{ClarificationClock, InterpretationContext, InterpretationContextQuery},
-    jobs::telegram_inbound::TelegramInboundLease,
+    jobs::telegram_inbound::{TelegramInboundLease, TelegramModelContext},
     share_policy::{
         DestinationKind, ModelChannelSharing, ShareCategory, ShareDestination, ShareRequirement,
     },
@@ -29,6 +29,25 @@ pub struct TelegramDiaryInterpretation {
     pub memory: MemoryFence,
     pub channel_versions: BTreeSet<Uuid>,
     pub model_versions: BTreeSet<Uuid>,
+    instance: String,
+    timezone: String,
+    mentioned: Vec<Uuid>,
+    digest: String,
+}
+
+impl TelegramDiaryInterpretation {
+    pub fn publication_context<'a>(
+        &'a self,
+        configured_timezone: &'a str,
+    ) -> TelegramModelContext<'a> {
+        TelegramModelContext {
+            timezone: &self.timezone,
+            configured_timezone,
+            model_instance: &self.instance,
+            mentioned_events: &self.mentioned,
+            digest: &self.digest,
+        }
+    }
 }
 
 impl ModelGateway<'_> {
@@ -73,15 +92,7 @@ impl ModelGateway<'_> {
             return Err(DiaryInterpretationError::RequiresSafetyScreen);
         }
         let mentioned = mentions(text);
-        let InterpretationContext {
-            channel,
-            mut events,
-            recent_questions,
-            mut pending_clarification,
-            selection_unavailable,
-            recent_analysis_question,
-            memory_fence,
-        } = self
+        let context = self
             .database
             .interpretation_context(InterpretationContextQuery {
                 binding,
@@ -92,6 +103,16 @@ impl ModelGateway<'_> {
             })
             .await
             .map_err(DiaryInterpretationError::Read)?;
+        let digest = context.digest().map_err(DiaryInterpretationError::Read)?;
+        let InterpretationContext {
+            channel,
+            mut events,
+            recent_questions,
+            mut pending_clarification,
+            selection_unavailable,
+            recent_analysis_question,
+            memory_fence,
+        } = context;
         let mut expired_selection = mentioned.is_empty() && selection_unavailable;
         if mentioned.is_empty()
             && let Some(pending) = pending_clarification.as_ref()
@@ -170,6 +191,10 @@ impl ModelGateway<'_> {
             memory: memory_fence,
             channel_versions: events.channel_versions,
             model_versions: events.tracker_versions,
+            instance: self.binding().instance_id.to_owned(),
+            timezone: timezone.to_owned(),
+            mentioned,
+            digest,
         })
     }
 }

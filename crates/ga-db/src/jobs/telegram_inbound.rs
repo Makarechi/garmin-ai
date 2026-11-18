@@ -1,10 +1,12 @@
 mod control;
 mod diary;
 mod history;
+mod model_publication;
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
 pub(crate) use history::resolve_legacy_history;
+pub use model_publication::TelegramModelContext;
 
 use std::time::Duration;
 
