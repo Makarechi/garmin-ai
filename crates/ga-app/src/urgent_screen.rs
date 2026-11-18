@@ -359,7 +359,7 @@ pub fn obvious_third_party_emergency(text: &str) -> Result<bool, UrgentScreenUna
 
 pub fn urgent_notice(locale: &str) -> &'static str {
     if locale
-        .split(['-', '_'])
+        .split('-')
         .next()
         .is_some_and(|code| code.eq_ignore_ascii_case("ru"))
     {
