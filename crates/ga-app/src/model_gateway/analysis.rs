@@ -8,7 +8,7 @@ use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError, AnalysisStage},
     analysis_claims::AnswerEvidence,
     analysis_step::{AnalysisStep, AnalysisStepAction, AnalysisStepError},
-    legacy_json::{Utf8Layout, encode},
+    legacy_json::{JsonError, Utf8Layout, encode},
     model_consent::ModelCategories,
     model_request::ApprovedModelSchema,
 };
@@ -305,7 +305,7 @@ async fn check_context(
     }
 }
 
-fn ordered(document: &Value) -> Result<String, AnalysisError> {
+pub(super) fn ordered(document: &impl serde::Serialize) -> Result<String, AnalysisError> {
     let mut bytes = PromptBytes(Vec::new());
     serde_json::to_writer(&mut bytes, document).map_err(|error| {
         if error.io_error_kind() == Some(io::ErrorKind::FileTooLarge) {
@@ -314,8 +314,13 @@ fn ordered(document: &Value) -> Result<String, AnalysisError> {
             AnalysisError::InvalidDocument
         }
     })?;
-    let output = encode(&bytes.0, Utf8Layout::Ordered, MAX_PROMPT_JSON)
-        .map_err(|_| AnalysisError::InvalidDocument)?;
+    let output = encode(&bytes.0, Utf8Layout::Ordered, MAX_PROMPT_JSON).map_err(|error| {
+        if error == JsonError::InputTooLarge {
+            AnalysisBudgetError::Limit.into()
+        } else {
+            AnalysisError::InvalidDocument
+        }
+    })?;
     String::from_utf8(output).map_err(|_| AnalysisError::InvalidDocument)
 }
 

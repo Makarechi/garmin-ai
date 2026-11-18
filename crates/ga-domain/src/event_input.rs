@@ -385,6 +385,18 @@ pub fn source_calendar_wall_time(
     Some((date, clock))
 }
 
+/// Display a stored instant in the owner's zone while retaining its exact offset.
+pub fn source_offset_datetime(
+    start: StoredInstant,
+    timezone: &str,
+) -> Option<time::OffsetDateTime> {
+    let instant = jiff::Timestamp::from_microsecond(start.unix_microseconds()).ok()?;
+    let zone = jiff::tz::db().get(timezone).ok()?;
+    let local = instant.to_zoned_datetime(zone);
+    let offset = time::UtcOffset::from_whole_seconds(local.offset().seconds()).ok()?;
+    time::OffsetDateTime::from(start).checked_to_offset(offset)
+}
+
 /// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
 pub fn local_midnight(day: time::Date, timezone: &str) -> Option<StoredInstant> {
     local_wall_time(day, time::Time::MIDNIGHT, timezone)
