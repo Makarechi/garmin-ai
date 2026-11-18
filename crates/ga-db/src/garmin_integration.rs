@@ -1,8 +1,12 @@
+mod reauthentication;
+
+pub use reauthentication::{GarminReauthError, GarminReauthStatus, GarminReauthTarget};
+
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
-use sqlx::{Executor, Postgres};
+use sqlx::{Executor, Postgres, Transaction};
 
 use crate::{
     Database, ReadinessError, check_readiness,
@@ -158,100 +162,108 @@ impl Database {
         if !admitted {
             return Err(GarminIntegrationError::Busy);
         }
-        let previous = recorded_state(&mut txn).await?;
-        let old_count = previous
-            .as_ref()
-            .map_or(0, |(state, _)| state.failure_count);
-        if let Some((state, previous_at)) = previous
-            && (previous_at.is_some_and(|previous_at| previous_at > at)
-                || (state.status == "reauth_required"
-                    && !matches!(
-                        outcome,
-                        GarminTransportOutcome::AuthorizedLogin
-                            | GarminTransportOutcome::AuthenticationRequired
-                            | GarminTransportOutcome::AccountMismatch
-                    )))
-        {
-            txn.commit().await?;
-            return Ok(state);
-        }
-        let (status, reason, retry_after, minimum) = match outcome {
-            GarminTransportOutcome::Reachable | GarminTransportOutcome::AuthorizedLogin => {
-                ("active", None, None, None)
-            }
-            GarminTransportOutcome::AuthenticationRequired => (
-                "reauth_required",
-                Some("AuthenticationRequired"),
-                None,
-                None,
-            ),
-            GarminTransportOutcome::AccountMismatch => {
-                ("reauth_required", Some("AccountMismatch"), None, None)
-            }
-            GarminTransportOutcome::RateLimited { retry_after } => (
-                "rate_limited",
-                Some("GarminConnectTooManyRequestsError"),
-                retry_after,
-                Some(MINIMUM_RATE_LIMIT),
-            ),
-            GarminTransportOutcome::ConnectionFailure { retry_after } => (
-                "degraded",
-                Some("GarminConnectConnectionError"),
-                retry_after,
-                Some(Duration::ZERO),
-            ),
-            GarminTransportOutcome::CircuitOpen => (
-                "degraded",
-                Some("CircuitOpen"),
-                None,
-                Some(MINIMUM_RATE_LIMIT),
-            ),
-        };
-        let blocked_until = match (minimum, retry_after) {
-            (None, _) => None,
-            (Some(minimum), Some(delay)) => {
-                let delay = delay
-                    .clamp(Duration::from_secs(1), MAXIMUM_PROVIDER_DELAY)
-                    .max(minimum);
-                Some(deadline(at, delay)?)
-            }
-            (Some(minimum), None) => {
-                let jitter: f64 = sqlx::query_scalar("SELECT random() * 5.0")
-                    .fetch_one(&mut *txn)
-                    .await?;
-                let seconds = f64::from((60_u32 << old_count.min(6)).min(3_600)) + jitter;
-                Some(deadline(at, Duration::from_secs_f64(seconds).max(minimum))?)
-            }
-        };
-        let failure_count = if reason.is_some() {
-            old_count.saturating_add(1)
-        } else {
-            0
-        };
-        sqlx::query(
-            "INSERT INTO app_state(key, value) VALUES ($1,$2::jsonb)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()",
-        )
-        .bind(GARMIN_STATE_KEY)
-        .bind(
-            json!({
-                "status": status,
-                "blocked_until": blocked_until.map(|at| at.to_string()),
-                "last_attempt": at.to_string(),
-                "reason_class": reason,
-                "failure_count": failure_count,
-            })
-            .to_string(),
-        )
-        .execute(&mut *txn)
-        .await?;
+        let state = record_transport_in(&mut txn, at, outcome).await?;
         txn.commit().await?;
-        Ok(RecordedGarminTransport {
-            status: status.to_owned(),
-            blocked_until,
-            failure_count,
-        })
+        Ok(state)
     }
+}
+
+async fn record_transport_in(
+    txn: &mut Transaction<'_, Postgres>,
+    at: StoredInstant,
+    outcome: GarminTransportOutcome,
+) -> Result<RecordedGarminTransport, GarminIntegrationError> {
+    let previous = recorded_state(txn).await?;
+    let old_count = previous
+        .as_ref()
+        .map_or(0, |(state, _)| state.failure_count);
+    if let Some((state, previous_at)) = previous
+        && (previous_at.is_some_and(|previous_at| previous_at > at)
+            || (state.status == "reauth_required"
+                && !matches!(
+                    outcome,
+                    GarminTransportOutcome::AuthorizedLogin
+                        | GarminTransportOutcome::AuthenticationRequired
+                        | GarminTransportOutcome::AccountMismatch
+                )))
+    {
+        return Ok(state);
+    }
+    let (status, reason, retry_after, minimum) = match outcome {
+        GarminTransportOutcome::Reachable | GarminTransportOutcome::AuthorizedLogin => {
+            ("active", None, None, None)
+        }
+        GarminTransportOutcome::AuthenticationRequired => (
+            "reauth_required",
+            Some("AuthenticationRequired"),
+            None,
+            None,
+        ),
+        GarminTransportOutcome::AccountMismatch => {
+            ("reauth_required", Some("AccountMismatch"), None, None)
+        }
+        GarminTransportOutcome::RateLimited { retry_after } => (
+            "rate_limited",
+            Some("GarminConnectTooManyRequestsError"),
+            retry_after,
+            Some(MINIMUM_RATE_LIMIT),
+        ),
+        GarminTransportOutcome::ConnectionFailure { retry_after } => (
+            "degraded",
+            Some("GarminConnectConnectionError"),
+            retry_after,
+            Some(Duration::ZERO),
+        ),
+        GarminTransportOutcome::CircuitOpen => (
+            "degraded",
+            Some("CircuitOpen"),
+            None,
+            Some(MINIMUM_RATE_LIMIT),
+        ),
+    };
+    let blocked_until = match (minimum, retry_after) {
+        (None, _) => None,
+        (Some(minimum), Some(delay)) => {
+            let delay = delay
+                .clamp(Duration::from_secs(1), MAXIMUM_PROVIDER_DELAY)
+                .max(minimum);
+            Some(deadline(at, delay)?)
+        }
+        (Some(minimum), None) => {
+            let jitter: f64 = sqlx::query_scalar("SELECT random() * 5.0")
+                .fetch_one(&mut **txn)
+                .await?;
+            let seconds = f64::from((60_u32 << old_count.min(6)).min(3_600)) + jitter;
+            Some(deadline(at, Duration::from_secs_f64(seconds).max(minimum))?)
+        }
+    };
+    let failure_count = if reason.is_some() {
+        old_count.saturating_add(1)
+    } else {
+        0
+    };
+    sqlx::query(
+        "INSERT INTO app_state(key, value) VALUES ($1,$2::jsonb)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()",
+    )
+    .bind(GARMIN_STATE_KEY)
+    .bind(
+        json!({
+            "status": status,
+            "blocked_until": blocked_until.map(|at| at.to_string()),
+            "last_attempt": at.to_string(),
+            "reason_class": reason,
+            "failure_count": failure_count,
+        })
+        .to_string(),
+    )
+    .execute(&mut **txn)
+    .await?;
+    Ok(RecordedGarminTransport {
+        status: status.to_owned(),
+        blocked_until,
+        failure_count,
+    })
 }
 
 pub(crate) async fn garmin_pause<'e>(

@@ -1,4 +1,5 @@
 pub mod legacy;
+pub mod managed_password;
 mod query;
 
 #[cfg(test)]
