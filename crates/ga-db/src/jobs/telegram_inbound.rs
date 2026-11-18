@@ -6,7 +6,7 @@ pub use diary::TelegramDiaryCommitError;
 
 use std::time::Duration;
 
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{telegram_control::COMMAND_WHITESPACE, timestamp::StoredInstant};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -73,7 +73,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary)
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary, None)
             .await
     }
 
@@ -84,8 +84,32 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Control)
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Control, None)
             .await
+    }
+
+    /// Claim commands served by the current local worker, for historical and new inbox rows.
+    pub async fn claim_local_telegram_control(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Control,
+            Some(&[
+                "/forget_conversation",
+                "/today",
+                "/pause",
+                "/resume",
+                "/help",
+                "/start",
+            ]),
+        )
+        .await
     }
 
     async fn claim_telegram_lane(
@@ -94,6 +118,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
         lane: InboxLane,
+        commands: Option<&[&str]>,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
         if !(1..=86_400).contains(&lease_seconds) {
             return Err(JobStoreError::InvalidLeaseDuration);
@@ -142,6 +167,8 @@ impl Database {
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
+                       AND ($9::text[] IS NULL OR split_part(ltrim(translate(
+                           i.envelope->>'text',$10,repeat(' ',char_length($10)))), ' ',1)=ANY($9))
                      ORDER BY coalesce((j.payload->>'ordering_epoch')::bigint,0),
                               i.external_event_id::bigint,j.id
                      LIMIT 1
@@ -161,6 +188,8 @@ impl Database {
             .bind(token)
             .bind(ATTEMPT_LIMIT)
             .bind(lane.label())
+            .bind(commands)
+            .bind(COMMAND_WHITESPACE)
             .fetch_optional(&mut *txn)
             .await?;
             let mut result =

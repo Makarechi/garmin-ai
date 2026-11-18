@@ -83,6 +83,37 @@ enum Dispatch {
 }
 
 impl Database {
+    /// Reschedule a claim whose preparation failed before starting any provider request.
+    /// Once dispatch rotates its token, the original claim can never requeue the send.
+    pub async fn defer_unsent_reply(
+        &self,
+        owner: Uuid,
+        claim: ReplyClaim,
+        retry_at: StoredInstant,
+    ) -> Result<bool, ReplyDispatchError> {
+        tokio::time::timeout(DATABASE_DEADLINE, async {
+            let mut txn = self.work.begin().await?;
+            sqlx::query("SET LOCAL statement_timeout='750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(ReplyDispatchError::Storage)?;
+            let updated = defer(
+                &mut txn,
+                owner,
+                claim.outbox_id,
+                claim.lease_token,
+                retry_at,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok(updated)
+        })
+        .await
+        .map_err(|_| ReplyDispatchError::Database)?
+    }
+
     /// Expose one reply to its channel after fresh authorization and durable dispatch fencing.
     /// The closure returns the provider observation or a definitely safe retry time.
     pub async fn dispatch_outbox_reply<F>(

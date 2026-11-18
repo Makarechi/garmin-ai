@@ -202,7 +202,7 @@ impl TelegramTransport {
     }
 }
 
-fn wall_clock() -> Result<StoredInstant, TelegramLoopError> {
+pub(super) fn wall_clock() -> Result<StoredInstant, TelegramLoopError> {
     let micros = i64::try_from(
         OffsetDateTime::now_utc()
             .unix_timestamp_nanos()

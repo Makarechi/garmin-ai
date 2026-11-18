@@ -81,6 +81,8 @@ impl Database {
                 command @ (TelegramControl::Pause
                 | TelegramControl::Resume
                 | TelegramControl::Today
+                | TelegramControl::Help
+                | TelegramControl::Start
                 | TelegramControl::ForgetConversation),
             ) => command,
             _ => return Err(TelegramControlError::Unsupported),
@@ -106,6 +108,7 @@ impl Database {
             let ordering_epoch = control_epoch(&mut txn, lease).await?;
             let mut projection = None;
             let text = match command {
+                TelegramControl::Help | TelegramControl::Start => HELP.to_owned(),
                 TelegramControl::Today => {
                     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
                         .bind(REPLAY_MUTATION_LOCK).fetch_one(&mut *txn).await?;
@@ -169,6 +172,17 @@ impl Database {
         .map_err(|_| TelegramControlError::Database)?
     }
 }
+
+const HELP: &str = concat!(
+    "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n",
+    "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n",
+    "/newtracker — создать трекер\n/goals — личные цели\n/undo — отменить последнее изменение\n",
+    "/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n",
+    "ИИ-модель сейчас недоступна; дневник и формы доступны локально. Полная исходная история хранится локально. ",
+    "Наблюдения по данным не являются диагнозом.\n/conversation — контекст анализа\n",
+    "/forget_conversation — очистить контекст анализа\n",
+    "/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках",
+);
 
 async fn control_epoch(
     txn: &mut Transaction<'_, Postgres>,
