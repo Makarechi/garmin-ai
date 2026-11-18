@@ -55,6 +55,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/tracker-setups/preview", any(tracker_setup::preview))
         .route("/tracker-setups", any(tracker_setup::confirm))
+        .route("/tracker-packs/export", any(tracker_setup::export_pack))
         .route(
             "/tracker-setups/{tracker_id}/settings",
             any(tracker_setup::settings),
