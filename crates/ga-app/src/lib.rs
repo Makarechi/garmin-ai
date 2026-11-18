@@ -1,3 +1,4 @@
+pub mod garmin_mini_app;
 pub mod garmin_worker;
 pub mod medication_assertion;
 pub mod medication_dose;
