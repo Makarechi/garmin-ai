@@ -4,7 +4,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ga_db::Database;
+
+use crate::configuration;
+
 const DEADLINE: Duration = Duration::from_secs(1);
+
+#[tokio::main(flavor = "current_thread")]
+pub(crate) async fn worker() -> bool {
+    let Ok([Some(url)]) = configuration::read(["GA_DATABASE_URL"]) else {
+        return false;
+    };
+    match Database::connect_lazy(&url) {
+        Ok(database) => database.native_worker_healthy().await.unwrap_or(false),
+        Err(_) => false,
+    }
+}
 
 pub(crate) fn probe(port: u16, ready: bool) -> io::Result<bool> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
