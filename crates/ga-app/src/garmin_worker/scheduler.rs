@@ -63,8 +63,14 @@ impl<S: ActivityExportSource> ScheduledGarminWorker<'_, S> {
             }
             _ => return Ok(GarminQueueStep::Inactive),
         }
-        let owner_date = source_calendar_date(at, self.runner.timezone)
-            .ok_or(EndpointWorkerError::InvalidClock)?;
+        let timezone = self
+            .runner
+            .database
+            .garmin_job_timezone(self.runner.timezone)
+            .await
+            .map_err(EndpointWorkerError::Schedule)?;
+        let owner_date =
+            source_calendar_date(at, &timezone).ok_or(EndpointWorkerError::InvalidClock)?;
         let Some(lease) = self
             .runner
             .database
@@ -73,15 +79,18 @@ impl<S: ActivityExportSource> ScheduledGarminWorker<'_, S> {
         else {
             return Ok(GarminQueueStep::Idle);
         };
+        let runner = EndpointWorker {
+            timezone: &timezone,
+            archive: self.runner.archive.clone(),
+            ..self.runner
+        };
         match lease.kind() {
-            GarminJobKind::Endpoint => self.runner.run(&lease).await.map(GarminQueueStep::Endpoint),
-            GarminJobKind::Activities => self
-                .runner
+            GarminJobKind::Endpoint => runner.run(&lease).await.map(GarminQueueStep::Endpoint),
+            GarminJobKind::Activities => runner
                 .run_activity_page(&lease)
                 .await
                 .map(GarminQueueStep::Activities),
-            GarminJobKind::Fit => self
-                .runner
+            GarminJobKind::Fit => runner
                 .run_activity_export(&lease, self.fit_limits)
                 .await
                 .map(GarminQueueStep::Fit),

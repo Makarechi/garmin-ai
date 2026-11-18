@@ -96,6 +96,29 @@ async fn retire_jobs(
 }
 
 impl Database {
+    /// Apply saved onboarding preferences for each current Garmin job.
+    pub async fn garmin_job_timezone(
+        &self,
+        configured_timezone: &str,
+    ) -> Result<String, GarminSyncScheduleError> {
+        tokio::time::timeout(std::time::Duration::from_millis(1500), async {
+            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SET LOCAL statement_timeout='750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(GarminSyncScheduleError::Storage)?;
+            let timezone = crate::health_analysis::owner_timezone(&mut txn, configured_timezone)
+                .await
+                .map_err(|_| GarminSyncScheduleError::Database)?;
+            txn.commit().await?;
+            Ok(timezone)
+        })
+        .await
+        .map_err(|_| GarminSyncScheduleError::Database)?
+    }
+
     /// Retire existing work when onboarding has disabled this configured source.
     pub async fn retire_deselected_garmin_work(
         &self,
@@ -165,16 +188,11 @@ impl Database {
         {
             return Ok(GarminSyncSchedule::Paused);
         }
-        let selected_timezone: Option<String> = sqlx::query_scalar(
-            "SELECT timezone FROM people WHERE id=$1
-             AND EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')",
-        )
-        .bind(owner.owner_id())
-        .fetch_optional(&mut *txn)
-        .await?;
-        let timezone = selected_timezone
-            .as_deref()
-            .unwrap_or(request.configured_timezone);
+        let timezone =
+            crate::health_analysis::owner_timezone(&mut txn, request.configured_timezone)
+                .await
+                .map_err(|_| GarminSyncScheduleError::Database)?;
+        let timezone = timezone.as_str();
         let (today, hour) = source_calendar_clock(request.now, timezone)
             .ok_or(GarminSyncScheduleError::InvalidCalendar)?;
         let yesterday = today

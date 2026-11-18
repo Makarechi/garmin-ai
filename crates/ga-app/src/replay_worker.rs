@@ -325,7 +325,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 .run(
                     &database,
                     &config.raw_archive,
-                    &timezone,
+                    &config.timezone,
                     backups.is_some() && backup_worker.is_some(),
                 )
                 .await

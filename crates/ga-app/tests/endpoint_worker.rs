@@ -26,7 +26,7 @@ use ga_db::{
     garmin_periodic::GarminSyncSchedule,
     jobs::{GarminJobLease, JobStoreError, RecordedJobStatus},
 };
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{event_input::source_calendar_date, timestamp::StoredInstant};
 use ga_fit::ExportLimits;
 use ga_garmin::{
     GarminError,
@@ -873,12 +873,35 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     .bind(fixture.start.date().to_string())
     .execute(&fixture.inspect)
     .await?;
+    let sample =
+        StoredInstant::from_unix_microseconds((source.at.unix_timestamp() - 60) * 1_000_000)?;
+    let original = source_calendar_date(sample, worker.runner.timezone);
+    let (new_timezone, new_date) = ["Etc/GMT+12", "Pacific/Kiritimati"]
+        .into_iter()
+        .filter_map(|zone| source_calendar_date(sample, zone).map(|date| (zone, date)))
+        .find(|(_, date)| Some(*date) != original)
+        .ok_or("Expected a timezone that changes the sample's date")?;
+    sqlx::query("UPDATE people SET timezone=$1 WHERE singleton")
+        .bind(new_timezone)
+        .execute(&fixture.inspect)
+        .await?;
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"source_instance_ids\":[\"source:garmin:primary\"]}')")
+        .execute(&fixture.inspect).await?;
     assert_eq!(
         worker.process_one(now().await?).await?,
         GarminQueueStep::Endpoint(EndpointWork::Publication(EndpointPublication::Published(
             DocumentStatus::Normalized
         ))),
     );
+    let observed: String =
+        sqlx::query_scalar("SELECT local_date::text FROM measurements WHERE ts=$1")
+            .bind(OffsetDateTime::from(sample))
+            .fetch_one(&fixture.inspect)
+            .await?;
+    assert_eq!(observed, new_date.to_string());
+    sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+        .execute(&fixture.inspect)
+        .await?;
     assert_eq!(source.calls.load(Ordering::Relaxed), 2);
     assert_eq!(source.fit.calls.load(Ordering::Relaxed), 2);
     assert_eq!(
