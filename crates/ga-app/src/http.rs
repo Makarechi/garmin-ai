@@ -32,6 +32,7 @@ struct AppState {
     database: Option<Database>,
     authorization: Authorization,
     configured_timezone: Arc<str>,
+    configured_locale: Arc<str>,
 }
 
 fn router(state: AppState) -> Router {
@@ -173,6 +174,10 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
                 .last()
         })
         .unwrap_or_else(|| "Europe/Bratislava".into());
+    let configured_locale = crate::configuration::read(["GA_LOCALE"])
+        .ok()
+        .and_then(|[value]| value)
+        .unwrap_or_else(|| "ru".into());
     let webhook = TelegramWebhook::configured(database.clone()).router();
     let garmin_auth = garmin_auth::router(database.clone());
     println!("Listening on http://{}", listener.local_addr()?);
@@ -182,6 +187,7 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
             database,
             authorization,
             configured_timezone: configured_timezone.into(),
+            configured_locale: configured_locale.into(),
         })
         .merge(webhook)
         .merge(garmin_auth),

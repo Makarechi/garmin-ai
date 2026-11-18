@@ -122,6 +122,7 @@ async fn rows(
 ) -> Result<Vec<Record>, sqlx::Error> {
     sqlx::query_as(concat!(
         include_str!("history/rows.sql"),
+        include_str!("../../share_policy/entry_visibility.sql"),
         include_str!("../../share_policy/consent.sql"),
         "))))
          AND (NOT $2 OR (entry.kind='migraine' AND entry.status='confirmed'

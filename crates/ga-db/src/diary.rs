@@ -174,7 +174,7 @@ impl Database {
         Ok(written)
     }
 
-    async fn create_system_event_in(
+    pub(crate) async fn create_system_event_in(
         txn: &mut Transaction<'_, Postgres>,
         request: CreateSystemEvent<'_>,
     ) -> Result<StoredSystemEvent, DiaryWriteError> {

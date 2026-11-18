@@ -93,7 +93,7 @@ async fn lock_mutations(txn: &mut Transaction<'_, Postgres>) -> Result<(), Ingre
     Ok(())
 }
 
-async fn ingest(
+pub(crate) async fn ingest(
     txn: &mut Transaction<'_, Postgres>,
     envelope: &InboundEnvelope,
 ) -> Result<InboundReceipt, IngressError> {
