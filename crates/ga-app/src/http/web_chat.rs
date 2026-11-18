@@ -1,49 +1,91 @@
 use axum::{
     Json,
-    body::{Body, Bytes},
-    extract::{Path, State},
+    body::{Body, Bytes, to_bytes},
+    extract::{Path, Request, State},
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use futures_util::stream;
-use ga_db::{Database, web_chat::WebChatError};
+use ga_app::urgent_screen::{obvious_urgent_symptoms, urgent_notice};
+use ga_db::{
+    Database,
+    web_chat::{WebChatError, WebChatSnapshot, WebChatSubmission},
+};
 use ga_domain::access::Scope;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{AppState, method_not_allowed, private_cache};
+use super::{AppState, method_not_allowed, private_cache, tools::MAX_REQUEST_BYTES};
 
-pub(super) async fn messages(
-    State(state): State<AppState>,
-    method: Method,
-    headers: HeaderMap,
-) -> Response {
-    let response = if method != Method::GET {
-        method_not_allowed("GET")
+pub(super) async fn messages(State(state): State<AppState>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let response = if !matches!(parts.method, Method::GET | Method::POST) {
+        method_not_allowed("POST")
     } else {
-        match owner_database(&state, &headers) {
-            Ok(database) => match database.web_chat_messages().await {
-                Ok(snapshot) => {
-                    let chunks = stream::try_unfold(snapshot, |mut snapshot| async move {
-                        Ok::<_, WebChatError>(
-                            snapshot
-                                .next_json()
-                                .await?
-                                .map(|bytes| (Bytes::from(bytes), snapshot)),
-                        )
-                    });
-                    (
-                        [(header::CONTENT_TYPE, "application/json")],
-                        Body::from_stream(chunks),
-                    )
-                        .into_response()
-                }
-                Err(error) => failure(error),
-            },
+        match owner_database(&state, &parts.headers) {
+            Ok(database) => {
+                let result = if parts.method == Method::POST {
+                    submit(&state, database, body).await
+                } else {
+                    database.web_chat_messages().await
+                };
+                result.map(stream_snapshot).unwrap_or_else(failure)
+            }
             Err((status, detail)) => (status, Json(json!({"detail":detail}))).into_response(),
         }
     };
-    private_cache(response, &headers)
+    private_cache(response, &parts.headers)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Message {
+    client_message_id: String,
+    text: String,
+}
+
+async fn submit(
+    state: &AppState,
+    database: &Database,
+    body: Body,
+) -> Result<WebChatSnapshot, WebChatError> {
+    let bytes = to_bytes(body, MAX_REQUEST_BYTES)
+        .await
+        .map_err(|_| WebChatError::Invalid)?;
+    let message: Message = serde_json::from_slice(&bytes).map_err(|_| WebChatError::Invalid)?;
+    let client_message_id =
+        Uuid::parse_str(&message.client_message_id).map_err(|_| WebChatError::Invalid)?;
+    if !(1..=16_000).contains(&message.text.chars().count()) {
+        return Err(WebChatError::Invalid);
+    }
+    let urgent =
+        obvious_urgent_symptoms(message.text.trim()).map_err(|_| WebChatError::Database)?;
+    database
+        .send_web_chat(WebChatSubmission {
+            client_message_id,
+            text: &message.text,
+            configured_timezone: &state.configured_timezone,
+            configured_locale: &state.configured_locale,
+            urgent_messages: urgent.then(|| (urgent_notice("ru"), urgent_notice("en"))),
+        })
+        .await
+}
+
+fn stream_snapshot(snapshot: WebChatSnapshot) -> Response {
+    let chunks = stream::try_unfold(snapshot, |mut snapshot| async move {
+        Ok::<_, WebChatError>(
+            snapshot
+                .next_json()
+                .await?
+                .map(|bytes| (Bytes::from(bytes), snapshot)),
+        )
+    });
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        Body::from_stream(chunks),
+    )
+        .into_response()
 }
 
 pub(super) async fn mark_read(
@@ -93,7 +135,8 @@ fn owner_database<'a>(
 fn failure(error: WebChatError) -> Response {
     let status = match error {
         WebChatError::Missing => StatusCode::NOT_FOUND,
-        WebChatError::Unavailable => StatusCode::CONFLICT,
+        WebChatError::Unavailable | WebChatError::ReusedMessage => StatusCode::CONFLICT,
+        WebChatError::Invalid => StatusCode::UNPROCESSABLE_ENTITY,
         WebChatError::Database | WebChatError::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     (status, Json(json!({"detail":error.to_string()}))).into_response()
