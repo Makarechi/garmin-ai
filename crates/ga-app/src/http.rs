@@ -7,6 +7,7 @@ mod personal_goals;
 mod source_mappings;
 pub(crate) mod tools;
 mod tracker_actions;
+mod tracker_setup;
 mod tracker_sharing;
 mod wearable;
 mod web_chat;
@@ -52,6 +53,8 @@ fn router(state: AppState) -> Router {
             "/source-metric-mappings/{mapping_id}",
             any(source_mappings::item),
         )
+        .route("/tracker-setups/preview", any(tracker_setup::preview))
+        .route("/tracker-setups", any(tracker_setup::confirm))
         .route("/actions/events/{event_id}", any(tracker_actions::event))
         .route("/forms/{action_id}", any(tracker_actions::form))
         .route("/forms/{action_id}/submit", any(tracker_actions::submit))

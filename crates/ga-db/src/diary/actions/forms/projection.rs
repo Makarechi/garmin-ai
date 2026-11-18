@@ -7,7 +7,7 @@ pub(super) fn flags(schema: &Value) -> Result<(bool, bool), TrackerActionError> 
     form_schema_flags(schema).map_err(|_| TrackerActionError::InvalidContract)
 }
 
-pub(super) fn fields(
+pub(in crate::diary::actions) fn fields(
     schema: &Value,
     metadata: &Value,
     locale: &str,
