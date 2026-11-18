@@ -27,6 +27,7 @@ pub enum DiaryReadError {
     InvalidEvent,
     ModelConsent,
     InvalidDestination,
+    Owner,
 }
 
 impl fmt::Display for DiaryReadError {
@@ -42,6 +43,7 @@ impl fmt::Display for DiaryReadError {
             Self::InvalidEvent => "Recorded diary entry could not be interpreted",
             Self::ModelConsent => "The diary model category is disabled",
             Self::InvalidDestination => "Invalid diary sharing destination",
+            Self::Owner => "Diary entries belong to a different owner",
         })
     }
 }
@@ -55,6 +57,7 @@ impl From<sqlx::Error> for DiaryReadError {
 }
 
 pub struct ModelDiaryQuery<'a> {
+    pub owner_id: Uuid,
     pub start: StoredInstant,
     pub end: StoredInstant,
     pub kind: Option<&'a str>,
@@ -65,6 +68,7 @@ pub struct ModelDiaryQuery<'a> {
 
 pub struct ModelDiaryPage {
     pub value: Value,
+    pub tracker_versions: BTreeSet<Uuid>,
     pub channel_versions: BTreeSet<Uuid>,
 }
 
@@ -99,7 +103,7 @@ impl Database {
         .map_err(|_| DiaryReadError::Database)?
     }
 
-    /// Return only model-visible entries and the version dependencies for a queued channel reply.
+    /// Return only model-visible entries and the version dependencies for future requests.
     pub async fn list_model_events(
         &self,
         query: ModelDiaryQuery<'_>,
@@ -118,12 +122,15 @@ impl Database {
         check_range(start, end)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
-            let diary_allowed: bool = sqlx::query_scalar(
+            let diary_allowed: Option<bool> = sqlx::query_scalar(
                 "SELECT COALESCE((SELECT COALESCE(value->'model_categories' @> '[\"diary\"]'::jsonb,false)
-                    FROM app_state WHERE key='preferences:onboarding'), true)",
+                    FROM app_state WHERE key='preferences:onboarding'), true)
+                 FROM people WHERE singleton AND id=$1",
             )
-            .fetch_one(&mut *txn)
+            .bind(query.owner_id)
+            .fetch_optional(&mut *txn)
             .await?;
+            let diary_allowed = diary_allowed.ok_or(DiaryReadError::Owner)?;
             if !diary_allowed {
                 return Err(DiaryReadError::ModelConsent);
             }
@@ -237,7 +244,7 @@ async fn read_events(
         bool,
     );
     let mut rows = Vec::new();
-    let mut channel_versions = BTreeSet::new();
+    let mut tracker_versions = BTreeSet::new();
     let model = audience.as_ref().map(|audience| audience.model);
     let channel = audience.as_ref().and_then(|audience| audience.channel);
     let denials = audience
@@ -271,24 +278,25 @@ async fn read_events(
         if model.is_some() {
             let fields = event.as_object_mut().ok_or(DiaryReadError::InvalidEvent)?;
             fields.remove("original_text");
-            if channel.is_some()
-                && fields["kind"]
-                    .as_str()
-                    .is_some_and(|kind| kind.starts_with("user."))
+            if fields["kind"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("user."))
             {
                 let version = fields["definition_version_id"]
                     .as_str()
                     .and_then(|id| id.parse::<Uuid>().ok())
                     .ok_or(DiaryReadError::InvalidEvent)?;
-                channel_versions.insert(version);
+                tracker_versions.insert(version);
             }
         }
         rows.push(event);
     }
     let mut response = json!({"truncated": truncated});
     response["rows"] = Value::Array(rows);
+    let channel_versions = channel.map_or_else(BTreeSet::new, |_| tracker_versions.clone());
     Ok(ModelDiaryPage {
         value: response,
+        tracker_versions,
         channel_versions,
     })
 }
