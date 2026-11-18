@@ -307,7 +307,7 @@ fn report(envelope: &InboundEnvelope) -> Result<(&str, StoredInstant), TelegramD
     Ok((text, reference))
 }
 
-async fn queue_reply(
+pub(super) async fn queue_reply(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,

@@ -73,12 +73,13 @@ struct Configuration {
     database_url: String,
     raw_archive: PathBuf,
     timezone: String,
+    locale: String,
 }
 
 impl Configuration {
     fn read() -> Result<Self, ReplayServiceError> {
-        let [url, path, timezone] =
-            configuration::read(["GA_DATABASE_URL", "GA_DATA_DIR", "GA_TIMEZONE"])
+        let [url, path, timezone, locale] =
+            configuration::read(["GA_DATABASE_URL", "GA_DATA_DIR", "GA_TIMEZONE", "GA_LOCALE"])
                 .map_err(|_| ReplayServiceError::Configuration)?;
         let database_url = url
             .filter(|url| !url.is_empty())
@@ -95,6 +96,7 @@ impl Configuration {
             database_url,
             raw_archive,
             timezone,
+            locale: locale.unwrap_or_else(|| "ru".into()),
         })
     }
 }
@@ -307,7 +309,8 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             tokio::select! {
                 result = transport.run_acknowledgements(&database, settings) => result,
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
-                result = transport.run_history(&database, settings) => result,
+                result = transport.run_local_diary(&database, settings, &config.timezone) => result,
+                result = transport.run_local_text(&database, settings, &config.locale, reminders_available) => result,
                 result = transport.run_replies(&database, settings) => result,
                 result = async {
                     if reminders_available {
