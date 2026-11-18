@@ -192,7 +192,7 @@ impl DailyHealthReader {
     }
 }
 
-async fn owner_timezone(
+pub(crate) async fn owner_timezone(
     txn: &mut Transaction<'_, Postgres>,
     configured: &str,
 ) -> Result<String, HealthAnalysisError> {

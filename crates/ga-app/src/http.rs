@@ -35,6 +35,7 @@ fn router(state: AppState) -> Router {
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
         .route("/events", any(diary::create))
+        .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
