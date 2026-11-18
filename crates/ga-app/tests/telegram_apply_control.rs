@@ -184,7 +184,10 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
     sqlx::query("SELECT pg_advisory_xact_lock_shared(72104619)")
         .execute(&mut *replay)
         .await?;
-    match database.apply_telegram_owner_control(&pause, 3).await {
+    match database
+        .apply_telegram_owner_control(&pause, 3, "Europe/Bratislava")
+        .await
+    {
         Err(
             error @ TelegramControlError::Outbox(ga_db::outbox_enqueue::QueueIntentError::Busy),
         ) => {
