@@ -18,7 +18,7 @@ use crate::{
     Database,
     channel_ingress::telegram_poll::{TelegramPollError, selection},
     conversation_memory::{ConversationBinding, MemoryError, forget_telegram_in},
-    jobs::{JobStoreError, begin},
+    jobs::{FailureReason, JobOutcome, JobStoreError, begin},
     outbox_enqueue::{QueueIntent, QueueIntentError, QueuedIntent, queue_outbox_intent},
     proactive_control::{ProactiveCommand, ProactiveControlError, set_in},
     replay::REPLAY_MUTATION_LOCK,
@@ -34,6 +34,7 @@ pub enum TelegramControlError {
     Memory(MemoryError),
     Proactive(ProactiveControlError),
     Outbox(QueueIntentError),
+    Busy,
     BindingChanged,
     Unsupported,
     Malformed,
@@ -49,6 +50,7 @@ impl fmt::Display for TelegramControlError {
             Self::Memory(error) => error.fmt(f),
             Self::Proactive(error) => error.fmt(f),
             Self::Outbox(error) => error.fmt(f),
+            Self::Busy => f.write_str("Telegram control policy is being updated"),
             Self::BindingChanged => f.write_str("Telegram owner or selected channel changed"),
             Self::Unsupported => f.write_str("The command requires a separate handler"),
             Self::Malformed => f.write_str("The stored Telegram command is invalid"),
@@ -57,6 +59,18 @@ impl fmt::Display for TelegramControlError {
     }
 }
 impl Error for TelegramControlError {}
+impl TelegramControlError {
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Busy
+                | Self::Channel(TelegramPollError::Busy)
+                | Self::Pairing(TelegramBindingError::Busy)
+                | Self::Memory(MemoryError::Busy)
+                | Self::Proactive(ProactiveControlError::Busy)
+        )
+    }
+}
 impl From<sqlx::Error> for TelegramControlError {
     fn from(_: sqlx::Error) -> Self {
         Self::Database
@@ -64,6 +78,29 @@ impl From<sqlx::Error> for TelegramControlError {
 }
 
 impl Database {
+    /// Return an unexecuted local control to its queue after a policy lock conflict.
+    pub async fn defer_telegram_owner_control(
+        &self,
+        lease: &TelegramInboundLease,
+        now: StoredInstant,
+    ) -> Result<(), JobStoreError> {
+        let retry_at =
+            StoredInstant::from_unix_microseconds(now.unix_microseconds().saturating_add(250_000))
+                .map_err(|_| JobStoreError::InvalidRecordedState)?;
+        self.finish_job(
+            lease.job_id,
+            lease.token,
+            KIND,
+            now,
+            JobOutcome::Failed {
+                reason: FailureReason::TelegramPolicyBusy,
+                retry_at: Some(retry_at),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Apply a local owner setting or forget command and queue its confirmation
     /// in the same transaction that consumes the current authenticated lease.
     pub async fn apply_telegram_owner_control(
@@ -101,7 +138,7 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = begin(&self.control).await.map_err(TelegramControlError::Job)?;
             if !try_ingress_lock(&mut txn).await.map_err(TelegramControlError::Job)? {
-                return Err(TelegramControlError::Database);
+                return Err(TelegramControlError::Busy);
             }
             if !selection(&mut txn, instance).await.map_err(TelegramControlError::Channel)?
                 || confirmed_pairing(&mut txn, instance, chat).await.map_err(TelegramControlError::Pairing)? != owner
@@ -121,7 +158,7 @@ impl Database {
                     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
                         .bind(REPLAY_MUTATION_LOCK).fetch_one(&mut *txn).await?;
                     if !locked {
-                        return Err(TelegramControlError::Database);
+                        return Err(TelegramControlError::Busy);
                     }
                     let (text, fence) = if command == TelegramControl::Today {
                         telegram_garmin::capture_today(&mut txn, conversation).await?

@@ -113,12 +113,19 @@ impl TelegramTransport {
                 if let Ok(Some(lease)) = database
                     .claim_local_telegram_control(target, now, CONTROL_LEASE_SECONDS)
                     .await
-                    && database
+                {
+                    match database
                         .apply_telegram_owner_control(&lease, question_budget, configured_timezone)
                         .await
-                        .is_ok()
-                {
-                    continue;
+                    {
+                        Ok(_) => continue,
+                        Err(error) if error.is_busy() => {
+                            if let Ok(now) = wall_clock() {
+                                let _ = database.defer_telegram_owner_control(&lease, now).await;
+                            }
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
             sleep(ACK_IDLE).await;

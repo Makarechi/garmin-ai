@@ -115,9 +115,30 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
         let next = request(&mut long_poll).await?;
         assert_eq!(next["endpoint"], "getUpdates");
         assert_eq!(next["fields"]["offset"], 43);
+        let mut policy = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared(72104621)")
+            .execute(&mut *policy)
+            .await?;
         poll_started
             .send(())
             .map_err(|_| "Missing callback worker")?;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let deferred: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT FROM jobs j JOIN inbound_messages i
+                          ON i.id::text=j.payload->>'inbound_message_id'
+                        WHERE i.external_event_id='42' AND i.status='pending'
+                          AND j.status='pending' AND j.attempts=0 AND j.last_error='TelegramPolicyBusy'
+                    )",
+                ).fetch_one(&pool).await?;
+                if deferred {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.map_err(|_| "Pause did not return to its queue while policy was locked")??;
+        policy.rollback().await?;
         timeout(Duration::from_secs(2), async {
             let mut endpoints = Vec::new();
             for _ in 0..2 {
@@ -192,12 +213,10 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
             result = callback => result,
         }
     };
-    let (server, completion) = timeout(Duration::from_secs(8), async {
-        tokio::join!(server, completion)
+    timeout(Duration::from_secs(8), async {
+        tokio::try_join!(server, completion)
     })
-    .await?;
-    server?;
-    completion?;
+    .await??;
     let retained: Vec<(String, String)> = sqlx::query_as(
         "SELECT external_event_id,status FROM inbound_messages ORDER BY external_event_id",
     )
