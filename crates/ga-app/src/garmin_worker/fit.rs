@@ -85,7 +85,7 @@ impl<S: ActivityExportSource> EndpointWorker<'_, S> {
             return Ok(ActivityFitWork::Deferred(status));
         }
         let put_limits = PutLimits {
-            max_bytes: self.limits.max_bytes.min(export_limits.max_bytes),
+            max_bytes: export_limits.max_bytes,
             disk_reserve_bytes: self.limits.disk_reserve_bytes,
         };
         let (file, download_limit) = self

@@ -19,6 +19,24 @@ const EXPLICIT: &str = "source:garmin:archive";
 const ACCOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
+fn worker_discovers_new_legacy_credentials_without_restarting() -> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let directory = root.path().canonicalize()?.join("tokens");
+    let source = GarminSourceSettings::for_worker(None, &directory)?
+        .ok_or("Expected implicit Garmin source")?;
+    assert_eq!(source.instance_id(), PRIMARY);
+    assert!(source.existing_tokens()?.is_none());
+    assert!(!directory.exists());
+
+    GarminTokenFile::open(&directory)?
+        .try_lock()?
+        .replace(b"synthetic token file")?;
+    assert!(source.existing_tokens()?.is_some());
+    assert!(GarminSourceSettings::for_worker(Some("[]"), &directory)?.is_none());
+    Ok(())
+}
+
+#[test]
 #[ignore = "uses the source selection cases recorded by pinned Python"]
 fn matches_the_selected_garmin_source_and_opens_only_existing_tokens() -> Result<(), Box<dyn Error>>
 {
