@@ -4,6 +4,7 @@ import argparse
 import json
 import selectors
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
@@ -17,6 +18,8 @@ from sqlalchemy.orm import Session
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.definitions import activate_definition, create_custom_event, create_definition_draft
+from garmin_ai.events import deletion_response
+from garmin_ai.models import Event
 from garmin_ai.scenario_packs import PackSelection, configure_scenario_pack, ensure_scenario_packs
 
 PATH = "/events"
@@ -167,6 +170,53 @@ def compare(python, native, engine):
     assert native.get(endpoint, headers=headers("reader")).status_code == 404
     assert native.post(PATH, headers=headers("both", "fixture-python"), json=NOTE).json()["deleted"]
     assert counts(engine) == (3, 2)
+    compare_deletion(python, native, engine, hidden)
+
+
+def compare_deletion(python, native, engine, hidden):
+    system = native.post(PATH, headers=headers("both", "fixture-rust"), json=CAFFEINE).json()
+    identity = UUID(system["id"])
+    endpoint = f"{PATH}/{identity}"
+    for client in (python, native):
+        for role, code in [(None, 401), ("reader", 403), ("writer", 403)]:
+            assert (
+                client.delete(f"{endpoint}?revision=1", headers=headers(role)).status_code == code
+            )
+        for suffix in ("", "?revision=0", "?revision=-1", "?revision=untrusted"):
+            assert client.delete(endpoint + suffix, headers=headers("both")).status_code == 422
+        stale = client.delete(f"{endpoint}?revision=2", headers=headers("both"))
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Event changed; reload before deleting"}
+        assert client.get(endpoint, headers=headers("reader")).json() == system
+
+    deleted = native.delete(f"{endpoint}?revision=9&%72evision=%2B1", headers=headers("both"))
+    assert deleted.status_code == 200 and deleted.headers["cache-control"] == "no-store"
+    with Session(engine) as session:
+        row = session.get(Event, identity)
+        assert row.deleted and row.revision == 2
+        assert deleted.json() == deletion_response(session, row)
+        audit = session.execute(
+            text("SELECT action,actor,before,after FROM audit_log WHERE event_id=:id ORDER BY id"),
+            {"id": identity},
+        ).all()
+        assert [(record.action, record.actor) for record in audit] == [
+            ("create", "api"),
+            ("delete", "api"),
+        ]
+        assert audit[1].before == audit[0].after
+        assert audit[1].after["deleted"] and audit[1].after["revision"] == 2
+    for client in (python, native):
+        assert client.delete(f"{endpoint}?revision=2", headers=headers("both")).status_code == 404
+        assert client.get(endpoint, headers=headers("reader")).status_code == 404
+        replay = client.post(PATH, headers=headers("both", "fixture-rust"), json=CAFFEINE)
+        assert replay.json() == deleted.json()
+
+    protected = f"{PATH}/{hidden}?revision=1"
+    response = native.delete(protected, headers=headers("both"))
+    assert response.status_code == 200
+    assert response.json() == {"id": str(hidden), "revision": 2, "deleted": True}
+    for client in (python, native):
+        assert client.delete(protected, headers=headers("both")).status_code == 404
 
 
 def compare_tracker_creation(python, native, engine):
@@ -218,24 +268,183 @@ def compare_tracker_creation(python, native, engine):
     assert counts(engine) == (5, 4)
 
 
+def compare_undo(python, native, engine):
+    path = "/events/undo"
+    for client in (python, native):
+        for role, status in [(None, 401), ("reader", 403), ("writer", 403)]:
+            assert client.post(path, headers=headers(role)).status_code == status
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    left = now - timedelta(hours=1)
+    right = left + timedelta(minutes=22)
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details)
+            SELECT ts,'heart_rate_bpm','garmin_connect',ts::date,70,'bpm','observed','{}'
+            FROM (
+                SELECT CAST(:now AS timestamptz)-make_interval(days=>day,mins=>minute) AS ts
+                FROM generate_series(2,8) AS day CROSS JOIN generate_series(0,29) AS minute
+            ) AS samples
+            """),
+            {"now": now},
+        )
+        connection.execute(
+            text("""
+            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details)
+            SELECT ts,metric,'garmin_connect',ts::date,90,unit,'observed','{}'
+            FROM generate_series(CAST(:left AS timestamptz),CAST(:right AS timestamptz)-interval '2 minutes',
+                                 interval '2 minutes') AS ts
+            CROSS JOIN (VALUES ('heart_rate_bpm','bpm'),('stress_score','score')) AS channels(metric,unit)
+            """),
+            {"left": left, "right": right},
+        )
+
+    for index, (first, second) in enumerate(((python, native), (native, python))):
+        response = first.post(
+            PATH,
+            headers=headers("both"),
+            json={
+                **NOTE,
+                "start": left.isoformat(),
+                "end": right.isoformat(),
+                "payload": {"type": "context", "description": "synthetic answer"},
+            },
+        )
+        assert response.status_code == 200
+        identity = response.json()["id"]
+        context = f"synthetic-context-{index}"
+        paused = f"synthetic-paused-{index}"
+        acknowledged = f"synthetic-ack-{index}"
+        with engine.begin() as connection:
+            for key, kind, status, evidence in [
+                (
+                    context,
+                    "context",
+                    "answered",
+                    {
+                        "start": left.isoformat(),
+                        "end": right.isoformat(),
+                        "answer_event_id": identity,
+                    },
+                ),
+                (
+                    paused,
+                    "context",
+                    "cancelled",
+                    {"cancel_reason": "owner_pause", "acknowledged_events": {identity: 1}},
+                ),
+                (
+                    acknowledged,
+                    "tracker_checkin",
+                    "acknowledged",
+                    {"acknowledged_events": {identity: 1}, "answer_text": "synthetic"},
+                ),
+            ]:
+                connection.execute(
+                    text("""
+                    INSERT INTO pending_questions(id,kind,text,evidence,priority,earliest_send_at,
+                                                  expires_at,sent_at,status,dedup_key,attempts)
+                    VALUES(gen_random_uuid(),:kind,'synthetic question',CAST(:evidence AS jsonb),
+                           1,:left,:right,:left,:status,:key,1)
+                    """),
+                    {
+                        "kind": kind,
+                        "evidence": json.dumps(evidence),
+                        "left": left,
+                        "right": right,
+                        "status": status,
+                        "key": key,
+                    },
+                )
+        request = headers("both", f"synthetic-undo-receipt-{index}")
+        if first is native:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("""
+                    CREATE FUNCTION reject_undo_receipt() RETURNS trigger AS $$
+                    BEGIN
+                        IF NEW.key LIKE 'api:undo:%' THEN
+                            RAISE EXCEPTION 'synthetic receipt failure';
+                        END IF;
+                        RETURN NEW;
+                    END; $$ LANGUAGE plpgsql
+                    """)
+                )
+                connection.execute(
+                    text("""
+                    CREATE TRIGGER reject_undo_receipt BEFORE INSERT ON app_state
+                    FOR EACH ROW EXECUTE FUNCTION reject_undo_receipt()
+                    """)
+                )
+            assert native.post(path, headers=request).status_code == 503
+            assert native.get(f"{PATH}/{identity}", headers=headers("reader")).status_code == 200
+            with engine.begin() as connection:
+                status = connection.execute(
+                    text("SELECT status FROM pending_questions WHERE dedup_key=:key"),
+                    {"key": context},
+                ).scalar_one()
+                assert status == "answered"
+                connection.execute(text("DROP TRIGGER reject_undo_receipt ON app_state"))
+                connection.execute(text("DROP FUNCTION reject_undo_receipt()"))
+        undone = first.post(path, headers=request)
+        replay = second.post(path, headers=request)
+        assert undone.status_code == replay.status_code == 200
+        assert undone.json() == replay.json() == {"id": identity, "revision": 2, "deleted": True}
+        with engine.connect() as connection:
+            states = {
+                row.dedup_key: (row.status, row.evidence)
+                for row in connection.execute(
+                    text(
+                        "SELECT dedup_key,status,evidence FROM pending_questions WHERE dedup_key IN (:a,:b,:c)"
+                    ),
+                    {"a": context, "b": paused, "c": acknowledged},
+                )
+            }
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM audit_log WHERE event_id=:id AND action='undo'"),
+                    {"id": identity},
+                ).scalar_one()
+                == 1
+            )
+        assert states[context][0] == "sent"
+        evidence = states[context][1]
+        assert evidence["baseline_hr_p95"] == 70 and evidence["hr_samples"] == 11
+        assert abs(evidence["hr_coverage_ratio"] - 20 / 22) < 1e-9
+        assert evidence["context_coverage"]["uncovered_seconds"] == 22 * 60
+        assert "answer_event_id" not in evidence
+        assert states[paused][0] == "cancelled"
+        assert states[paused][1]["acknowledged_events"] == {identity: 1}
+        assert states[acknowledged] == ("sent", {})
+        for client in (python, native):
+            conflict = client.post(path, headers=headers("both"))
+            assert conflict.status_code == 409
+            assert conflict.json() == {
+                "detail": "The last operation has already been changed or undone"
+            }
+
+
 def run(binary):
     engine = isolated_engine()
     try:
         with Session(engine) as session, session.begin():
-            row = ensure_scenario_packs(session, legacy_install=False)["caffeine"]
-            configure_scenario_pack(
-                session,
-                "caffeine",
-                PackSelection(
-                    revision=row.revision,
-                    tracking_enabled=True,
-                    collection_enabled=row.collection_enabled,
-                    reminders_enabled=row.reminders_enabled,
-                    visible=row.visible,
-                    llm_enabled=row.llm_enabled,
-                    outcome_goal=row.outcome_goal,
-                ),
-            )
+            packs = ensure_scenario_packs(session, legacy_install=False)
+            for key in ("caffeine", "wellbeing", "general_diary"):
+                row = packs[key]
+                configure_scenario_pack(
+                    session,
+                    key,
+                    PackSelection(
+                        revision=row.revision,
+                        tracking_enabled=True,
+                        collection_enabled=row.collection_enabled,
+                        reminders_enabled=True,
+                        visible=row.visible,
+                        llm_enabled=row.llm_enabled,
+                        outcome_goal=row.outcome_goal,
+                    ),
+                )
         settings = Settings(api_tokens=TOKENS, api_key="")
         with (
             TestClient(create_app(settings, engine=engine)) as python,
@@ -260,6 +469,7 @@ def run(binary):
                 with httpx.Client(base_url=line.split(" on ", 1)[1], trust_env=False) as native:
                     compare(python, native, engine)
                     compare_tracker_creation(python, native, engine)
+                    compare_undo(python, native, engine)
             finally:
                 process.terminate()
                 process.wait(timeout=5)

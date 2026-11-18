@@ -38,6 +38,7 @@ const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 struct Mcp {
     database: Database,
     owner: Uuid,
+    timezone: String,
     read_tools: Vec<Tool>,
     write_tools: Vec<Tool>,
     active_reads: Semaphore,
@@ -45,7 +46,8 @@ struct Mcp {
 
 #[tokio::main(flavor = "current_thread")]
 pub(crate) async fn run() -> Result<(), &'static str> {
-    let [url, writes] = configuration::read(["GA_DATABASE_URL", "GA_MCP_ENABLE_WRITES"])?;
+    let [url, writes, timezone] =
+        configuration::read(["GA_DATABASE_URL", "GA_MCP_ENABLE_WRITES", "GA_TIMEZONE"])?;
     let writes = match writes.as_deref().map(str::to_ascii_lowercase).as_deref() {
         None | Some("0" | "off" | "false" | "f" | "no" | "n") => false,
         Some("1" | "on" | "true" | "t" | "yes" | "y") => true,
@@ -60,8 +62,10 @@ pub(crate) async fn run() -> Result<(), &'static str> {
     let service = Mcp {
         database,
         owner,
+        timezone: timezone.unwrap_or_else(|| "Europe/Bratislava".to_owned()),
         read_tools: std::iter::once(ReadTool::Events)
-            .chain(ReadTool::MCP_GARMIN)
+            .chain(ReadTool::GARMIN_READS)
+            .chain(std::iter::once(ReadTool::Freshness))
             .map(read_tool)
             .collect::<Result<_, _>>()?,
         write_tools: WRITE_TOOLS
@@ -134,12 +138,13 @@ impl ServerHandler for Mcp {
         let enable_writes = !self.write_tools.is_empty();
         let result = match call.name.as_ref() {
             "events" => self.events(args).await,
+            "data_freshness" => self.garmin(ReadTool::Freshness, args).await,
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
             "events_delete" if enable_writes => self.delete(args, is_cancelled).await,
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
             }
-            tool_name => match ReadTool::MCP_GARMIN
+            tool_name => match ReadTool::GARMIN_READS
                 .into_iter()
                 .find(|tool| tool.name() == tool_name)
             {
@@ -198,6 +203,25 @@ impl Mcp {
             .active_reads
             .try_acquire()
             .map_err(|_| "RuntimeError")?;
+        if tool == ReadTool::Freshness {
+            if !args.is_empty() {
+                return Err("ValidationError");
+            }
+            let micros = time::OffsetDateTime::now_utc()
+                .unix_timestamp_nanos()
+                .div_euclid(1000);
+            let at = ga_domain::timestamp::StoredInstant::from_unix_microseconds(
+                i64::try_from(micros).map_err(|_| "RuntimeError")?,
+            )
+            .map_err(|_| "RuntimeError")?;
+            let result = self
+                .database
+                .model_data_freshness(self.owner, at, &self.timezone)
+                .await
+                .map_err(|error| garmin_error(GarminReadError::Health(error)))?
+                .ok_or("PermissionError")?;
+            return tool_result(result);
+        }
         let result = read_garmin(&self.database, tool, &args, Some(self.owner))
             .await
             .map_err(garmin_error)?;
