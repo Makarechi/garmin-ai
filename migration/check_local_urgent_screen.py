@@ -19,7 +19,15 @@ NAMES = {
 
 def cases():
     source = ast.parse(Path("tests/test_tracker_chat_form.py").read_text())
-    texts = set()
+    texts = {
+        "У мамы инсульт был ٢ года назад",
+        "У мамы инсульт был ٠١ год назад",
+        "У мамы инсульт был в 20١٠ году",
+        "У мамы инсульт был ٢ года назад, а сегодня снова приступ",
+        "My father had a stroke ２ years ago",
+        "My father had a stroke ０１ year ago",
+        "My father had a stroke in 20１０",
+    }
     for test in source.body:
         if not isinstance(test, ast.FunctionDef):
             continue
