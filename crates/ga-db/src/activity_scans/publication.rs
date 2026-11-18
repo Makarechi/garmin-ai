@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use ga_archive::{Archive, PutLimits};
 use ga_domain::{
     activity_scan::{
         ACTIVITY_PAGE_SIZE, ActivityScanAdvance, ActivityScanPage, advance_activity_scan,
@@ -20,8 +23,11 @@ use crate::{
     check_readiness,
     garmin_freshness::record_freshness,
     garmin_owner::verify_owner_in_transaction,
-    jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome},
-    raw_capture::{GARMIN_LEGACY_SOURCE, lock_legacy_scope},
+    jobs::{FailureReason, GARMIN_PUBLICATION_SECONDS, GarminJobKind, GarminJobLease, JobOutcome},
+    raw_capture::{
+        CapturedSource, GARMIN_LEGACY_SOURCE, archive_json, checked_json_body, insert_source,
+        lock_legacy_scope,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,12 +45,32 @@ pub enum ActivityPageResult {
     CollectionDisabled,
 }
 
+pub enum ActivityPageCapture {
+    Captured(CapturedSource),
+    Superseded,
+    CollectionDisabled,
+}
+
+pub struct CaptureActivityPage<'a> {
+    pub authenticated_fingerprint: &'a str,
+    pub lease: &'a GarminJobLease,
+    pub requested_at: StoredInstant,
+    pub body: Vec<u8>,
+}
+
 pub struct PublishActivityPage<'a> {
     pub authenticated_fingerprint: &'a str,
     pub lease: &'a GarminJobLease,
     pub source_id: Uuid,
     pub requested_at: StoredInstant,
     pub timezone: &'a str,
+}
+
+#[derive(Clone, Copy)]
+enum LeaseAccess {
+    Observe,
+    Lock,
+    Publication,
 }
 
 struct Page {
@@ -174,7 +200,7 @@ impl Database {
     ) -> Result<ActivityPagePreflight, ActivityScanError> {
         let page = Page::from_lease(lease, authenticated_fingerprint)?;
         let (mut txn, enabled) = self
-            .begin_activity_page(authenticated_fingerprint, lease)
+            .begin_activity_page(authenticated_fingerprint, lease, LeaseAccess::Lock)
             .await?;
         let outcome = match page.current(&mut txn, lease).await? {
             None => ActivityPagePreflight::Superseded,
@@ -196,6 +222,63 @@ impl Database {
         Ok(outcome)
     }
 
+    /// Archive a fetched list against the exact live job and cursor.
+    pub async fn capture_activity_page(
+        &self,
+        request: CaptureActivityPage<'_>,
+        archive: Arc<Archive>,
+        limits: PutLimits,
+    ) -> Result<ActivityPageCapture, ActivityScanError> {
+        let account = request.authenticated_fingerprint;
+        let lease = request.lease;
+        let page = Page::from_lease(lease, account)?;
+        let body = checked_json_body(request.body, limits).map_err(ActivityScanError::Capture)?;
+        let (mut txn, enabled) = self
+            .begin_activity_page(account, lease, LeaseAccess::Observe)
+            .await?;
+        let result = match page.current(&mut txn, lease).await? {
+            None => ActivityPageCapture::Superseded,
+            Some(state) if !enabled => {
+                disable(&mut txn, &page, state, request.requested_at).await?;
+                ActivityPageCapture::CollectionDisabled
+            }
+            Some(_) => {
+                let source_key = page.source_key();
+                lock_legacy_scope(
+                    &mut txn,
+                    &format!("{GARMIN_LEGACY_SOURCE}:activities:{source_key}"),
+                )
+                .await
+                .map_err(ActivityScanError::Capture)?;
+                let (mut txn, key, body) = archive_json(txn, body, archive, limits)
+                    .await
+                    .map_err(ActivityScanError::Capture)?;
+                let captured = insert_source(
+                    &mut txn,
+                    "activities",
+                    &source_key,
+                    request.requested_at,
+                    key,
+                    &body,
+                )
+                .await
+                .map_err(ActivityScanError::Capture)?;
+                lease
+                    .check_live(&mut txn)
+                    .await
+                    .map_err(ActivityScanError::Job)?;
+                txn.commit().await?;
+                return Ok(ActivityPageCapture::Captured(captured));
+            }
+        };
+        lease
+            .finish_in(&mut txn, JobOutcome::Completed)
+            .await
+            .map_err(ActivityScanError::Job)?;
+        txn.commit().await?;
+        Ok(result)
+    }
+
     /// Commit an archived Garmin list, activity jobs, scan cursor and lease result together.
     pub async fn publish_activity_page(
         &self,
@@ -206,7 +289,11 @@ impl Database {
         }
         let page = Page::from_lease(request.lease, request.authenticated_fingerprint)?;
         let (mut txn, enabled) = self
-            .begin_activity_page(request.authenticated_fingerprint, request.lease)
+            .begin_activity_page(
+                request.authenticated_fingerprint,
+                request.lease,
+                LeaseAccess::Publication,
+            )
             .await?;
         let result = match page.current(&mut txn, request.lease).await? {
             None => ActivityPageResult::Superseded,
@@ -244,7 +331,7 @@ impl Database {
     ) -> Result<(), ActivityScanError> {
         let page = Page::from_lease(lease, authenticated_fingerprint)?;
         let (mut txn, enabled) = self
-            .begin_activity_page(authenticated_fingerprint, lease)
+            .begin_activity_page(authenticated_fingerprint, lease, LeaseAccess::Lock)
             .await?;
         let outcome = match page.current(&mut txn, lease).await? {
             None => JobOutcome::Completed,
@@ -277,11 +364,18 @@ impl Database {
         &self,
         account: &str,
         lease: &GarminJobLease,
+        access: LeaseAccess,
     ) -> Result<(Transaction<'static, Postgres>, bool), ActivityScanError> {
         let mut txn = self.work.begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '750ms'")
             .execute(&mut *txn)
             .await?;
+        if matches!(access, LeaseAccess::Publication) {
+            sqlx::query("SELECT set_config('transaction_timeout',$1,true)")
+                .bind(format!("{GARMIN_PUBLICATION_SECONDS}s"))
+                .execute(&mut *txn)
+                .await?;
+        }
         check_readiness(&mut txn)
             .await
             .map_err(ActivityScanError::Storage)?;
@@ -295,10 +389,17 @@ impl Database {
         if !locked {
             return Err(ActivityScanError::Busy);
         }
-        lease
-            .check_live(&mut txn)
-            .await
-            .map_err(ActivityScanError::Job)?;
+        match access {
+            LeaseAccess::Observe => lease.observe_live(&mut txn).await,
+            LeaseAccess::Lock | LeaseAccess::Publication => lease.check_live(&mut txn).await,
+        }
+        .map_err(ActivityScanError::Job)?;
+        if matches!(access, LeaseAccess::Publication) {
+            lease
+                .reserve_publication(&mut txn, GARMIN_PUBLICATION_SECONDS + 1)
+                .await
+                .map_err(ActivityScanError::Job)?;
+        }
         let allowed = collection_enabled(&mut txn, owner.owner_id()).await?;
         Ok((txn, allowed))
     }
