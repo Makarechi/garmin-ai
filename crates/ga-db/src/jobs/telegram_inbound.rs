@@ -1,3 +1,4 @@
+pub(crate) mod analysis_reply;
 mod control;
 mod diary;
 mod history;
@@ -409,6 +410,27 @@ impl Database {
         })
         .await
         .map_err(|_| JobStoreError::Database)?
+    }
+
+    /// Yield an unexpired model claim while the configured provider is cooling down.
+    pub async fn defer_telegram_model_text(
+        &self,
+        lease: &TelegramInboundLease,
+        now: StoredInstant,
+        retry_at: StoredInstant,
+    ) -> Result<(), JobStoreError> {
+        self.finish_job(
+            lease.job_id,
+            lease.token,
+            KIND,
+            now,
+            JobOutcome::Failed {
+                reason: super::FailureReason::ProviderCooldown,
+                retry_at: Some(retry_at),
+            },
+        )
+        .await?;
+        Ok(())
     }
 }
 

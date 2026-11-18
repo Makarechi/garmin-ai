@@ -48,6 +48,84 @@ type DeliveredReply = (
     i32,
 );
 
+pub(crate) async fn remember_delivered_in(
+    txn: &mut Transaction<'_, Postgres>,
+    owner_id: Uuid,
+    outbox_id: Uuid,
+) -> Result<bool, MemoryError> {
+    let row: Option<(Uuid, Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT o.conversation_id,o.operation_id,o.intent::text,o.memory_fence::text,i.normalized_text
+         FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+         WHERE o.id=$1 AND o.owner_id=$2 AND o.state IN ('delivered','read')
+           AND o.memory_fence ? 'telegram_diary_analysis' AND i.normalized_text IS NOT NULL",
+    )
+    .bind(outbox_id)
+    .bind(owner_id)
+    .fetch_optional(&mut **txn)
+    .await?;
+    let Some((conversation_id, operation_id, intent, pinned, question)) = row else {
+        return Ok(false);
+    };
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(crate::replay::REPLAY_MUTATION_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !locked {
+        return Err(MemoryError::Busy);
+    }
+    let intent: Value = serde_json::from_str(&intent).map_err(|_| MemoryError::InvalidState)?;
+    let answer = intent["blocks"]
+        .as_array()
+        .ok_or(MemoryError::InvalidState)?
+        .iter()
+        .map(|block| block["text"].as_str().ok_or(MemoryError::InvalidState))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    let fence = read_fence(&pinned)?;
+    let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **txn)
+        .await?;
+    remember(
+        txn,
+        ConfirmedAnalysis {
+            binding: ConversationBinding {
+                owner_id,
+                conversation_id,
+            },
+            operation_id,
+            outbox_id,
+            fence: &fence,
+            question: &question,
+            answer: &answer,
+            now: StoredInstant::try_from(at).map_err(|_| MemoryError::InvalidState)?,
+        },
+    )
+    .await
+}
+
+pub(super) async fn refresh_delivered_in(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    now: StoredInstant,
+) -> Result<(), MemoryError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT o.id FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+         WHERE o.owner_id=$1 AND o.conversation_id=$2 AND o.state IN ('delivered','read')
+           AND o.memory_fence ? 'telegram_diary_analysis'
+           AND i.received_at BETWEEN $3::timestamptz-interval '7 days' AND $3
+         ORDER BY i.received_at DESC,o.id DESC LIMIT 6",
+    )
+    .bind(binding.owner_id)
+    .bind(binding.conversation_id)
+    .bind(OffsetDateTime::from(now))
+    .fetch_all(&mut **txn)
+    .await?;
+    for id in ids.into_iter().rev() {
+        remember_delivered_in(txn, binding.owner_id, id).await?;
+    }
+    Ok(())
+}
+
 async fn remember(
     txn: &mut Transaction<'_, Postgres>,
     analysis: ConfirmedAnalysis<'_>,

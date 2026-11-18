@@ -1,3 +1,4 @@
+use ga_archive::json_spool::{JsonDocument, JsonSpool};
 use ga_db::{
     Database,
     health_analysis::{
@@ -50,7 +51,7 @@ pub(crate) async fn read_garmin(
     tool: ReadTool,
     arguments: &Map<String, Value>,
     mcp_owner: Option<Uuid>,
-) -> Result<Value, GarminReadError> {
+) -> Result<JsonDocument, GarminReadError> {
     let mut reader = database.verified_health_reader().await?;
     let query = parse(tool, arguments)?;
     if let Some(owner) = mcp_owner
@@ -74,7 +75,7 @@ pub(crate) async fn read_garmin(
     {
         return Err(GarminReadError::Permission);
     }
-    match query {
+    let value = match query {
         Query::Snapshot(day) => Ok(reader.snapshot(day).await?),
         Query::Range(start, end) => Ok(reader.range(HealthPeriod::new(start, end)?).await?),
         Query::Activities(start, end, kind) => {
@@ -107,12 +108,19 @@ pub(crate) async fn read_garmin(
             .lagged_association(first, second, HealthPeriod::new(start, end)?, &lags)
             .await?),
         Query::EventWindows(kind, metric, start, end) => {
-            Ok(reader.event_windows(kind, metric, start, end).await?)
+            return Ok(reader.event_windows(kind, metric, start, end).await?);
         }
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
-    }
+    }?;
+    let mut document = JsonSpool::default();
+    serde_json::to_writer(&mut document, &value)
+        .map_err(|_| GarminReadError::Health(HealthAnalysisError::Database))?;
+    drop(value);
+    document
+        .finish()
+        .map_err(|_| GarminReadError::Health(HealthAnalysisError::Database))
 }
 
 enum Query<'a> {

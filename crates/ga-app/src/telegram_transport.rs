@@ -1,5 +1,6 @@
 mod local_text;
 mod model_reply;
+mod model_worker;
 mod poller;
 mod reminders;
 mod send;

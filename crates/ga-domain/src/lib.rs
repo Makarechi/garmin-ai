@@ -3,6 +3,7 @@ pub mod activity_scan;
 pub mod agent_interpretation;
 pub mod analysis_budget;
 pub mod channel;
+pub mod community_pack;
 pub mod event_contract;
 pub mod event_input;
 pub mod event_payload;
