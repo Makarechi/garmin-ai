@@ -2,7 +2,9 @@ use std::time::{Duration, Instant};
 
 use ga_db::{
     Database,
-    conversation_memory::{AnalysisReadContext, ConversationBinding, ConversationReadContext},
+    conversation_memory::{
+        AnalysisReadContext, ConversationBinding, ConversationReadContext, MemoryError,
+    },
     jobs::telegram_inbound::{
         TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundTarget,
         TelegramModelAdmission,
@@ -114,6 +116,28 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 return;
             }
         };
+        let envelope = match InboundEnvelope::parse(lease.envelope_json().as_bytes()) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                self.finish(lease, &locale, Disposition::Gone).await;
+                return;
+            }
+        };
+        let binding = ConversationBinding {
+            owner_id: envelope.owner_id(),
+            conversation_id: envelope.conversation_id(),
+        };
+        // Recover confirmed replies before interpretation captures the conversation digest.
+        if let Err(error) = self.database.conversation_memory(binding, started).await {
+            let disposition = match error {
+                MemoryError::Busy | MemoryError::Storage(_) | MemoryError::Database => {
+                    Disposition::Retry(IDLE)
+                }
+                _ => Disposition::Text("agent.conversation_deleted"),
+            };
+            self.finish(lease, &locale, disposition).await;
+            return;
+        }
         let mut budget = AnalysisBudget::new(Instant::now());
         let request = match self
             .gateway

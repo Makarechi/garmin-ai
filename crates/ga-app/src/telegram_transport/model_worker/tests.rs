@@ -54,19 +54,39 @@ impl Sender for SyntheticProvider {
                 assert_eq!(prompt["text"], "What is in the synthetic diary?");
                 json!({"intent":"question","confidence":1.0,"response_language":"en"})
             }
-            2 => {
-                assert_eq!(prompt["question"], "What is in the synthetic diary?");
+            call @ (2 | 5) => {
+                let question = if call == 2 {
+                    "What is in the synthetic diary?"
+                } else {
+                    "What about the previous entry?"
+                };
+                assert_eq!(prompt["question"], question);
                 assert_eq!(prompt["tools"][0]["name"], "events");
                 assert_eq!(prompt["evidence"], json!([]));
+                if call == 5 {
+                    assert!(
+                        prompt["conversation"]
+                            .to_string()
+                            .contains("What is in the synthetic diary?")
+                    );
+                }
                 json!({"calls":[{"name":"events","arguments_json":json!({"start":self.from,"end":self.to,"kind":"note"}).to_string()}]})
             }
-            3 => {
+            3 | 6 => {
                 assert!(
                     prompt["evidence"][0]["result"]
                         .to_string()
                         .contains("Synthetic detail")
                 );
                 json!({"answer":"The diary contains the synthetic detail.","evidence_ids":[1],"response_language":"en"})
+            }
+            4 => {
+                assert_eq!(prompt["text"], "What about the previous entry?");
+                assert_eq!(
+                    prompt["context"]["recent_analysis_question"]["question"],
+                    "What is in the synthetic diary?"
+                );
+                json!({"intent":"question","confidence":1.0,"response_language":"en"})
             }
             _ => panic!("Unexpected provider retry"),
         };
@@ -145,16 +165,14 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
         owner_id,
         instance_id: "primary",
     };
-    for (id, text) in [
-        (1, "Save a synthetic note now"),
-        (2, "What is in the synthetic diary?"),
-    ] {
+    let process = async |runtime: &mut ga_db::runtime_lease::RuntimeLease, id: i64, text: &str| {
+        let message_at = at.unix_timestamp() + i64::from(id == 3);
         binding
             .accept_polled_update(
-                &mut runtime,
+                runtime,
                 &json!({"update_id":id,"message":{
                     "message_id":id,"from":{"id":42},"chat":{"id":42,"type":"private"},
-                    "text":text,"date":at.unix_timestamp()
+                    "text":text,"date":message_at
                 }}),
                 started,
                 false,
@@ -182,6 +200,13 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
             .await?
             .ok_or("Expected screened report")?;
         worker.process(&lease, started).await;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    for (id, text) in [
+        (1, "Save a synthetic note now"),
+        (2, "What is in the synthetic diary?"),
+    ] {
+        process(&mut runtime, id, text).await?;
     }
     assert_eq!(fake.calls.load(Ordering::SeqCst), 4);
     let stored: i64 = sqlx::query_scalar(
@@ -250,6 +275,17 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
     }
     sqlx::query("UPDATE conversations SET state=jsonb_set(state,'{analysis_turns}','[]'::jsonb) WHERE id=$1")
         .bind(conversation_id).execute(&pool).await?;
+    process(&mut runtime, 3, "What about the previous entry?").await?;
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 7);
+    let continued: (String, bool) = sqlx::query_as(
+        "SELECT o.intent#>>'{blocks,0,text}',
+        coalesce(o.memory_fence ? 'telegram_diary_analysis',false)
+        FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+        WHERE i.normalized_text='What about the previous entry?'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(continued, (replies[1].0.clone(), true));
     assert_eq!(
         database
             .conversation_memory(conversation, observed)
