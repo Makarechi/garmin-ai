@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.definitions import activate_definition, create_custom_event, create_definition_draft
+from garmin_ai.events import deletion_response
+from garmin_ai.models import Event
 from garmin_ai.scenario_packs import PackSelection, configure_scenario_pack, ensure_scenario_packs
 
 PATH = "/events"
@@ -167,6 +169,53 @@ def compare(python, native, engine):
     assert native.get(endpoint, headers=headers("reader")).status_code == 404
     assert native.post(PATH, headers=headers("both", "fixture-python"), json=NOTE).json()["deleted"]
     assert counts(engine) == (3, 2)
+    compare_deletion(python, native, engine, hidden)
+
+
+def compare_deletion(python, native, engine, hidden):
+    system = native.post(PATH, headers=headers("both", "fixture-rust"), json=CAFFEINE).json()
+    identity = UUID(system["id"])
+    endpoint = f"{PATH}/{identity}"
+    for client in (python, native):
+        for role, code in [(None, 401), ("reader", 403), ("writer", 403)]:
+            assert (
+                client.delete(f"{endpoint}?revision=1", headers=headers(role)).status_code == code
+            )
+        for suffix in ("", "?revision=0", "?revision=-1", "?revision=untrusted"):
+            assert client.delete(endpoint + suffix, headers=headers("both")).status_code == 422
+        stale = client.delete(f"{endpoint}?revision=2", headers=headers("both"))
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Event changed; reload before deleting"}
+        assert client.get(endpoint, headers=headers("reader")).json() == system
+
+    deleted = native.delete(f"{endpoint}?revision=9&%72evision=%2B1", headers=headers("both"))
+    assert deleted.status_code == 200 and deleted.headers["cache-control"] == "no-store"
+    with Session(engine) as session:
+        row = session.get(Event, identity)
+        assert row.deleted and row.revision == 2
+        assert deleted.json() == deletion_response(session, row)
+        audit = session.execute(
+            text("SELECT action,actor,before,after FROM audit_log WHERE event_id=:id ORDER BY id"),
+            {"id": identity},
+        ).all()
+        assert [(record.action, record.actor) for record in audit] == [
+            ("create", "api"),
+            ("delete", "api"),
+        ]
+        assert audit[1].before == audit[0].after
+        assert audit[1].after["deleted"] and audit[1].after["revision"] == 2
+    for client in (python, native):
+        assert client.delete(f"{endpoint}?revision=2", headers=headers("both")).status_code == 404
+        assert client.get(endpoint, headers=headers("reader")).status_code == 404
+        replay = client.post(PATH, headers=headers("both", "fixture-rust"), json=CAFFEINE)
+        assert replay.json() == deleted.json()
+
+    protected = f"{PATH}/{hidden}?revision=1"
+    response = native.delete(protected, headers=headers("both"))
+    assert response.status_code == 200
+    assert response.json() == {"id": str(hidden), "revision": 2, "deleted": True}
+    for client in (python, native):
+        assert client.delete(protected, headers=headers("both")).status_code == 404
 
 
 def compare_tracker_creation(python, native, engine):
