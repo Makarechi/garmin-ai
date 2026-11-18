@@ -1,3 +1,4 @@
+pub(crate) mod demo;
 mod diary;
 mod personal_goals;
 pub(crate) mod tools;
@@ -150,23 +151,6 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
     let authorization = Authorization::configured()?;
     let listener = TcpListener::bind((host, port)).await?;
 
-    #[cfg(unix)]
-    let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-
-    let shutdown = async move {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = signal::ctrl_c() => {},
-                _ = terminate.recv() => {},
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = signal::ctrl_c().await;
-        }
-    };
-
     let database = env::var("GA_DATABASE_URL")
         .ok()
         .and_then(|url| Database::connect_lazy(&url).ok());
@@ -183,7 +167,7 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
         .unwrap_or_else(|| "Europe/Bratislava".into());
     let webhook = TelegramWebhook::configured(database.clone()).router();
     println!("Listening on http://{}", listener.local_addr()?);
-    axum::serve(
+    accept(
         listener,
         router(AppState {
             database,
@@ -192,6 +176,23 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
         })
         .merge(webhook),
     )
-    .with_graceful_shutdown(shutdown)
     .await
+}
+
+async fn accept(listener: TcpListener, app: Router) -> io::Result<()> {
+    #[cfg(unix)]
+    let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+
+    let shutdown = async move {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+        #[cfg(not(unix))]
+        let _ = signal::ctrl_c().await;
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
