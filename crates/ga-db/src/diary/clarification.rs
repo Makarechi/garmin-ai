@@ -82,8 +82,7 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.work.begin_with("BEGIN READ ONLY").await?;
             prepare(&mut txn).await?;
-            let scope = scope(&mut txn, binding).await?;
-            let result = load(&mut txn, &scope, clock).await?;
+            let (_, result) = pending_in(&mut txn, binding, clock).await?;
             txn.commit().await?;
             Ok(result)
         })
@@ -194,6 +193,16 @@ async fn lock(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationEr
 struct Scope {
     key: String,
     destination: String,
+}
+
+pub(super) async fn pending_in(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    clock: ClarificationClock,
+) -> Result<(String, Option<Value>), ClarificationError> {
+    let scope = scope(txn, binding).await?;
+    let pending = load(txn, &scope, clock).await?;
+    Ok((scope.destination, pending))
 }
 
 async fn scope(
