@@ -37,11 +37,12 @@ pub(crate) enum ReadTool {
     RunningEfficiency,
     MetricSeries,
     LaggedAssociation,
+    EventWindows,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 10] = [
+    pub(crate) const GARMIN_READS: [Self; 11] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -52,8 +53,9 @@ impl ReadTool {
         Self::RunningEfficiency,
         Self::MetricSeries,
         Self::LaggedAssociation,
+        Self::EventWindows,
     ];
-    const IMPLEMENTED: [Self; 14] = [
+    const IMPLEMENTED: [Self; 15] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -66,6 +68,7 @@ impl ReadTool {
         Self::RunningEfficiency,
         Self::MetricSeries,
         Self::LaggedAssociation,
+        Self::EventWindows,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -85,6 +88,7 @@ impl ReadTool {
             Self::RunningEfficiency => "analysis_running_efficiency",
             Self::MetricSeries => "metric_series",
             Self::LaggedAssociation => "analysis_lagged_association",
+            Self::EventWindows => "analysis_event_windows",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -196,6 +200,14 @@ impl ReadTool {
                     "start":date("Start"),"end":date("End"),
                     "lags":{"title":"Lags","type":"array","items":{"type":"integer"}}}),
                 &["metric_a", "metric_b", "start", "end", "lags"][..],
+            ),
+            Self::EventWindows => (
+                "Compute measured physiology in -48h through +24h windows around diary events.",
+                "analysis_event_windowsArgs",
+                json!({"event_type":{"title":"Event Type","type":"string"},
+                    "metric":{"title":"Metric","type":"string"},
+                    "start":datetime("Start"),"end":datetime("End")}),
+                &["event_type", "metric", "start", "end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",

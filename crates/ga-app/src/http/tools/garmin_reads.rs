@@ -68,6 +68,12 @@ pub(crate) async fn read_garmin(
     {
         return Err(GarminReadError::Permission);
     }
+    if mcp_owner.is_some()
+        && let Query::EventWindows(kind, ..) = query
+        && !reader.permits_model_event_kind(kind).await?
+    {
+        return Err(GarminReadError::Permission);
+    }
     match query {
         Query::Snapshot(day) => Ok(reader.snapshot(day).await?),
         Query::Range(start, end) => Ok(reader.range(HealthPeriod::new(start, end)?).await?),
@@ -100,6 +106,9 @@ pub(crate) async fn read_garmin(
         Query::Lagged(first, second, start, end, lags) => Ok(reader
             .lagged_association(first, second, HealthPeriod::new(start, end)?, &lags)
             .await?),
+        Query::EventWindows(kind, metric, start, end) => {
+            Ok(reader.event_windows(kind, metric, start, end).await?)
+        }
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
@@ -117,6 +126,7 @@ enum Query<'a> {
     Running(StoredInstant, StoredInstant, f64, f64),
     Series(&'a str, OffsetDateTime, OffsetDateTime, u16),
     Lagged(&'a str, &'a str, Date, Date, Vec<i64>),
+    EventWindows(&'a str, &'a str, OffsetDateTime, OffsetDateTime),
 }
 
 impl Query<'_> {
@@ -127,7 +137,8 @@ impl Query<'_> {
             Self::Baseline(metric, ..)
             | Self::Compare(metric, ..)
             | Self::Series(metric, ..)
-            | Self::Lagged(metric, ..) => model_metric_packs(metric),
+            | Self::Lagged(metric, ..)
+            | Self::EventWindows(_, metric, ..) => model_metric_packs(metric),
             Self::Running(..) => &["training", "sleep", "wellbeing"],
         }
     }
@@ -212,6 +223,23 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
                 .collect::<Option<Vec<_>>>()
                 .ok_or(GarminReadError::Arguments)?;
             Ok(Query::Lagged(first, second, start, end, lags))
+        }
+        ReadTool::EventWindows if arguments.len() == 4 => {
+            let requested = arguments
+                .get("event_type")
+                .and_then(Value::as_str)
+                .ok_or(GarminReadError::Arguments)?;
+            let kind = requested.strip_prefix("system.").unwrap_or(requested);
+            let metric = metric().ok_or(GarminReadError::Arguments)?;
+            let start = arguments
+                .get("start")
+                .and_then(StoredInstant::legacy_input_with_offset)
+                .ok_or(GarminReadError::Arguments)?;
+            let end = arguments
+                .get("end")
+                .and_then(StoredInstant::legacy_input_with_offset)
+                .ok_or(GarminReadError::Arguments)?;
+            Ok(Query::EventWindows(kind, metric, start, end))
         }
         _ => Err(GarminReadError::Arguments),
     }
