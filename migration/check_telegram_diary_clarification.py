@@ -1,4 +1,4 @@
-"""Record two synthetic diary clarifications through the pinned Python agent."""
+"""Record synthetic diary clarifications through the pinned Python agent."""
 
 import argparse
 import json
@@ -14,15 +14,16 @@ from garmin_ai.models import AppState
 
 def capture(output):
     cases = [
-        ("2026-11-18T09:30:00+00:00", "synthetic report", "What time did it start?"),
-        ("2026-11-18T09:40:00+00:00", "synthetic answer", "Was that in the morning?"),
+        ("2026-11-18T09:30:00+00:00", "synthetic report", "What time did it start?", None),
+        ("2026-11-18T09:40:00+00:00", "synthetic answer", "Was that in the morning?", None),
+        ("2026-11-18T09:41:00+00:00", "edited answer", "Which morning did you mean?", 302),
     ]
     results = []
     engine = isolated_engine()
     try:
         with Session(engine) as session, session.begin():
             session.info["channel_destination_instance_id"] = "telegram:primary"
-            for update_id, (stamp, text, question) in enumerate(cases, 301):
+            for update_id, (stamp, text, question, edits) in enumerate(cases, 301):
                 sent = datetime.fromisoformat(stamp)
                 processed = sent.replace(second=1, microsecond=120000, tzinfo=UTC)
                 session.info["conversation_now"] = processed
@@ -39,6 +40,7 @@ def capture(output):
                 results.append(
                     {
                         "update_id": update_id,
+                        "edits": edits,
                         "message_at": stamp,
                         "processing_started": processed.isoformat(),
                         "text": text,

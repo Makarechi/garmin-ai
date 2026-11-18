@@ -139,7 +139,7 @@ impl Database {
                 idempotency_prefix: &key,
             }).await.map_err(TelegramDiaryCommitError::Diary)?;
             let intent = reply(&envelope, &events).ok_or(TelegramDiaryCommitError::Reply)?;
-            let queued = queue_reply(&mut txn, lease, &envelope, intent).await?;
+            let queued = queue_reply(&mut txn, lease, &envelope, intent, None).await?;
             txn.commit().await?;
             Ok(queued)
         })
@@ -186,7 +186,9 @@ impl Database {
             )
             .await
             .map_err(TelegramDiaryCommitError::Clarification)?;
-            let queued = queue_reply(&mut txn, lease, &envelope, intent).await?;
+            // Telegram edits share their operation with the original message.
+            let key = format!("inbound:{}:clarification", lease.message_id);
+            let queued = queue_reply(&mut txn, lease, &envelope, intent, Some(&key)).await?;
             txn.commit().await?;
             Ok(queued)
         })
@@ -277,6 +279,7 @@ async fn queue_reply(
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,
     intent: OutboundIntent,
+    dedup_key: Option<&str>,
 ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
     if intent.owner_id() != envelope.owner_id()
         || intent.conversation_id() != envelope.conversation_id()
@@ -294,7 +297,7 @@ async fn queue_reply(
             intent,
             operation_id: lease.operation_id,
             inbound_id: Some(lease.message_id),
-            dedup_key: None,
+            dedup_key,
             requirements: &[],
             now: now
                 .try_into()
