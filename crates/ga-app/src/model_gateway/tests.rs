@@ -600,6 +600,7 @@ async fn verify_tracker_channel_fence(
         channel: Some(ModelChannelSharing {
             destination: channel,
             requirements: &channel_requirements,
+            conversation: None,
         }),
         job: None,
     };

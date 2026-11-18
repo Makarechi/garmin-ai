@@ -3,7 +3,9 @@ use uuid::Uuid;
 
 use super::{ConversationBinding, MemoryError, MemoryFence, shared_memory_epochs};
 use crate::{
-    channel_ingress::telegram_poll::selection, personal_goals, telegram_binding::confirmed_pairing,
+    channel_ingress::telegram_poll::{TelegramPollError, selection},
+    personal_goals,
+    telegram_binding::{TelegramBindingError, confirmed_pairing},
 };
 
 /// The trusted question and policy revisions captured by an authenticated channel.
@@ -16,10 +18,41 @@ pub struct AnalysisReadContext<'a> {
     pub goals_revision: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct ConversationReadContext<'a> {
+    pub binding: ConversationBinding,
+    pub inbound_id: Uuid,
+    pub operation_id: Uuid,
+    pub memory: &'a MemoryFence,
+}
+
 pub(crate) async fn channel_in(
     txn: &mut Transaction<'_, Postgres>,
     context: AnalysisReadContext<'_>,
 ) -> Result<Option<String>, MemoryError> {
+    let channel = current_conversation_channel(
+        txn,
+        ConversationReadContext {
+            binding: context.binding,
+            inbound_id: context.inbound_id,
+            operation_id: context.operation_id,
+            memory: context.memory,
+        },
+    )
+    .await?;
+    let Some((_, instance)) = channel else {
+        return Ok(None);
+    };
+    let (goals, _) = personal_goals::load(txn, context.binding.owner_id)
+        .await
+        .map_err(|_| MemoryError::InvalidState)?;
+    Ok((goals.revision == context.goals_revision).then_some(instance))
+}
+
+pub(crate) async fn current_conversation_channel(
+    txn: &mut Transaction<'_, Postgres>,
+    context: ConversationReadContext<'_>,
+) -> Result<Option<(String, String)>, MemoryError> {
     type QuestionRow = (Uuid, bool, String, String, Option<String>, String);
     let row: Option<QuestionRow> = sqlx::query_as(
         "SELECT conversation.memory_epoch,conversation.share_owner_memory,conversation.channel_instance_id,
@@ -48,12 +81,6 @@ pub(crate) async fn channel_in(
     {
         return Ok(None);
     }
-    let (goals, _) = personal_goals::load(txn, context.binding.owner_id)
-        .await
-        .map_err(|_| MemoryError::InvalidState)?;
-    if goals.revision != context.goals_revision {
-        return Ok(None);
-    }
     if channel == "telegram" {
         let Ok(chat) = sender.parse::<i64>() else {
             return Ok(None);
@@ -61,11 +88,19 @@ pub(crate) async fn channel_in(
         if external
             .as_ref()
             .is_some_and(|external| external != &sender)
-            || !selection(txn, &instance).await.unwrap_or(false)
-            || confirmed_pairing(txn, &instance, chat).await.ok() != Some(context.binding.owner_id)
         {
             return Ok(None);
         }
+        match selection(txn, &instance).await {
+            Ok(true) => {}
+            Err(TelegramPollError::Busy) => return Err(MemoryError::Busy),
+            _ => return Ok(None),
+        }
+        match confirmed_pairing(txn, &instance, chat).await {
+            Ok(owner) if owner == context.binding.owner_id => {}
+            Err(TelegramBindingError::Busy) => return Err(MemoryError::Busy),
+            _ => return Ok(None),
+        }
     }
-    Ok(Some(instance))
+    Ok(Some((channel, instance)))
 }
