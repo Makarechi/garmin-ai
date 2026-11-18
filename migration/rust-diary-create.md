@@ -42,3 +42,5 @@ The native Linux arm64 test covered a stale revision, two generations of a
 caffeine metric, audit snapshots, changes to a linked migraine episode, and
 reopening a sent question after expiry. Python replay still found the event
 through its original creation audit.
+
+The native transaction also checks whether the caller cancelled before committing a prepared write. The disposable TimescaleDB fixture verified that cancelling at this boundary left the diary, audit, and projected metric counts unchanged. The same key then completed successfully and was replayed through Python.
