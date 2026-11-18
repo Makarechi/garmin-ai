@@ -88,6 +88,7 @@ struct MemoryFence {
     telegram_today: Option<GarminProjection>,
     telegram_status: Option<GarminProjection>,
     telegram_debug: Option<[Value; 5]>,
+    telegram_goals: Option<u64>,
 }
 
 enum FenceStatus {
@@ -239,11 +240,13 @@ async fn check_fence(
         fence.telegram_today.is_some(),
         fence.telegram_status.is_some(),
         fence.telegram_debug.is_some(),
+        fence.telegram_goals.is_some(),
     ) {
-        (true, false, false) => Some(TelegramControl::Today),
-        (false, true, false) => Some(TelegramControl::Status),
-        (false, false, true) => Some(TelegramControl::Debug),
-        (false, false, false) => None,
+        (true, false, false, false) => Some(TelegramControl::Today),
+        (false, true, false, false) => Some(TelegramControl::Status),
+        (false, false, true, false) => Some(TelegramControl::Debug),
+        (false, false, false, true) => Some(TelegramControl::Goals),
+        (false, false, false, false) => None,
         _ => return Ok(FenceStatus::Stale),
     };
     if owner_control.is_none()
@@ -316,6 +319,23 @@ async fn check_fence(
         .fetch_one(&mut **txn)
         .await?;
         if !unchanged {
+            return Ok(FenceStatus::Stale);
+        }
+    }
+    if let Some(revision) = fence.telegram_goals {
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
+            .bind(crate::personal_goals::GOAL_POLICY_LOCK)
+            .fetch_one(&mut **txn)
+            .await?;
+        if !locked {
+            return Err(sqlx::Error::Protocol(
+                "Personal goals are being updated".into(),
+            ));
+        }
+        let (goals, _) = crate::personal_goals::load(txn, owner_id)
+            .await
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        if revision != goals.revision {
             return Ok(FenceStatus::Stale);
         }
     }

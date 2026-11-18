@@ -147,6 +147,16 @@ def test_changed_goals_fence_an_inflight_model_answer(db):
     assert db.info["goals_revision"] is None
 
 
+def test_same_second_goal_commands_use_numeric_telegram_order(db):
+    from garmin_ai.personal_goals import telegram_goals
+
+    telegram_goals(db, "/goals сон", NOW, sent_at=NOW, received_at=NOW, update_id=99)
+    assert preferences(db)["goals"] == ["sleep"]
+    telegram_goals(db, "/goals нет", NOW, sent_at=NOW, received_at=NOW, update_id=100)
+    telegram_goals(db, "/goals бег", NOW, sent_at=NOW, received_at=NOW, update_id=99)
+    assert preferences(db)["goals"] == []
+
+
 def test_goal_change_fences_cached_analysis_delivery(db, db_engine):
     import asyncio
 

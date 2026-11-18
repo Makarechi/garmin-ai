@@ -323,11 +323,10 @@ fn superseded(stored: &Value, incoming: GoalCommandOrder<'_>) -> Result<bool, Pe
         let tie = previous["tie_breaker"]
             .as_str()
             .ok_or(PersonalGoalsError::InvalidState)?;
-        return Ok((
-            incoming.source_epoch,
-            incoming.received_at,
-            incoming.tie_breaker,
-        ) <= (source, received, tie));
+        let earlier = (incoming.source_epoch, incoming.received_at)
+            .cmp(&(source, received))
+            .then_with(|| compare_command_ids(incoming.tie_breaker, tie));
+        return Ok(!earlier.is_gt());
     }
     if let Some(previous) = stored
         .get("telegram_order")
@@ -345,6 +344,19 @@ fn superseded(stored: &Value, incoming: GoalCommandOrder<'_>) -> Result<bool, Pe
             || (incoming.source_epoch == source && incoming.tie_breaker == id));
     }
     Ok(false)
+}
+
+fn compare_command_ids(incoming: &str, previous: &str) -> std::cmp::Ordering {
+    let numeric = |value: &str| {
+        value
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0 && value.bytes().all(|digit| digit.is_ascii_digit()))
+    };
+    match (numeric(incoming), numeric(previous)) {
+        (Some(incoming), Some(previous)) => incoming.cmp(&previous),
+        _ => incoming.cmp(previous),
+    }
 }
 
 async fn save(

@@ -9,11 +9,12 @@ use ga_db::{
         telegram_inbound::{TelegramControlError, TelegramInboundTarget},
     },
     outbox_claims::{ReplyDestination, ReplyDispatchResult, ReplyObservation, ReplySendOutcome},
+    personal_goals::{GoalSelection, PersonalGoal},
 };
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -593,8 +594,161 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             }
         ));
     }
+    let instructions =
+        "\nВыберите нужные: /goals сон самочувствие бег мигрень. Убрать все: /goals нет.";
+    let mut old_goals = None;
+    for (update, command, description, revision) in [
+        (33, "/goals", "Цели пока не выбраны.", 0),
+        (34, "/goals СОН, бег", "Ваши цели: бег, сон.", 1),
+        (
+            35,
+            "/goals нет",
+            "Личные цели отключены. Спортивная цель выключена.",
+            2,
+        ),
+    ] {
+        binding
+            .accept_polled_update(&mut runtime, &wire(update, command), now, false)
+            .await?;
+        let lease = database
+            .claim_local_telegram_control(target, now, 60)
+            .await?
+            .ok_or("Missing goals command")?;
+        let queued = database
+            .apply_telegram_owner_control(&lease, 4, "Europe/Bratislava")
+            .await?;
+        let (text, fence): (String, i64) = sqlx::query_as(
+            "SELECT intent#>>'{blocks,0,text}',(memory_fence->>'telegram_goals')::bigint
+             FROM outbox_messages WHERE id=$1",
+        )
+        .bind(queued.outbox_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(text, format!("{description}{instructions}"));
+        assert_eq!(fence, revision);
+        let claimed = database
+            .claim_outbox_reply(destination(), now, 60)
+            .await?
+            .ok_or("Missing goals response")?;
+        assert_eq!(claimed.outbox_id, queued.outbox_id);
+        if let Some(previous) = old_goals.replace(claimed) {
+            assert_eq!(
+                database
+                    .dispatch_telegram_outbox_reply(destination(), 42, previous, &[], |_| async {
+                        panic!("A stale goal revision was sent")
+                    })
+                    .await?,
+                ReplyDispatchResult::Cancelled
+            );
+        }
+    }
+    let goals = database.personal_goals(owner).await?;
+    assert_eq!(goals.revision, 2);
+    assert!(goals.configured && goals.goals.is_empty());
+    binding
+        .accept_polled_update(&mut runtime, &wire(36, "/goals сон сон"), now, false)
+        .await?;
+    let invalid = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing invalid goals command")?;
+    let reply = database
+        .apply_telegram_owner_control(&invalid, 4, "Europe/Bratislava")
+        .await?;
+    let text: String =
+        sqlx::query_scalar("SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE id=$1")
+            .bind(reply.outbox_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(text.starts_with("Не удалось выбрать цели."));
+    assert_eq!(database.personal_goals(owner).await?, goals);
+
+    let mut voice = wire(37, "/goals сон");
+    let voice_fields = voice["message"]
+        .as_object_mut()
+        .ok_or("Missing fixture message")?;
+    let caption = voice_fields
+        .remove("text")
+        .ok_or("Missing fixture caption")?;
+    voice_fields.insert("caption".into(), caption);
+    voice_fields.insert(
+        "voice".into(),
+        json!({"file_id":"synthetic_voice","duration":1}),
+    );
+    let accepted = binding
+        .accept_polled_update(&mut runtime, &voice, now, false)
+        .await?;
+    assert!(accepted.inbound.is_some_and(|receipt| receipt.created));
+    let original = wire(38, "Synthetic unsent diary text");
+    binding
+        .accept_polled_update(&mut runtime, &original, now, false)
+        .await?;
+    let mut edited = original["message"].clone();
+    edited["text"] = json!("/goals сон");
+    edited["edit_date"] = json!(clock.unix_timestamp() + 1);
+    let accepted = binding
+        .accept_polled_update(
+            &mut runtime,
+            &json!({"update_id":39,"edited_message":edited}),
+            now,
+            false,
+        )
+        .await?;
+    assert!(accepted.inbound.is_some_and(|receipt| receipt.created));
+    binding
+        .accept_polled_update(&mut runtime, &wire(40, "/goals"), now, false)
+        .await?;
+    let menu = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("The goals menu was held by a diary message")?;
+    database
+        .apply_telegram_owner_control(&menu, 4, "Europe/Bratislava")
+        .await?;
+    assert_eq!(database.personal_goals(owner).await?, goals);
+
+    let api_at = StoredInstant::try_from(OffsetDateTime::from(now) - Duration::seconds(30))?;
+    let saved = database
+        .select_personal_goals(
+            owner,
+            GoalSelection {
+                expected_revision: goals.revision,
+                goals: &[PersonalGoal::Wellbeing],
+                now: api_at,
+                command: None,
+            },
+        )
+        .await?;
+    let mut earlier = wire(41, "/goals бег");
+    earlier["message"]["date"] = json!(clock.unix_timestamp() - 60);
+    binding
+        .accept_polled_update(&mut runtime, &earlier, now, false)
+        .await?;
+    let delayed = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing delayed goal command")?;
+    database
+        .apply_telegram_owner_control(&delayed, 4, "Europe/Bratislava")
+        .await?;
+    assert_eq!(database.personal_goals(owner).await?, saved);
+    for (update, text) in [(99, "/goals сон"), (100, "/goals нет")] {
+        binding
+            .accept_polled_update(&mut runtime, &wire(update, text), now, false)
+            .await?;
+    }
+    for expected in [vec![PersonalGoal::Sleep], Vec::new()] {
+        let next = database
+            .claim_local_telegram_control(target, now, 60)
+            .await?
+            .ok_or("Missing same-second goal command")?;
+        database
+            .apply_telegram_owner_control(&next, 4, "Europe/Bratislava")
+            .await?;
+        assert_eq!(database.personal_goals(owner).await?.goals, expected);
+    }
     println!(
-        "Verified durable owner controls, Garmin summaries and status, and suppression of stale replies"
+        "Verified durable owner controls, Garmin status, goals and suppression of stale replies"
     );
     Ok(())
 }

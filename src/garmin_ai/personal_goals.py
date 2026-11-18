@@ -47,6 +47,18 @@ class CommandOrder(StrictModel):
         return (self.source_epoch, self.received_at, self.tie_breaker)
 
 
+def _command_superseded(incoming: CommandOrder, previous: CommandOrder) -> bool:
+    current_clock, previous_clock = incoming.key[:2], previous.key[:2]
+    if current_clock != previous_clock:
+        return current_clock < previous_clock
+    left, right = incoming.tie_breaker, previous.tie_breaker
+    if all(
+        value.isascii() and value.isdecimal() and 0 < int(value) < 2**63 for value in (left, right)
+    ):
+        return int(left) <= int(right)
+    return left <= right
+
+
 def preferences(session, *, bind_owner=True):
     person = owner(session)
     row = session.get(AppState, KEY, populate_existing=True)
@@ -81,7 +93,7 @@ def select_goals(session, selection, now=None, *, command_order: CommandOrder | 
             return current
     if command_order is not None and previous_order:
         previous = CommandOrder.model_validate(previous_order)
-        if command_order.key <= previous.key:
+        if _command_superseded(command_order, previous):
             return current
     if command_order is not None and not previous_order and row:
         legacy_order = row.value.get("telegram_order")
