@@ -51,7 +51,7 @@ impl Database {
         let (text, received_at) = report(&envelope)?;
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            let context = verify(&mut txn, &envelope, expected).await?;
+            let context = verify(&mut txn, lease, &envelope, expected).await?;
             if context.selection_unavailable {
                 return Err(TelegramDiaryCommitError::ModelContextChanged);
             }

@@ -18,6 +18,7 @@ pub mod identity;
 pub mod language_tags;
 pub mod legacy_json;
 pub mod legacy_metrics;
+pub mod localization;
 pub mod model_consent;
 pub mod model_gate;
 pub mod model_request;

@@ -16,6 +16,8 @@ pub enum ActivityReadError {
     Range,
     CalendarRange,
     Limit,
+    HeartRateRange,
+    ActivityAnalysisLimit,
     Pagination,
     Missing,
     Analysis(HealthAnalysisError),
@@ -27,6 +29,10 @@ impl fmt::Display for ActivityReadError {
             Self::Range => f.write_str("Timestamp range must be ordered and bounded"),
             Self::CalendarRange => f.write_str("Date range must be ordered and at most 3661 days"),
             Self::Limit => f.write_str("Invalid activity limit"),
+            Self::HeartRateRange => f.write_str("Invalid heart-rate range"),
+            Self::ActivityAnalysisLimit => {
+                f.write_str("Limit analysis to 2000 activities; narrow the date range")
+            }
             Self::Pagination => f.write_str("Invalid activity pagination"),
             Self::Missing => f.write_str("Activity not found"),
             Self::Analysis(error) => error.fmt(f),
