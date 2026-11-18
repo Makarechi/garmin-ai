@@ -9,6 +9,7 @@ use std::{
 };
 
 use futures_util::TryStreamExt;
+use ga_archive::ArchiveKey;
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
 use sqlx::{Connection, PgConnection, Postgres, Transaction};
@@ -17,6 +18,7 @@ use uuid::Uuid;
 use crate::{
     Database, OWNER_ENROLLMENT_LOCK, ReadinessError, SCHEMA_REVISION, STORAGE_LIFECYCLE_LOCK,
     check_readiness,
+    runtime_lease::{RuntimeLease, RuntimeLeaseError},
 };
 
 const FORMAT: &str = "garmin-ai-jsonl-v1";
@@ -62,6 +64,19 @@ const TABLES: &[(&str, &str)] = export_tables![
     "metric_observations",
 ];
 
+const TOKEN_PUBLICATION_LOCK: i64 = 72_104_626;
+
+pub struct BackupSnapshot {
+    pub counts: ExportCounts,
+    pub required_raw: Vec<ArchiveKey>,
+}
+
+/// Share the original runtime and token-publication locks with Python for the full backup.
+pub struct BackupSourceLease<'a> {
+    database: &'a Database,
+    runtime: RuntimeLease,
+}
+
 pub type ExportCounts = BTreeMap<&'static str, u64>;
 
 #[derive(Debug)]
@@ -69,6 +84,7 @@ pub enum DatabaseExportError {
     Storage(ReadinessError),
     Busy,
     Owner,
+    ArchiveReference,
     Io(io::Error),
     Database,
 }
@@ -82,6 +98,7 @@ impl fmt::Display for DatabaseExportError {
                 "Backup database storage is busy"
             }
             Self::Owner => "The export requires the enrolled owner",
+            Self::ArchiveReference => "The snapshot contains an invalid raw archive reference",
             Self::Io(_) => "Database export could not be written",
             Self::Database => "The database snapshot could not be read",
         })
@@ -108,6 +125,47 @@ impl Database {
         exported_at: StoredInstant,
         output: &mut impl Write,
     ) -> Result<ExportCounts, DatabaseExportError> {
+        Ok(self
+            .export_snapshot(owner, exported_at, output, false)
+            .await?
+            .counts)
+    }
+
+    pub async fn acquire_backup_sources(
+        &self,
+    ) -> Result<BackupSourceLease<'_>, DatabaseExportError> {
+        let mut runtime = self
+            .acquire_runtime_lease()
+            .await
+            .map_err(|error| match error {
+                RuntimeLeaseError::Occupied => DatabaseExportError::Busy,
+                RuntimeLeaseError::Readiness(error) => DatabaseExportError::Storage(error),
+                RuntimeLeaseError::Database => DatabaseExportError::Database,
+            })?;
+        let locked: bool = tokio::time::timeout(
+            Duration::from_millis(1500),
+            sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(TOKEN_PUBLICATION_LOCK)
+                .fetch_one(&mut runtime.connection),
+        )
+        .await
+        .map_err(|_| DatabaseExportError::Database)??;
+        if !locked {
+            return Err(DatabaseExportError::Busy);
+        }
+        Ok(BackupSourceLease {
+            database: self,
+            runtime,
+        })
+    }
+
+    async fn export_snapshot(
+        &self,
+        owner: Uuid,
+        exported_at: StoredInstant,
+        output: &mut impl Write,
+        include_archive: bool,
+    ) -> Result<BackupSnapshot, DatabaseExportError> {
         let mut connection = self.lock_export_snapshot().await?;
         let mut snapshot = connection
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -124,12 +182,20 @@ impl Database {
         if selected != Some(owner) {
             return Err(DatabaseExportError::Owner);
         }
+        let required_raw = if include_archive {
+            required_archive_keys(&mut snapshot).await?
+        } else {
+            Vec::new()
+        };
         let counts = export_rows(&mut snapshot, exported_at, output).await?;
         snapshot.commit().await?;
         // This dedicated session owns the lifecycle lock until the snapshot ends.
         // Closing it releases the lock on success, error and cancellation.
         drop(connection);
-        Ok(counts)
+        Ok(BackupSnapshot {
+            counts,
+            required_raw,
+        })
     }
 
     async fn lock_export_snapshot(&self) -> Result<PgConnection, DatabaseExportError> {
@@ -150,6 +216,53 @@ impl Database {
         .await
         .map_err(|_| DatabaseExportError::Database)?
     }
+}
+
+impl BackupSourceLease<'_> {
+    /// Inventory and rows come from the same committed source state.
+    pub async fn export(
+        &mut self,
+        exported_at: StoredInstant,
+        output: &mut impl Write,
+    ) -> Result<BackupSnapshot, DatabaseExportError> {
+        let owner = tokio::time::timeout(
+            Duration::from_millis(1500),
+            sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+                .fetch_optional(&mut self.runtime.connection),
+        )
+        .await
+        .map_err(|_| DatabaseExportError::Database)??
+        .ok_or(DatabaseExportError::Owner)?;
+        self.database
+            .export_snapshot(owner, exported_at, output, true)
+            .await
+    }
+
+    pub async fn check(&mut self) -> Result<(), DatabaseExportError> {
+        self.runtime
+            .check()
+            .await
+            .map_err(|_| DatabaseExportError::Database)
+    }
+}
+
+async fn required_archive_keys(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<ArchiveKey>, DatabaseExportError> {
+    let mut references = sqlx::query_scalar::<_, String>(
+        "SELECT archive_key FROM source_payloads
+         UNION SELECT fit_key FROM activities WHERE fit_key IS NOT NULL",
+    )
+    .fetch(&mut **txn);
+    let mut keys = Vec::new();
+    while let Some(reference) = references.try_next().await? {
+        keys.push(
+            reference
+                .parse()
+                .map_err(|_| DatabaseExportError::ArchiveReference)?,
+        );
+    }
+    Ok(keys)
 }
 
 async fn export_rows(
