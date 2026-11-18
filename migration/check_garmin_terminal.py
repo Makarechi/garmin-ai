@@ -41,7 +41,9 @@ def verify_terminal(binary, root, environment):
         assert SYNTHETIC_INPUT not in output
         assert termios.tcgetattr(terminal)[3] & termios.ECHO
         try:
-            assert select.select([terminal], [], [], 5)[0], "Sign-in did not exit after cancellation"
+            assert select.select([terminal], [], [], 5)[0], (
+                "Sign-in did not exit after cancellation"
+            )
             assert not os.read(terminal, 8192)
         except OSError as error:
             assert error.errno == errno.EIO
