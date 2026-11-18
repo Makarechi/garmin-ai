@@ -4,6 +4,7 @@ import argparse
 import json
 import selectors
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
@@ -288,7 +289,11 @@ def compare_tracker_updates(python, native, engine):
         seeded = python.post("/entries", headers=headers("both"), json=entry)
         assert seeded.status_code == 200
         second = UUID(seeded.json()["id"])
-        edited = {**entry, "values": {"value": 4}}
+        edited = {
+            **entry,
+            "end": "2026-10-25T00:15:00.123456Z",
+            "values": {"value": 4},
+        }
         for client in (python, native):
             change = edit(client, first, edited, revision=2)
             assert change.status_code == 409
@@ -307,6 +312,7 @@ def compare_tracker_updates(python, native, engine):
             assert result["id"] == str(identity) and result["revision"] == 2
             if readable:
                 assert result["start"] == edited["start"]
+                assert result["end"] is None
                 assert result["canonical"]["observed"]["start"] == edited["start"]
                 assert result["payload"] == {"type": key, "value": 4}
             else:
@@ -315,6 +321,8 @@ def compare_tracker_updates(python, native, engine):
                 assert edit(client, identity, edited).status_code == 409
                 found = client.get(f"/events/{identity}", headers=headers("reader"))
                 assert found.status_code == (200 if readable else 404)
+                if readable:
+                    assert found.json()["end"] is None
         with engine.connect() as connection:
             audit = connection.execute(
                 text("""
@@ -328,6 +336,164 @@ def compare_tracker_updates(python, native, engine):
             assert row.before["revision"] == 1 and row.after["revision"] == 2
             assert row.after["payload"] == {"type": key, "value": 4}
             assert row.after["start"] == edited["start"]
+            assert row.after["end"] is None
+
+
+def compare_undo(python, native, engine):
+    path = "/events/undo"
+    for client in (python, native):
+        for role, status in [(None, 401), ("reader", 403), ("writer", 403)]:
+            assert client.post(path, headers=headers(role)).status_code == status
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    left = now - timedelta(hours=1)
+    right = left + timedelta(minutes=22)
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details)
+            SELECT ts,'heart_rate_bpm','garmin_connect',ts::date,70,'bpm','observed','{}'
+            FROM (
+                SELECT CAST(:now AS timestamptz)-make_interval(days=>day,mins=>minute) AS ts
+                FROM generate_series(2,8) AS day CROSS JOIN generate_series(0,29) AS minute
+            ) AS samples
+            """),
+            {"now": now},
+        )
+        connection.execute(
+            text("""
+            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details)
+            SELECT ts,metric,'garmin_connect',ts::date,90,unit,'observed','{}'
+            FROM generate_series(CAST(:left AS timestamptz),CAST(:right AS timestamptz)-interval '2 minutes',
+                                 interval '2 minutes') AS ts
+            CROSS JOIN (VALUES ('heart_rate_bpm','bpm'),('stress_score','score')) AS channels(metric,unit)
+            """),
+            {"left": left, "right": right},
+        )
+
+    for index, (first, second) in enumerate(((python, native), (native, python))):
+        response = first.post(
+            PATH,
+            headers=headers("both"),
+            json={
+                **NOTE,
+                "start": left.isoformat(),
+                "end": right.isoformat(),
+                "payload": {"type": "context", "description": "synthetic answer"},
+            },
+        )
+        assert response.status_code == 200
+        identity = response.json()["id"]
+        context = f"synthetic-context-{index}"
+        paused = f"synthetic-paused-{index}"
+        acknowledged = f"synthetic-ack-{index}"
+        with engine.begin() as connection:
+            for key, kind, status, evidence in [
+                (
+                    context,
+                    "context",
+                    "answered",
+                    {
+                        "start": left.isoformat(),
+                        "end": right.isoformat(),
+                        "answer_event_id": identity,
+                    },
+                ),
+                (
+                    paused,
+                    "context",
+                    "cancelled",
+                    {"cancel_reason": "owner_pause", "acknowledged_events": {identity: 1}},
+                ),
+                (
+                    acknowledged,
+                    "tracker_checkin",
+                    "acknowledged",
+                    {"acknowledged_events": {identity: 1}, "answer_text": "synthetic"},
+                ),
+            ]:
+                connection.execute(
+                    text("""
+                    INSERT INTO pending_questions(id,kind,text,evidence,priority,earliest_send_at,
+                                                  expires_at,sent_at,status,dedup_key,attempts)
+                    VALUES(gen_random_uuid(),:kind,'synthetic question',CAST(:evidence AS jsonb),
+                           1,:left,:right,:left,:status,:key,1)
+                    """),
+                    {
+                        "kind": kind,
+                        "evidence": json.dumps(evidence),
+                        "left": left,
+                        "right": right,
+                        "status": status,
+                        "key": key,
+                    },
+                )
+        request = headers("both", f"synthetic-undo-receipt-{index}")
+        if first is native:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("""
+                    CREATE FUNCTION reject_undo_receipt() RETURNS trigger AS $$
+                    BEGIN
+                        IF NEW.key LIKE 'api:undo:%' THEN
+                            RAISE EXCEPTION 'synthetic receipt failure';
+                        END IF;
+                        RETURN NEW;
+                    END; $$ LANGUAGE plpgsql
+                    """)
+                )
+                connection.execute(
+                    text("""
+                    CREATE TRIGGER reject_undo_receipt BEFORE INSERT ON app_state
+                    FOR EACH ROW EXECUTE FUNCTION reject_undo_receipt()
+                    """)
+                )
+            assert native.post(path, headers=request).status_code == 503
+            assert native.get(f"{PATH}/{identity}", headers=headers("reader")).status_code == 200
+            with engine.begin() as connection:
+                status = connection.execute(
+                    text("SELECT status FROM pending_questions WHERE dedup_key=:key"),
+                    {"key": context},
+                ).scalar_one()
+                assert status == "answered"
+                connection.execute(text("DROP TRIGGER reject_undo_receipt ON app_state"))
+                connection.execute(text("DROP FUNCTION reject_undo_receipt()"))
+        undone = first.post(path, headers=request)
+        replay = second.post(path, headers=request)
+        assert undone.status_code == replay.status_code == 200
+        assert undone.json() == replay.json() == {"id": identity, "revision": 2, "deleted": True}
+        with engine.connect() as connection:
+            states = {
+                row.dedup_key: (row.status, row.evidence)
+                for row in connection.execute(
+                    text(
+                        "SELECT dedup_key,status,evidence FROM pending_questions WHERE dedup_key IN (:a,:b,:c)"
+                    ),
+                    {"a": context, "b": paused, "c": acknowledged},
+                )
+            }
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM audit_log WHERE event_id=:id AND action='undo'"),
+                    {"id": identity},
+                ).scalar_one()
+                == 1
+            )
+        assert states[context][0] == "sent"
+        evidence = states[context][1]
+        assert evidence["baseline_hr_p95"] == 70 and evidence["hr_samples"] == 11
+        assert abs(evidence["hr_coverage_ratio"] - 20 / 22) < 1e-9
+        assert evidence["context_coverage"]["uncovered_seconds"] == 22 * 60
+        assert "answer_event_id" not in evidence
+        assert states[paused][0] == "cancelled"
+        assert states[paused][1]["acknowledged_events"] == {identity: 1}
+        assert states[acknowledged] == ("sent", {})
+        for client in (python, native):
+            conflict = client.post(path, headers=headers("both"))
+            assert conflict.status_code == 409
+            assert conflict.json() == {
+                "detail": "The last operation has already been changed or undone"
+            }
 
 
 def compare_system_updates(python, native, engine):
@@ -441,7 +607,7 @@ def run(binary):
     try:
         with Session(engine) as session, session.begin():
             packs = ensure_scenario_packs(session, legacy_install=False)
-            for key in ("caffeine", "migraine", "wellbeing"):
+            for key in ("caffeine", "migraine", "wellbeing", "general_diary"):
                 row = packs[key]
                 configure_scenario_pack(
                     session,
@@ -450,7 +616,7 @@ def run(binary):
                         revision=row.revision,
                         tracking_enabled=True,
                         collection_enabled=row.collection_enabled,
-                        reminders_enabled=row.reminders_enabled,
+                        reminders_enabled=True,
                         visible=row.visible,
                         llm_enabled=row.llm_enabled,
                         outcome_goal=row.outcome_goal,
@@ -482,6 +648,7 @@ def run(binary):
                     compare_tracker_creation(python, native, engine)
                     compare_tracker_updates(python, native, engine)
                     compare_system_updates(python, native, engine)
+                    compare_undo(python, native, engine)
             finally:
                 process.terminate()
                 process.wait(timeout=5)

@@ -18,7 +18,7 @@ use crate::{
     Database,
     channel_ingress::telegram_poll::{TelegramPollError, selection},
     conversation_memory::{ConversationBinding, MemoryError, forget_telegram_in},
-    jobs::{JobStoreError, begin},
+    jobs::{FailureReason, JobOutcome, JobStoreError, begin},
     outbox_enqueue::{QueueIntent, QueueIntentError, QueuedIntent, queue_outbox_intent},
     proactive_control::{ProactiveCommand, ProactiveControlError, set_in},
     replay::REPLAY_MUTATION_LOCK,
@@ -34,6 +34,7 @@ pub enum TelegramControlError {
     Memory(MemoryError),
     Proactive(ProactiveControlError),
     Outbox(QueueIntentError),
+    Busy,
     BindingChanged,
     Unsupported,
     Malformed,
@@ -49,6 +50,7 @@ impl fmt::Display for TelegramControlError {
             Self::Memory(error) => error.fmt(f),
             Self::Proactive(error) => error.fmt(f),
             Self::Outbox(error) => error.fmt(f),
+            Self::Busy => f.write_str("Telegram control policy is being updated"),
             Self::BindingChanged => f.write_str("Telegram owner or selected channel changed"),
             Self::Unsupported => f.write_str("The command requires a separate handler"),
             Self::Malformed => f.write_str("The stored Telegram command is invalid"),
@@ -57,6 +59,19 @@ impl fmt::Display for TelegramControlError {
     }
 }
 impl Error for TelegramControlError {}
+impl TelegramControlError {
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Busy
+                | Self::Channel(TelegramPollError::Busy)
+                | Self::Pairing(TelegramBindingError::Busy)
+                | Self::Memory(MemoryError::Busy)
+                | Self::Proactive(ProactiveControlError::Busy)
+                | Self::Outbox(QueueIntentError::Busy)
+        )
+    }
+}
 impl From<sqlx::Error> for TelegramControlError {
     fn from(_: sqlx::Error) -> Self {
         Self::Database
@@ -64,6 +79,29 @@ impl From<sqlx::Error> for TelegramControlError {
 }
 
 impl Database {
+    /// Return an unexecuted local control to its queue after a policy lock conflict.
+    pub async fn defer_telegram_owner_control(
+        &self,
+        lease: &TelegramInboundLease,
+        now: StoredInstant,
+    ) -> Result<(), JobStoreError> {
+        let retry_at =
+            StoredInstant::from_unix_microseconds(now.unix_microseconds().saturating_add(250_000))
+                .map_err(|_| JobStoreError::InvalidRecordedState)?;
+        self.finish_job(
+            lease.job_id,
+            lease.token,
+            KIND,
+            now,
+            JobOutcome::Failed {
+                reason: FailureReason::TelegramPolicyBusy,
+                retry_at: Some(retry_at),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Apply a local owner setting or forget command and queue its confirmation
     /// in the same transaction that consumes the current authenticated lease.
     pub async fn apply_telegram_owner_control(
@@ -81,6 +119,9 @@ impl Database {
                 command @ (TelegramControl::Pause
                 | TelegramControl::Resume
                 | TelegramControl::Today
+                | TelegramControl::Help
+                | TelegramControl::Start
+                | TelegramControl::Debug
                 | TelegramControl::ForgetConversation),
             ) => command,
             _ => return Err(TelegramControlError::Unsupported),
@@ -96,7 +137,7 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = begin(&self.control).await.map_err(TelegramControlError::Job)?;
             if !try_ingress_lock(&mut txn).await.map_err(TelegramControlError::Job)? {
-                return Err(TelegramControlError::Database);
+                return Err(TelegramControlError::Busy);
             }
             if !selection(&mut txn, instance).await.map_err(TelegramControlError::Channel)?
                 || confirmed_pairing(&mut txn, instance, chat).await.map_err(TelegramControlError::Pairing)? != owner
@@ -104,16 +145,22 @@ impl Database {
                 return Err(TelegramControlError::BindingChanged);
             }
             let ordering_epoch = control_epoch(&mut txn, lease).await?;
-            let mut projection = None;
+            let mut reply_fence = None;
             let text = match command {
+                TelegramControl::Help | TelegramControl::Start => HELP.to_owned(),
+                TelegramControl::Debug => {
+                    let (text, fence) = debug::apply(&mut txn, &envelope, ordering_epoch).await?;
+                    reply_fence = Some(fence);
+                    text
+                }
                 TelegramControl::Today => {
                     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
                         .bind(REPLAY_MUTATION_LOCK).fetch_one(&mut *txn).await?;
                     if !locked {
-                        return Err(TelegramControlError::Database);
+                        return Err(TelegramControlError::Busy);
                     }
                     let (text, fence) = telegram_today::capture(&mut txn, conversation).await?;
-                    projection = Some(fence);
+                    reply_fence = Some(fence);
                     text
                 }
                 TelegramControl::ForgetConversation => {
@@ -153,9 +200,9 @@ impl Database {
                 intent, operation_id:lease.operation_id, inbound_id:Some(lease.message_id),
                 dedup_key:None, requirements:&[], now:timestamp,
             }).await.map_err(TelegramControlError::Outbox)?;
-            if outbox.created && let Some(projection) = projection {
+            if outbox.created && let Some(fence) = reply_fence {
                 sqlx::query("UPDATE outbox_messages SET memory_fence=$2::jsonb WHERE id=$1")
-                    .bind(outbox.outbox_id).bind(projection).execute(&mut *txn).await?;
+                    .bind(outbox.outbox_id).bind(fence).execute(&mut *txn).await?;
             }
             // Recheck expiry after storage work, while every side effect is still reversible.
             let final_clock: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -169,6 +216,17 @@ impl Database {
         .map_err(|_| TelegramControlError::Database)?
     }
 }
+
+const HELP: &str = concat!(
+    "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n",
+    "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n",
+    "/newtracker — создать трекер\n/goals — личные цели\n/undo — отменить последнее изменение\n",
+    "/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n",
+    "ИИ-модель сейчас недоступна; дневник и формы доступны локально. Полная исходная история хранится локально. ",
+    "Наблюдения по данным не являются диагнозом.\n/conversation — контекст анализа\n",
+    "/forget_conversation — очистить контекст анализа\n",
+    "/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках",
+);
 
 async fn control_epoch(
     txn: &mut Transaction<'_, Postgres>,
@@ -201,3 +259,4 @@ async fn control_epoch(
     }
     Err(TelegramControlError::Job(JobStoreError::LeaseLost))
 }
+mod debug;

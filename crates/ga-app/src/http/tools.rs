@@ -7,10 +7,7 @@ use axum::{
 };
 use ga_db::{
     diary::DiaryReadError,
-    health_analysis::{
-        ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod, NapPolicy,
-        TimelineError,
-    },
+    health_analysis::{HealthAnalysisError, NapPolicy, TimelineError},
 };
 use ga_domain::{
     access::{ReadToolInput, Scopes},
@@ -25,8 +22,8 @@ use super::{AppState, method_not_allowed, private_cache};
 pub(super) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const REPLAY_NOTICE: &str = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже.";
 
-#[derive(Clone, Copy)]
-enum ReadTool {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ReadTool {
     Snapshot,
     Range,
     Activities,
@@ -41,6 +38,15 @@ enum ReadTool {
 }
 
 impl ReadTool {
+    pub(crate) const GARMIN_READS: [Self; 7] = [
+        Self::Snapshot,
+        Self::Range,
+        Self::Activities,
+        Self::ActivityDetails,
+        Self::DeviceHistory,
+        Self::Baseline,
+        Self::ComparePeriods,
+    ];
     const IMPLEMENTED: [Self; 11] = [
         Self::Snapshot,
         Self::Range,
@@ -55,7 +61,7 @@ impl ReadTool {
         Self::DeviceHistory,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Snapshot => "health_snapshot",
             Self::Range => "health_range",
@@ -71,7 +77,7 @@ impl ReadTool {
         }
     }
 
-    fn catalog_entry(self) -> Value {
+    pub(crate) fn catalog_entry(self) -> Value {
         let date = |title| json!({"format": "date", "title": title, "type": "string"});
         let datetime = |title| json!({"format": "date-time", "title": title, "type": "string"});
         let typed_range = || {
@@ -291,29 +297,19 @@ async fn execute_read_tool(
             Err(error) => health_failure(error),
         };
     }
+    if ReadTool::GARMIN_READS.contains(&tool) {
+        return match read_garmin(&database, tool, &arguments, None).await {
+            Ok(value) => Json(value).into_response(),
+            Err(GarminReadError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
+            Err(GarminReadError::Health(error)) => health_failure(error),
+            Err(_) => invalid_arguments(),
+        };
+    }
     let reader = match database.verified_health_reader().await {
         Ok(reader) => reader,
         Err(error) => return health_failure(error),
     };
     let outcome = match tool {
-        ReadTool::Snapshot if arguments.len() == 1 => {
-            match arguments.get("day").and_then(date_input) {
-                Some(day) => reader.snapshot(day).await,
-                None => return invalid_arguments(),
-            }
-        }
-        ReadTool::Range if arguments.len() == 2 => {
-            let (Some(start), Some(end)) = (
-                arguments.get("start").and_then(date_input),
-                arguments.get("end").and_then(date_input),
-            ) else {
-                return invalid_arguments();
-            };
-            match HealthPeriod::new(start, end) {
-                Ok(period) => reader.range(period).await,
-                Err(error) => Err(error),
-            }
-        }
         ReadTool::Sleep => {
             let Some((start, end, policy, timing_only)) = sleep_input(&arguments) else {
                 return invalid_arguments();
@@ -330,67 +326,6 @@ async fn execute_read_tool(
                     .owner_sleep_analysis(start, end, &state.configured_timezone, policy)
                     .await
             }
-        }
-        ReadTool::Baseline if arguments.len() == 3 => {
-            let (Some(metric), Some(start), Some(end)) = (
-                arguments.get("metric").and_then(Value::as_str),
-                arguments.get("start").and_then(date_input),
-                arguments.get("end").and_then(date_input),
-            ) else {
-                return invalid_arguments();
-            };
-            match HealthPeriod::new(start, end) {
-                Ok(period) => reader.personal_baseline(metric, period).await,
-                Err(error) => Err(error),
-            }
-        }
-        ReadTool::ComparePeriods if arguments.len() == 5 => {
-            let (Some(metric), Some(a_start), Some(a_end), Some(b_start), Some(b_end)) = (
-                arguments.get("metric").and_then(Value::as_str),
-                arguments.get("a_start").and_then(date_input),
-                arguments.get("a_end").and_then(date_input),
-                arguments.get("b_start").and_then(date_input),
-                arguments.get("b_end").and_then(date_input),
-            ) else {
-                return invalid_arguments();
-            };
-            match (
-                HealthPeriod::new(a_start, a_end),
-                HealthPeriod::new(b_start, b_end),
-            ) {
-                (Ok(first), Ok(second)) => reader.compare_periods(metric, first, second).await,
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        }
-        ReadTool::Activities => {
-            let Some((start, end, kind)) = range_with_kind(&arguments) else {
-                return invalid_arguments();
-            };
-            return activity_response(reader.activity_summaries(start, end, kind, 200).await);
-        }
-        ReadTool::ActivityDetails => {
-            if arguments.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "activity_id" | "include_samples" | "offset" | "limit"
-                )
-            }) {
-                return invalid_arguments();
-            }
-            let (Some(id), Some(samples), Some(offset), Some(limit)) = (
-                arguments.get("activity_id").and_then(Value::as_str),
-                arguments
-                    .get("include_samples")
-                    .map_or(Some(false), bool_input),
-                arguments.get("offset").map_or(Some(0), integer_input),
-                arguments.get("limit").map_or(Some(100), integer_input),
-            ) else {
-                return invalid_arguments();
-            };
-            let Ok(limit) = u16::try_from(limit) else {
-                return invalid_arguments();
-            };
-            return activity_response(reader.activity_details(id, samples, offset, limit).await);
         }
         ReadTool::Timeline if arguments.len() == 2 => {
             let (Some(start), Some(end)) = (
@@ -410,16 +345,6 @@ async fn execute_read_tool(
                 Err(TimelineError::Health(error)) => health_failure(error),
                 Err(TimelineError::Diary(error)) => diary_failure(error),
                 Err(TimelineError::Database) => storage_unavailable(),
-                Err(_) => invalid_arguments(),
-            };
-        }
-        ReadTool::DeviceHistory => {
-            let Some((start, end, limit)) = device_arguments(&arguments) else {
-                return invalid_arguments();
-            };
-            return match reader.device_history(start, end, limit).await {
-                Ok(document) => Json(document).into_response(),
-                Err(DeviceHistoryError::Analysis(error)) => health_failure(error),
                 Err(_) => invalid_arguments(),
             };
         }
@@ -444,10 +369,6 @@ fn device_arguments(arguments: &Map<String, Value>) -> Option<(StoredInstant, St
         StoredInstant::from_legacy_input(arguments.get("end")?)?,
         u16::try_from(limit).ok()?,
     ))
-}
-
-pub(crate) fn event_tool_description() -> Value {
-    ReadTool::Events.catalog_entry()
 }
 
 pub(crate) fn range_with_kind(
@@ -527,15 +448,6 @@ pub(super) fn integer_input(value: &Value) -> Option<u32> {
             (!integer.starts_with('-') || number == 0).then_some(number)
         }
         _ => None,
-    }
-}
-
-fn activity_response(outcome: Result<Value, ActivityReadError>) -> Response {
-    match outcome {
-        Ok(document) => Json(document).into_response(),
-        Err(ActivityReadError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
-        Err(ActivityReadError::Analysis(error)) => health_failure(error),
-        Err(_) => invalid_arguments(),
     }
 }
 
@@ -701,3 +613,6 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         _ => storage_unavailable(),
     }
 }
+mod garmin_reads;
+
+pub(crate) use garmin_reads::{GarminReadError, read_garmin};

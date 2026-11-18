@@ -1,11 +1,15 @@
 use futures_util::TryStreamExt;
-use ga_domain::{legacy_metrics::legacy_metric_contracts, timestamp::StoredInstant};
+use ga_domain::{
+    legacy_metrics::legacy_metric_contracts, model_consent::ModelCategories,
+    timestamp::StoredInstant,
+};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
+use uuid::Uuid;
 
 use super::{HealthAnalysisError, HealthPeriod, begin_daily_analysis, begin_verified_analysis};
-use crate::Database;
+use crate::{Database, model_gate::onboarding::onboarding_allows_model};
 
 const METRICS: &[&str] = &[
     "active_calories",
@@ -64,6 +68,38 @@ impl Database {
 }
 
 impl DailyHealthReader {
+    /// Check the enrolled model audience in the same snapshot as its data.
+    pub async fn permits_model_health(&mut self, owner: Uuid) -> Result<bool, HealthAnalysisError> {
+        let current: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT FROM people WHERE singleton AND id=$1)")
+                .bind(owner)
+                .fetch_one(&mut *self.0)
+                .await?;
+        Ok(current && onboarding_allows_model(&mut self.0, ModelCategories::HEALTH).await?)
+    }
+
+    /// Check every required pack in the same snapshot as the outgoing model data.
+    pub async fn permits_model_packs(
+        &mut self,
+        owner: Uuid,
+        packs: &[&str],
+    ) -> Result<bool, HealthAnalysisError> {
+        Ok(sqlx::query_scalar(
+            "SELECT NOT EXISTS(SELECT FROM module_configs WHERE owner_id=$1)
+                OR NOT EXISTS(
+                    SELECT FROM unnest($2::text[]) AS required(key)
+                    WHERE NOT EXISTS(
+                        SELECT FROM module_configs
+                        WHERE owner_id=$1 AND pack_key=required.key AND llm_enabled
+                    )
+                )",
+        )
+        .bind(owner)
+        .bind(packs)
+        .fetch_one(&mut *self.0)
+        .await?)
+    }
+
     /// Return recorded summaries for this inclusive calendar range.
     pub async fn range(mut self, period: HealthPeriod) -> Result<Value, HealthAnalysisError> {
         let mut rows = Vec::new();
