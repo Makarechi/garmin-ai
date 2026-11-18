@@ -131,6 +131,39 @@ async fn warns_about_storage_only_while_current_and_preserves_the_receipt()
         .claim_outbox_reply(destination(), now, 60)
         .await?
         .ok_or("No warning")?;
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding',$1::jsonb)")
+        .bind(
+            json!({"channel":{"channel":"web","instance_id":"local"},
+            "fallback_channels":[{"channel":"telegram","instance_id":"primary"}]})
+            .to_string(),
+        )
+        .execute(&pool)
+        .await?;
+    let fallback = database
+        .dispatch_telegram_outbox_reply(destination(), chat, claim, &[], |_| async {
+            panic!("A fallback channel cannot receive a storage notice")
+        })
+        .await?;
+    assert_eq!(fallback, ReplyDispatchResult::Cancelled);
+    database
+        .queue_telegram_storage_notice(owner, "primary", chat, now)
+        .await?;
+    assert!(
+        database
+            .claim_outbox_reply(destination(), now, 60)
+            .await?
+            .is_none()
+    );
+    sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+        .execute(&pool)
+        .await?;
+    database
+        .queue_telegram_storage_notice(owner, "primary", chat, now)
+        .await?;
+    let claim = database
+        .claim_outbox_reply(destination(), now, 60)
+        .await?
+        .ok_or("No warning after restoring the primary channel")?;
     capacity(&database, worker, at, 6, true).await?;
     let silent = database
         .dispatch_telegram_outbox_reply(destination(), chat, claim, &[], |_| async {

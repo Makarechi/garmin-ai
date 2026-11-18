@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::{JobStoreError, begin};
 use crate::{
     Database,
-    channel_ingress::telegram_poll::selection,
+    channel_ingress::telegram_poll::{selection, telegram_primary},
     delivery::DeliveryState,
     outbox_enqueue::{QueueIntent, queue_outbox_intent},
     replay::REPLAY_MUTATION_LOCK,
@@ -199,6 +199,7 @@ impl Database {
             || !selection(&mut txn, instance)
                 .await
                 .map_err(|_| JobStoreError::Database)?
+            || !telegram_primary(&mut txn, instance).await?
             || confirmed_pairing(&mut txn, instance, chat).await.ok() != Some(owner)
         {
             return Ok(());

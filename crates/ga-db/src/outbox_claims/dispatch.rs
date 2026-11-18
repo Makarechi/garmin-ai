@@ -333,7 +333,7 @@ async fn prepare(
     if storage_notice.is_some() {
         acquire_shared(&mut txn, STORAGE_QUEUE_LOCK).await?;
     }
-    let fence = check_fence(&mut txn, destination.owner_id, &candidate).await?;
+    let fence = check_fence(&mut txn, destination, &candidate).await?;
     let ready = match (serde_json::from_str::<Value>(&raw), fence) {
         (Ok(mut intent), FenceStatus::Current(projection))
             if matches_intent(&intent, destination, &candidate)
