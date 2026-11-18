@@ -73,6 +73,9 @@ impl DailyHealthReader {
                 .and_then(|day| local_midnight(day, &timezone))
                 .map(time::OffsetDateTime::from)
                 .ok_or(HealthAnalysisError::InvalidTimezone)?;
+            sqlx::query("SET LOCAL statement_timeout = '1500ms'")
+                .execute(&mut *self.0)
+                .await?;
             let observed: Vec<ObservedHour> = sqlx::query_as(include_str!("stress.sql"))
                 .bind(left)
                 .bind(right)
