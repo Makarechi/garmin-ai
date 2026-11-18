@@ -164,9 +164,8 @@ def compare(binary, reference, native, root):
     activation = locks / "activating"
 
     def assert_activation_is_fenced():
-        assert "Restore or resume storage after erasure" in run(
-            legacy, root, file_only, ("probe",), fails=True
-        )
+        refused = run(legacy, root, file_only, ("probe",), fails=True)
+        assert refused == "Operation failed (ValueError). No sensitive details logged."
         assert not data.exists() and not tokens.exists()
         assert activation.is_file() and (locks / "erased").is_file()
         assert contents(native) == expected_erased
