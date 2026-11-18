@@ -10,7 +10,7 @@ from uuid import UUID
 
 from capture_reference import isolated_engine
 from check_model_diary_policy import END, START, seed
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from garmin_ai.models import ChannelBinding, Conversation, InboundMessage, Person
@@ -20,6 +20,14 @@ from garmin_ai.tools import call_tool, model_tool_descriptions
 def record_questions(engine):
     with Session(engine) as session, session.begin():
         owner = session.scalar(select(Person.id))
+        session.execute(
+            text("""
+            UPDATE app_state SET value=value || '{
+              "channel":{"channel":"telegram","instance_id":"telegram:allowed"},
+              "fallback_channels":[{"channel":"telegram","instance_id":"telegram:schema"}]
+            }'::jsonb WHERE key='preferences:onboarding'
+            """)
+        )
         for index, suffix in enumerate(("allowed", "schema")):
             channel = f"telegram:{suffix}"
             chat = str(900001 + index)

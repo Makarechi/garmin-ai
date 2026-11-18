@@ -1,6 +1,9 @@
 use std::{collections::BTreeSet, env, error::Error, fs, str::FromStr};
 
-use ga_app::model_gateway::{AnalysisReadTools, DiaryAnalysisTools};
+use ga_app::{
+    model_gateway::{AnalysisReadTools, DiaryAnalysisTools},
+    telegram_input::TelegramBinding,
+};
 use ga_db::{
     Database,
     conversation_memory::{AnalysisReadContext, ConversationBinding},
@@ -9,6 +12,7 @@ use ga_db::{
 use ga_domain::{model_consent::ModelCategories, timestamp::StoredInstant};
 use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -91,6 +95,8 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
         assert!(reader.read("events", &injected).await.is_none());
     }
 
+    verify_native_ingress(&db, &inspect, owner_id, now, &fixture).await?;
+
     let binding = ConversationBinding {
         owner_id,
         conversation_id: Uuid::from_u128(100),
@@ -117,14 +123,14 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
     )?;
     assert!(!foreign.context_current().await && foreign.read("events", args).await.is_none());
     sqlx::query(
-        "UPDATE app_state SET value=jsonb_build_object('model_categories','[\"health\"]'::jsonb)
+        "UPDATE app_state SET value=value || jsonb_build_object('model_categories','[\"health\"]'::jsonb)
                  WHERE key='preferences:onboarding'",
     )
     .execute(&inspect)
     .await?;
     assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
     sqlx::query(
-        "UPDATE app_state SET value=jsonb_build_object('model_categories','[\"diary\"]'::jsonb)
+        "UPDATE app_state SET value=value || jsonb_build_object('model_categories','[\"diary\"]'::jsonb)
                  WHERE key='preferences:onboarding'",
     )
     .execute(&inspect)
@@ -178,5 +184,74 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
          FROM inbound_messages WHERE id=$1",
     ).bind(context.inbound_id).execute(&inspect).await?;
     assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    Ok(())
+}
+
+async fn verify_native_ingress(
+    db: &Database,
+    inspect: &PgPool,
+    owner_id: Uuid,
+    now: StoredInstant,
+    fixture: &Value,
+) -> Result<(), Box<dyn Error>> {
+    let channel = TelegramBinding {
+        owner_id,
+        instance_id: "telegram:allowed",
+        external_owner_id: 900001,
+    };
+    let arrival = json!({
+        "update_id":900010,
+        "message":{"message_id":900010,"date":OffsetDateTime::from(now).unix_timestamp(),
+            "from":{"id":900001},"chat":{"id":900001,"type":"private"},
+            "text":"Synthetic question through native ingress"},
+    });
+    let mut runtime = db.acquire_runtime_lease().await?;
+    let receipt = channel
+        .accept_polled_update(&mut runtime, &arrival, now, false)
+        .await?
+        .inbound
+        .ok_or("Native ingress did not store the question")?;
+    let (conversation_id, external): (Uuid, Option<String>) = sqlx::query_as(
+        "SELECT message.conversation_id,conversation.external_conversation_id FROM inbound_messages message
+         JOIN conversations conversation ON conversation.id=message.conversation_id WHERE message.id=$1",
+    ).bind(receipt.message_id).fetch_one(inspect).await?;
+    assert!(external.is_none());
+    let binding = ConversationBinding {
+        owner_id,
+        conversation_id,
+    };
+    let memory = db.conversation_memory(binding, now).await?;
+    let context = AnalysisReadContext {
+        binding,
+        inbound_id: receipt.message_id,
+        operation_id: receipt.operation_id,
+        memory: &memory.fence,
+        goals_revision: 0,
+    };
+    let reader = DiaryAnalysisTools::new(db, context, "model:primary")?;
+    let args = fixture["args"]
+        .as_object()
+        .ok_or("Missing model arguments")?;
+    assert!(reader.context_current().await);
+    assert_eq!(
+        reader
+            .read("events", args)
+            .await
+            .ok_or("Native diary read was rejected")?
+            .value,
+        fixture["cases"][0]["result"]
+    );
+    let selected: String =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='preferences:onboarding'")
+            .fetch_one(inspect)
+            .await?;
+    sqlx::query("UPDATE app_state SET value=value-'channel'-'fallback_channels' WHERE key='preferences:onboarding'")
+        .execute(inspect).await?;
+    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    sqlx::query("UPDATE app_state SET value=$1::jsonb WHERE key='preferences:onboarding'")
+        .bind(selected)
+        .execute(inspect)
+        .await?;
+    assert!(reader.context_current().await);
     Ok(())
 }

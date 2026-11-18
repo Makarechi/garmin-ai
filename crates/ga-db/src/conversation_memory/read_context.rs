@@ -2,7 +2,9 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{ConversationBinding, MemoryError, MemoryFence, shared_memory_epochs};
-use crate::{personal_goals, telegram_binding::confirmed_pairing};
+use crate::{
+    channel_ingress::telegram_poll::selection, personal_goals, telegram_binding::confirmed_pairing,
+};
 
 /// The trusted question and policy revisions captured by an authenticated channel.
 #[derive(Clone, Copy)]
@@ -53,13 +55,15 @@ pub(crate) async fn channel_in(
         return Ok(None);
     }
     if channel == "telegram" {
-        let Some(chat) = external
-            .filter(|external| external == &sender)
-            .and_then(|external| external.parse::<i64>().ok())
-        else {
+        let Ok(chat) = sender.parse::<i64>() else {
             return Ok(None);
         };
-        if confirmed_pairing(txn, &instance, chat).await.ok() != Some(context.binding.owner_id) {
+        if external
+            .as_ref()
+            .is_some_and(|external| external != &sender)
+            || !selection(txn, &instance).await.unwrap_or(false)
+            || confirmed_pairing(txn, &instance, chat).await.ok() != Some(context.binding.owner_id)
+        {
             return Ok(None);
         }
     }
