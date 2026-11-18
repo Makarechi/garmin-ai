@@ -7,6 +7,7 @@ mod personal_goals;
 pub(crate) mod tools;
 mod tracker_sharing;
 mod wearable;
+mod web_chat;
 
 use std::{env, io, sync::Arc};
 
@@ -48,6 +49,8 @@ fn router(state: AppState) -> Router {
         .route("/tools/{name}", any(tools::execute))
         .route("/preferences/goals", any(personal_goals::preferences))
         .route("/wearable/marks", any(wearable::marks))
+        .route("/web-chat/messages", any(web_chat::messages))
+        .route("/web-chat/messages/{id}/read", any(web_chat::mark_read))
         .route(
             "/tracker-sharing-consents",
             any(tracker_sharing::collection),

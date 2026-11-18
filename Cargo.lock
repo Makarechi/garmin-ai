@@ -835,6 +835,7 @@ dependencies = [
  "fancy-regex",
  "flate2",
  "form_urlencoded",
+ "futures-util",
  "ga-archive",
  "ga-db",
  "ga-domain",
