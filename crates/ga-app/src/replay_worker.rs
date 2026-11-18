@@ -1,3 +1,5 @@
+mod garmin;
+
 use std::{
     env,
     error::Error,
@@ -201,6 +203,15 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         .flatten();
     let database = Database::connect_lazy(&config.database_url)
         .map_err(|_| ReplayServiceError::Configuration)?;
+    let garmin = worker
+        .then(|| match garmin::GarminWorkerSettings::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
     let reminders_available = telegram.is_some() && reminder_model_available(&database, clock()?);
     let archive = Arc::new(
         Archive::open_read_only(&config.raw_archive).map_err(|_| ReplayServiceError::Archive)?,
@@ -288,11 +299,21 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         }
         future::pending::<Result<(), ReplayServiceError>>().await
     };
+    let garmin_work = async {
+        if let Some(settings) = &garmin {
+            settings
+                .run(&database, &config.raw_archive, &timezone)
+                .await
+        } else {
+            future::pending().await
+        }
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
         result = receive => result,
         result = telegram_work => result,
+        result = garmin_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

@@ -11,7 +11,9 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{Database, ReadinessError, check_readiness};
+use crate::{
+    Database, ReadinessError, check_readiness, garmin_integration::current_source_selected,
+};
 
 const ATTEMPT_LIMIT: i32 = 8;
 const KIND: &str = "channel_initiatives";
@@ -147,6 +149,7 @@ pub struct GarminJobLease {
     attempt: i32,
     kind: GarminJobKind,
     payload: String,
+    source_instance: Option<String>,
 }
 
 impl GarminJobLease {
@@ -255,11 +258,45 @@ impl Database {
         lease_seconds: u32,
         backups_enabled: bool,
     ) -> Result<Option<GarminJobLease>, JobStoreError> {
+        self.claim_garmin_job_in_scope(now, owner_local_date, lease_seconds, backups_enabled, None)
+            .await
+    }
+
+    /// Bind new runtime work to its selected source through renewal and publication.
+    pub async fn claim_selected_garmin_job(
+        &self,
+        now: StoredInstant,
+        owner_local_date: Date,
+        lease_seconds: u32,
+        backups_enabled: bool,
+        source_instance: &str,
+    ) -> Result<Option<GarminJobLease>, JobStoreError> {
+        self.claim_garmin_job_in_scope(
+            now,
+            owner_local_date,
+            lease_seconds,
+            backups_enabled,
+            Some(source_instance),
+        )
+        .await
+    }
+
+    async fn claim_garmin_job_in_scope(
+        &self,
+        now: StoredInstant,
+        owner_local_date: Date,
+        lease_seconds: u32,
+        backups_enabled: bool,
+        source_instance: Option<&str>,
+    ) -> Result<Option<GarminJobLease>, JobStoreError> {
         if !(1..=86_400).contains(&lease_seconds) {
             return Err(JobStoreError::InvalidLeaseDuration);
         }
         let seconds = lease_seconds as i32;
         let mut txn = begin(&self.work).await?;
+        if !source_allows_job(&mut txn, source_instance).await? {
+            return Ok(None);
+        }
         let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(STORAGE_QUEUE_LOCK)
             .fetch_one(&mut *txn)
@@ -351,6 +388,7 @@ impl Database {
                 attempt,
                 kind: GarminJobKind::stored(&kind)?,
                 payload,
+                source_instance: source_instance.map(str::to_owned),
             }),
             None => None,
         };
@@ -363,7 +401,7 @@ impl Database {
         lease: &InitiativeLease,
         now: StoredInstant,
     ) -> Result<bool, JobStoreError> {
-        self.renew_job(lease.id, lease.token, lease.seconds, KIND, now)
+        self.renew_job(lease.id, lease.token, lease.seconds, KIND, now, None)
             .await
     }
 
@@ -378,6 +416,7 @@ impl Database {
             lease.seconds,
             lease.kind.label(),
             now,
+            lease.source_instance.as_deref(),
         )
         .await
     }
@@ -389,8 +428,12 @@ impl Database {
         seconds: i32,
         kind: &str,
         now: StoredInstant,
+        source_instance: Option<&str>,
     ) -> Result<bool, JobStoreError> {
         let mut txn = begin(&self.control).await?;
+        if !source_allows_job(&mut txn, source_instance).await? {
+            return Ok(false);
+        }
         let refreshed = sqlx::query(
             "UPDATE jobs
              SET lease_until = GREATEST(lease_until, $3 + $4 * INTERVAL '1 second')
@@ -488,6 +531,18 @@ impl Database {
     }
 }
 
+async fn source_allows_job(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: Option<&str>,
+) -> Result<bool, JobStoreError> {
+    match instance {
+        Some(instance) => current_source_selected(txn, instance)
+            .await
+            .map_err(|_| JobStoreError::Database),
+        None => Ok(true),
+    }
+}
+
 impl GarminJobLease {
     pub(crate) async fn observe_live(
         &self,
@@ -531,6 +586,9 @@ impl GarminJobLease {
         txn: &mut Transaction<'_, Postgres>,
         lock: bool,
     ) -> Result<(), JobStoreError> {
+        if !source_allows_job(txn, self.source_instance.as_deref()).await? {
+            return Err(JobStoreError::LeaseLost);
+        }
         macro_rules! live {
             ($suffix:literal) => {
                 concat!(

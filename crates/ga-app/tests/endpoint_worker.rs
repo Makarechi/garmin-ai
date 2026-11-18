@@ -13,16 +13,17 @@ use std::{
 
 use ga_app::garmin_worker::{
     ActivityExportSource, ActivityFitWork, ActivityPageWork, EndpointSource, EndpointWork,
-    EndpointWorker, EndpointWorkerError,
+    EndpointWorker, EndpointWorkerError, GarminQueueStep, ScheduledGarminWorker,
 };
 use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
     activity_documents::DocumentStatus,
     activity_scans::{ActivityPageResult, ActivityScansStarted, StartActivityScans},
-    fit_ingest::FitIngestOutcome,
+    fit_ingest::{FitIngestError, FitIngestOutcome},
     garmin_endpoint::EndpointPublication,
     garmin_integration::GarminTransportOutcome,
+    garmin_periodic::GarminSyncSchedule,
     jobs::{GarminJobLease, JobStoreError, RecordedJobStatus},
 };
 use ga_domain::timestamp::StoredInstant;
@@ -504,6 +505,7 @@ const FIT_RECORDING: &[u8] =
 struct FitSource {
     calls: AtomicUsize,
     interrupted: bool,
+    started: Option<Arc<Notify>>,
 }
 
 impl EndpointSource for FitSource {
@@ -530,6 +532,9 @@ impl ActivityExportSource for FitSource {
             .write_all(&FIT_RECORDING[..16])
             .await
             .map_err(|_| GarminError::DestinationWrite)?;
+        if let Some(started) = &self.started {
+            started.notify_one();
+        }
         if self.interrupted {
             return Err(GarminError::InterruptedTransfer);
         }
@@ -589,6 +594,7 @@ async fn downloads_fit_in_private_staging_and_preserves_the_last_complete_export
     let good = FitSource {
         calls: AtomicUsize::new(0),
         interrupted: false,
+        started: None,
     };
     let first = claim(1).await?;
     sqlx::raw_sql(
@@ -664,6 +670,7 @@ async fn downloads_fit_in_private_staging_and_preserves_the_last_complete_export
     let interrupted = FitSource {
         calls: AtomicUsize::new(0),
         interrupted: true,
+        started: None,
     };
     let second = claim(20).await?;
     assert!(matches!(
@@ -693,5 +700,195 @@ async fn downloads_fit_in_private_staging_and_preserves_the_last_complete_export
                 .starts_with(".rust-stage-")
         );
     }
+    Ok(())
+}
+
+struct ScheduledSource {
+    at: OffsetDateTime,
+    calls: AtomicUsize,
+    fit: FitSource,
+}
+
+impl EndpointSource for ScheduledSource {
+    fn fingerprint(&self) -> &str {
+        ACCOUNT
+    }
+
+    async fn read(
+        &self,
+        resource: LegacyRead,
+        maximum_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, GarminError> {
+        assert_eq!(maximum_bytes, 65_536);
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let value = match resource {
+            LegacyRead::Activities { start: 0, limit } if limit.get() == 100 => json!([{
+                "activityId":761,
+                "startTimeGMT":self.at.unix_timestamp()-5,
+                "duration":30
+            }]),
+            LegacyRead::Daily(DailyEndpoint::HeartRate, _) => json!({
+                "heartRateValues":[[(self.at.unix_timestamp() - 60) * 1000,77]]
+            }),
+            _ => return Err(GarminError::InvalidRequest),
+        };
+        serde_json::to_vec(&value)
+            .map(Some)
+            .map_err(|_| GarminError::InvalidRequest)
+    }
+}
+
+impl ActivityExportSource for ScheduledSource {
+    async fn download(
+        &self,
+        activity: NonZeroU64,
+        maximum_bytes: u64,
+        destination: &mut File,
+    ) -> Result<u64, GarminError> {
+        self.fit
+            .download(activity, maximum_bytes, destination)
+            .await
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the claim and dispatch stages with disposable TimescaleDB and synthetic Garmin"]
+async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_source()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, _root) = setup().await?;
+    let started = Arc::new(Notify::new());
+    let source = ScheduledSource {
+        at: fixture.start,
+        calls: AtomicUsize::new(0),
+        fit: FitSource {
+            calls: AtomicUsize::new(0),
+            interrupted: false,
+            started: Some(started.clone()),
+        },
+    };
+    let worker = ScheduledGarminWorker {
+        runner: fixture.worker(&source),
+        instance: "source:garmin:primary",
+        history_days: 0,
+        backups_enabled: false,
+        fit_limits: ExportLimits {
+            max_bytes: 65_536,
+            max_zip_entries: NonZeroUsize::MIN,
+            max_duration: Duration::from_secs(3),
+        },
+    };
+    let now = || async {
+        let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&fixture.inspect)
+            .await?;
+        Ok::<_, Box<dyn Error>>(StoredInstant::try_from(now)?)
+    };
+    assert!(matches!(
+        worker.plan(now().await?).await?,
+        GarminSyncSchedule::Scheduled{ activity_pages:1, periodic, .. } if periodic > 0,
+    ));
+    sqlx::query("UPDATE jobs SET run_at=run_at+interval '1 day' WHERE kind='garmin_endpoint'")
+        .execute(&fixture.inspect)
+        .await?;
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Activities(ActivityPageWork::Publication(
+            ActivityPageResult::Published(DocumentStatus::Normalized)
+        )),
+    );
+    sqlx::raw_sql(
+        "UPDATE jobs SET run_at=clock_timestamp()+interval '1 day'
+             WHERE kind='garmin_endpoint' AND status='pending';
+         INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"source_instance_ids\":[]}');"
+    ).execute(&fixture.inspect).await?;
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Inactive
+    );
+    let fit_attempts: i32 = sqlx::query_scalar("SELECT attempts FROM jobs WHERE kind='garmin_fit'")
+        .fetch_one(&fixture.inspect)
+        .await?;
+    assert_eq!(fit_attempts, 0);
+    assert_eq!(source.fit.calls.load(Ordering::Relaxed), 0);
+
+    sqlx::query("DELETE FROM app_state WHERE key='preferences:onboarding'")
+        .execute(&fixture.inspect)
+        .await?;
+    let revoke = async {
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
+        sqlx::query(
+            "INSERT INTO app_state(key,value)
+                     VALUES('preferences:onboarding','{\"source_instance_ids\":[]}')",
+        )
+        .execute(&fixture.inspect)
+        .await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let (outcome, revoke) = tokio::join!(worker.process_one(now().await?), revoke);
+    revoke?;
+    assert!(matches!(
+        outcome,
+        Err(EndpointWorkerError::Fit(FitIngestError::Lease(
+            JobStoreError::LeaseLost
+        )))
+    ));
+    let archived_while_disabled: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM source_payloads WHERE endpoint='activity_fit'")
+            .fetch_one(&fixture.inspect)
+            .await?;
+    assert_eq!(archived_while_disabled, 0);
+    sqlx::raw_sql(
+        "DELETE FROM app_state WHERE key='preferences:onboarding';
+         UPDATE jobs SET lease_until=clock_timestamp()-interval '1 second'
+            WHERE kind='garmin_fit' AND status='running';",
+    )
+    .execute(&fixture.inspect)
+    .await?;
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Fit(ActivityFitWork::Publication(FitIngestOutcome::Normalized {
+            rows: 1
+        })),
+    );
+    sqlx::query(
+        "UPDATE jobs SET run_at=clock_timestamp()-interval '1 second' WHERE kind='garmin_endpoint'
+         AND payload->>'endpoint'='heart_rate' AND payload->>'key'=$1",
+    )
+    .bind(fixture.start.date().to_string())
+    .execute(&fixture.inspect)
+    .await?;
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Endpoint(EndpointWork::Publication(EndpointPublication::Published(
+            DocumentStatus::Normalized
+        ))),
+    );
+    assert_eq!(source.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(source.fit.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Idle
+    );
+    assert_eq!(
+        fixture
+            .database
+            .retire_deselected_garmin_work(worker.instance, now().await?)
+            .await?,
+        0
+    );
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"source_instance_ids\":[]}')")
+        .execute(&fixture.inspect).await?;
+    assert!(
+        fixture
+            .database
+            .retire_deselected_garmin_work(worker.instance, now().await?)
+            .await?
+            > 0
+    );
+    let old_export_still_visible: bool =
+        sqlx::query_scalar("SELECT fit_key IS NOT NULL FROM activities WHERE id='761'")
+            .fetch_one(&fixture.inspect)
+            .await?;
+    assert!(old_export_still_visible);
     Ok(())
 }

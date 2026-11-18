@@ -2,7 +2,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
-use sqlx::{Executor, Postgres};
+use sqlx::{Executor, Postgres, Transaction};
 
 use crate::{
     Database, ReadinessError, check_readiness,
@@ -98,14 +98,7 @@ impl Database {
             check_readiness(&mut txn)
                 .await
                 .map_err(GarminIntegrationError::Storage)?;
-            let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
-                .bind(OWNER_ONBOARDING_LOCK)
-                .fetch_one(&mut *txn)
-                .await?;
-            if !locked {
-                return Err(GarminIntegrationError::Busy);
-            }
-            if !source_instance_selected(&mut txn, instance).await? {
+            if !current_source_selected(&mut txn, instance).await? {
                 return Ok(GarminSourceAdmission::Unselected);
             }
             let Some(fingerprint) = stored_garmin_fingerprint(&mut txn)
@@ -252,6 +245,22 @@ impl Database {
             failure_count,
         })
     }
+}
+
+pub(crate) async fn current_source_selected(
+    txn: &mut Transaction<'_, Postgres>,
+    instance: &str,
+) -> Result<bool, GarminIntegrationError> {
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
+        .bind(OWNER_ONBOARDING_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    if !locked {
+        return Err(GarminIntegrationError::Busy);
+    }
+    source_instance_selected(txn, instance)
+        .await
+        .map_err(Into::into)
 }
 
 pub(crate) async fn garmin_pause<'e>(
