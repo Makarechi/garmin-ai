@@ -53,6 +53,16 @@ pub fn write_backup_bundle_guarded(
     bundle: BackupBundle<'_>,
     before_publish: impl FnOnce() -> io::Result<()>,
 ) -> Result<BackupDigest, BackupError> {
+    write_backup_bundle_cancellable(destination, key, bundle, || false, before_publish)
+}
+
+pub fn write_backup_bundle_cancellable(
+    destination: &Path,
+    key: &[u8; 32],
+    bundle: BackupBundle<'_>,
+    cancelled: impl Fn() -> bool,
+    before_publish: impl FnOnce() -> io::Result<()>,
+) -> Result<BackupDigest, BackupError> {
     let target = normalized(destination)?;
     if target.starts_with(normalized(bundle.data_dir)?)
         || target.starts_with(normalized(bundle.token_dir)?)
@@ -69,7 +79,10 @@ pub fn write_backup_bundle_guarded(
         destination,
         key,
         |output| {
-            let mut archive = Builder::new(GzEncoder::new(output, Compression::best()));
+            let mut archive = Builder::new(CancellableWriter::new(
+                GzEncoder::new(output, Compression::best()),
+                &cancelled,
+            ));
             let file = open_source(bundle.database_export).map_err(source_error)?;
             append_file(&mut archive, Path::new(DATABASE_MEMBER), file, None)?;
             let (data_dir, exists) = existing_directory(bundle.data_dir).map_err(archive_error)?;
@@ -111,11 +124,40 @@ pub fn write_backup_bundle_guarded(
                     "The snapshot references an archive file absent from the backup",
                 ));
             }
-            archive.into_inner()?.finish()?;
+            archive.into_inner()?.into_inner().finish()?;
             Ok(())
         },
         before_publish,
     )
+}
+
+/// Stop staging output once the caller loses its job or worker lease.
+pub struct CancellableWriter<W, F> {
+    writer: W,
+    cancelled: F,
+}
+
+impl<W, F> CancellableWriter<W, F> {
+    pub fn new(writer: W, cancelled: F) -> Self {
+        Self { writer, cancelled }
+    }
+
+    fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: Write, F: Fn() -> bool> Write for CancellableWriter<W, F> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(io::Error::other("Backup staging was cancelled"));
+        }
+        self.writer.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 fn append_directory(
