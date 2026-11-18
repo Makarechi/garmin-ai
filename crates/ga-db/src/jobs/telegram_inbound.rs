@@ -1,5 +1,7 @@
+mod control;
 mod diary;
 
+pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
 
 use std::time::Duration;

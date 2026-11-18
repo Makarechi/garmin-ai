@@ -3,6 +3,7 @@
 mod confirmed;
 mod telegram_forget;
 pub use confirmed::ConfirmedAnalysis;
+pub(crate) use telegram_forget::forget_in as forget_telegram_in;
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 
