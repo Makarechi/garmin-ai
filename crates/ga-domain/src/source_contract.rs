@@ -561,13 +561,7 @@ fn read_record(raw: &JsonValue<'_>) -> Result<SourceRecord, SourceContractError>
         if operation == SourceOperation::Delete && !values.is_empty() {
             return Err(SourceContractError::Deletion);
         }
-        validate_payload(raw, 0)?;
-        let mut spaced = Vec::new();
-        write_value(&mut spaced, raw, Utf8Layout::Archive)
-            .map_err(|_| SourceContractError::Payload)?;
-        if spaced.len() > MAX_PAYLOAD_BYTES {
-            return Err(SourceContractError::Payload);
-        }
+        check_payload_size(raw)?;
         payload.clear();
         write_value(&mut payload, raw, Utf8Layout::Compact)
             .map_err(|_| SourceContractError::Payload)?;
@@ -582,6 +576,26 @@ fn read_record(raw: &JsonValue<'_>) -> Result<SourceRecord, SourceContractError>
         source_reference: text(get(&fields, "source_reference"), 500)?,
         payload,
     })
+}
+
+/// Validate bytes against the source record's bounded observation payload contract.
+pub fn validate_source_payload(bytes: &[u8]) -> Result<(), SourceContractError> {
+    let value = JsonValue::parse(bytes, false).map_err(|_| SourceContractError::Payload)?;
+    if !matches!(value, JsonValue::Object(_)) {
+        return Err(SourceContractError::Payload);
+    }
+    check_payload_size(&value)
+}
+
+fn check_payload_size(value: &JsonValue<'_>) -> Result<(), SourceContractError> {
+    validate_payload(value, 0)?;
+    let mut spaced = Vec::new();
+    write_value(&mut spaced, value, Utf8Layout::Archive)
+        .map_err(|_| SourceContractError::Payload)?;
+    if spaced.len() > MAX_PAYLOAD_BYTES {
+        return Err(SourceContractError::Payload);
+    }
+    Ok(())
 }
 
 fn validate_payload(value: &JsonValue<'_>, depth: u8) -> Result<(), SourceContractError> {
