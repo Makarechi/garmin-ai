@@ -168,7 +168,7 @@ impl Database {
     }
 }
 
-async fn record_transport_in(
+pub(crate) async fn record_transport_in(
     txn: &mut Transaction<'_, Postgres>,
     at: StoredInstant,
     outcome: GarminTransportOutcome,

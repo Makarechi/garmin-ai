@@ -845,6 +845,7 @@ dependencies = [
  "markdown-it-rust-core",
  "reqwest",
  "rmcp",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",
