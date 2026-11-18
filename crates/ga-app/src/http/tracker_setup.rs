@@ -5,9 +5,13 @@ use axum::{
     http::{Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use ga_db::diary::{CustomRegistryError, ManageCustomDefinition, actions::TrackerSetupStoreError};
+use ga_db::diary::{
+    CustomRegistryError, ManageCustomDefinition,
+    actions::{TrackerActionError, TrackerSetupStoreError},
+};
 use ga_domain::{access::Scope, event_schema::TrackerSetupDraft};
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::{
     AppState,
@@ -22,6 +26,52 @@ pub(super) async fn preview(State(state): State<AppState>, request: Request) -> 
 
 pub(super) async fn confirm(State(state): State<AppState>, request: Request) -> Response {
     tracker_setup(&state, request, true).await
+}
+
+pub(super) async fn export_pack(State(state): State<AppState>, request: Request) -> Response {
+    let (head, body) = request.into_parts();
+    let response = async {
+        if head.method != Method::POST {
+            return method_not_allowed("POST");
+        }
+        let (database, owner_id) =
+            match authorized(&state, &head.headers, &[Scope::ManageDefinitions]).await {
+                Ok(context) => context,
+                Err(status) => return access_failure(status),
+            };
+        let Some(value) = to_bytes(body, MAX_REQUEST_BYTES)
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        else {
+            return invalid();
+        };
+        let Some(object) = value.as_object().filter(|object| object.len() == 1) else {
+            return invalid();
+        };
+        let Some(ids) = object
+            .get("definition_ids")
+            .and_then(Value::as_array)
+            .filter(|ids| (1..=32).contains(&ids.len()))
+        else {
+            return invalid();
+        };
+        let Some(ids) = ids
+            .iter()
+            .map(|id| id.as_str().and_then(|id| id.parse::<Uuid>().ok()))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return invalid();
+        };
+        match database.export_tracker_pack(owner_id, &ids).await {
+            Ok(document) => Json(document).into_response(),
+            Err(TrackerActionError::Missing) => detail(StatusCode::NOT_FOUND, "Record not found"),
+            Err(TrackerActionError::InvalidContract) => invalid(),
+            Err(_) => access_failure(StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+    .await;
+    private_cache(response, &head.headers)
 }
 
 async fn tracker_setup(state: &AppState, request: Request, confirm: bool) -> Response {
