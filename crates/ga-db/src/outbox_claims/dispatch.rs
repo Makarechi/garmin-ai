@@ -15,7 +15,9 @@ use crate::{
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
     jobs::{STORAGE_QUEUE_LOCK, telegram_notices::TelegramNoticeFence},
     replay::REPLAY_MUTATION_LOCK,
-    share_policy::{CHANNEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed},
+    share_policy::{
+        CHANNEL_CONSENT_LOCK, MODEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed,
+    },
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
     telegram_garmin::REPLAY_NOTICE,
 };
@@ -358,6 +360,9 @@ async fn prepare(
     let telegram_notice = candidate.telegram_notice();
     if telegram_notice.is_some() {
         acquire_shared(&mut txn, STORAGE_QUEUE_LOCK).await?;
+    }
+    if candidate.has_diary_analysis() {
+        acquire_shared(&mut txn, MODEL_CONSENT_LOCK).await?;
     }
     let fence = check_fence(&mut txn, destination, &candidate).await?;
     let ready = match (serde_json::from_str::<Value>(&raw), fence) {

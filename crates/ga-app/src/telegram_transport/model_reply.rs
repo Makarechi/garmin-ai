@@ -145,7 +145,7 @@ pub async fn publish_telegram_interpretation(
     Ok(DiaryReplyOutcome::Published)
 }
 
-fn text_reply(envelope: &InboundEnvelope, text: &str) -> Option<OutboundIntent> {
+pub(super) fn text_reply(envelope: &InboundEnvelope, text: &str) -> Option<OutboundIntent> {
     OutboundIntent::normalize(json!({
         "owner_id":envelope.owner_id().to_string(),"conversation_id":envelope.conversation_id().to_string(),
         "channel_instance":{"channel":"telegram","instance_id":envelope.channel().instance_id()},

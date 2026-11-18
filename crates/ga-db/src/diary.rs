@@ -33,7 +33,7 @@ pub use reads::{
     ModelDiaryPage, ModelDiaryQuery, event_document,
 };
 pub use reads::{InterpretationContext, InterpretationContextQuery};
-pub(crate) use reads::{caffeine_total, owner_events_in};
+pub(crate) use reads::{analysis_events_in, caffeine_total, owner_events_in};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 pub use wearable::WearableError;
