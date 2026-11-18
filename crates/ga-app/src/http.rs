@@ -1,3 +1,4 @@
+mod diary;
 mod personal_goals;
 pub(crate) mod tools;
 mod tracker_sharing;
@@ -33,6 +34,9 @@ fn router(state: AppState) -> Router {
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
+        .route("/events", any(diary::create))
+        .route("/events/{event_id}", any(diary::entry))
+        .route("/entries", any(diary::create_custom))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
         .route("/preferences/goals", any(personal_goals::preferences))

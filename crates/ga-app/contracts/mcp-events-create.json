@@ -1,0 +1,700 @@
+{
+  "name": "events_create",
+  "description": "Record a diary fact explicitly supplied by the owner; use a stable idempotency key.",
+  "inputSchema": {
+    "$defs": {
+      "ActivityEffort": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "activity_effort",
+            "default": "activity_effort",
+            "title": "Type",
+            "type": "string"
+          },
+          "activity_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Activity Id",
+            "type": "string"
+          },
+          "perceived_exertion": {
+            "maximum": 10,
+            "minimum": 0,
+            "title": "Perceived Exertion",
+            "type": "integer"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
+          }
+        },
+        "required": [
+          "activity_id",
+          "perceived_exertion"
+        ],
+        "title": "ActivityEffort",
+        "type": "object"
+      },
+      "Caffeine": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "caffeine",
+            "default": "caffeine",
+            "title": "Type",
+            "type": "string"
+          },
+          "beverage": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Beverage",
+            "type": "string"
+          },
+          "servings": {
+            "default": 1,
+            "exclusiveMinimum": 0,
+            "maximum": 30,
+            "title": "Servings",
+            "type": "number"
+          },
+          "dose_basis": {
+            "default": "unknown",
+            "enum": [
+              "total",
+              "per_serving",
+              "unknown"
+            ],
+            "title": "Dose Basis",
+            "type": "string"
+          },
+          "dose_provenance": {
+            "default": "unknown",
+            "enum": [
+              "estimated",
+              "reported_label",
+              "unknown"
+            ],
+            "title": "Dose Provenance",
+            "type": "string"
+          },
+          "dose_notes": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dose Notes"
+          },
+          "caffeine_mg_estimate": {
+            "anyOf": [
+              {
+                "maximum": 5000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caffeine Mg Estimate"
+          },
+          "caffeine_mg_min": {
+            "anyOf": [
+              {
+                "maximum": 5000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caffeine Mg Min"
+          },
+          "caffeine_mg_max": {
+            "anyOf": [
+              {
+                "maximum": 5000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caffeine Mg Max"
+          }
+        },
+        "required": [
+          "beverage"
+        ],
+        "title": "Caffeine",
+        "type": "object"
+      },
+      "ContextEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "enum": [
+              "alcohol",
+              "meal",
+              "hydration",
+              "illness",
+              "nap",
+              "stressor",
+              "travel",
+              "mood",
+              "note",
+              "context",
+              "caffeine_absence",
+              "caffeine_log_complete"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Amount"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "description"
+        ],
+        "title": "ContextEvent",
+        "type": "object"
+      },
+      "EventInput": {
+        "additionalProperties": false,
+        "properties": {
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End"
+          },
+          "timezone": {
+            "default": "Europe/Bratislava",
+            "title": "Timezone",
+            "type": "string"
+          },
+          "source": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "telegram_text",
+              "telegram_button",
+              "telegram_voice",
+              "mcp",
+              "inferred",
+              "wearable"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "confidence": {
+            "default": 1,
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "status": {
+            "default": "confirmed",
+            "enum": [
+              "confirmed",
+              "inferred",
+              "needs_confirmation"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "original_text": {
+            "anyOf": [
+              {
+                "maxLength": 16000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Original Text"
+          },
+          "payload": {
+            "discriminator": {
+              "mapping": {
+                "activity_effort": "#/$defs/ActivityEffort",
+                "alcohol": "#/$defs/ContextEvent",
+                "caffeine": "#/$defs/Caffeine",
+                "caffeine_absence": "#/$defs/ContextEvent",
+                "caffeine_log_complete": "#/$defs/ContextEvent",
+                "context": "#/$defs/ContextEvent",
+                "headache_observation": "#/$defs/HeadacheObservation",
+                "hydration": "#/$defs/ContextEvent",
+                "illness": "#/$defs/ContextEvent",
+                "meal": "#/$defs/ContextEvent",
+                "medication": "#/$defs/Medication",
+                "migraine": "#/$defs/Migraine",
+                "mood": "#/$defs/ContextEvent",
+                "nap": "#/$defs/ContextEvent",
+                "note": "#/$defs/ContextEvent",
+                "stressor": "#/$defs/ContextEvent",
+                "symptom_observation": "#/$defs/SymptomObservation",
+                "travel": "#/$defs/ContextEvent",
+                "wellbeing_observation": "#/$defs/WellbeingObservation"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Caffeine"
+              },
+              {
+                "$ref": "#/$defs/Migraine"
+              },
+              {
+                "$ref": "#/$defs/Medication"
+              },
+              {
+                "$ref": "#/$defs/ContextEvent"
+              },
+              {
+                "$ref": "#/$defs/HeadacheObservation"
+              },
+              {
+                "$ref": "#/$defs/WellbeingObservation"
+              },
+              {
+                "$ref": "#/$defs/ActivityEffort"
+              },
+              {
+                "$ref": "#/$defs/SymptomObservation"
+              }
+            ],
+            "title": "Payload"
+          }
+        },
+        "required": [
+          "start",
+          "payload"
+        ],
+        "title": "EventInput",
+        "type": "object"
+      },
+      "HeadacheObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "headache_observation",
+            "default": "headache_observation",
+            "title": "Type",
+            "type": "string"
+          },
+          "headache": {
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "title": "Headache",
+            "type": "string"
+          },
+          "migraine": {
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "title": "Migraine",
+            "type": "string"
+          }
+        },
+        "required": [
+          "headache",
+          "migraine"
+        ],
+        "title": "HeadacheObservation",
+        "type": "object"
+      },
+      "Medication": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "medication",
+            "default": "medication",
+            "title": "Type",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name"
+          },
+          "dose": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "maximum": 100000,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dose"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "enum": [
+                  "mg",
+                  "mcg",
+                  "g",
+                  "ml",
+                  "tablet",
+                  "drop",
+                  "IU"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unit"
+          },
+          "reason_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason Event Id"
+          }
+        },
+        "title": "Medication",
+        "type": "object"
+      },
+      "Migraine": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "migraine",
+            "default": "migraine",
+            "title": "Type",
+            "type": "string"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Severity"
+          },
+          "aura": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aura"
+          },
+          "symptoms": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Symptoms",
+            "type": "array"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
+          }
+        },
+        "title": "Migraine",
+        "type": "object"
+      },
+      "SymptomObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "symptom_observation",
+            "default": "symptom_observation",
+            "title": "Type",
+            "type": "string"
+          },
+          "episode_id": {
+            "format": "uuid",
+            "title": "Episode Id",
+            "type": "string"
+          },
+          "severity": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Severity"
+          },
+          "aura": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Aura"
+          },
+          "symptoms": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Symptoms",
+            "type": "array"
+          },
+          "impact": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Impact"
+          }
+        },
+        "required": [
+          "episode_id"
+        ],
+        "title": "SymptomObservation",
+        "type": "object"
+      },
+      "WellbeingObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "wellbeing_observation",
+            "default": "wellbeing_observation",
+            "title": "Type",
+            "type": "string"
+          },
+          "energy": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Energy"
+          },
+          "restedness": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Restedness"
+          },
+          "pain": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pain"
+          },
+          "functional_impact": {
+            "anyOf": [
+              {
+                "maximum": 10,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Functional Impact"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Notes"
+          }
+        },
+        "title": "WellbeingObservation",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "event": {
+        "$ref": "#/$defs/EventInput"
+      },
+      "idempotency_key": {
+        "maxLength": 200,
+        "minLength": 1,
+        "title": "Idempotency Key",
+        "type": "string"
+      }
+    },
+    "required": [
+      "event",
+      "idempotency_key"
+    ],
+    "title": "CreateArgs",
+    "type": "object"
+  },
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  }
+}
