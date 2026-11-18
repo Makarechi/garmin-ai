@@ -10,11 +10,14 @@ use std::{
     time::Duration,
 };
 
-use ga_app::garmin_worker::{EndpointSource, EndpointWork, EndpointWorker, EndpointWorkerError};
+use ga_app::garmin_worker::{
+    ActivityPageWork, EndpointSource, EndpointWork, EndpointWorker, EndpointWorkerError,
+};
 use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
     activity_documents::DocumentStatus,
+    activity_scans::{ActivityPageResult, ActivityScansStarted, StartActivityScans},
     garmin_endpoint::EndpointPublication,
     garmin_integration::GarminTransportOutcome,
     jobs::{GarminJobLease, JobStoreError, RecordedJobStatus},
@@ -26,7 +29,8 @@ use ga_garmin::{
 };
 use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Iso8601};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 const ACCOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -35,6 +39,8 @@ struct Source {
     calls: AtomicUsize,
     response: Result<Option<Vec<u8>>, GarminError>,
     delay: Duration,
+    activity_offset: Option<u32>,
+    started: Option<Arc<Notify>>,
 }
 
 impl Source {
@@ -43,6 +49,8 @@ impl Source {
             calls: AtomicUsize::new(0),
             response,
             delay,
+            activity_offset: None,
+            started: None,
         }
     }
 }
@@ -57,12 +65,21 @@ impl EndpointSource for Source {
         resource: LegacyRead,
         maximum_bytes: u64,
     ) -> Result<Option<Vec<u8>>, GarminError> {
-        assert!(matches!(
-            resource,
-            LegacyRead::Daily(DailyEndpoint::HeartRate, _)
-        ));
+        if let Some(offset) = self.activity_offset {
+            assert!(
+                matches!(resource, LegacyRead::Activities {start, limit} if start == offset && limit.get()==100)
+            );
+        } else {
+            assert!(matches!(
+                resource,
+                LegacyRead::Daily(DailyEndpoint::HeartRate, _)
+            ));
+        }
         assert_eq!(maximum_bytes, 65_536);
         self.calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(started) = &self.started {
+            started.notify_one();
+        }
         tokio::time::sleep(self.delay).await;
         self.response.clone()
     }
@@ -128,9 +145,7 @@ impl Fixture {
     }
 }
 
-#[tokio::test]
-#[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
-async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), Box<dyn Error>> {
+async fn setup() -> Result<(Fixture, tempfile::TempDir), Box<dyn Error>> {
     let url = env::var("GA_TEST_DATABASE_URL")?;
     let address = url
         .strip_prefix("postgresql+psycopg://")
@@ -160,6 +175,13 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
     };
     sqlx::query("INSERT INTO app_state(key,value) VALUES('account:garmin',jsonb_build_object('fingerprint',$1::text))")
         .bind(ACCOUNT).execute(&fixture.inspect).await?;
+    Ok((fixture, root))
+}
+
+#[tokio::test]
+#[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
+async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), Box<dyn Error>> {
+    let (fixture, _root) = setup().await?;
     // Each statement fits the database's 750ms limit, but together they need more than the lease.
     sqlx::raw_sql(
         "CREATE FUNCTION slow_endpoint_publication() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -286,5 +308,129 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
     .fetch_one(&fixture.inspect)
     .await?;
     assert_eq!(facts, (1, 77.0, true));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "uses a disposable database and synthetic Garmin activity replies"]
+async fn restores_the_pending_page_and_refuses_a_superseded_response() -> Result<(), Box<dyn Error>>
+{
+    let (fixture, _root) = setup().await?;
+    let now = fixture.start;
+    let account = ACCOUNT;
+    assert_eq!(
+        fixture
+            .database
+            .start_activity_scans(StartActivityScans {
+                authenticated_fingerprint: account,
+                timezone: "UTC",
+                history_days: 0,
+                now: now.try_into()?,
+            })
+            .await?,
+        ActivityScansStarted::Scheduled { pages: 1 },
+    );
+    let claim = |seconds| {
+        let fixture = &fixture;
+        async move {
+            let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&fixture.inspect)
+                .await?;
+            fixture
+                .database
+                .claim_garmin_job(at.try_into()?, now.date(), seconds, false)
+                .await?
+                .ok_or_else(|| -> Box<dyn Error> {
+                    io::Error::other("Missing activity claim").into()
+                })
+        }
+    };
+    let page: GarminJobLease = claim(1).await?;
+    let source_value = json!([{
+        "activityId":761,
+        "startTimeGMT":(now-time::Duration::seconds(3)).format(&Iso8601::DEFAULT)?,
+        "duration":30,
+        "unknownSyntheticMetadata":{"kept":true},
+    }]);
+    let mut source = Source::new(
+        Ok(Some(serde_json::to_vec(&source_value)?)),
+        Duration::from_millis(1300),
+    );
+    source.activity_offset = Some(0);
+    assert_eq!(
+        fixture.worker(&source).run_activity_page(&page).await?,
+        ActivityPageWork::Publication(ActivityPageResult::Published(DocumentStatus::Normalized)),
+    );
+    assert_eq!(fixture.job(&page).await?, ("done".into(), 1));
+    assert_eq!(source.calls.load(Ordering::Relaxed), 1);
+    let key = format!("activity_scan:{ACCOUNT}:recent");
+    let state = fixture.stored(&key).await?;
+    assert_eq!(state["status"], "complete");
+    assert_eq!(state["pages"], 1);
+    let (recorded, summary, fit): (String,i64,i64) = sqlx::query_as(
+        "SELECT (SELECT payload::text FROM source_payloads WHERE source='garmin_connect'
+                 AND endpoint='activities' AND source_key='page:0'),
+                (SELECT count(*) FROM activities WHERE id='761'),
+                (SELECT count(*) FROM jobs WHERE kind='garmin_fit' AND payload->>'activity_id'='761')",
+    ).fetch_one(&fixture.inspect).await?;
+    assert_eq!(serde_json::from_str::<Value>(&recorded)?, source_value);
+    assert_eq!((summary, fit), (1, 1));
+
+    sqlx::raw_sql(
+        "UPDATE jobs SET run_at=clock_timestamp()+interval '1 day' WHERE status='pending';
+         UPDATE app_state SET value=jsonb_set(value,'{next_scan_at}','null') WHERE starts_with(key,'activity_scan:');",
+    ).execute(&fixture.inspect).await?;
+    let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&fixture.inspect)
+        .await?;
+    assert_eq!(
+        fixture
+            .database
+            .start_activity_scans(StartActivityScans {
+                authenticated_fingerprint: account,
+                timezone: "UTC",
+                history_days: 0,
+                now: at.try_into()?,
+            })
+            .await?,
+        ActivityScansStarted::Scheduled { pages: 1 },
+    );
+    let page: GarminJobLease = claim(20).await?;
+    let mut late = source_value;
+    late[0]["duration"] = json!(91);
+    let mut source = Source::new(
+        Ok(Some(serde_json::to_vec(&late)?)),
+        Duration::from_millis(250),
+    );
+    source.activity_offset = Some(0);
+    let started = Arc::new(Notify::new());
+    source.started = Some(started.clone());
+    let supersede = async {
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
+        sqlx::query(
+            "UPDATE app_state SET value=jsonb_set(value,'{generation}',to_jsonb(gen_random_uuid()))
+                        WHERE key=$1",
+        )
+        .bind(&key)
+        .execute(&fixture.inspect)
+        .await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let worker = fixture.worker(&source);
+    let (result, changed) = tokio::join!(worker.run_activity_page(&page), supersede);
+    changed?;
+    assert_eq!(
+        result?,
+        ActivityPageWork::Publication(ActivityPageResult::Superseded)
+    );
+    assert_eq!(fixture.job(&page).await?, ("done".into(), 1));
+    assert_eq!(source.calls.load(Ordering::Relaxed), 1);
+    let raw_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM source_payloads WHERE endpoint='activities'")
+            .fetch_one(&fixture.inspect)
+            .await?;
+    assert_eq!(raw_count, 1);
+    let freshness = fixture.stored("freshness:activities:page:0").await?;
+    assert_eq!(freshness["status"], "normalized");
     Ok(())
 }

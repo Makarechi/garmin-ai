@@ -1,6 +1,9 @@
 mod publication;
 
-pub use publication::{ActivityPagePreflight, ActivityPageResult, PublishActivityPage};
+pub use publication::{
+    ActivityPageCapture, ActivityPagePreflight, ActivityPageResult, CaptureActivityPage,
+    PublishActivityPage,
+};
 
 use std::{error::Error, fmt};
 
@@ -44,6 +47,7 @@ pub enum ActivityScanError {
     Busy,
     Job(crate::jobs::JobStoreError),
     Document(crate::activity_documents::DocumentError),
+    Capture(crate::raw_capture::CaptureError),
     Database,
 }
 
@@ -57,6 +61,7 @@ impl fmt::Display for ActivityScanError {
             Self::Busy => "Activity scan publication is busy",
             Self::Job(_) => "Activity scan job lease is unavailable",
             Self::Document(_) => "Activity summaries could not be published",
+            Self::Capture(error) => return error.fmt(f),
             Self::Database => "Activity scan could not be stored",
         })
     }

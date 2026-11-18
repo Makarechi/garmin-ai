@@ -1,3 +1,6 @@
+mod activities;
+pub use activities::ActivityPageWork;
+
 use std::{
     error::Error,
     fmt,
@@ -9,6 +12,7 @@ use std::{
 use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
+    activity_scans::ActivityScanError,
     garmin_endpoint::{
         CaptureEndpoint, EndpointCapture, EndpointError, EndpointPreflight, EndpointPublication,
         PublishEndpoint,
@@ -64,6 +68,7 @@ pub enum EndpointWork {
 #[derive(Debug)]
 pub enum EndpointWorkerError {
     Storage(EndpointError),
+    ActivityScan(ActivityScanError),
     Job(JobStoreError),
     Integration(GarminIntegrationError),
     Fetch(GarminError),
@@ -74,6 +79,7 @@ impl fmt::Display for EndpointWorkerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Storage(error) => error.fmt(f),
+            Self::ActivityScan(error) => error.fmt(f),
             Self::Job(error) => error.fmt(f),
             Self::Integration(error) => error.fmt(f),
             Self::Fetch(error) => error.fmt(f),
@@ -86,6 +92,11 @@ impl Error for EndpointWorkerError {}
 impl From<EndpointError> for EndpointWorkerError {
     fn from(value: EndpointError) -> Self {
         Self::Storage(value)
+    }
+}
+impl From<ActivityScanError> for EndpointWorkerError {
+    fn from(value: ActivityScanError) -> Self {
+        Self::ActivityScan(value)
     }
 }
 impl From<JobStoreError> for EndpointWorkerError {
@@ -124,21 +135,16 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
                 return Ok(EndpointWork::Publication(EndpointPublication::Superseded));
             }
         };
-        if let Some(pause) = self.database.garmin_request_pause(clock()?).await? {
-            let retry_at = match pause {
-                GarminRequestPause::Reauthentication => None,
-                GarminRequestPause::Cooldown(until) => Some(until),
-            };
-            return self
-                .defer(lease, FailureReason::ProviderCooldown, retry_at)
-                .await;
+        if let Some(status) = self.defer_if_paused(lease).await? {
+            return Ok(EndpointWork::Deferred(status));
         }
         let resource = match LegacyRead::queued_endpoint(&endpoint, &key) {
             Ok(resource) => resource,
             Err(_) => {
                 return self
                     .defer(lease, FailureReason::InvalidGarminWork, None)
-                    .await;
+                    .await
+                    .map(EndpointWork::Deferred);
             }
         };
 
@@ -194,17 +200,33 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         Ok(EndpointWork::Publication(result))
     }
 
+    async fn defer_if_paused(
+        &self,
+        lease: &GarminJobLease,
+    ) -> Result<Option<RecordedJobStatus>, EndpointWorkerError> {
+        let Some(pause) = self.database.garmin_request_pause(clock()?).await? else {
+            return Ok(None);
+        };
+        let retry_at = match pause {
+            GarminRequestPause::Reauthentication => None,
+            GarminRequestPause::Cooldown(until) => Some(until),
+        };
+        self.defer(lease, FailureReason::ProviderCooldown, retry_at)
+            .await
+            .map(Some)
+    }
+
     async fn defer(
         &self,
         lease: &GarminJobLease,
         reason: FailureReason,
         retry_at: Option<StoredInstant>,
-    ) -> Result<EndpointWork, EndpointWorkerError> {
+    ) -> Result<RecordedJobStatus, EndpointWorkerError> {
         let status = self
             .database
             .finish_garmin_job(lease, clock()?, JobOutcome::Failed { reason, retry_at })
             .await?;
-        Ok(EndpointWork::Deferred(status))
+        Ok(status)
     }
 
     async fn fetch_failed(
@@ -213,6 +235,23 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         attempted: StoredInstant,
         error: GarminError,
     ) -> Result<EndpointWork, EndpointWorkerError> {
+        let (reason, retry_at) = self.record_fetch_failure(&error).await?;
+        self.database
+            .finish_garmin_endpoint_fetch_error(
+                self.source.fingerprint(),
+                lease,
+                attempted,
+                reason,
+                retry_at,
+            )
+            .await?;
+        Err(EndpointWorkerError::Fetch(error))
+    }
+
+    async fn record_fetch_failure(
+        &self,
+        error: &GarminError,
+    ) -> Result<(FailureReason, Option<StoredInstant>), EndpointWorkerError> {
         let account = self.source.fingerprint();
         let (outcome, reason) = match error {
             GarminError::AuthenticationRequired
@@ -227,7 +266,7 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
             ),
             GarminError::RateLimited { retry_after } => (
                 Some(GarminTransportOutcome::RateLimited {
-                    retry_after: Some(retry_after),
+                    retry_after: Some(*retry_after),
                 }),
                 FailureReason::ProviderCooldown,
             ),
@@ -249,10 +288,7 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
             }
             None => None,
         };
-        self.database
-            .finish_garmin_endpoint_fetch_error(account, lease, attempted, reason, retry_at)
-            .await?;
-        Err(EndpointWorkerError::Fetch(error))
+        Ok((reason, retry_at))
     }
 
     async fn with_renewal<T>(
