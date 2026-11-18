@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -60,7 +60,9 @@ def sleeping(engine):
         )
 
 
-async def verify_cancellation(binary, engine, root, env):
+@contextmanager
+def delay_write(engine, action):
+    assert action in {"INSERT", "UPDATE"}
     with engine.begin() as connection:
         connection.execute(
             text("""
@@ -69,11 +71,20 @@ async def verify_cancellation(binary, engine, root, env):
             """)
         )
         connection.execute(
-            text("""
-            CREATE TRIGGER wait_for_mcp_fixture BEFORE INSERT ON events
+            text(f"""
+            CREATE TRIGGER wait_for_mcp_fixture BEFORE {action} ON events
             FOR EACH ROW EXECUTE FUNCTION wait_for_mcp_fixture()
             """)
         )
+    try:
+        yield
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP TRIGGER wait_for_mcp_fixture ON events"))
+            connection.execute(text("DROP FUNCTION wait_for_mcp_fixture()"))
+
+
+async def cancel_write(binary, engine, root, env, name, arguments):
     process = await asyncio.create_subprocess_exec(
         binary,
         "mcp",
@@ -111,10 +122,7 @@ async def verify_cancellation(binary, engine, root, env):
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {
-                    "name": "events_create",
-                    "arguments": {"event": REPORT, "idempotency_key": "fixture-cancelled"},
-                },
+                "params": {"name": name, "arguments": arguments},
             }
         )
         for _ in range(30):
@@ -139,10 +147,6 @@ async def verify_cancellation(binary, engine, root, env):
         if process.returncode is None:
             process.kill()
             await process.wait()
-        with engine.begin() as connection:
-            connection.execute(text("DROP TRIGGER wait_for_mcp_fixture ON events"))
-            connection.execute(text("DROP FUNCTION wait_for_mcp_fixture()"))
-    assert counts(engine) == (2, 2, 2)
 
 
 async def compare(binary, root, engine):
@@ -186,7 +190,16 @@ async def compare(binary, root, engine):
         conflict = await create(native, "fixture-rust", changed)
         assert conflict["isError"]
     assert counts(engine) == (2, 2, 2)
-    await verify_cancellation(binary, engine, root, env)
+    with delay_write(engine, "INSERT"):
+        await cancel_write(
+            binary,
+            engine,
+            root,
+            env,
+            "events_create",
+            {"event": REPORT, "idempotency_key": "fixture-cancelled"},
+        )
+    assert counts(engine) == (2, 2, 2)
     async with open_client(str(binary), ["mcp"], root, env, "retry") as native:
         resumed = await create(native, "fixture-cancelled")
         assert not resumed["isError"]
