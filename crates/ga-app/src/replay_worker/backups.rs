@@ -26,6 +26,81 @@ const PLAN_INTERVAL: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const LEASE_SECONDS: u32 = 300;
 
+async fn keep_lease(
+    duration: Duration,
+    mut renew: impl AsyncFnMut(StoredInstant) -> Result<bool, JobStoreError>,
+) -> Result<(), ScheduledBackupError> {
+    let tick = duration / 3;
+    let mut timer = interval_at(Instant::now() + tick, tick);
+    timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        timer.tick().await;
+        let now = clock().map_err(|_| ScheduledBackupError::Clock)?;
+        if !renew(now).await? {
+            return Err(JobStoreError::LeaseLost.into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, str::FromStr};
+
+    use ga_archive::backup_space::BackupSpace;
+    use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "tests an expiring capacity lease on disposable TimescaleDB"]
+    async fn renews_storage_check_while_capacity_estimate_waits() -> Result<(), Box<dyn Error>> {
+        let url = env::var("GA_TEST_DATABASE_URL")?;
+        let address = url
+            .strip_prefix("postgresql+psycopg://")
+            .ok_or("Expected fixture URL")?;
+        let options = PgConnectOptions::from_str(&format!("postgresql://{address}"))?
+            .disable_statement_logging();
+        let target = options
+            .get_database()
+            .filter(|name| name.ends_with("_test"))
+            .ok_or("Expected disposable database")?;
+        let pool = PgPool::connect_with(options.clone()).await?;
+        let actual: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(actual, target);
+        let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+        let mut runtime = database.acquire_runtime_lease().await?;
+        let worker = runtime.worker_identity().await?;
+        let at = clock().map_err(|_| "Fixture clock unavailable")?;
+        database.schedule_storage_check(at).await?;
+        let lease = database
+            .claim_storage_check(at, 1)
+            .await?
+            .ok_or("Expected due storage check")?;
+        let renewal = keep_lease(lease.lease_duration(), |now| {
+            database.renew_storage_check(&lease, now)
+        });
+        let estimate = async {
+            sleep(Duration::from_millis(1600)).await;
+            database
+                .complete_storage_check(&lease, BackupSpace { volumes: vec![] }, at, worker, false)
+                .await
+        };
+        tokio::select! {
+            result = estimate => result?,
+            failure = renewal => failure?,
+        }
+        let saved: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM app_state WHERE key='storage:backup-capacity' AND value->>'status'='ready')
+                AND EXISTS(SELECT 1 FROM jobs WHERE kind='storage_check' AND status='done' AND attempts=1)",
+        ).fetch_one(&pool).await?;
+        assert!(saved);
+        assert!(!database.renew_storage_check(&lease, at).await?);
+        Ok(())
+    }
+}
+
 pub(super) struct ScheduledBackups {
     directory: PathBuf,
     key: [u8; 32],
@@ -128,7 +203,7 @@ impl ScheduledBackups {
                 Ok(None) => {}
                 Err(error) => eprintln!("{error}"),
             }
-            if let Err(error) = self.check_capacity(database, notify_telegram).await {
+            if let Err(error) = self.check_capacity(database, worker, notify_telegram).await {
                 eprintln!("{error}");
             }
             sleep(POLL_INTERVAL).await;
@@ -138,23 +213,34 @@ impl ScheduledBackups {
     async fn check_capacity(
         &self,
         database: &Database,
+        worker: RuntimeWorkerIdentity,
         notify_telegram: bool,
     ) -> Result<(), ScheduledBackupError> {
         let at = clock().map_err(|_| ScheduledBackupError::Clock)?;
         let Some(lease) = database.claim_storage_check(at, LEASE_SECONDS).await? else {
             return Ok(());
         };
-        match backup_space::estimate(
+        let cancellation = CancelBackup(Arc::new(AtomicBool::new(false)));
+        let cancelled = Arc::clone(&cancellation.0);
+        let estimate = backup_space::estimate(
             database,
             self.data.clone(),
             self.tokens.clone(),
             self.directory.join("capacity-check.enc"),
-        )
-        .await
-        {
+            move || cancelled.load(Ordering::Acquire),
+        );
+        let renew = keep_lease(lease.lease_duration(), |at| {
+            database.renew_storage_check(&lease, at)
+        });
+        let result = tokio::select! {
+            biased;
+            result=estimate=>result,
+            expired=renew=>return expired,
+        };
+        match result {
             Ok(estimate) => {
                 database
-                    .complete_storage_check(&lease, estimate, at, notify_telegram)
+                    .complete_storage_check(&lease, estimate, at, worker, notify_telegram)
                     .await?
             }
             Err(error) => {
@@ -174,18 +260,9 @@ impl ScheduledBackups {
     ) -> Result<(), ScheduledBackupError> {
         let cancellation = CancelBackup(Arc::new(AtomicBool::new(false)));
         let work = self.write(database, worker, lease, &cancellation.0);
-        let tick = lease.lease_duration() / 3;
-        let renew = async {
-            let mut timer = interval_at(Instant::now() + tick, tick);
-            timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            loop {
-                timer.tick().await;
-                let now = clock().map_err(|_| ScheduledBackupError::Clock)?;
-                if !database.renew_daily_backup(lease, now).await? {
-                    return Err(JobStoreError::LeaseLost.into());
-                }
-            }
-        };
+        let renew = keep_lease(lease.lease_duration(), |at| {
+            database.renew_daily_backup(lease, at)
+        });
         tokio::select! {
             biased;
             result=work=>result,

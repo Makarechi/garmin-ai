@@ -4,6 +4,7 @@ use ga_archive::backup_space::{BackupSpace, Volume, VolumeRole};
 use ga_db::{
     Database,
     outbox_claims::{ReplyDestination, ReplyDispatchResult},
+    runtime_lease::RuntimeWorkerIdentity,
 };
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
@@ -17,6 +18,7 @@ use crate::telegram_settings::TelegramIngressSettings;
 
 async fn capacity(
     database: &Database,
+    worker: RuntimeWorkerIdentity,
     at: OffsetDateTime,
     offset: i64,
     ready: bool,
@@ -39,6 +41,7 @@ async fn capacity(
                 }],
             },
             observation,
+            worker,
             true,
         )
         .await?;
@@ -65,7 +68,8 @@ async fn warns_about_storage_only_while_current_and_preserves_the_receipt()
         .await?;
     assert_eq!(actual, target);
     let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
-    let _runtime = database.acquire_runtime_lease().await?;
+    let mut runtime = database.acquire_runtime_lease().await?;
+    let worker = runtime.worker_identity().await?;
     let settings =
         TelegramIngressSettings::selected(Some("42"), None)?.ok_or("Missing settings")?;
     let chat = settings.external_owner_id();
@@ -105,7 +109,7 @@ async fn warns_about_storage_only_while_current_and_preserves_the_receipt()
     .bind(&receipt)
     .execute(&pool)
     .await?;
-    capacity(&database, at, 0, false).await?;
+    capacity(&database, worker, at, 0, false).await?;
     database
         .queue_telegram_storage_notice(owner, "primary", chat, now)
         .await?;
@@ -127,14 +131,14 @@ async fn warns_about_storage_only_while_current_and_preserves_the_receipt()
         .claim_outbox_reply(destination(), now, 60)
         .await?
         .ok_or("No warning")?;
-    capacity(&database, at, 6, true).await?;
+    capacity(&database, worker, at, 6, true).await?;
     let silent = database
         .dispatch_telegram_outbox_reply(destination(), chat, claim, &[], |_| async {
             panic!("A resolved storage shortage must not reach Telegram")
         })
         .await?;
     assert_eq!(silent, ReplyDispatchResult::Cancelled);
-    capacity(&database, at, 12, false).await?;
+    capacity(&database, worker, at, 12, false).await?;
 
     let (listener, transport) = bind().await?;
     let server = async {
