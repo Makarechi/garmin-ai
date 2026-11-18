@@ -1,5 +1,7 @@
 mod activities;
+mod fit;
 pub use activities::ActivityPageWork;
+pub use fit::{ActivityExportSource, ActivityFitWork};
 
 use std::{
     error::Error,
@@ -13,6 +15,7 @@ use ga_archive::{Archive, PutLimits};
 use ga_db::{
     Database,
     activity_scans::ActivityScanError,
+    fit_ingest::FitIngestError,
     garmin_endpoint::{
         CaptureEndpoint, EndpointCapture, EndpointError, EndpointPreflight, EndpointPublication,
         PublishEndpoint,
@@ -69,6 +72,7 @@ pub enum EndpointWork {
 pub enum EndpointWorkerError {
     Storage(EndpointError),
     ActivityScan(ActivityScanError),
+    Fit(FitIngestError),
     Job(JobStoreError),
     Integration(GarminIntegrationError),
     Fetch(GarminError),
@@ -80,6 +84,7 @@ impl fmt::Display for EndpointWorkerError {
         match self {
             Self::Storage(error) => error.fmt(f),
             Self::ActivityScan(error) => error.fmt(f),
+            Self::Fit(error) => error.fmt(f),
             Self::Job(error) => error.fmt(f),
             Self::Integration(error) => error.fmt(f),
             Self::Fetch(error) => error.fmt(f),
@@ -97,6 +102,11 @@ impl From<EndpointError> for EndpointWorkerError {
 impl From<ActivityScanError> for EndpointWorkerError {
     fn from(value: ActivityScanError) -> Self {
         Self::ActivityScan(value)
+    }
+}
+impl From<FitIngestError> for EndpointWorkerError {
+    fn from(value: FitIngestError) -> Self {
+        Self::Fit(value)
     }
 }
 impl From<JobStoreError> for EndpointWorkerError {
