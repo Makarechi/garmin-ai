@@ -8,10 +8,11 @@ use super::{
     ATTEMPT_LIMIT, FailureReason, GARMIN_KINDS, JobOutcome, JobStoreError, RecordedJobStatus,
     STORAGE_QUEUE_LOCK, begin, fail_exhausted, finish_in_transaction,
 };
-use crate::Database;
+use crate::{Database, runtime_lease::RuntimeWorkerIdentity};
 
 const KIND: &str = "backup";
 
+#[derive(Clone, Copy)]
 pub struct DailyBackupLease {
     id: Uuid,
     token: Uuid,
@@ -20,6 +21,21 @@ pub struct DailyBackupLease {
 }
 
 impl DailyBackupLease {
+    pub(crate) async fn check_on(
+        &self,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<(), JobStoreError> {
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE id=$1 AND lease_token=$2
+                AND kind='backup' AND status='running' AND lease_until>clock_timestamp())",
+        )
+        .bind(self.id)
+        .bind(self.token)
+        .fetch_one(connection)
+        .await?;
+        active.then_some(()).ok_or(JobStoreError::LeaseLost)
+    }
+
     pub fn date(&self) -> Date {
         self.date
     }
@@ -165,10 +181,36 @@ impl Database {
         destination: &str,
         now: StoredInstant,
     ) -> Result<(), JobStoreError> {
+        self.complete_backup(lease, destination, now, None).await
+    }
+
+    pub async fn complete_worker_backup(
+        &self,
+        lease: &DailyBackupLease,
+        destination: &str,
+        now: StoredInstant,
+        worker: RuntimeWorkerIdentity,
+    ) -> Result<(), JobStoreError> {
+        self.complete_backup(lease, destination, now, Some(worker))
+            .await
+    }
+
+    async fn complete_backup(
+        &self,
+        lease: &DailyBackupLease,
+        destination: &str,
+        now: StoredInstant,
+        worker: Option<RuntimeWorkerIdentity>,
+    ) -> Result<(), JobStoreError> {
         if destination.is_empty() || destination.contains('\0') {
             return Err(JobStoreError::InvalidRecordedState);
         }
         let mut txn = begin(&self.work).await?;
+        if let Some(worker) = worker
+            && !worker.still_held(&mut txn).await?
+        {
+            return Err(JobStoreError::LeaseLost);
+        }
         complete(&mut txn, lease, destination, now).await?;
         txn.commit().await?;
         Ok(())
