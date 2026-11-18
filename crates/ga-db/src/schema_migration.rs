@@ -9,12 +9,14 @@ use crate::{
     runtime_lease::RUNTIME_LOCK,
 };
 
+const BEFORE_INGESTION_TIME: &str = "a72d9f4c8e31";
 const BEFORE_REVISIONS: &str = "b7c4e1a92d60";
 const BEFORE_FENCE: &str = "c8f51d3a7e20";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaState {
     Empty,
+    BeforeIngestionTime,
     BeforeRevisions,
     BeforeFence,
     Current,
@@ -24,6 +26,7 @@ impl SchemaState {
     pub fn revision(self) -> Option<&'static str> {
         match self {
             Self::Empty => None,
+            Self::BeforeIngestionTime => Some(BEFORE_INGESTION_TIME),
             Self::BeforeRevisions => Some(BEFORE_REVISIONS),
             Self::BeforeFence => Some(BEFORE_FENCE),
             Self::Current => Some(SCHEMA_REVISION),
@@ -74,13 +77,14 @@ impl Database {
         let state = schema_state(&mut txn).await?;
         match state {
             SchemaState::Empty => install(&mut txn).await?,
-            SchemaState::BeforeRevisions => {
-                sqlx::raw_sql(include_str!("schema_migration/measurement_revisions.sql"))
+            SchemaState::BeforeIngestionTime => {
+                sqlx::raw_sql(include_str!("schema_migration/measurement_ingestion.sql"))
                     .execute(&mut *txn)
                     .await?;
-                advance(&mut txn, BEFORE_REVISIONS, BEFORE_FENCE).await?;
-                delivery_fence(&mut txn).await?;
+                advance(&mut txn, BEFORE_INGESTION_TIME, BEFORE_REVISIONS).await?;
+                measurement_revisions(&mut txn).await?;
             }
+            SchemaState::BeforeRevisions => measurement_revisions(&mut txn).await?,
             SchemaState::BeforeFence => delivery_fence(&mut txn).await?,
             SchemaState::Current => {}
         }
@@ -130,6 +134,7 @@ async fn schema_state(
         [revision] if revision == SCHEMA_REVISION => Ok(SchemaState::Current),
         [revision] if revision == BEFORE_FENCE => Ok(SchemaState::BeforeFence),
         [revision] if revision == BEFORE_REVISIONS => Ok(SchemaState::BeforeRevisions),
+        [revision] if revision == BEFORE_INGESTION_TIME => Ok(SchemaState::BeforeIngestionTime),
         _ => Err(SchemaMigrationError::Unsupported),
     }
 }
@@ -182,6 +187,16 @@ async fn install(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrat
         .execute(&mut **txn)
         .await?;
     Ok(())
+}
+
+async fn measurement_revisions(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), SchemaMigrationError> {
+    sqlx::raw_sql(include_str!("schema_migration/measurement_revisions.sql"))
+        .execute(&mut **txn)
+        .await?;
+    advance(txn, BEFORE_REVISIONS, BEFORE_FENCE).await?;
+    delivery_fence(txn).await
 }
 
 async fn delivery_fence(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrationError> {

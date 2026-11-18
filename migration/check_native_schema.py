@@ -11,6 +11,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
+BEFORE_INGESTION = "a72d9f4c8e31"
 BEFORE_REVISIONS = "b7c4e1a92d60"
 BEFORE_FENCE = "c8f51d3a7e20"
 CURRENT = "c54f8a72d130"
@@ -73,7 +74,7 @@ def upgrade(engine, revision):
         command.upgrade(config, revision)
 
 
-def compare_catalog(reference, native):
+def compare_catalog(reference, native, *, check_ingestion=False):
     with reference.connect() as left, native.connect() as right:
         for index, query in enumerate(CATALOG):
             assert left.execute(text(query)).all() == right.execute(text(query)).all(), index
@@ -86,8 +87,17 @@ def compare_catalog(reference, native):
         source_ref,quality,details,ingested_at
         """
         for table in ("measurements", "measurement_revisions"):
-            statement = text(f"SELECT {fields} FROM {table} ORDER BY ts, metric, source")
+            where = "WHERE source_ref IS NOT NULL" if check_ingestion else ""
+            statement = text(f"SELECT {fields} FROM {table} {where} ORDER BY ts, metric, source")
             assert left.execute(statement).all() == right.execute(statement).all()
+            if check_ingestion:
+                for connection in (left, right):
+                    assert connection.scalar(
+                        text(
+                            f"SELECT ingested_at = '2026-10-22T00:01:02.123456Z' FROM {table} "
+                            "WHERE source_ref IS NOT NULL"
+                        )
+                    )
 
 
 def run_native(binary, engine, case):
@@ -119,23 +129,75 @@ def seed_measurement(engine):
         )
 
 
+def seed_before_ingestion(engine):
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+            INSERT INTO source_payloads(id,source,endpoint,source_key,payload_hash,archive_key,
+                                       fetched_at,parser_version,status)
+            VALUES ('00000000-0000-0000-0000-000000000013','synthetic','endpoint','key',
+                    'synthetic-digest','synthetic-object','2026-10-22T00:01:02.123456Z',1,'ok')
+            """)
+        )
+        connection.execute(
+            text("""
+            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details,source_ref)
+            VALUES ('2026-10-21T00:11:00Z','synthetic_metric','synthetic','2026-10-21',17.5,
+                    'test','observed','{}','00000000-0000-0000-0000-000000000013'),
+                   ('2026-10-21T00:12:00Z','synthetic_metric','synthetic','2026-10-21',18.5,
+                    'test','observed','{}',NULL)
+            """)
+        )
+
+
+def database_time(engine):
+    with engine.connect() as connection:
+        return connection.scalar(text("SELECT clock_timestamp()"))
+
+
+def check_fallback(engine, before):
+    with engine.connect() as connection:
+        after = connection.scalar(text("SELECT clock_timestamp()"))
+        queries = [
+            text(f"SELECT ts,metric,value,ingested_at FROM {table} WHERE source_ref IS NULL")
+            for table in ("measurements", "measurement_revisions")
+        ]
+        measurement, revision = (connection.execute(query).one() for query in queries)
+        assert measurement == revision
+        assert measurement.metric == "synthetic_metric" and measurement.value == 18.5
+        assert before <= measurement.ingested_at <= after
+
+
 def compare_case(binary, reference, native, case, revision):
     if revision:
         for target in [reference, native]:
-            upgrade(target, BEFORE_REVISIONS)
-            seed_measurement(target)
+            if revision == BEFORE_INGESTION:
+                upgrade(target, revision)
+                seed_before_ingestion(target)
+            else:
+                upgrade(target, BEFORE_REVISIONS)
+                seed_measurement(target)
             if revision == BEFORE_FENCE:
                 upgrade(target, BEFORE_FENCE)
-    if case == "before_revisions":
+    if case in ("before_revisions", "before_ingestion"):
         with native.begin() as connection:
             connection.execute(text("ALTER TABLE outbox_messages ADD COLUMN memory_fence jsonb"))
-        run_native(binary, native, "rollback")
+        run_native(
+            binary, native, "rollback_ingestion" if case == "before_ingestion" else "rollback"
+        )
         with native.begin() as connection:
             connection.execute(text("ALTER TABLE outbox_messages DROP COLUMN memory_fence"))
+    before_reference = database_time(reference)
     upgrade(reference, CURRENT)
+    before_native = database_time(native)
     run_native(binary, native, case)
-    compare_catalog(reference, native)
-    if revision:
+    if revision == BEFORE_INGESTION:
+        check_fallback(reference, before_reference)
+        check_fallback(native, before_native)
+        compare_catalog(reference, native, check_ingestion=True)
+    else:
+        compare_catalog(reference, native)
+    if revision and revision != BEFORE_INGESTION:
         with native.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM measurement_revisions")) == 1
     print(f"Matched Alembic schema and data for {case}")
@@ -152,6 +214,7 @@ def main():
     with ExitStack() as stack:
         for category, revision in (
             ("fresh", None),
+            ("before_ingestion", BEFORE_INGESTION),
             ("before_revisions", BEFORE_REVISIONS),
             ("before_fence", BEFORE_FENCE),
         ):
