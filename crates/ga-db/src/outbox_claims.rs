@@ -13,8 +13,14 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    Database, ReadinessError, channel_ingress::telegram_poll::telegram_primary, check_readiness,
-    jobs::storage_notices::StorageNoticeFence, replay::REPLAY_MUTATION_LOCK,
+    Database, ReadinessError,
+    channel_ingress::telegram_poll::telegram_primary,
+    check_readiness,
+    conversation_memory::{ConversationBinding, MemoryFence as ConversationFence},
+    jobs::storage_notices::StorageNoticeFence,
+    jobs::telegram_inbound::analysis_reply::DiaryAnalysisFence,
+    replay::REPLAY_MUTATION_LOCK,
+    share_policy::{MODEL_CONSENT_LOCK, try_shared_lock},
     telegram_garmin::GarminProjection,
 };
 
@@ -86,6 +92,13 @@ impl Candidate {
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok())
     }
+
+    fn has_diary_analysis(&self) -> bool {
+        self.fence
+            .as_deref()
+            .and_then(|fence| serde_json::from_str::<Value>(fence).ok())
+            .is_some_and(|value| value.get("telegram_diary_analysis").is_some())
+    }
 }
 
 #[derive(Deserialize)]
@@ -96,6 +109,7 @@ struct MemoryFence {
     telegram_status: Option<GarminProjection>,
     telegram_debug: Option<[Value; 5]>,
     telegram_goals: Option<u64>,
+    telegram_diary_analysis: Option<DiaryAnalysisFence>,
 }
 
 enum FenceStatus {
@@ -284,7 +298,7 @@ async fn check_fence(
     if candidate.owner_memory && owner_control.is_none() {
         let sources: Option<BTreeMap<Uuid, Uuid>> = fence
             .source_epochs
-            .into_iter()
+            .iter()
             .map(|(id, epoch)| Some((id.parse().ok()?, epoch.parse().ok()?)))
             .collect();
         let Some(sources) = sources else {
@@ -362,6 +376,44 @@ async fn check_fence(
             .await
             .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
         if revision != goals.revision {
+            return Ok(FenceStatus::Stale);
+        }
+    }
+    if let Some(analysis) = fence.telegram_diary_analysis {
+        let identity = (candidate.inbound_id, fence.target_epoch.parse().ok());
+        let (Some(inbound_id), Some(target_epoch)) = identity else {
+            return Ok(FenceStatus::Stale);
+        };
+        if destination.channel != "telegram" || owner_control.is_some() {
+            return Ok(FenceStatus::Stale);
+        }
+        let sources: Option<BTreeMap<Uuid, Uuid>> = fence
+            .source_epochs
+            .iter()
+            .map(|(id, epoch)| Some((id.parse().ok()?, epoch.parse().ok()?)))
+            .collect();
+        let Some(source_epochs) = sources else {
+            return Ok(FenceStatus::Stale);
+        };
+        try_shared_lock(txn, MODEL_CONSENT_LOCK)
+            .await
+            .map_err(|_| sqlx::Error::Protocol("Could not validate model policy".into()))?;
+        let current = analysis
+            .check(
+                txn,
+                ConversationBinding {
+                    owner_id,
+                    conversation_id: candidate.conversation_id,
+                },
+                inbound_id,
+                candidate.operation_id,
+                &ConversationFence {
+                    target_epoch,
+                    source_epochs,
+                },
+            )
+            .await?;
+        if current.is_none() {
             return Ok(FenceStatus::Stale);
         }
     }

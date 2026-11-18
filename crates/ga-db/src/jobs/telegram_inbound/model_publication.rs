@@ -36,10 +36,10 @@ pub struct TelegramModelContext<'a> {
 }
 
 pub(super) struct CurrentTelegramModelContext {
-    memory: MemoryFence,
+    pub(super) memory: MemoryFence,
     pub(super) offered: Vec<Value>,
     pub(super) questions: Vec<Value>,
-    versions: BTreeSet<Uuid>,
+    pub(super) versions: BTreeSet<Uuid>,
     pub(super) pending_clarification: Option<Value>,
     pub(super) selection_unavailable: bool,
 }

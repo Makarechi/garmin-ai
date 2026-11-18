@@ -78,6 +78,29 @@ pub struct DiaryEventRange<'a> {
     pub limit: u16,
 }
 
+impl<'a> DiaryEventRange<'a> {
+    pub fn from_analysis_arguments(args: &'a serde_json::Map<String, Value>) -> Option<Self> {
+        if args
+            .keys()
+            .any(|key| !matches!(key.as_str(), "start" | "end" | "kind"))
+        {
+            return None;
+        }
+        let start = StoredInstant::from_legacy_input(args.get("start")?)?;
+        let end = StoredInstant::from_legacy_input(args.get("end")?)?;
+        let kind = match args.get("kind") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_str()?),
+        };
+        Some(Self {
+            start,
+            end,
+            kind,
+            limit: 500,
+        })
+    }
+}
+
 pub struct ModelDiaryPage {
     pub value: Value,
     pub tracker_versions: BTreeSet<Uuid>,
@@ -274,23 +297,7 @@ impl Database {
     ) -> Result<ModelDiaryPage, DiaryReadError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
-            let channel = analysis_channel_in(&mut txn, context)
-                .await
-                .map_err(|_| DiaryReadError::ContextChanged)?
-                .ok_or(DiaryReadError::ContextChanged)?;
-            let channel = ShareDestination::new(DestinationKind::Channel, &channel)
-                .map_err(|_| DiaryReadError::InvalidDestination)?;
-            let query = ModelDiaryQuery {
-                owner_id: context.binding.owner_id,
-                model,
-                channel: Some(channel),
-                start: range.start,
-                end: range.end,
-                kind: range.kind,
-                limit: range.limit,
-            };
-            let window = model_window(&query)?;
-            let page = model_events_in(&mut txn, query, Some(window)).await?;
+            let page = analysis_events_in(&mut txn, context, model, range).await?;
             txn.commit().await?;
             Ok(page)
         })
@@ -311,6 +318,31 @@ impl Database {
             .map_err(DiaryReadError::Storage)?;
         Ok(txn)
     }
+}
+
+pub(crate) async fn analysis_events_in(
+    txn: &mut Transaction<'_, Postgres>,
+    context: AnalysisReadContext<'_>,
+    model: ShareDestination<'_>,
+    range: DiaryEventRange<'_>,
+) -> Result<ModelDiaryPage, DiaryReadError> {
+    let channel = analysis_channel_in(txn, context)
+        .await
+        .map_err(|_| DiaryReadError::ContextChanged)?
+        .ok_or(DiaryReadError::ContextChanged)?;
+    let channel = ShareDestination::new(DestinationKind::Channel, &channel)
+        .map_err(|_| DiaryReadError::InvalidDestination)?;
+    let query = ModelDiaryQuery {
+        owner_id: context.binding.owner_id,
+        model,
+        channel: Some(channel),
+        start: range.start,
+        end: range.end,
+        kind: range.kind,
+        limit: range.limit,
+    };
+    let window = model_window(&query)?;
+    model_events_in(txn, query, Some(window)).await
 }
 
 async fn model_diary_allowed(
