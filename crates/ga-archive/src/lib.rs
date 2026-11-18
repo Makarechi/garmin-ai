@@ -6,6 +6,7 @@ mod token_file;
 
 pub mod backup_bundle;
 pub mod backup_envelope;
+pub mod backup_unpack;
 
 use std::{
     env,

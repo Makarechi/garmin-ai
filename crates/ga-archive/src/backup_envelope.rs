@@ -116,7 +116,7 @@ pub fn decrypt_encrypted_backup(
     })
 }
 
-fn authenticate_source(
+pub(crate) fn authenticate_source(
     path: &Path,
     key: &[u8; 32],
     plain: &mut dyn Write,
@@ -346,7 +346,7 @@ fn open_destination(path: &Path) -> Result<(OwnedFd, &OsStr), BackupError> {
     }
 }
 
-fn parent_file(path: &Path, create: bool) -> Result<(OwnedFd, &OsStr), BackupError> {
+pub(crate) fn parent_file(path: &Path, create: bool) -> Result<(OwnedFd, &OsStr), BackupError> {
     let name = path.file_name().ok_or(BackupError::InvalidPath)?;
     let parent = path.parent().ok_or(BackupError::InvalidPath)?;
     let absolute = if parent.is_absolute() {
@@ -418,14 +418,14 @@ fn write_destination(
     Ok(result)
 }
 
-struct PrivateStageDirectory<'a> {
+pub(crate) struct PrivateStageDirectory<'a> {
     parent: &'a OwnedFd,
     name: String,
-    handle: OwnedFd,
+    pub(crate) handle: OwnedFd,
 }
 
 impl<'a> PrivateStageDirectory<'a> {
-    fn create(parent: &'a OwnedFd) -> Result<Self, BackupError> {
+    pub(crate) fn create(parent: &'a OwnedFd) -> Result<Self, BackupError> {
         let mut random = [0; 16];
         getrandom::fill(&mut random).map_err(|_| BackupError::Entropy)?;
         let name = format!(".rust-backup-{}", hex::encode(random));

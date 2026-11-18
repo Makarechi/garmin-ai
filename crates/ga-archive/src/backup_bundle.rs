@@ -26,7 +26,7 @@ use crate::{
 
 const DATABASE_MEMBER: &str = "database.jsonl.gz";
 const COVERAGE_MEMBER: &str = "coverage-report.json";
-const MAX_DIRECTORY_DEPTH: usize = 128;
+pub(crate) const MAX_DIRECTORY_DEPTH: usize = 128;
 
 pub struct BackupBundle<'a> {
     pub data_dir: &'a Path,
@@ -196,7 +196,7 @@ impl<R: Read> Read for VerifiedReader<R> {
     }
 }
 
-fn normalized(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn normalized(path: &Path) -> io::Result<PathBuf> {
     let mut resolved = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
         if component == Component::ParentDir {
