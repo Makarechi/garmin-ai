@@ -40,7 +40,7 @@ def seed(engine):
                     deep_seconds=-0.0,
                     resting_hr=float("inf"),
                     steps=5432,
-                    sources={"label": "Синтетический тест ☕ \"-0\"", "none": None},
+                    sources={"label": 'Синтетический тест ☕ "-0"', "none": None},
                     updated_at=AT,
                 ),
                 SourcePayload(
@@ -108,8 +108,8 @@ def table_values(engine):
     with engine.connect() as connection:
         return {
             table.name: [
-                dict(row) for row in connection.execute(select(table).order_by(*table.primary_key))
-                .mappings()
+                dict(row)
+                for row in connection.execute(select(table).order_by(*table.primary_key)).mappings()
             ]
             for table in Base.metadata.sorted_tables
         }
