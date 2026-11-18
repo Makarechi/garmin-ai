@@ -62,10 +62,10 @@ def wait_for_marker(process, marker, prior_inode):
     raise AssertionError("Erasure process did not reach its durable file marker")
 
 
-def interrupt(binary, root, env, marker, action):
+def interrupt(binary, root, env, marker, action, args=ERASE):
     prior_inode = marker.stat().st_ino if marker.exists() else None
     with subprocess.Popen(
-        [binary, *ERASE],
+        [binary, *args],
         cwd=root,
         env=env,
         text=True,
@@ -160,7 +160,25 @@ def compare(binary, reference, native, root):
            FOR EACH STATEMENT EXECUTE FUNCTION reject_resume_fixture()""",
     )
     assert "could not be committed" in run(binary, root, env, ("resume-storage",), fails=True)
-    assert contents(native) == expected_erased
+    file_only = {key: value for key, value in env.items() if key != "GA_DATABASE_URL"}
+    activation = locks / "activating"
+
+    def assert_activation_is_fenced():
+        assert "Restore or resume storage after erasure" in run(
+            legacy, root, file_only, ("probe",), fails=True
+        )
+        assert not data.exists() and not tokens.exists()
+        assert activation.is_file() and (locks / "erased").is_file()
+        assert contents(native) == expected_erased
+
+    assert_activation_is_fenced()
+    execute(
+        native,
+        """CREATE OR REPLACE FUNCTION reject_resume_fixture() RETURNS trigger AS $$
+           BEGIN PERFORM pg_sleep(2); RETURN NULL; END; $$ LANGUAGE plpgsql""",
+    )
+    interrupt(binary, root, env, activation, kill, args=("resume-storage",))
+    assert_activation_is_fenced()
     execute(
         native,
         "DROP TRIGGER reject_resume_fixture ON app_state",

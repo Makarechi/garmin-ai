@@ -63,8 +63,8 @@ async fn run(operation: Operation) -> CommandResult {
         }
         Operation::Resume => {
             let activation = local.begin_activation()?;
-            activation.complete()?;
             maintenance.resume_database().await?;
+            activation.complete()?;
             maintenance.release().await?;
             println!("Storage re-enabled.");
         }
