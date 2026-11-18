@@ -99,7 +99,7 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
         assert_eq!(request(&mut first).await?["endpoint"], "getUpdates");
         let mut unhandled = message.clone();
         unhandled["message_id"] = json!(75);
-        unhandled["text"] = json!("/goals");
+        unhandled["text"] = json!("/history");
         let mut pause = message.clone();
         pause["message_id"] = json!(77);
         pause["text"] = json!("\u{00a0}/pause\u{2003}");

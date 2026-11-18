@@ -104,6 +104,7 @@ impl Database {
                 "/forget_conversation",
                 "/today",
                 "/status",
+                "/goals",
                 "/pause",
                 "/resume",
                 "/help",

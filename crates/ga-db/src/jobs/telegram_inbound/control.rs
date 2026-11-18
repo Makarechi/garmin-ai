@@ -20,6 +20,7 @@ use crate::{
     conversation_memory::{ConversationBinding, MemoryError, forget_telegram_in},
     jobs::{FailureReason, JobOutcome, JobStoreError, begin},
     outbox_enqueue::{QueueIntent, QueueIntentError, QueuedIntent, queue_outbox_intent},
+    personal_goals::PersonalGoalsError,
     proactive_control::{ProactiveCommand, ProactiveControlError, set_in},
     replay::REPLAY_MUTATION_LOCK,
     telegram_binding::{TelegramBindingError, confirmed_pairing},
@@ -33,6 +34,7 @@ pub enum TelegramControlError {
     Pairing(TelegramBindingError),
     Memory(MemoryError),
     Proactive(ProactiveControlError),
+    Goals(PersonalGoalsError),
     Outbox(QueueIntentError),
     Busy,
     BindingChanged,
@@ -49,6 +51,7 @@ impl fmt::Display for TelegramControlError {
             Self::Pairing(error) => error.fmt(f),
             Self::Memory(error) => error.fmt(f),
             Self::Proactive(error) => error.fmt(f),
+            Self::Goals(error) => error.fmt(f),
             Self::Outbox(error) => error.fmt(f),
             Self::Busy => f.write_str("Telegram control policy is being updated"),
             Self::BindingChanged => f.write_str("Telegram owner or selected channel changed"),
@@ -68,6 +71,7 @@ impl TelegramControlError {
                 | Self::Pairing(TelegramBindingError::Busy)
                 | Self::Memory(MemoryError::Busy)
                 | Self::Proactive(ProactiveControlError::Busy)
+                | Self::Goals(PersonalGoalsError::Busy)
                 | Self::Outbox(QueueIntentError::Busy)
         )
     }
@@ -115,19 +119,8 @@ impl Database {
         if envelope.message_id() != lease.message_id || envelope.channel().channel() != "telegram" {
             return Err(TelegramControlError::Malformed);
         }
-        let command = match TelegramControl::from_envelope(&envelope) {
-            Some(
-                command @ (TelegramControl::Pause
-                | TelegramControl::Resume
-                | TelegramControl::Today
-                | TelegramControl::Status
-                | TelegramControl::Help
-                | TelegramControl::Start
-                | TelegramControl::Debug
-                | TelegramControl::ForgetConversation),
-            ) => command,
-            _ => return Err(TelegramControlError::Unsupported),
-        };
+        let command =
+            TelegramControl::from_envelope(&envelope).ok_or(TelegramControlError::Unsupported)?;
         let chat = envelope
             .sender_ref()
             .parse()
@@ -153,6 +146,11 @@ impl Database {
                 TelegramControl::Debug => {
                     let (text, fence) = debug::apply(&mut txn, &envelope, ordering_epoch).await?;
                     reply_fence = Some(fence);
+                    text
+                }
+                TelegramControl::Goals => {
+                    let (text, fence) = goals::apply(&mut txn, &envelope, ordering_epoch).await?;
+                    reply_fence = fence;
                     text
                 }
                 TelegramControl::Today | TelegramControl::Status => {
@@ -190,7 +188,6 @@ impl Database {
                         "Вопросы отключены. Синхронизация продолжается.".to_owned()
                     }
                 }
-                _ => return Err(TelegramControlError::Unsupported),
             };
             let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn).await?;
@@ -267,3 +264,4 @@ async fn control_epoch(
     Err(TelegramControlError::Job(JobStoreError::LeaseLost))
 }
 mod debug;
+mod goals;
