@@ -59,7 +59,7 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
             &mut request_stream,
             "200 OK",
             &[],
-            r#"{"ok":true,"result":{"url":"https://synthetic.invalid/telegram"}}"#,
+            r#"{"ok":true,"result":{"url":"https://synthetic.invalid/telegram","pending_update_count":0}}"#,
         )
         .await?;
         assert!(

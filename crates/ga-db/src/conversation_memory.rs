@@ -84,7 +84,7 @@ impl Database {
     ) -> Result<MemorySnapshot, MemoryError> {
         tokio::time::timeout(DEADLINE, async {
             let mut txn = self.begin_memory().await?;
-            let snapshot = snapshot(&mut txn, binding, now).await?;
+            let snapshot = snapshot(&mut txn, binding, now, true).await?;
             txn.commit().await?;
             Ok(snapshot)
         })
@@ -174,10 +174,11 @@ async fn clear_conversation(
 
 type ConversationRow = (Uuid, Uuid, bool, Option<String>);
 
-async fn snapshot(
+pub(crate) async fn snapshot(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     now: StoredInstant,
+    maintain: bool,
 ) -> Result<MemorySnapshot, MemoryError> {
     let target = conversation(txn, binding).await?;
     let mut sources = vec![target];
@@ -203,7 +204,7 @@ async fn snapshot(
     let mut turns = Vec::new();
     for source in sources {
         let recent = recent_turns(&source.turns, source.shared, &shared_epochs, now)?;
-        if recent.len() != source.turns.len() {
+        if maintain && recent.len() != source.turns.len() {
             persist_turns(
                 txn,
                 ConversationBinding {

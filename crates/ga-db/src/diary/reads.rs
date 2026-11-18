@@ -111,7 +111,10 @@ macro_rules! select_events {
 }
 
 mod model_context;
-pub use model_context::{InterpretationEvents, InterpretationEventsQuery};
+pub use model_context::{
+    InterpretationContext, InterpretationContextQuery, InterpretationEvents,
+    InterpretationEventsQuery,
+};
 
 const RANGE_EVENTS: &str = select_events!(
     "

@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, env, error::Error, future::pending, str::FromStr, sync::Mutex};
 
-use ga_domain::model_gate::ModelGateReason;
+use ga_db::share_policy::{ShareCategory, TrackerShareGrant};
+use ga_domain::{access::Scope, model_gate::ModelGateReason};
 use ga_model::ModelUnavailability;
 use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
@@ -17,6 +18,7 @@ enum Responses {
     Success,
     RevokeAfterInvalid,
     CheckSettingsFence,
+    CheckChannelFence,
     UnavailableThenSuccess,
     Quota,
 }
@@ -67,21 +69,40 @@ impl Sender for Mock {
             (Responses::RevokeAfterInvalid, true) => update_preferences(&self.pool, false)
                 .await
                 .map_err(|_| ModelTransportError::InvalidConfiguration)?,
-            (Responses::CheckSettingsFence, _) => {
+            (Responses::CheckSettingsFence | Responses::CheckChannelFence, _) => {
                 let mut change = self
                     .pool
                     .begin()
                     .await
                     .map_err(|_| ModelTransportError::InvalidConfiguration)?;
-                let writable: bool =
-                    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(72104621)")
+                let channel = matches!(self.responses, Responses::CheckChannelFence);
+                let locks: &[i64] = if channel {
+                    &[72104621, 72104631, 72104632]
+                } else {
+                    &[72104621]
+                };
+                for lock in locks {
+                    let writable: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                        .bind(lock)
                         .fetch_one(&mut *change)
                         .await
                         .map_err(|_| ModelTransportError::InvalidConfiguration)?;
-                assert!(
-                    !writable,
-                    "owner settings were writable during model transport"
-                );
+                    assert!(
+                        !writable,
+                        "the selected sharing policy was writable during transport"
+                    );
+                }
+                if channel {
+                    let diary_writable: bool =
+                        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(72104619)")
+                            .fetch_one(&mut *change)
+                            .await
+                            .map_err(|_| ModelTransportError::InvalidConfiguration)?;
+                    assert!(
+                        diary_writable,
+                        "the model attempt held the general diary lock"
+                    );
+                }
                 change
                     .rollback()
                     .await
@@ -501,6 +522,7 @@ async fn keeps_saved_onboarding_consent_live_until_transport_finishes() -> Resul
         .execute_with(input(), &policy, &[], None, &send)
         .await?;
     assert_eq!(send.attempts(), [PRIMARY]);
+    verify_tracker_channel_fence(&gateway, &pool, grant).await?;
 
     let mut change = pool.begin().await?;
     sqlx::query("SET LOCAL statement_timeout='750ms'")
@@ -528,6 +550,82 @@ async fn keeps_saved_onboarding_consent_live_until_transport_finishes() -> Resul
         Err(GatewayError::Attempt(FallbackError::ConsentRequired))
     ));
     assert_eq!(send.attempts(), [PRIMARY]);
+    Ok(())
+}
+
+async fn verify_tracker_channel_fence(
+    gateway: &ModelGateway<'_>,
+    pool: &PgPool,
+    granted_at: StoredInstant,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::raw_sql(
+        "INSERT INTO event_definitions(id,owner_id,namespace,key,status,revision,current_version)
+         SELECT '00000000-0000-0000-0000-000000000031',id,'user','user.synthetic','active',1,1 FROM people;
+         INSERT INTO event_definition_versions(id,definition_id,version,schema,schema_hash,topology,field_metadata,labels,privacy,allowed_operations)
+         VALUES('00000000-0000-0000-0000-000000000032','00000000-0000-0000-0000-000000000031',
+            1,'{}',repeat('0',64),'point','{}','{\"en\":\"Synthetic\"}','sensitive','[\"query\"]');",
+    ).execute(pool).await?;
+    let database = &gateway.database;
+    let definition_id = Uuid::from_u128(0x31);
+    let version_id = Uuid::from_u128(0x32);
+    let scopes = [Scope::ManageIntegrations].into_iter().collect();
+    let model = ShareDestination::new(DestinationKind::Model, gateway.binding().instance_id)?;
+    let channel = ShareDestination::new(DestinationKind::Channel, "telegram:synthetic")?;
+    let model_requirements = [ShareRequirement {
+        version_id,
+        categories: &[ShareCategory::Facts],
+    }];
+    let channel_requirements = [ShareRequirement {
+        version_id,
+        categories: &[ShareCategory::Schema, ShareCategory::Facts],
+    }];
+    for (destination, requirements) in [
+        (model, &model_requirements),
+        (channel, &channel_requirements),
+    ] {
+        database
+            .grant_tracker_share(
+                scopes,
+                TrackerShareGrant {
+                    definition_id,
+                    destination,
+                    categories: requirements[0].categories,
+                    granted_at,
+                },
+            )
+            .await?;
+    }
+    let scope = || runtime::ModelRequestScope {
+        requirements: &model_requirements,
+        channel: Some(ModelChannelSharing {
+            destination: channel,
+            requirements: &channel_requirements,
+        }),
+        job: None,
+    };
+    let model_policy = || current_policy(gateway, &[], granted_at);
+    let sender = Mock::new(pool, Responses::CheckChannelFence);
+    gateway
+        .execute_with_context(input(), &model_policy, scope(), &sender)
+        .await?;
+    assert_eq!(sender.attempts(), [PRIMARY]);
+    assert!(
+        database
+            .revoke_tracker_share(scopes, definition_id, channel)
+            .await?
+    );
+    assert!(
+        database
+            .tracker_version_allowed(model_requirements[0], model)
+            .await?
+    );
+    assert!(matches!(
+        gateway
+            .execute_with_context(input(), &model_policy, scope(), &sender)
+            .await,
+        Err(GatewayError::Attempt(FallbackError::ConsentRequired))
+    ));
+    assert_eq!(sender.attempts(), [PRIMARY]);
     Ok(())
 }
 

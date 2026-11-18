@@ -1,10 +1,14 @@
 mod analysis;
+mod configuration;
+mod interpretation;
 mod safety;
 
 pub use analysis::{
     AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult, AnalysisToolRead,
     DiaryAnalysisTools, OfferedReadTool,
 };
+pub use configuration::{ConfiguredModel, ModelEnvironmentError, RuntimeModelSettings};
+pub use interpretation::{DiaryInterpretationError, DiaryInterpretationRequest, ModelDiaryContext};
 pub use safety::{ReplySafety, ReplySafetyIntent, SafetyScreenError};
 
 mod runtime;
@@ -17,7 +21,7 @@ use std::{collections::BTreeMap, error::Error, fmt, future::Future, time::Durati
 use ga_db::{
     Database,
     model_gate::ModelGateError,
-    share_policy::{DestinationKind, ShareDestination, ShareRequirement},
+    share_policy::{DestinationKind, ModelChannelSharing, ShareDestination, ShareRequirement},
 };
 use ga_domain::{
     model_consent::{
@@ -290,6 +294,28 @@ impl<'a> ModelGateway<'a> {
     ) -> Result<StructuredModelOutput, GatewayError> {
         self.execute_with(input, &policy, requirements, job, &self.transport)
             .await
+    }
+
+    /// Keep both consent scopes current when a channel supplied diary context.
+    pub async fn execute_in_channel<'policy>(
+        &self,
+        input: ModelInput<'_>,
+        policy: impl Fn() -> CurrentModelPolicy<'policy> + Sync,
+        requirements: &[ShareRequirement<'_>],
+        channel: ModelChannelSharing<'_>,
+        job: Option<ActiveModelJob>,
+    ) -> Result<StructuredModelOutput, GatewayError> {
+        self.execute_with_context(
+            input,
+            &policy,
+            runtime::ModelRequestScope {
+                requirements,
+                channel: Some(channel),
+                job,
+            },
+            &self.transport,
+        )
+        .await
     }
 
     fn authorize<'policy>(
