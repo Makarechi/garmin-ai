@@ -12,6 +12,7 @@ use crate::{
     runtime_lease::RUNTIME_LOCK,
 };
 
+const BEFORE_TELEGRAM_BACKFILL: &str = "f103aa712b44";
 const BEFORE_TELEGRAM_REPAIR: &str = "a42d9e18c701";
 const BEFORE_INGESTION_TIME: &str = "a72d9f4c8e31";
 const BEFORE_REVISIONS: &str = "b7c4e1a92d60";
@@ -20,6 +21,7 @@ const BEFORE_FENCE: &str = "c8f51d3a7e20";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaState {
     Empty,
+    BeforeTelegramBackfill,
     BeforeTelegramRepair,
     BeforeIngestionTime,
     BeforeRevisions,
@@ -31,6 +33,7 @@ impl SchemaState {
     pub fn revision(self) -> Option<&'static str> {
         match self {
             Self::Empty => None,
+            Self::BeforeTelegramBackfill => Some(BEFORE_TELEGRAM_BACKFILL),
             Self::BeforeTelegramRepair => Some(BEFORE_TELEGRAM_REPAIR),
             Self::BeforeIngestionTime => Some(BEFORE_INGESTION_TIME),
             Self::BeforeRevisions => Some(BEFORE_REVISIONS),
@@ -98,11 +101,12 @@ impl Database {
         let state = schema_state(&mut txn).await?;
         match state {
             SchemaState::Empty => install(&mut txn).await?,
-            SchemaState::BeforeTelegramRepair => {
-                telegram_conversations::repair(&mut txn).await?;
-                advance(&mut txn, BEFORE_TELEGRAM_REPAIR, BEFORE_INGESTION_TIME).await?;
-                measurement_ingestion(&mut txn).await?;
+            SchemaState::BeforeTelegramBackfill => {
+                telegram_conversations::repair_legacy_backfill(&mut txn).await?;
+                advance(&mut txn, BEFORE_TELEGRAM_BACKFILL, BEFORE_TELEGRAM_REPAIR).await?;
+                telegram_repair(&mut txn).await?;
             }
+            SchemaState::BeforeTelegramRepair => telegram_repair(&mut txn).await?,
             SchemaState::BeforeIngestionTime => measurement_ingestion(&mut txn).await?,
             SchemaState::BeforeRevisions => measurement_revisions(&mut txn).await?,
             SchemaState::BeforeFence => delivery_fence(&mut txn).await?,
@@ -159,6 +163,9 @@ async fn schema_state(
         [revision] if revision == BEFORE_REVISIONS => Ok(SchemaState::BeforeRevisions),
         [revision] if revision == BEFORE_INGESTION_TIME => Ok(SchemaState::BeforeIngestionTime),
         [revision] if revision == BEFORE_TELEGRAM_REPAIR => Ok(SchemaState::BeforeTelegramRepair),
+        [revision] if revision == BEFORE_TELEGRAM_BACKFILL => {
+            Ok(SchemaState::BeforeTelegramBackfill)
+        }
         _ => Err(SchemaMigrationError::Unsupported),
     }
 }
@@ -211,6 +218,12 @@ async fn install(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrat
         .execute(&mut **txn)
         .await?;
     Ok(())
+}
+
+async fn telegram_repair(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrationError> {
+    telegram_conversations::repair(txn).await?;
+    advance(txn, BEFORE_TELEGRAM_REPAIR, BEFORE_INGESTION_TIME).await?;
+    measurement_ingestion(txn).await
 }
 
 async fn measurement_ingestion(
