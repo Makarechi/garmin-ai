@@ -19,8 +19,15 @@ pub enum TelegramSafetyDecision<'a> {
     Urgent {
         russian: &'a str,
         english: &'a str,
-        report_during_setup: bool,
+        setup_metadata: SetupMetadata,
     },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum SetupMetadata {
+    None,
+    Name,
+    Field,
 }
 
 pub enum LocalTelegramText<'a> {
@@ -66,9 +73,11 @@ impl Database {
             let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
             let reply = match work {
                 LocalTelegramText::Safety(TelegramSafetyDecision::Clear) => None,
-                LocalTelegramText::Safety(TelegramSafetyDecision::Urgent { russian, english, report_during_setup }) => {
+                LocalTelegramText::Safety(TelegramSafetyDecision::Urgent { russian, english, setup_metadata }) => {
                     let prompt = prompt::inspect(&mut txn, binding, lease, &envelope, now).await?;
-                    if prompt.draft.is_some() && !report_during_setup {
+                    if prompt.draft.as_ref().is_some_and(|draft|
+                        setup_metadata == SetupMetadata::Field
+                            || (setup_metadata == SetupMetadata::Name && draft.awaiting_name)) {
                         None
                     } else {
                         let locale: Option<String> = sqlx::query_scalar(

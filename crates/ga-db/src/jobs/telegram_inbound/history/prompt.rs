@@ -22,6 +22,7 @@ pub(in crate::jobs::telegram_inbound) struct PromptState {
 pub(in crate::jobs::telegram_inbound) struct SetupDraft {
     pub(in crate::jobs::telegram_inbound) key: String,
     pub(in crate::jobs::telegram_inbound) russian: bool,
+    pub(in crate::jobs::telegram_inbound) awaiting_name: bool,
     pub(in crate::jobs::telegram_inbound) predates_step: bool,
 }
 
@@ -130,6 +131,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             setup = Some(SetupDraft {
                 key,
                 russian,
+                awaiting_name: draft["name"].is_null(),
                 predates_step: last_update.is_some_and(|last| order <= (last_epoch, last)),
             });
         } else if active(clock) {

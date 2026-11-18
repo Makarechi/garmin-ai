@@ -3,7 +3,7 @@ mod diary;
 mod history;
 mod local_text;
 
-pub use local_text::{LocalTelegramText, TelegramSafetyDecision};
+pub use local_text::{LocalTelegramText, SetupMetadata, TelegramSafetyDecision};
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
