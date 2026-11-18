@@ -42,7 +42,10 @@ pub(crate) async fn read_garmin(
     let mut reader = database.verified_health_reader().await?;
     let query = parse(tool, arguments)?;
     if let Some(owner) = mcp_owner
-        && !reader.permits_model_health(owner).await?
+        && (!reader.permits_model_health(owner).await?
+            || !reader
+                .permits_model_packs(owner, query.model_packs())
+                .await?)
     {
         return Err(GarminReadError::Permission);
     }
@@ -71,6 +74,17 @@ enum Query<'a> {
     Activities(StoredInstant, StoredInstant, Option<&'a str>),
     Activity(&'a str, bool, u32, u16),
     Devices(StoredInstant, StoredInstant, u16),
+}
+
+impl Query<'_> {
+    fn model_packs(&self) -> &'static [&'static str] {
+        match self {
+            Self::Snapshot(_) | Self::Range(..) => {
+                &["sleep", "wellbeing", "training", "general_diary"]
+            }
+            Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
+        }
+    }
 }
 
 fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, GarminReadError> {
