@@ -1,5 +1,8 @@
 mod activities;
+mod configuration;
+
 pub use activities::ActivityPageWork;
+pub use configuration::{GarminConfigurationError, GarminSourceSettings};
 
 use std::{
     error::Error,

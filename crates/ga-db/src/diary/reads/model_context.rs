@@ -13,6 +13,9 @@ use crate::{
     share_policy::{DestinationKind, ShareDestination},
 };
 
+mod continuations;
+pub use continuations::{InterpretationContext, InterpretationContextQuery};
+
 const RECENT_LIMIT: usize = 12;
 const OPEN_LIMIT: usize = 20;
 const MENTION_LIMIT: usize = 20;
@@ -112,31 +115,12 @@ async fn fetch_context(
     let mut ids = BTreeSet::new();
     let mut tracker_versions = BTreeSet::new();
     let mut entries = Vec::new();
-    for (document, start, end, created, updated, recorded, ingested, _) in rows {
-        let mut event =
-            event_snapshot((document, start, end, created, updated, recorded, ingested))
-                .map_err(|_| DiaryReadError::InvalidEvent)?;
-        let fields = event.as_object_mut().ok_or(DiaryReadError::InvalidEvent)?;
-        let uuid = |field: &str| {
-            fields[field]
-                .as_str()
-                .and_then(|id| id.parse::<Uuid>().ok())
-                .ok_or(DiaryReadError::InvalidEvent)
-        };
-        if !ids.insert(uuid("id")?) {
+    for row in rows {
+        let (id, event, version) = context_event(row)?;
+        if !ids.insert(id) {
             continue;
         }
-        if fields["kind"]
-            .as_str()
-            .is_some_and(|kind| kind.starts_with("user."))
-        {
-            tracker_versions.insert(uuid("definition_version_id")?);
-        }
-        let confidence = fields["confidence"]
-            .as_f64()
-            .ok_or(DiaryReadError::InvalidEvent)?;
-        fields.insert("confidence".into(), json!(confidence));
-        fields.remove("original_text");
+        tracker_versions.extend(version);
         entries.push(event);
     }
     let channel_versions = audience
@@ -148,6 +132,32 @@ async fn fetch_context(
         tracker_versions,
         channel_versions,
     })
+}
+
+fn context_event(
+    (document, start, end, created, updated, recorded, ingested, _): EventRow,
+) -> Result<(Uuid, Value, Option<Uuid>), DiaryReadError> {
+    let mut event = event_snapshot((document, start, end, created, updated, recorded, ingested))
+        .map_err(|_| DiaryReadError::InvalidEvent)?;
+    let fields = event.as_object_mut().ok_or(DiaryReadError::InvalidEvent)?;
+    let uuid = |field: &str| {
+        fields[field]
+            .as_str()
+            .and_then(|id| id.parse::<Uuid>().ok())
+            .ok_or(DiaryReadError::InvalidEvent)
+    };
+    let id = uuid("id")?;
+    let version = fields["kind"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("user."))
+        .then(|| uuid("definition_version_id"))
+        .transpose()?;
+    let confidence = fields["confidence"]
+        .as_f64()
+        .ok_or(DiaryReadError::InvalidEvent)?;
+    fields.insert("confidence".into(), json!(confidence));
+    fields.remove("original_text");
+    Ok((id, event, version))
 }
 
 async fn read_window(

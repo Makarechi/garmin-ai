@@ -681,7 +681,14 @@ where
     if unchanged {
         return Ok((DocumentStatus::Unchanged, None));
     }
-    invalidate_replay_outputs(txn).await?;
+    invalidate_replay_outputs(txn)
+        .await
+        .map_err(|error| match error {
+            DocumentError::Access(crate::raw_capture::CaptureError::Busy) => {
+                CalendarReplayError::Busy
+            }
+            _ => error.into(),
+        })?;
     let status = match status.as_str() {
         "normalized" => DocumentStatus::Normalized,
         "archived" => DocumentStatus::Archived,

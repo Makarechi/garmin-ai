@@ -6,6 +6,7 @@ use sqlx::{Connection, PgConnection, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::garmin_context::{DiaryContextAvailability, availability_in};
 use super::{
     DiaryQuestionKind, NotificationDecision, NotificationExclusions, NotificationPolicy,
     NotificationReason, ProactiveControlError, ReservedDiaryQuestion,
@@ -16,12 +17,10 @@ use super::{
     policy::{decision_in, lock_notification_policy},
 };
 use crate::{
-    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK,
-    activity_documents::PARSER_VERSION,
-    check_readiness,
+    Database, OWNER_ENROLLMENT_LOCK, STORAGE_LIFECYCLE_LOCK, check_readiness,
     diary::caffeine_answer_at,
     outbox_claims::ReplyDestination,
-    replay::{REPLAY_MUTATION_LOCK, projection_pending},
+    replay::REPLAY_MUTATION_LOCK,
     runtime_lease::RuntimeLease,
     share_policy::{CHANNEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK},
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
@@ -362,7 +361,7 @@ async fn prepare(
             stored
         }
         DiaryQuestionKind::Context => {
-            if projection_pending(txn, PARSER_VERSION).await? {
+            if availability_in(txn, now).await? != DiaryContextAvailability::Ready {
                 release(txn, reserved.id, "pending", None, false).await?;
                 return finished(Unavailable);
             }

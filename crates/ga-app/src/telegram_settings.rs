@@ -36,21 +36,6 @@ impl TelegramIngressSettings {
         telegram_user_id: Option<&str>,
         integrations: Option<&str>,
     ) -> Result<Option<Self>, TelegramSettingsError> {
-        Self::select(telegram_user_id, integrations, false)
-    }
-
-    pub(crate) fn for_webhook(
-        telegram_user_id: Option<&str>,
-        integrations: Option<&str>,
-    ) -> Result<Option<Self>, TelegramSettingsError> {
-        Self::select(telegram_user_id, integrations, integrations.is_some())
-    }
-
-    fn select(
-        telegram_user_id: Option<&str>,
-        integrations: Option<&str>,
-        require_enabled_instance: bool,
-    ) -> Result<Option<Self>, TelegramSettingsError> {
         let external_owner_id = telegram_user_id
             .map_or(Ok(0), |value| value.trim().parse::<i64>())
             .map_err(|_| TelegramSettingsError::InvalidOwner)?;
@@ -94,7 +79,7 @@ impl TelegramIngressSettings {
             instance_id = Some(namespace.to_owned());
             break;
         }
-        if configured.is_empty() && !require_enabled_instance {
+        if configured.is_empty() && integrations.is_none() {
             instance_id = Some("primary".to_owned());
         }
         Ok(instance_id.map(|instance_id| Self {

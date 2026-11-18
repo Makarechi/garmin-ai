@@ -1,6 +1,6 @@
 mod clarification;
-pub(crate) use clarification::clarification_active_at;
 pub use clarification::{ClarificationClock, ClarificationError, ClarificationReply};
+pub(crate) use clarification::{clarification_active_at, save_in as save_clarification_in};
 
 mod agent_batch;
 pub use agent_batch::CreateAgentLogBatch;
@@ -25,6 +25,7 @@ pub use reads::{
     DiaryEventRange, DiaryReadError, InterpretationEvents, InterpretationEventsQuery,
     ModelDiaryPage, ModelDiaryQuery, event_document,
 };
+pub use reads::{InterpretationContext, InterpretationContextQuery};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 pub use wearable::WearableError;
