@@ -25,6 +25,7 @@ pub use reads::{
     DiaryEventRange, DiaryReadError, InterpretationEvents, InterpretationEventsQuery,
     ModelDiaryPage, ModelDiaryQuery, event_document,
 };
+pub use reads::{InterpretationContext, InterpretationContextQuery};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};
 pub use undo::{UndoDiaryOperation, UndoneDiaryOperation};
 pub use wearable::WearableError;

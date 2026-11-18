@@ -1,6 +1,9 @@
 mod activities;
+mod configuration;
 mod fit;
+
 pub use activities::ActivityPageWork;
+pub use configuration::{GarminConfigurationError, GarminSourceSettings};
 pub use fit::{ActivityExportSource, ActivityFitWork};
 
 use std::{
