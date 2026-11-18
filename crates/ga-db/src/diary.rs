@@ -19,6 +19,7 @@ mod revisions;
 mod undo;
 mod wearable;
 
+pub(crate) use proactive_answers::context as question_context;
 pub(crate) use reads::owner_events_in;
 pub use reads::{DiaryEventRange, DiaryReadError, ModelDiaryPage, ModelDiaryQuery, event_document};
 pub use revisions::{DeleteEvent, UpdateSystemEvent};

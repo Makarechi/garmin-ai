@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::DiaryWriteError;
 
-mod context;
+pub(crate) mod context;
 
 type Row = (
     Uuid,
