@@ -56,6 +56,10 @@ pub(super) async fn apply(
         let now = StoredInstant::try_from(clock).map_err(|_| TelegramControlError::Database)?;
         let received_at = StoredInstant::try_from(envelope.received_at())
             .map_err(|_| TelegramControlError::Malformed)?;
+        let source_epoch = envelope
+            .occurred_at()
+            .unwrap_or_else(|| envelope.received_at())
+            .unix_timestamp();
         current = match personal_goals::set_in(
             txn,
             owner,
@@ -64,7 +68,7 @@ pub(super) async fn apply(
                 goals: &choices,
                 now,
                 command: Some(GoalCommandOrder {
-                    source_epoch: clock.unix_timestamp(),
+                    source_epoch,
                     received_at,
                     tie_breaker: envelope.external_event_id(),
                 }),
@@ -136,12 +140,14 @@ async fn earlier_change(
              WHERE j.kind='telegram_native_inbound' AND j.status IN ('pending','running')
                AND i.owner_id=$1 AND i.channel='telegram' AND i.channel_instance_id=$2
                AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
+               AND i.kind <> 'voice'
                AND (coalesce((j.payload->>'ordering_epoch')::bigint,0),i.external_event_id::bigint)<($3,$4)
                AND translate(i.envelope->>'text',$5,repeat(' ',char_length($5))) ~ $6
          ) OR EXISTS(
              SELECT FROM jobs j JOIN telegram_updates t ON j.dedup_key=concat('telegram:',t.id)
              WHERE j.kind IN ('telegram_control','telegram_update') AND j.status IN ('pending','running')
                AND t.status='pending'
+               AND coalesce(jsonb_typeof(t.payload#>'{message,voice}'),'null') <> 'object'
                AND coalesce(j.payload->>'channel_instance_id','telegram:primary')=concat('telegram:',$2)
                AND (coalesce((t.payload->>'_ordering_epoch')::bigint,0),t.id)<($3,$4)
                AND (translate(t.payload#>>'{message,text}',$5,repeat(' ',char_length($5))) ~ $6
