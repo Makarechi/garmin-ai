@@ -120,7 +120,7 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Run archive replay and Telegram receipt processing
+    /// Run Garmin acquisition, archive replay and Telegram processing
     Worker,
 }
 

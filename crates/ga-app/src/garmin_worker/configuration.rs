@@ -32,18 +32,33 @@ pub struct GarminSourceSettings {
 }
 
 impl GarminSourceSettings {
+    fn primary(token_directory: &Path) -> Self {
+        Self {
+            instance: LEGACY_SOURCE.into(),
+            token_directory: token_directory.to_owned(),
+        }
+    }
+
+    /// The worker can discover a newly created legacy token file without restarting.
+    pub fn for_worker(
+        integrations: Option<&str>,
+        token_directory: &Path,
+    ) -> Result<Option<Self>, GarminConfigurationError> {
+        if integrations.is_none() {
+            Ok(Some(Self::primary(token_directory)))
+        } else {
+            Self::resolve(integrations, token_directory)
+        }
+    }
+
     pub fn resolve(
         integrations: Option<&str>,
         token_directory: &Path,
     ) -> Result<Option<Self>, GarminConfigurationError> {
-        let primary = || Self {
-            instance: LEGACY_SOURCE.into(),
-            token_directory: token_directory.to_owned(),
-        };
         let Some(config) = integrations else {
             let saved = GarminTokenFile::open_existing(token_directory)
                 .map_err(GarminConfigurationError::TokenDirectory)?;
-            return Ok(saved.map(|_| primary()));
+            return Ok(saved.map(|_| Self::primary(token_directory)));
         };
         let integrations: Vec<Value> =
             serde_json::from_str(config).map_err(|_| GarminConfigurationError::Invalid)?;

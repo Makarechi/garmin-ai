@@ -157,7 +157,7 @@ async fn local_text_worker_screens_urgent_reports_before_older_diary_jobs()
             binding,
             &pool,
             106,
-            json!({"text":"I can't breathe"}),
+            json!({"text":"Uncontrolled bleeding right now"}),
         )
         .await?;
         assert_eq!(json!(await_reply(&pool, 106).await?), expected["emergency"]);

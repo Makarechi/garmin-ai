@@ -8,7 +8,9 @@ mod model_publication;
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
 pub(crate) use history::resolve_legacy_history;
-pub use local_text::{LocalTelegramText, TelegramModelAdmission, TelegramSafetyDecision};
+pub use local_text::{
+    LocalTelegramText, SetupMetadata, TelegramModelAdmission, TelegramSafetyDecision,
+};
 pub use model_publication::TelegramModelContext;
 
 use std::time::Duration;
