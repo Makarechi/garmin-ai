@@ -476,8 +476,76 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             }
         ));
     }
+    let instructions =
+        "\nВыберите нужные: /goals сон самочувствие бег мигрень. Убрать все: /goals нет.";
+    let mut old_goals = None;
+    for (update, command, description, revision) in [
+        (32, "/goals", "Цели пока не выбраны.", 0),
+        (33, "/goals СОН, бег", "Ваши цели: бег, сон.", 1),
+        (
+            34,
+            "/goals нет",
+            "Личные цели отключены. Спортивная цель выключена.",
+            2,
+        ),
+    ] {
+        binding
+            .accept_polled_update(&mut runtime, &wire(update, command), now, false)
+            .await?;
+        let lease = database
+            .claim_local_telegram_control(target, now, 60)
+            .await?
+            .ok_or("Missing goals command")?;
+        let queued = database
+            .apply_telegram_owner_control(&lease, 4, "Europe/Bratislava")
+            .await?;
+        let (text, fence): (String, i64) = sqlx::query_as(
+            "SELECT intent#>>'{blocks,0,text}',(memory_fence->>'telegram_goals')::bigint
+             FROM outbox_messages WHERE id=$1",
+        )
+        .bind(queued.outbox_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(text, format!("{description}{instructions}"));
+        assert_eq!(fence, revision);
+        let claimed = database
+            .claim_outbox_reply(destination(), now, 60)
+            .await?
+            .ok_or("Missing goals response")?;
+        assert_eq!(claimed.outbox_id, queued.outbox_id);
+        if let Some(previous) = old_goals.replace(claimed) {
+            assert_eq!(
+                database
+                    .dispatch_telegram_outbox_reply(destination(), 42, previous, &[], |_| async {
+                        panic!("A stale goal revision was sent")
+                    })
+                    .await?,
+                ReplyDispatchResult::Cancelled
+            );
+        }
+    }
+    let goals = database.personal_goals(owner).await?;
+    assert_eq!(goals.revision, 2);
+    assert!(goals.configured && goals.goals.is_empty());
+    binding
+        .accept_polled_update(&mut runtime, &wire(35, "/goals сон сон"), now, false)
+        .await?;
+    let invalid = database
+        .claim_local_telegram_control(target, now, 60)
+        .await?
+        .ok_or("Missing invalid goals command")?;
+    let reply = database
+        .apply_telegram_owner_control(&invalid, 4, "Europe/Bratislava")
+        .await?;
+    let text: String =
+        sqlx::query_scalar("SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE id=$1")
+            .bind(reply.outbox_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(text.starts_with("Не удалось выбрать цели."));
+    assert_eq!(database.personal_goals(owner).await?, goals);
     println!(
-        "Verified durable owner controls, Garmin summaries and status, and suppression of stale replies"
+        "Verified durable owner controls, Garmin status, goals and suppression of stale replies"
     );
     Ok(())
 }
