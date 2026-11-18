@@ -7,12 +7,17 @@ use axum::{
 };
 use ga_db::{
     Database,
-    diary::{CreateSystemEvent, DiaryWriteError, UpdateSystemEvent, event_document},
+    diary::{
+        CreateSystemEvent, DeleteEvent, DiaryWriteError, UpdateSystemEvent,
+        custom_entries::{CreateCustomEntry, UpdateCustomEntry},
+        event_document,
+    },
 };
 use ga_domain::{
     access::Scope,
     event_input::{EventInput, ValidationMode},
     event_replay::{ReplayConflict, check_idempotency_key},
+    event_schema::CustomEntry,
 };
 use uuid::Uuid;
 
@@ -24,18 +29,97 @@ use super::{
     },
 };
 
+#[derive(Clone, Copy)]
+enum EntryKind {
+    System,
+    Tracker,
+}
+
 pub(super) async fn create(State(state): State<AppState>, request: Request) -> Response {
+    create_request(&state, request, EntryKind::System).await
+}
+
+pub(super) async fn create_custom(State(state): State<AppState>, request: Request) -> Response {
+    create_request(&state, request, EntryKind::Tracker).await
+}
+
+pub(super) async fn edit_custom(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let response = if parts.method == Method::PUT {
+        match authorized(
+            &state,
+            &parts.headers,
+            &[Scope::ReadDiary, Scope::WriteDiary],
+        )
+        .await
+        {
+            Ok((database, owner)) => match id.parse() {
+                Ok(id) => update_tracker_entry(database, owner, id, body).await,
+                Err(_) => invalid_arguments(),
+            },
+            Err(status) => access_failure(status),
+        }
+    } else {
+        method_not_allowed("PUT")
+    };
+    private_cache(response, &parts.headers)
+}
+
+async fn update_tracker_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) -> Response {
+    let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return report_too_large();
+    };
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let Ok(serde_json::Value::Object(mut body)) = serde_json::from_slice(bytes) else {
+        return invalid_arguments();
+    };
+    let Some(revision) = body
+        .get("revision")
+        .and_then(integer_input)
+        .filter(|revision| *revision >= 1)
+    else {
+        return invalid_arguments();
+    };
+    let Some(entry) = body
+        .remove("entry")
+        .and_then(|entry| CustomEntry::from_value(entry).ok())
+    else {
+        return invalid_arguments();
+    };
+    match database
+        .update_custom_entry_document(UpdateCustomEntry {
+            owner_id: owner,
+            actor: "api",
+            id,
+            expected_revision: i32::try_from(revision).unwrap_or(0),
+            entry: &entry,
+            evidence_refs: &[],
+        })
+        .await
+    {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => write_failure(error),
+    }
+}
+
+async fn create_request(state: &AppState, request: Request, kind: EntryKind) -> Response {
     let (parts, body) = request.into_parts();
     let response = match parts.method {
         Method::POST => {
             match authorized(
-                &state,
+                state,
                 &parts.headers,
                 &[Scope::ReadDiary, Scope::WriteDiary],
             )
             .await
             {
-                Ok((database, owner)) => create_entry(database, owner, &parts.headers, body).await,
+                Ok((database, owner)) => {
+                    create_entry(database, owner, &parts.headers, body, kind).await
+                }
                 Err(status) => access_failure(status),
             }
         }
@@ -52,12 +136,15 @@ pub(super) async fn entry(
     let (parts, body) = request.into_parts();
     let required: &[Scope] = match parts.method {
         Method::GET => &[Scope::ReadDiary],
-        Method::PUT => &[Scope::ReadDiary, Scope::WriteDiary],
-        _ => return private_cache(method_not_allowed("GET, PUT"), &parts.headers),
+        Method::PUT | Method::DELETE => &[Scope::ReadDiary, Scope::WriteDiary],
+        _ => return private_cache(method_not_allowed("GET, PUT, DELETE"), &parts.headers),
     };
     let response = match authorized(&state, &parts.headers, required).await {
         Ok((database, owner)) => match id.parse() {
             Ok(id) if parts.method == Method::PUT => update_entry(database, owner, id, body).await,
+            Ok(id) if parts.method == Method::DELETE => {
+                delete_entry(database, owner, id, parts.uri.query()).await
+            }
             Ok(id) => match database.owner_event(owner, id).await {
                 Ok(Some(value)) => Json(value).into_response(),
                 Ok(None) => record_missing(),
@@ -111,11 +198,65 @@ async fn update_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) ->
     }
 }
 
+async fn delete_entry(database: &Database, owner: Uuid, id: Uuid, query: Option<&str>) -> Response {
+    let expected = query.and_then(|raw| {
+        form_urlencoded::parse(raw.as_bytes())
+            .filter_map(|(key, value)| (key == "revision").then_some(value))
+            .last()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|revision| *revision >= 1)
+    });
+    let Some(expected_revision) = expected else {
+        return invalid_arguments();
+    };
+    match database
+        .delete_event(DeleteEvent {
+            owner_id: owner,
+            authenticated_actor: "api",
+            event_id: id,
+            expected_revision,
+        })
+        .await
+    {
+        Ok(deleted) if deleted.snapshot.get("kind").is_none() => {
+            Json(deleted.snapshot).into_response()
+        }
+        Ok(deleted) => event_response(deleted.snapshot),
+        Err(DiaryWriteError::EventMissing) => record_missing(),
+        Err(DiaryWriteError::RevisionChanged) => detail(
+            StatusCode::CONFLICT,
+            "Event changed; reload before deleting",
+        ),
+        Err(DiaryWriteError::DeletionForbidden) => {
+            detail(StatusCode::FORBIDDEN, "Operation not allowed")
+        }
+        Err(DiaryWriteError::LinkedObservations) => detail(
+            StatusCode::CONFLICT,
+            "Detach linked medication or symptom observations before removing or changing this migraine",
+        ),
+        Err(_) => storage_unavailable(),
+    }
+}
+
+fn record_missing() -> Response {
+    detail(StatusCode::NOT_FOUND, "Record not found")
+}
+
+fn event_response(snapshot: serde_json::Value) -> Response {
+    match event_document(snapshot) {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => storage_unavailable(),
+    }
+}
+
 async fn create_entry(
     database: &Database,
     owner: Uuid,
     headers: &HeaderMap,
     body: Body,
+    kind: EntryKind,
 ) -> Response {
     let idempotency = headers.get("idempotency-key").map(|key| {
         key.as_bytes()
@@ -134,28 +275,43 @@ async fn create_entry(
         Err(_) => return report_too_large(),
     };
     let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&body);
-    let Ok(report) = EventInput::from_json(body, MAX_REQUEST_BYTES, ValidationMode::NewReport)
-    else {
-        return invalid_arguments();
+    let written = match kind {
+        EntryKind::System => {
+            let Ok(report) =
+                EventInput::from_json(body, MAX_REQUEST_BYTES, ValidationMode::NewReport)
+            else {
+                return invalid_arguments();
+            };
+            database
+                .create_system_event(CreateSystemEvent {
+                    owner_id: owner,
+                    authenticated_actor: "api",
+                    report: &report,
+                    idempotency_key: idempotency.as_deref(),
+                    operation_id: None,
+                    clock_uncertainty_seconds: None,
+                })
+                .await
+        }
+        EntryKind::Tracker => {
+            let Ok(entry) = CustomEntry::from_json(body, MAX_REQUEST_BYTES) else {
+                return invalid_arguments();
+            };
+            database
+                .create_custom_entry(CreateCustomEntry {
+                    owner_id: owner,
+                    actor: "api",
+                    entry: &entry,
+                    idempotency_key: idempotency.as_deref(),
+                    evidence_refs: &[],
+                })
+                .await
+        }
     };
-    let written = database
-        .create_system_event(CreateSystemEvent {
-            owner_id: owner,
-            authenticated_actor: "api",
-            report: &report,
-            idempotency_key: idempotency.as_deref(),
-            operation_id: None,
-            clock_uncertainty_seconds: None,
-        })
-        .await;
     match written {
         Ok(entry) => event_response(entry.snapshot),
         Err(error) => write_failure(error),
     }
-}
-
-fn record_missing() -> Response {
-    detail(StatusCode::NOT_FOUND, "Record not found")
 }
 
 fn report_too_large() -> Response {
@@ -163,13 +319,6 @@ fn report_too_large() -> Response {
         StatusCode::PAYLOAD_TOO_LARGE,
         "Diary report exceeds the size limit",
     )
-}
-
-fn event_response(snapshot: serde_json::Value) -> Response {
-    match event_document(snapshot) {
-        Ok(value) => Json(value).into_response(),
-        Err(_) => storage_unavailable(),
-    }
 }
 
 async fn authorized<'a>(
@@ -213,7 +362,9 @@ fn write_failure(error: DiaryWriteError) -> Response {
             StatusCode::CONFLICT,
             "Creation audit unavailable for idempotent replay",
         ),
-        DiaryWriteError::TrackingDisabled => detail(StatusCode::FORBIDDEN, "Operation not allowed"),
+        DiaryWriteError::TrackingDisabled | DiaryWriteError::OperationForbidden => {
+            detail(StatusCode::FORBIDDEN, "Operation not allowed")
+        }
         DiaryWriteError::EventMissing => record_missing(),
         DiaryWriteError::RevisionChanged => {
             detail(StatusCode::CONFLICT, "Event changed; reload before editing")
@@ -229,6 +380,7 @@ fn write_failure(error: DiaryWriteError) -> Response {
         ),
         DiaryWriteError::Input(_)
         | DiaryWriteError::CustomEntry
+        | DiaryWriteError::CustomInput(_)
         | DiaryWriteError::InvalidRelation
         | DiaryWriteError::Replay(ReplayConflict::InvalidKey) => invalid_arguments(),
         _ => storage_unavailable(),
