@@ -36,11 +36,12 @@ pub(crate) enum ReadTool {
     ComparePeriods,
     RunningEfficiency,
     MetricSeries,
+    EventWindows,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 9] = [
+    pub(crate) const GARMIN_READS: [Self; 10] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -50,8 +51,9 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::EventWindows,
     ];
-    const IMPLEMENTED: [Self; 13] = [
+    const IMPLEMENTED: [Self; 14] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -63,6 +65,7 @@ impl ReadTool {
         Self::ComparePeriods,
         Self::RunningEfficiency,
         Self::MetricSeries,
+        Self::EventWindows,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -81,6 +84,7 @@ impl ReadTool {
             Self::ComparePeriods => "analysis_compare_periods",
             Self::RunningEfficiency => "analysis_running_efficiency",
             Self::MetricSeries => "metric_series",
+            Self::EventWindows => "analysis_event_windows",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -183,6 +187,14 @@ impl ReadTool {
                     "timing_only":{"type":"boolean","title":"Timing Only","default":false}
                 }),
                 &["start", "end"][..],
+            ),
+            Self::EventWindows => (
+                "Compute measured physiology in -48h through +24h windows around diary events.",
+                "analysis_event_windowsArgs",
+                json!({"event_type":{"title":"Event Type","type":"string"},
+                    "metric":{"title":"Metric","type":"string"},
+                    "start":datetime("Start"),"end":datetime("End")}),
+                &["event_type", "metric", "start", "end"][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
