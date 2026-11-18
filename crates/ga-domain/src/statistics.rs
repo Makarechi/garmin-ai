@@ -1,6 +1,10 @@
+mod assignment;
 mod bootstrap;
 
-pub use bootstrap::{MeanDifference, block_mean_difference};
+pub use assignment::match_weekday_controls;
+pub use bootstrap::{
+    MeanDifference, PairedDifference, block_mean_difference, paired_mean_difference,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Description {
