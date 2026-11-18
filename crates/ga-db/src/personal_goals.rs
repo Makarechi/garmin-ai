@@ -76,12 +76,58 @@ impl From<sqlx::Error> for PersonalGoalsError {
 }
 
 impl Database {
+    /// Resolve the enrolled owner after an API credential has been authorized.
+    pub async fn enrolled_owner_id(&self) -> Result<Uuid, PersonalGoalsError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SET LOCAL statement_timeout='750ms'")
+                .execute(&mut *txn)
+                .await?;
+            check_readiness(&mut txn)
+                .await
+                .map_err(PersonalGoalsError::Storage)?;
+            let owner = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+                .fetch_optional(&mut *txn)
+                .await?
+                .ok_or(PersonalGoalsError::Owner)?;
+            txn.commit().await?;
+            Ok(owner)
+        })
+        .await
+        .map_err(|_| PersonalGoalsError::Database)?
+    }
+
     /// Read the enrolled owner's current preferences without writing legacy rows.
     pub async fn personal_goals(&self, owner: Uuid) -> Result<PersonalGoals, PersonalGoalsError> {
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
             prepare(&mut txn, owner).await?;
             let (goals, _) = load(&mut txn, owner).await?;
+            txn.commit().await?;
+            Ok(goals)
+        })
+        .await
+        .map_err(|_| PersonalGoalsError::Database)?
+    }
+
+    /// Preserve the preferences endpoint's legacy owner binding on first access.
+    pub async fn bound_personal_goals(
+        &self,
+        owner: Uuid,
+    ) -> Result<PersonalGoals, PersonalGoalsError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = self.control.begin().await?;
+            prepare(&mut txn, owner).await?;
+            let (mut goals, stored) = load(&mut txn, owner).await?;
+            if needs_owner(&stored) {
+                lock_goals(&mut txn).await?;
+                let (current, mut current_row) = load(&mut txn, owner).await?;
+                goals = current;
+                if needs_owner(&current_row) {
+                    current_row["owner_id"] = json!(owner.to_string());
+                    save(&mut txn, &current_row).await?;
+                }
+            }
             txn.commit().await?;
             Ok(goals)
         })
@@ -169,21 +215,9 @@ pub(crate) async fn set_in(
     if goals.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(PersonalGoalsError::InvalidSelection);
     }
-    for lock in [REPLAY_MUTATION_LOCK, GOAL_POLICY_LOCK] {
-        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(lock)
-            .fetch_one(&mut **txn)
-            .await?;
-        if !locked {
-            return Err(PersonalGoalsError::Busy);
-        }
-    }
+    lock_goals(txn).await?;
     let (current, mut stored) = load(txn, owner).await?;
-    let bind_legacy = !stored
-        .as_object()
-        .ok_or(PersonalGoalsError::InvalidState)?
-        .is_empty()
-        && stored["owner_id"].is_null();
+    let bind_legacy = needs_owner(&stored);
     if bind_legacy {
         stored["owner_id"] = json!(owner.to_string());
     }
@@ -241,6 +275,25 @@ pub(crate) async fn set_in(
     value["command_order"] = order.unwrap_or_else(|| stored["command_order"].clone());
     save(txn, &value).await?;
     Ok(result)
+}
+
+fn needs_owner(stored: &Value) -> bool {
+    stored
+        .as_object()
+        .is_some_and(|row| !row.is_empty() && stored["owner_id"].is_null())
+}
+
+async fn lock_goals(txn: &mut Transaction<'_, Postgres>) -> Result<(), PersonalGoalsError> {
+    for lock in [REPLAY_MUTATION_LOCK, GOAL_POLICY_LOCK] {
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(lock)
+            .fetch_one(&mut **txn)
+            .await?;
+        if !locked {
+            return Err(PersonalGoalsError::Busy);
+        }
+    }
+    Ok(())
 }
 
 fn superseded(stored: &Value, incoming: GoalCommandOrder<'_>) -> Result<bool, PersonalGoalsError> {
