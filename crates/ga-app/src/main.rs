@@ -2,6 +2,7 @@ mod authorization;
 mod backup;
 mod backup_space;
 mod configuration;
+mod extensions;
 mod healthcheck;
 mod http;
 mod lifecycle;
@@ -76,6 +77,11 @@ enum Command {
     ResumeStorage,
     /// Serve MCP tools over standard input and output
     Mcp,
+    /// Check an explicitly supplied source extension with synthetic data
+    CheckSourceExtension {
+        executable: PathBuf,
+        instance_id: String,
+    },
     /// Probe the local native HTTP service or worker
     Healthcheck {
         #[arg(long, default_value_t = 8080)]
@@ -186,6 +192,12 @@ fn main() -> ExitCode {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
+        }
+        Some(Command::CheckSourceExtension {
+            executable,
+            instance_id,
+        }) => {
+            return report(extensions::check_source(&executable, &instance_id));
         }
         Some(Command::Healthcheck {
             port,
