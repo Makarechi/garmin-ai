@@ -8,8 +8,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, creation_audit, load_event,
-    metrics, stored_instant,
+    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, commit_diary_write,
+    creation_audit, load_event, metrics, stored_instant,
 };
 use crate::Database;
 
@@ -38,6 +38,19 @@ impl Database {
         &self,
         request: CreateCustomEntry<'_>,
     ) -> Result<StoredCustomEntry, DiaryWriteError> {
+        self.create_custom_entry_unless_cancelled(request, || false)
+            .await
+    }
+
+    /// Keep the entry, audit, and mapped measurements provisional through cancellation.
+    pub async fn create_custom_entry_unless_cancelled(
+        &self,
+        request: CreateCustomEntry<'_>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<StoredCustomEntry, DiaryWriteError> {
+        if is_cancelled() {
+            return Err(DiaryWriteError::Cancelled);
+        }
         let mut txn = self.begin_diary_write(request.owner_id).await?;
         let timezone: String = sqlx::query_scalar("SELECT timezone FROM people WHERE id=$1")
             .bind(request.owner_id)
@@ -81,7 +94,7 @@ impl Database {
                         snapshot: audit,
                     }
                 };
-                txn.commit().await?;
+                commit_diary_write(txn, is_cancelled).await?;
                 return Ok(stored);
             }
         }
@@ -119,7 +132,7 @@ impl Database {
         )
         .await?;
         metrics::project_event(&mut txn, id, &created.snapshot, at).await?;
-        txn.commit().await?;
+        commit_diary_write(txn, is_cancelled).await?;
         Ok(created)
     }
 

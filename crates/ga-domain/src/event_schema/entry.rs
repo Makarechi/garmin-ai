@@ -181,6 +181,12 @@ impl CustomEntry {
         &self.key
     }
 
+    /// Attribute a validated local MCP entry to the authenticated transport.
+    pub fn into_mcp_entry(mut self) -> Self {
+        self.source = "mcp";
+        self
+    }
+
     pub fn resolve<'a>(
         &'a self,
         schema: &Value,
