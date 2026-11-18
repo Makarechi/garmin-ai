@@ -45,11 +45,6 @@ fn router(state: AppState) -> Router {
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
         .route("/actions", any(tracker_actions::available))
-        .route("/tracker-setups/preview", any(tracker_setup::preview))
-        .route("/tracker-setups", any(tracker_setup::confirm))
-        .route("/community-packs", any(community_packs::catalog))
-        .route("/community-packs/preview", any(community_packs::preview))
-        .route("/community-packs/import", any(community_packs::import))
         .route(
             "/source-metric-mappings/preview",
             any(source_mappings::preview),
@@ -59,10 +54,15 @@ fn router(state: AppState) -> Router {
             "/source-metric-mappings/{mapping_id}",
             any(source_mappings::item),
         )
+        .route("/tracker-setups/preview", any(tracker_setup::preview))
+        .route("/tracker-setups", any(tracker_setup::confirm))
         .route(
             "/tracker-setups/{tracker_id}/settings",
             any(tracker_setup::settings),
         )
+        .route("/community-packs", any(community_packs::catalog))
+        .route("/community-packs/preview", any(community_packs::preview))
+        .route("/community-packs/import", any(community_packs::import))
         .route("/actions/events/{event_id}", any(tracker_actions::event))
         .route("/forms/{action_id}", any(tracker_actions::form))
         .route("/forms/{action_id}/submit", any(tracker_actions::submit))
