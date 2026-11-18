@@ -4,7 +4,7 @@ mod patterns;
 
 use std::{error::Error, fmt, sync::OnceLock};
 
-use fancy_regex::{Captures, Regex};
+use fancy_regex::{Captures, Regex, RegexBuilder};
 
 use patterns::*;
 
@@ -56,7 +56,10 @@ struct Rules {
 }
 
 fn insensitive(pattern: &str) -> Result<Regex, fancy_regex::Error> {
-    Regex::new(&format!("(?i){pattern}"))
+    // Each rule has its own match cache and runs beside the worker's other lanes.
+    RegexBuilder::new(&format!("(?i){pattern}"))
+        .delegate_dfa_size_limit(64 * 1024)
+        .build()
 }
 
 fn anchored(pattern: &str) -> Result<Regex, fancy_regex::Error> {
@@ -359,7 +362,7 @@ pub fn obvious_third_party_emergency(text: &str) -> Result<bool, UrgentScreenUna
 
 pub fn urgent_notice(locale: &str) -> &'static str {
     if locale
-        .split(['-', '_'])
+        .split('-')
         .next()
         .is_some_and(|code| code.eq_ignore_ascii_case("ru"))
     {

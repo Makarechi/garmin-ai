@@ -62,7 +62,9 @@ def cases():
             }
             for text in sorted(texts)
         ],
-        "messages": {locale: urgent_notice(locale) for locale in ("ru", "en", "ru-RU")},
+        "messages": {
+            locale: urgent_notice(locale) for locale in ("ru", "en", "ru-RU", "ru_RU", "RU")
+        },
     }
 
 
