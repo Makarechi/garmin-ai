@@ -18,7 +18,8 @@ use uuid::Uuid;
 use crate::{
     Database, OWNER_ENROLLMENT_LOCK, ReadinessError, SCHEMA_REVISION, STORAGE_LIFECYCLE_LOCK,
     check_readiness,
-    runtime_lease::{RuntimeLease, RuntimeLeaseError},
+    jobs::DailyBackupLease,
+    runtime_lease::{RuntimeLease, RuntimeLeaseError, RuntimeWorkerIdentity},
 };
 
 pub(crate) const FORMAT: &str = "garmin-ai-jsonl-v1";
@@ -74,7 +75,25 @@ pub struct BackupSnapshot {
 /// Share the original runtime and token-publication locks with Python for the full backup.
 pub struct BackupSourceLease<'a> {
     database: &'a Database,
-    runtime: RuntimeLease,
+    session: BackupSession,
+}
+
+enum BackupSession {
+    Manual(RuntimeLease),
+    Scheduled {
+        connection: PgConnection,
+        worker: RuntimeWorkerIdentity,
+        job: DailyBackupLease,
+    },
+}
+
+impl BackupSession {
+    fn connection(&mut self) -> &mut PgConnection {
+        match self {
+            Self::Manual(runtime) => &mut runtime.connection,
+            Self::Scheduled { connection, .. } => connection,
+        }
+    }
 }
 
 pub type ExportCounts = BTreeMap<&'static str, u64>;
@@ -142,21 +161,41 @@ impl Database {
                 RuntimeLeaseError::Readiness(error) => DatabaseExportError::Storage(error),
                 RuntimeLeaseError::Database => DatabaseExportError::Database,
             })?;
-        let locked: bool = tokio::time::timeout(
+        lock_backup_tokens(&mut runtime.connection).await?;
+        Ok(BackupSourceLease {
+            database: self,
+            session: BackupSession::Manual(runtime),
+        })
+    }
+
+    /// Schedule-owned backups use the same token fence while the current worker
+    /// retains its own runtime connection.
+    pub async fn acquire_scheduled_backup_sources(
+        &self,
+        worker: RuntimeWorkerIdentity,
+        job: DailyBackupLease,
+    ) -> Result<BackupSourceLease<'_>, DatabaseExportError> {
+        self.readiness()
+            .await
+            .map_err(DatabaseExportError::Storage)?;
+        let options = self.control.connect_options();
+        let mut connection = tokio::time::timeout(
             Duration::from_millis(1500),
-            sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-                .bind(TOKEN_PUBLICATION_LOCK)
-                .fetch_one(&mut runtime.connection),
+            PgConnection::connect_with(options.as_ref()),
         )
         .await
         .map_err(|_| DatabaseExportError::Database)??;
-        if !locked {
-            return Err(DatabaseExportError::Busy);
-        }
-        Ok(BackupSourceLease {
+        lock_backup_tokens(&mut connection).await?;
+        let mut lease = BackupSourceLease {
             database: self,
-            runtime,
-        })
+            session: BackupSession::Scheduled {
+                connection,
+                worker,
+                job,
+            },
+        };
+        lease.check().await?;
+        Ok(lease)
     }
 
     async fn export_snapshot(
@@ -228,7 +267,7 @@ impl BackupSourceLease<'_> {
         let owner = tokio::time::timeout(
             Duration::from_millis(1500),
             sqlx::query_scalar("SELECT id FROM people WHERE singleton")
-                .fetch_optional(&mut self.runtime.connection),
+                .fetch_optional(self.session.connection()),
         )
         .await
         .map_err(|_| DatabaseExportError::Database)??
@@ -239,11 +278,40 @@ impl BackupSourceLease<'_> {
     }
 
     pub async fn check(&mut self) -> Result<(), DatabaseExportError> {
-        self.runtime
-            .check()
+        match &mut self.session {
+            BackupSession::Manual(runtime) => runtime
+                .check()
+                .await
+                .map_err(|_| DatabaseExportError::Database),
+            BackupSession::Scheduled {
+                connection,
+                worker,
+                job,
+            } => tokio::time::timeout(Duration::from_millis(1500), async {
+                let active = worker.still_held(connection).await?;
+                if !active {
+                    return Err(DatabaseExportError::Busy);
+                }
+                job.check_on(connection)
+                    .await
+                    .map_err(|_| DatabaseExportError::Busy)
+            })
             .await
-            .map_err(|_| DatabaseExportError::Database)
+            .map_err(|_| DatabaseExportError::Database)?,
+        }
     }
+}
+
+async fn lock_backup_tokens(connection: &mut PgConnection) -> Result<(), DatabaseExportError> {
+    let locked: bool = tokio::time::timeout(
+        Duration::from_millis(1500),
+        sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(TOKEN_PUBLICATION_LOCK)
+            .fetch_one(connection),
+    )
+    .await
+    .map_err(|_| DatabaseExportError::Database)??;
+    locked.then_some(()).ok_or(DatabaseExportError::Busy)
 }
 
 async fn required_archive_keys(

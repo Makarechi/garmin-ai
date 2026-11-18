@@ -8,14 +8,17 @@ use std::{
 use base64::{Engine, engine::general_purpose::URL_SAFE};
 use flate2::{Compression, bufread::MultiGzDecoder, write::GzEncoder};
 use ga_archive::{
-    backup_bundle::{BackupBundle, write_backup_bundle_guarded},
+    backup_bundle::{BackupBundle, CancellableWriter, write_backup_bundle_cancellable},
     backup_envelope::{open_source, write_private_export},
     backup_space::{ExportSize, estimate_backup_space},
     backup_unpack::unpack_backup,
     backup_workspace::BackupWorkspace,
     storage_files::{StorageAccess, StorageFilesGuard, validate_backup_layout},
 };
-use ga_db::Database;
+use ga_db::{
+    Database, database_export::ExportCounts, jobs::DailyBackupLease,
+    runtime_lease::RuntimeWorkerIdentity,
+};
 use ga_domain::timestamp::StoredInstant;
 use tokio::runtime::{Builder, Runtime};
 
@@ -74,11 +77,7 @@ impl BackupSettings {
             .key
             .as_deref()
             .ok_or("GA_BACKUP_KEY must encode 32 random bytes")?;
-        URL_SAFE
-            .decode(input)
-            .ok()
-            .and_then(|decoded| decoded.try_into().ok())
-            .ok_or_else(|| "GA_BACKUP_KEY must encode 32 random bytes".into())
+        decode_key(input)
     }
 
     fn require_capacity(&self, destination: &Path, estimate: ExportSize) -> CommandResult {
@@ -89,13 +88,52 @@ impl BackupSettings {
     }
 }
 
+pub(crate) fn decode_key(input: &str) -> Result<[u8; 32], Box<dyn Error>> {
+    URL_SAFE
+        .decode(input)
+        .ok()
+        .and_then(|decoded| decoded.try_into().ok())
+        .ok_or_else(|| "GA_BACKUP_KEY must encode 32 random bytes".into())
+}
+
+pub(crate) fn validate_scheduled_destination(directory: &Path) -> CommandResult {
+    let settings = BackupSettings::read()?;
+    validate_backup_layout(&settings.data, &settings.tokens, &settings.locks, directory)?;
+    Ok(())
+}
+
 pub(crate) fn create(destination: &Path) -> CommandResult {
+    let counts = create_with_source(destination, None, || false)?;
+    println!("{}", serde_json::to_string(&counts)?);
+    Ok(())
+}
+
+pub(crate) fn create_scheduled(
+    destination: &Path,
+    worker: RuntimeWorkerIdentity,
+    job: DailyBackupLease,
+    cancelled: impl Fn() -> bool,
+) -> CommandResult {
+    create_with_source(destination, Some((worker, job)), cancelled)?;
+    Ok(())
+}
+
+fn create_with_source(
+    destination: &Path,
+    scheduled: Option<(RuntimeWorkerIdentity, DailyBackupLease)>,
+    cancelled: impl Fn() -> bool,
+) -> Result<ExportCounts, Box<dyn Error>> {
     let settings = BackupSettings::read()?;
     let key = settings.key()?;
     let _files = StorageFilesGuard::acquire(&settings.locks, StorageAccess::Active)?;
     let runtime = runtime()?;
     let database = runtime.block_on(async { settings.database() })?;
-    let mut sources = runtime.block_on(database.acquire_backup_sources())?;
+    let mut sources = match scheduled {
+        Some((worker, job)) => {
+            runtime.block_on(database.acquire_scheduled_backup_sources(worker, job))?
+        }
+        None => runtime.block_on(database.acquire_backup_sources())?,
+    };
     let workspace = BackupWorkspace::acquire(&settings.data)?;
     let size = runtime
         .block_on(database.backup_database_bytes())
@@ -107,14 +145,14 @@ pub(crate) fn create(destination: &Path) -> CommandResult {
     let snapshot = write_private_export(export, |file| {
         let mut compressed = GzEncoder::new(file, Compression::best());
         let snapshot = runtime
-            .block_on(sources.export(at, &mut compressed))
+            .block_on(sources.export(at, &mut CancellableWriter::new(&mut compressed, &cancelled)))
             .map_err(io::Error::other)?;
         compressed.finish()?;
         Ok(snapshot)
     })?;
     let staged_bytes = fs::metadata(export)?.len();
     settings.require_capacity(destination, ExportSize::AlreadyStaged(staged_bytes))?;
-    write_backup_bundle_guarded(
+    write_backup_bundle_cancellable(
         destination,
         &key,
         BackupBundle {
@@ -123,10 +161,15 @@ pub(crate) fn create(destination: &Path) -> CommandResult {
             database_export: export,
             required_raw: &snapshot.required_raw,
         },
-        || runtime.block_on(sources.check()).map_err(io::Error::other),
+        &cancelled,
+        || {
+            if cancelled() {
+                return Err(io::Error::other("Backup publication was cancelled"));
+            }
+            runtime.block_on(sources.check()).map_err(io::Error::other)
+        },
     )?;
-    println!("{}", serde_json::to_string(&snapshot.counts)?);
-    Ok(())
+    Ok(snapshot.counts)
 }
 
 pub(crate) fn export(destination: &Path) -> CommandResult {

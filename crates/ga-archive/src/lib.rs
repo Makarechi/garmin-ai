@@ -1,5 +1,6 @@
 pub mod backup_space;
 mod key;
+pub mod scheduled_backup;
 mod staging;
 pub mod storage_files;
 mod token_file;
@@ -161,6 +162,26 @@ impl Archive {
         let encoded = legacy_json::encode(payload, Utf8Layout::Archive, max_bytes)
             .map_err(ArchiveError::Json)?;
         self.put_reader(encoded.as_slice(), ArchiveKind::Json, limits)
+    }
+
+    /// Open an unnamed temporary download on the archive filesystem. The
+    /// returned byte limit leaves room for its eventual archive copy.
+    pub fn open_download_staging(&self, limits: PutLimits) -> Result<(File, u64), ArchiveError> {
+        self.require_writable()?;
+        let stat = fs::fstatvfs(&self.root)?;
+        let available = stat.f_bavail.saturating_mul(stat.f_frsize);
+        let max_bytes = limits
+            .max_bytes
+            .min(available.saturating_sub(limits.disk_reserve_bytes) / 2);
+        if max_bytes == 0 {
+            return Err(ArchiveError::InsufficientSpace);
+        }
+        let publication = staging::lock_for_write(&self.root)?;
+        let stage = Stage::create_readable(&publication)?;
+        // Unlink under the archive lock, leaving the private descriptor open.
+        let file = stage.file.try_clone()?;
+        fs::unlinkat(&publication, stage.name.as_str(), AtFlags::empty())?;
+        Ok((file, max_bytes))
     }
 
     /// Remove abandoned Rust staging entries while all writers are excluded.
