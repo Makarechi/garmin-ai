@@ -38,6 +38,7 @@ async fn keeps_callback_work_independent_and_reclaims_after_restart() -> Result<
     let primary = TelegramAckTarget {
         owner_id,
         instance_id: "primary",
+        confirmed_chat: Some(42),
     };
     let secondary = TelegramAckTarget {
         instance_id: "secondary",

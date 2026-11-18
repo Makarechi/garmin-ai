@@ -139,6 +139,7 @@ impl TelegramTransport {
         let target = TelegramAckTarget {
             owner_id: binding.owner_id,
             instance_id: binding.instance_id,
+            confirmed_chat: Some(binding.external_owner_id),
         };
         let lease = database
             .claim_telegram_ack(target, wall_clock()?)
@@ -147,11 +148,22 @@ impl TelegramTransport {
         let Some(lease) = lease else {
             return Ok(None);
         };
-        let result = self.acknowledge_callback(lease.callback_id()).await;
+        let result = database
+            .with_telegram_ack_authorization(
+                &lease,
+                target,
+                self.acknowledge_callback(lease.callback_id()),
+            )
+            .await
+            .map_err(TelegramLoopError::Acknowledgement)?;
         let now = wall_clock()?;
         let outcome = match result {
-            Ok(()) | Err(TelegramTransportError::Rejected) => JobOutcome::Completed,
-            Err(TelegramTransportError::RateLimited(delay)) => {
+            None => JobOutcome::Failed {
+                reason: FailureReason::TelegramPairingChanged,
+                retry_at: None,
+            },
+            Some(Ok(()) | Err(TelegramTransportError::Rejected)) => JobOutcome::Completed,
+            Some(Err(TelegramTransportError::RateLimited(delay))) => {
                 let micros = i64::try_from(delay.as_micros())
                     .ok()
                     .and_then(|delay| now.unix_microseconds().checked_add(delay));
@@ -166,15 +178,15 @@ impl TelegramTransport {
                     retry_at,
                 }
             }
-            Err(
+            Some(Err(
                 TelegramTransportError::Authorization
                 | TelegramTransportError::InvalidInput
                 | TelegramTransportError::Configuration,
-            ) => JobOutcome::Failed {
+            )) => JobOutcome::Failed {
                 reason: FailureReason::ProviderRequestInvalid,
                 retry_at: None,
             },
-            Err(_) => JobOutcome::Failed {
+            Some(Err(_)) => JobOutcome::Failed {
                 reason: FailureReason::RuntimeError,
                 retry_at: None,
             },

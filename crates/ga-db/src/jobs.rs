@@ -72,6 +72,7 @@ pub enum FailureReason {
     ProviderCooldown,
     RuntimeError,
     ProviderRequestInvalid,
+    TelegramPairingChanged,
     GarminCollectionDisabled,
     GarminAuthenticationRequired,
     InvalidGarminWork,
@@ -84,6 +85,7 @@ impl FailureReason {
             Self::ProviderCooldown => "ProviderCooldown",
             Self::RuntimeError => "RuntimeError",
             Self::ProviderRequestInvalid => "ProviderRequestInvalid",
+            Self::TelegramPairingChanged => "TelegramPairingChanged",
             Self::GarminCollectionDisabled => "GarminCollectionDisabled",
             Self::GarminAuthenticationRequired => "AuthenticationRequired",
             Self::InvalidGarminWork => "ValueError",
@@ -569,7 +571,10 @@ async fn finish_in_transaction(
             Some(reason.label()),
             retry_at.map(OffsetDateTime::from),
             reason.refund(),
-            matches!(reason, FailureReason::ProviderRequestInvalid),
+            matches!(
+                reason,
+                FailureReason::ProviderRequestInvalid | FailureReason::TelegramPairingChanged
+            ),
         ),
     };
     let status = sqlx::query_scalar::<_, String>(

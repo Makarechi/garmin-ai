@@ -278,6 +278,10 @@ async fn persist(
             let target = TelegramAckTarget {
                 owner_id: input.owner_id,
                 instance_id: input.instance_id,
+                confirmed_chat: match mode {
+                    DeliveryMode::Webhook(chat) => Some(chat),
+                    DeliveryMode::Polling(chat) => chat,
+                },
             };
             enqueue_telegram_ack(
                 &mut txn,

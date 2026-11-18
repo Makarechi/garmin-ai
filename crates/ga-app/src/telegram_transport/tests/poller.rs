@@ -126,6 +126,13 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
         let request_ack = request(&mut ack).await?;
         assert_eq!(request_ack["endpoint"], "answerCallbackQuery");
         assert_eq!(request_ack["fields"]["callback_query_id"], "synthetic-old");
+        for lock in [72_104_621_i64, 72_104_627] {
+            let can_change: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(lock)
+                .fetch_one(&pool)
+                .await?;
+            assert!(!can_change);
+        }
         respond(
             &mut ack,
             "429 Too Many Requests",
@@ -265,8 +272,28 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
             .await
             .is_err()
     );
+    sqlx::query(
+        "UPDATE jobs SET run_at=now() WHERE kind='telegram_native_ack' AND status='pending'",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        transport.acknowledge_once(&database, binding).await?,
+        Some(RecordedJobStatus::Failed),
+    );
+    let stale: Option<String> = sqlx::query_scalar(
+        "SELECT last_error FROM jobs WHERE kind='telegram_native_ack' AND payload->>'callback_id'='synthetic-old'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stale.as_deref(), Some("TelegramPairingChanged"));
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
     println!(
-        "Verified native polling, backlog gate, callback time, independent acknowledgement and durable rate limit"
+        "Verified independent acknowledgement, durable rate limit and no callback for a replaced pairing"
     );
     Ok(())
 }
