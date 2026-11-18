@@ -1,6 +1,9 @@
 mod clarification;
 pub use clarification::{ClarificationClock, ClarificationError, ClarificationReply};
-pub(crate) use clarification::{clarification_active_at, save_in as save_clarification_in};
+pub(crate) use clarification::{
+    clarification_active_at, lock as lock_clarification, pending_in as pending_clarification_in,
+    save_in as save_clarification_in,
+};
 
 mod agent_batch;
 pub use agent_batch::CreateAgentLogBatch;

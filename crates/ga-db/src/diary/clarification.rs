@@ -178,7 +178,7 @@ async fn prepare(txn: &mut Transaction<'_, Postgres>) -> Result<(), Clarificatio
         .map_err(ClarificationError::Storage)
 }
 
-async fn lock(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationError> {
+pub(crate) async fn lock(txn: &mut Transaction<'_, Postgres>) -> Result<(), ClarificationError> {
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(REPLAY_MUTATION_LOCK)
         .fetch_one(&mut **txn)
@@ -195,7 +195,7 @@ struct Scope {
     destination: String,
 }
 
-pub(super) async fn pending_in(
+pub(crate) async fn pending_in(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     clock: ClarificationClock,

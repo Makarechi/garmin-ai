@@ -145,7 +145,8 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
         .bind(
             json!({
                 "text":"Synthetic original report","question":"Please clarify",
-                "created_at":earlier,"channel_instance_id":"telegram:primary"
+                "created_at":earlier,"channel_instance_id":"telegram:primary",
+                "explicit_selector":true,"action":"close","selection_prompt":"h:old"
             })
             .to_string(),
         )
@@ -225,7 +226,7 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
         .clarification()
         .ok_or("Missing model clarification")?;
     let queued = database
-        .apply_telegram_text_clarification(&lease, now, question)
+        .apply_telegram_text_clarification(&lease, now, question, "en")
         .await?;
     let actual: (String,String) = sqlx::query_as(
         "SELECT inbox.status, reply.intent#>>'{blocks,0,text}'
@@ -236,6 +237,22 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
         actual,
         ("processed".into(), "What time did it start?".into())
     );
+    let (intent, prompt): (String, String) = sqlx::query_as(
+        "SELECT reply.intent::text, state.value->>'selection_prompt'
+           FROM outbox_messages reply CROSS JOIN app_state state
+          WHERE reply.id=$1 AND state.key='conversation:pending'",
+    )
+    .bind(queued.outbox_id)
+    .fetch_one(&pool)
+    .await?;
+    let intent = ga_domain::channel::OutboundIntent::normalize(serde_json::from_str(&intent)?)?;
+    let action = &intent.document()["actions"][0];
+    assert_eq!(action["action_id"], "diary.history.open");
+    let rendered = crate::telegram_reply::prepare_reply(binding, &intent, now)?;
+    assert_eq!(rendered.buttons.len(), 1);
+    assert_eq!(rendered.buttons[0].label, "That's not it — history");
+    assert_eq!(rendered.buttons[0].callback_data, prompt);
+    assert_ne!(prompt, "h:old");
     assert!(
         gateway
             .interpret_telegram_with(
@@ -249,5 +266,23 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
             .is_err()
     );
     assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    let callback = json!({
+        "update_id":302,"callback_query":{
+            "id":"synthetic-selector","data":prompt,"from":{"id":42},
+            "message":{"message_id":762,"chat":{"id":42,"type":"private"}}
+        }
+    });
+    let clicked = binding
+        .accept_polled_update(&mut runtime, &callback, now, false)
+        .await?
+        .inbound
+        .ok_or("Missing authenticated history action")?;
+    let action: String = sqlx::query_scalar(
+        "SELECT envelope#>>'{action,action_id}' FROM inbound_messages WHERE id=$1",
+    )
+    .bind(clicked.message_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(action, "diary.history.open");
     Ok(())
 }
