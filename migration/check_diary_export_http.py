@@ -128,6 +128,12 @@ def verify(engine, binary, directory):
                 compare("GET", base | {"timezone": "Unknown/Zone"}, DIARY, 422)
                 compare("GET", base | {"end": START.isoformat()}, DIARY, 422)
                 compare("GET", base | {"end": (START + timedelta(days=32)).isoformat()}, DIARY, 422)
+                for start, end in (
+                    ("2000-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+                    ("0001-01-01T00:00:00Z", "0001-01-02T00:00:00Z"),
+                    ("9999-12-30T00:00:00Z", "9999-12-31T00:00:00Z"),
+                ):
+                    compare("GET", {"start": start, "end": end}, DIARY, 422)
                 compare("GET", base | {"start": "0", "end": "1"}, DIARY, 200)
                 expected = compare("GET", base, DIARY, 200).json()
                 for zone in ("Europe/Bratislava", "America/New_York", "UTC"):

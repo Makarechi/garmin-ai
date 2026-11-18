@@ -81,7 +81,11 @@ async fn export(state: AppState, headers: &HeaderMap, uri: &Uri) -> Response {
     {
         Ok(result) => result,
         Err(
-            DiaryReadError::TimestampRange | DiaryReadError::InvalidZone | DiaryReadError::Limit,
+            DiaryReadError::TimestampRange
+            | DiaryReadError::CalendarRange
+            | DiaryReadError::CalendarBoundary
+            | DiaryReadError::InvalidZone
+            | DiaryReadError::Limit,
         ) => {
             return invalid_arguments();
         }
