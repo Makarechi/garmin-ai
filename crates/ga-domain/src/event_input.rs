@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use crate::{
     event_payload::{InvalidPayload, SystemPayload, finite_number, json_value},
-    event_time,
     timestamp::StoredInstant,
 };
 
@@ -36,6 +35,7 @@ pub enum ValidationMode {
 pub struct EventInput {
     start: StoredInstant,
     end: Option<StoredInstant>,
+    display_times: [Option<String>; 2],
     timezone: String,
     source: EventSource,
     status: EventStatus,
@@ -99,15 +99,17 @@ impl EventInput {
         let Some(Value::Object(mut fields)) = json_value(&parsed) else {
             return Err(InvalidEvent::InvalidObject);
         };
-        let start = fields
+        let (start, display_start) = fields
             .remove("start")
             .as_ref()
-            .and_then(event_time::aware)
+            .and_then(StoredInstant::legacy_input_with_json)
             .ok_or(InvalidEvent::InvalidField("start"))?;
-        let end = match fields.remove("end") {
-            None | Some(Value::Null) => None,
+        let (end, display_end) = match fields.remove("end") {
+            None | Some(Value::Null) => (None, None),
             Some(value) => {
-                Some(event_time::aware(&value).ok_or(InvalidEvent::InvalidField("end"))?)
+                let (end, display) = StoredInstant::legacy_input_with_json(&value)
+                    .ok_or(InvalidEvent::InvalidField("end"))?;
+                (Some(end), Some(display))
             }
         };
         let timezone = match fields.remove("timezone") {
@@ -141,6 +143,7 @@ impl EventInput {
         let mut event = Self {
             start,
             end,
+            display_times: [Some(display_start), display_end],
             timezone,
             source,
             status,
@@ -240,6 +243,7 @@ impl EventInput {
         let mut event = Self {
             start: self.start,
             end: self.end,
+            display_times: self.display_times.clone(),
             timezone: self.timezone.clone(),
             source,
             status: EventStatus::Confirmed,
@@ -260,6 +264,9 @@ impl EventInput {
     }
     pub fn end(&self) -> Option<StoredInstant> {
         self.end
+    }
+    pub fn display_times(&self) -> [Option<&str>; 2] {
+        self.display_times.each_ref().map(|time| time.as_deref())
     }
     pub fn timezone(&self) -> &str {
         &self.timezone
@@ -348,17 +355,17 @@ pub fn known_timezone(name: &str) -> bool {
 }
 
 pub fn source_calendar_date(start: StoredInstant, timezone: &str) -> Option<time::Date> {
-    source_calendar_clock(start, timezone).map(|(date, _)| date)
+    source_calendar_wall_time(start, timezone).map(|(date, _)| date)
 }
 
 pub fn source_calendar_clock(start: StoredInstant, timezone: &str) -> Option<(time::Date, u8)> {
-    source_calendar_minutes(start, timezone).map(|(date, hour, _)| (date, hour))
+    source_calendar_wall_time(start, timezone).map(|(date, clock)| (date, clock.hour()))
 }
 
-pub fn source_calendar_minutes(
+pub fn source_calendar_wall_time(
     start: StoredInstant,
     timezone: &str,
-) -> Option<(time::Date, u8, u8)> {
+) -> Option<(time::Date, time::Time)> {
     let instant = jiff::Timestamp::from_microsecond(start.unix_microseconds()).ok()?;
     let zone = jiff::tz::db().get(timezone).ok()?;
     let local = instant.to_zoned_datetime(zone);
@@ -368,11 +375,14 @@ pub fn source_calendar_minutes(
         u8::try_from(local.day()).ok()?,
     )
     .ok()?;
-    Some((
-        date,
+    let clock = time::Time::from_hms_nano(
         u8::try_from(local.hour()).ok()?,
         u8::try_from(local.minute()).ok()?,
-    ))
+        u8::try_from(local.second()).ok()?,
+        u32::try_from(local.subsec_nanosecond()).ok()?,
+    )
+    .ok()?;
+    Some((date, clock))
 }
 
 /// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
@@ -385,6 +395,25 @@ pub fn local_wall_time(
     day: time::Date,
     clock: time::Time,
     timezone: &str,
+) -> Option<StoredInstant> {
+    local_wall_instant(day, clock, timezone, None)
+}
+
+/// Resolve the next occurrence of a wall-clock time if a timezone overlap repeats it.
+pub fn local_wall_time_after(
+    day: time::Date,
+    clock: time::Time,
+    timezone: &str,
+    after: StoredInstant,
+) -> Option<StoredInstant> {
+    local_wall_instant(day, clock, timezone, Some(after))
+}
+
+fn local_wall_instant(
+    day: time::Date,
+    clock: time::Time,
+    timezone: &str,
+    after: Option<StoredInstant>,
 ) -> Option<StoredInstant> {
     let zone = jiff::tz::db().get(timezone).ok()?;
     let day = jiff::civil::Date::new(
@@ -399,6 +428,15 @@ pub fn local_wall_time(
         clock.second() as i8,
         clock.nanosecond() as i32,
     );
-    let instant = zone.to_ambiguous_timestamp(wall).compatible().ok()?;
-    StoredInstant::from_unix_microseconds(instant.as_microsecond()).ok()
+    let resolution = zone.to_ambiguous_timestamp(wall);
+    let mut instant = resolution.compatible().ok()?.as_microsecond();
+    if let Some(after) = after
+        && instant <= after.unix_microseconds()
+    {
+        instant = resolution.later().ok()?.as_microsecond();
+        if instant <= after.unix_microseconds() {
+            return None;
+        }
+    }
+    StoredInstant::from_unix_microseconds(instant).ok()
 }

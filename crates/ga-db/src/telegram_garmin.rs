@@ -1,4 +1,4 @@
-use ga_domain::{event_input::source_calendar_minutes, timestamp::StoredInstant};
+use ga_domain::{event_input::source_calendar_wall_time, timestamp::StoredInstant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
@@ -129,12 +129,14 @@ pub(crate) async fn capture_status(
         .max()
     {
         let instant = success.parse().map_err(protocol_error)?;
-        let (date, hour, minute) = source_calendar_minutes(instant, &timezone)
+        let (date, clock) = source_calendar_wall_time(instant, &timezone)
             .ok_or_else(|| protocol_error("Invalid owner timezone"))?;
         let day = date.day();
         let month = u8::from(date.month());
         text.push_str(&format!(
-            " Последний успешный ответ Garmin: {day:02}.{month:02} {hour:02}:{minute:02}."
+            " Последний успешный ответ Garmin: {day:02}.{month:02} {:02}:{:02}.",
+            clock.hour(),
+            clock.minute(),
         ));
     }
     if report["archive_replay"]["ready"] != true {
