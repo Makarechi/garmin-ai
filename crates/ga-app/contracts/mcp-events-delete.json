@@ -1,0 +1,31 @@
+{
+  "name": "events_delete",
+  "description": "Soft-delete a specific diary record at its current revision; retains audit history.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "event_id": {
+        "format": "uuid",
+        "title": "Event Id",
+        "type": "string"
+      },
+      "revision": {
+        "minimum": 1,
+        "title": "Revision",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "event_id",
+      "revision"
+    ],
+    "title": "DeleteArgs",
+    "type": "object"
+  },
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  }
+}
