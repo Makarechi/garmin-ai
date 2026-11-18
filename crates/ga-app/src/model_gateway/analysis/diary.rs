@@ -6,7 +6,7 @@ use ga_db::{
     diary::DiaryEventRange,
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
-use ga_domain::{model_consent::ModelCategories, timestamp::StoredInstant};
+use ga_domain::model_consent::ModelCategories;
 use serde_json::{Map, Value, json};
 
 use super::{AnalysisReadTools, AnalysisToolRead, OfferedReadTool};
@@ -76,7 +76,11 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
         }
         let page = self
             .database
-            .list_analysis_events(self.context, self.model, event_range(args)?)
+            .list_analysis_events(
+                self.context,
+                self.model,
+                DiaryEventRange::from_analysis_arguments(args)?,
+            )
             .await
             .ok()?;
         Some(AnalysisToolRead {
@@ -84,25 +88,4 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
             tracker_versions: page.tracker_versions,
         })
     }
-}
-
-fn event_range(args: &Map<String, Value>) -> Option<DiaryEventRange<'_>> {
-    if args
-        .keys()
-        .any(|key| !matches!(key.as_str(), "start" | "end" | "kind"))
-    {
-        return None;
-    }
-    let start = StoredInstant::from_legacy_input(args.get("start")?)?;
-    let end = StoredInstant::from_legacy_input(args.get("end")?)?;
-    let kind = match args.get("kind") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_str()?),
-    };
-    Some(DiaryEventRange {
-        start,
-        end,
-        kind,
-        limit: 500,
-    })
 }

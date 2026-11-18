@@ -1,3 +1,4 @@
+pub(crate) mod analysis_reply;
 mod control;
 mod diary;
 mod history;
