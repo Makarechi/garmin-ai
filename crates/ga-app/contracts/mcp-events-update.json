@@ -1,0 +1,39 @@
+{
+  "name": "events_update",
+  "description": "Correct an existing diary record at its current revision; preserve untouched fields.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "event_id": {
+        "format": "uuid",
+        "title": "Event Id",
+        "type": "string"
+      },
+      "revision": {
+        "minimum": 1,
+        "title": "Revision",
+        "type": "integer"
+      },
+      "changes": {
+        "additionalProperties": true,
+        "maxProperties": 30,
+        "minProperties": 1,
+        "title": "Changes",
+        "type": "object"
+      }
+    },
+    "required": [
+      "event_id",
+      "revision",
+      "changes"
+    ],
+    "title": "UpdateArgs",
+    "type": "object"
+  },
+  "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  }
+}
