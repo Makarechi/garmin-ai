@@ -2,12 +2,13 @@ mod control;
 mod diary;
 mod history;
 mod local_text;
+mod model_publication;
 
 pub use local_text::{LocalTelegramText, TelegramSafetyDecision};
-
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
 pub(crate) use history::resolve_legacy_history;
+pub use model_publication::TelegramModelContext;
 
 use std::time::Duration;
 
