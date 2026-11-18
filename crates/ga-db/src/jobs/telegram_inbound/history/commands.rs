@@ -5,14 +5,17 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde_json::json;
-use sqlx::{Acquire, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
 use super::{ConversationBinding, TelegramDiaryCommitError, TelegramInboundLease, prompt};
 use crate::{
     Database,
-    diary::{DiaryWriteError, UndoDiaryOperation, cancel_in, undo::undo_and_reconcile},
-    jobs::telegram_inbound::{TelegramInboundState, complete, diary::queue_reply},
+    diary::{UndoDiaryOperation, cancel_in, undo::try_undo_and_reconcile},
+    jobs::telegram_inbound::{
+        TelegramInboundState,
+        diary::{UNDO_UNAVAILABLE_REPLY, complete_reply_as, queue_reply},
+    },
     outbox_enqueue::QueuedIntent,
 };
 
@@ -89,9 +92,7 @@ impl Database {
                 "blocks":[{"text":message}],
             })).map_err(|_| TelegramDiaryCommitError::Reply)?;
             let queued = queue_reply(&mut txn, lease, envelope, intent, None).await?;
-            let completed = sqlx::query_scalar("SELECT clock_timestamp()")
-                .fetch_one(&mut *txn).await?;
-            complete(&mut txn, lease, completed, state).await?;
+            complete_reply_as(&mut txn, lease, state).await?;
             txn.commit().await?;
             Ok(queued)
         }).await.map_err(|_| TelegramDiaryCommitError::Database)?
@@ -127,9 +128,8 @@ async fn undo(
     configured_timezone: &str,
 ) -> Result<(String, TelegramInboundState), TelegramDiaryCommitError> {
     let actor = format!("telegram:{sender}");
-    let mut savepoint = txn.begin().await?;
-    let undone = match undo_and_reconcile(
-        &mut savepoint,
+    let Some(undone) = try_undo_and_reconcile(
+        txn,
         &UndoDiaryOperation {
             owner_id: binding.owner_id,
             authenticated_actor: &actor,
@@ -137,22 +137,10 @@ async fn undo(
         configured_timezone,
     )
     .await
-    {
-        Ok(undone) => undone,
-        Err(
-            DiaryWriteError::NothingToUndo
-            | DiaryWriteError::UndoConflict
-            | DiaryWriteError::LinkedObservations,
-        ) => {
-            savepoint.rollback().await?;
-            return Ok((
-                "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись.".into(),
-                TelegramInboundState::Invalid,
-            ));
-        }
-        Err(error) => return Err(TelegramDiaryCommitError::Diary(error)),
+    .map_err(TelegramDiaryCommitError::Diary)?
+    else {
+        return Ok((UNDO_UNAVAILABLE_REPLY.into(), TelegramInboundState::Invalid));
     };
-    savepoint.commit().await?;
     cancel_in(txn, binding)
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;

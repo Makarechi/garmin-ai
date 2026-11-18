@@ -1,8 +1,10 @@
 mod local_text;
+mod model_reply;
 mod poller;
 mod reminders;
 mod send;
 mod worker;
+pub use model_reply::{DiaryReplyOutcome, DiaryReplyPreferences, publish_telegram_interpretation};
 pub use poller::{PollBatch, PollProgress, TelegramLoopError};
 pub use reminders::DiaryReminderSettings;
 pub use send::TelegramSendOutcome;
