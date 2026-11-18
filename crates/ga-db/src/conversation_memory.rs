@@ -1,8 +1,11 @@
 //! Scoped analytic context for neutral conversations.
 
 mod confirmed;
+mod read_context;
 mod telegram_forget;
 pub use confirmed::ConfirmedAnalysis;
+pub use read_context::AnalysisReadContext;
+pub(crate) use read_context::channel_in as analysis_channel_in;
 pub(crate) use telegram_forget::forget_in as forget_telegram_in;
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
@@ -243,6 +246,24 @@ async fn conversation(
     .await?
     .ok_or(MemoryError::NotFound)?;
     parse_row(target)
+}
+
+pub(crate) async fn shared_memory_epochs(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    shared: bool,
+) -> Result<BTreeMap<Uuid, Uuid>, sqlx::Error> {
+    if !shared {
+        return Ok(BTreeMap::new());
+    }
+    let rows = sqlx::query_as(
+        "SELECT id,memory_epoch FROM conversations WHERE owner_id=$1 AND id<>$2 AND share_owner_memory",
+    )
+    .bind(binding.owner_id)
+    .bind(binding.conversation_id)
+    .fetch_all(&mut **txn)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 async fn persist_turns(
