@@ -407,13 +407,41 @@ def compare_system_updates(python, native, engine):
         expected["canonical"].pop(name)
     assert document == expected
 
+    point = {
+        **NOTE,
+        "start": "2026-10-25T02:15:00.123456+02:00",
+        "payload": {"type": "wellbeing_observation", "energy": 6},
+    }
+    for client in (python, native):
+        created = python.post(PATH, headers=headers("both"), json=point)
+        assert created.status_code == 200
+        point_id = UUID(created.json()["id"])
+        point_endpoint = f"{PATH}/{point_id}"
+        corrected = client.put(
+            point_endpoint,
+            headers=headers("both"),
+            json={
+                "revision": 1,
+                "event": {**point, "end": "2026-10-25T00:15:00.123456Z"},
+            },
+        )
+        assert corrected.status_code == 200 and corrected.json()["end"] is None
+        with engine.connect() as connection:
+            ending = connection.execute(
+                text("SELECT after->'end' FROM audit_log WHERE event_id=:id AND action='update'"),
+                {"id": point_id},
+            ).scalar_one()
+        assert ending is None
+        saved = client.get(point_endpoint, headers=headers("reader"))
+        assert saved.status_code == 200 and saved.json()["end"] is None
+
 
 def run(binary):
     engine = isolated_engine()
     try:
         with Session(engine) as session, session.begin():
             packs = ensure_scenario_packs(session, legacy_install=False)
-            for key in ("caffeine", "migraine"):
+            for key in ("caffeine", "migraine", "wellbeing"):
                 row = packs[key]
                 configure_scenario_pack(
                     session,
