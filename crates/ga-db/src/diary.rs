@@ -11,6 +11,7 @@ pub use custom_registry::{
 };
 
 mod metrics;
+mod proactive_answers;
 mod reads;
 mod revisions;
 mod undo;

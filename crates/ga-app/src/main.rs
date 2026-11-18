@@ -4,6 +4,7 @@ mod backup_space;
 mod configuration;
 mod healthcheck;
 mod http;
+mod lifecycle;
 mod mcp_stdio;
 mod migrate;
 mod replay_worker;
@@ -66,6 +67,13 @@ enum Command {
         source: PathBuf,
         destination: PathBuf,
     },
+    /// Erase the local database, raw archive, and Garmin tokens
+    EraseAll {
+        #[arg(long)]
+        confirm: String,
+    },
+    /// Re-enable storage after explicit local setup
+    ResumeStorage,
     /// Serve MCP tools over standard input and output
     Mcp,
     /// Probe the local native HTTP service or worker
@@ -157,20 +165,22 @@ fn main() -> ExitCode {
             }
         }
         Some(Command::Backup { path }) => {
-            return backup_result(backup::create(&path));
+            return report(backup::create(&path));
         }
         Some(Command::Export { path }) => {
-            return backup_result(backup::export(&path));
+            return report(backup::export(&path));
         }
         Some(Command::RestoreDb { path }) => {
-            return backup_result(backup::restore(&path));
+            return report(backup::restore(&path));
         }
         Some(Command::UnpackBackup {
             source,
             destination,
         }) => {
-            return backup_result(backup::unpack(&source, &destination));
+            return report(backup::unpack(&source, &destination));
         }
+        Some(Command::EraseAll { confirm }) => return report(lifecycle::erase(&confirm)),
+        Some(Command::ResumeStorage) => return report(lifecycle::resume()),
         Some(Command::Mcp) => {
             if let Err(error) = mcp_stdio::run() {
                 eprintln!("{error}");
@@ -208,7 +218,7 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn backup_result(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
+fn report(result: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -107,6 +107,7 @@ impl Database {
                 "/resume",
                 "/help",
                 "/start",
+                "/debug",
             ]),
         )
         .await
