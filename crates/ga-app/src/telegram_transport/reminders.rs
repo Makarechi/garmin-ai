@@ -37,11 +37,8 @@ impl TelegramTransport {
         database: &Database,
         settings: &TelegramIngressSettings,
         configured: &DiaryReminderSettings,
-        mut recovered: watch::Receiver<bool>,
+        mut ready: watch::Receiver<bool>,
     ) -> ! {
-        if recovered.wait_for(|ready| *ready).await.is_err() {
-            future::pending::<()>().await;
-        }
         let policy = NotificationPolicy {
             timezone: &configured.timezone,
             default_enabled: configured.enabled,
@@ -54,9 +51,12 @@ impl TelegramTransport {
         };
         let mut current = None;
         loop {
+            if ready.wait_for(|ready| *ready).await.is_err() {
+                future::pending::<()>().await;
+            }
             let wait = if let Ok(binding) = settings.confirmed_binding(database).await {
                 match self
-                    .reminder_step(database, binding, &policy, &mut current)
+                    .reminder_step(database, binding, &policy, &ready, &mut current)
                     .await
                 {
                     Ok(true) => continue,
@@ -75,6 +75,7 @@ impl TelegramTransport {
         database: &Database,
         binding: TelegramBinding<'_>,
         policy: &NotificationPolicy<'_>,
+        ready: &watch::Receiver<bool>,
         current: &mut Option<ReservedDiaryQuestion>,
     ) -> Result<bool, ProactiveControlError> {
         let clock = || wall_clock().map_err(|_| ProactiveControlError::InvalidCommand);
@@ -113,7 +114,12 @@ impl TelegramTransport {
                 question,
                 policy,
                 now,
-                |text| self.send_diary_reminder(binding, now, text),
+                |text| async move {
+                    if !*ready.borrow() {
+                        return retry_outcome(now, RETRY_INTERVAL);
+                    }
+                    self.send_diary_reminder(binding, now, text).await
+                },
             )
             .await?;
         // On a database error preserve the same reservation. Delivery never starts without its marker.
@@ -144,17 +150,20 @@ impl TelegramTransport {
                 last_message_id, ..
             }) => DiaryQuestionOutcome::Accepted(last_message_id),
             Ok(TelegramSendOutcome::RateLimited(delay)) => {
-                let observed = wall_clock().unwrap_or(now);
-                i64::try_from(delay.as_micros())
-                    .ok()
-                    .and_then(|delay| observed.unix_microseconds().checked_add(delay))
-                    .and_then(|retry| StoredInstant::from_unix_microseconds(retry).ok())
-                    .map_or(
-                        DiaryQuestionOutcome::Uncertain,
-                        DiaryQuestionOutcome::RetryAt,
-                    )
+                retry_outcome(wall_clock().unwrap_or(now), delay)
             }
             _ => DiaryQuestionOutcome::Uncertain,
         }
     }
+}
+
+fn retry_outcome(at: StoredInstant, delay: Duration) -> DiaryQuestionOutcome {
+    i64::try_from(delay.as_micros())
+        .ok()
+        .and_then(|delay| at.unix_microseconds().checked_add(delay))
+        .and_then(|retry| StoredInstant::from_unix_microseconds(retry).ok())
+        .map_or(
+            DiaryQuestionOutcome::Uncertain,
+            DiaryQuestionOutcome::RetryAt,
+        )
 }

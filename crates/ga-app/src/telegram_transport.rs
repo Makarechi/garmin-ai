@@ -75,15 +75,19 @@ impl TelegramTransport {
         Self::connect(token, TELEGRAM_API, true)
     }
 
-    /// Read the provider's current delivery mode without exposing the webhook URL.
-    async fn webhook_active(&self) -> Result<bool, TelegramTransportError> {
+    /// Read the webhook backlog, or report that the bot uses polling.
+    async fn webhook_backlog(&self) -> Result<Option<u64>, TelegramTransportError> {
         let value = self
             .call(&self.polling, "getWebhookInfo", &json!({}), MAX_ACK_BYTES)
             .await?;
-        value["url"]
-            .as_str()
-            .map(|url| !url.is_empty())
-            .ok_or(TelegramTransportError::InvalidResponse)
+        match value["url"].as_str() {
+            Some("") => Ok(None),
+            Some(_) => value["pending_update_count"]
+                .as_u64()
+                .map(Some)
+                .ok_or(TelegramTransportError::InvalidResponse),
+            None => Err(TelegramTransportError::InvalidResponse),
+        }
     }
 
     fn connect(

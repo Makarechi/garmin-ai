@@ -105,40 +105,36 @@ async fn worker_recovers_and_sends_one_current_reminder() -> Result<(), Box<dyn 
         }
     };
     let observer = async {
-        let mut sends = 0;
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().await?;
-            let body = request(&mut stream).await?;
-            match body["endpoint"].as_str() {
-                Some("getWebhookInfo") => {
-                    respond(
-                        &mut stream,
-                        "200 OK",
-                        &[],
-                        r#"{"ok":true,"result":{"url":"https://synthetic.invalid/telegram"}}"#,
-                    )
-                    .await?;
-                }
-                Some("sendMessage") => {
-                    sends += 1;
-                    assert_eq!(body["fields"]["chat_id"], 42);
-                    let question = body["fields"]["text"]
-                        .as_str()
-                        .ok_or("Expected plain question text")?;
-                    assert!(question.starts_with("Мигрень, начавшаяся"));
-                    assert!(question.ends_with("Принимали ли что-нибудь?"));
-                    let recovered: String =
-                        sqlx::query_scalar("SELECT status FROM pending_questions WHERE id=$1")
-                            .bind(unknown)
-                            .fetch_one(&pool)
-                            .await?;
-                    assert_eq!(recovered, "uncertain");
-                    respond(&mut stream, "200 OK", &[], r#"{"ok":true,"result":{"message_id":761,"chat":{"id":42,"type":"private"}}}"#).await?;
-                }
-                _ => return Err::<(), Box<dyn Error>>("Unexpected fixture Bot API request".into()),
-            }
+        for pending in [0, 1, 0, 0] {
+            let (mut webhook, _) = listener.accept().await?;
+            assert_eq!(request(&mut webhook).await?["endpoint"], "getWebhookInfo");
+            let response = json!({"ok":true,"result":{
+                "url":"https://synthetic.invalid/telegram", "pending_update_count":pending,
+            }});
+            respond(&mut webhook, "200 OK", &[], &response.to_string()).await?;
         }
-        assert_eq!(sends, 1);
+        let (mut stream, _) = listener.accept().await?;
+        let body = request(&mut stream).await?;
+        assert_eq!(body["endpoint"], "sendMessage");
+        assert_eq!(body["fields"]["chat_id"], 42);
+        let question = body["fields"]["text"]
+            .as_str()
+            .ok_or("Expected plain question text")?;
+        assert!(question.starts_with("Мигрень, начавшаяся"));
+        assert!(question.ends_with("Принимали ли что-нибудь?"));
+        let recovered: String =
+            sqlx::query_scalar("SELECT status FROM pending_questions WHERE id=$1")
+                .bind(unknown)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(recovered, "uncertain");
+        respond(
+            &mut stream,
+            "200 OK",
+            &[],
+            r#"{"ok":true,"result":{"message_id":761,"chat":{"id":42,"type":"private"}}}"#,
+        )
+        .await?;
         loop {
             let completed: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pending_questions q JOIN app_state a
@@ -158,14 +154,14 @@ async fn worker_recovers_and_sends_one_current_reminder() -> Result<(), Box<dyn 
                 .await
                 .is_err()
         );
-        Ok(())
+        Ok::<(), Box<dyn Error>>(())
     };
     tokio::select! {
         result = worker => result?,
         result = timeout(Duration::from_secs(8), observer) => result??,
     }
     println!(
-        "Verified startup recovery, saved owner enablement, and a single observed Telegram send"
+        "Verified startup recovery, webhook backlog, saved enablement, and a single Telegram send"
     );
     Ok(())
 }

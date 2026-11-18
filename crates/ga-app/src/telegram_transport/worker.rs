@@ -18,6 +18,7 @@ use super::{
 use crate::telegram_settings::TelegramIngressSettings;
 
 const MODE_REFRESH: Duration = Duration::from_secs(30);
+const WEBHOOK_BACKLOG_INTERVAL: Duration = Duration::from_secs(1);
 const INACTIVE_RETRY: Duration = Duration::from_secs(2);
 const EMPTY_POLL_RETRY: Duration = Duration::from_millis(250);
 const ACK_IDLE: Duration = Duration::from_millis(250);
@@ -42,9 +43,9 @@ impl TelegramTransport {
         database: &Database,
         runtime: &mut RuntimeLease,
         settings: &TelegramIngressSettings,
-        recovered: watch::Sender<bool>,
+        reminders_ready: watch::Sender<bool>,
     ) -> Result<(), RuntimeLeaseError> {
-        self.receive(database, runtime, settings, Some(recovered))
+        self.receive(database, runtime, settings, Some(reminders_ready))
             .await
     }
 
@@ -53,53 +54,91 @@ impl TelegramTransport {
         database: &Database,
         runtime: &mut RuntimeLease,
         settings: &TelegramIngressSettings,
-        mut reminder_recovery: Option<watch::Sender<bool>>,
+        reminders_ready: Option<watch::Sender<bool>>,
     ) -> Result<(), RuntimeLeaseError> {
-        let mut mode = None;
+        let mut recovered = reminders_ready.is_none();
+        let mut polling_until = None;
+        let mut empty_webhook_reports = 0_u8;
         let mut progress = PollProgress::default();
+        let set_ready = |ready| {
+            if let Some(sender) = &reminders_ready {
+                sender.send_if_modified(|current| {
+                    let changed = *current != ready;
+                    *current = ready;
+                    changed
+                });
+            }
+        };
         loop {
-            if let Some(recovered) = reminder_recovery.as_ref()
-                && runtime.recover_diary_question_deliveries().await.is_ok()
-            {
-                let _ = recovered.send(true);
-                reminder_recovery = None;
+            if !recovered {
+                recovered = runtime.recover_diary_question_deliveries().await.is_ok();
             }
             let binding = settings.confirmed_binding(database).await;
             let selected = runtime
                 .telegram_channel_selected(settings.instance_id())
                 .await;
             let (Ok(binding), Ok(true)) = (binding, selected) else {
-                mode = None;
+                set_ready(false);
+                polling_until = None;
+                empty_webhook_reports = 0;
                 progress = PollProgress::default();
                 runtime.while_held(sleep(INACTIVE_RETRY)).await?;
                 continue;
             };
-            if mode.is_none_or(|(_, expires)| Instant::now() >= expires) {
-                match runtime.while_held(self.webhook_active()).await? {
-                    Ok(active) => mode = Some((active, Instant::now() + MODE_REFRESH)),
+            if polling_until.is_none_or(|expires| Instant::now() >= expires) {
+                match runtime.while_held(self.webhook_backlog()).await? {
+                    Ok(None) => {
+                        if polling_until.is_none() {
+                            set_ready(false);
+                        }
+                        polling_until = Some(Instant::now() + MODE_REFRESH);
+                        empty_webhook_reports = 0;
+                    }
+                    Ok(Some(pending)) => {
+                        polling_until = None;
+                        progress = PollProgress::default();
+                        empty_webhook_reports = if pending == 0 {
+                            empty_webhook_reports.saturating_add(1)
+                        } else {
+                            0
+                        };
+                        set_ready(recovered && empty_webhook_reports >= 2);
+                        let wait = if reminders_ready.is_some() {
+                            WEBHOOK_BACKLOG_INTERVAL
+                        } else {
+                            MODE_REFRESH
+                        };
+                        runtime.while_held(sleep(wait)).await?;
+                        continue;
+                    }
                     Err(error) => {
+                        set_ready(false);
+                        polling_until = None;
+                        empty_webhook_reports = 0;
                         progress = PollProgress::default();
                         runtime.while_held(sleep(retry_delay(error))).await?;
                         continue;
                     }
                 }
             }
-            if let Some((true, expires)) = mode {
-                progress = PollProgress::default();
-                runtime
-                    .while_held(tokio::time::sleep_until(expires))
-                    .await?;
-                continue;
-            }
             let wait = match self.poll_once(runtime, binding, &mut progress).await {
-                Ok(batch) if batch.updates > 0 => continue,
-                Ok(_) => EMPTY_POLL_RETRY,
+                Ok(batch) => {
+                    set_ready(recovered && batch.notification_ready);
+                    if batch.updates > 0 {
+                        continue;
+                    }
+                    EMPTY_POLL_RETRY
+                }
                 Err(TelegramLoopError::Runtime(error)) => return Err(error),
                 Err(TelegramLoopError::Transport(error)) => {
-                    mode = None;
+                    set_ready(false);
+                    polling_until = None;
                     retry_delay(error)
                 }
-                Err(_) => INACTIVE_RETRY,
+                Err(_) => {
+                    set_ready(false);
+                    INACTIVE_RETRY
+                }
             };
             runtime.while_held(sleep(wait)).await?;
         }
