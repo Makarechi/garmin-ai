@@ -1,6 +1,6 @@
 use ga_db::{
     Database,
-    diary::{CreateSystemEvent, DiaryReadError, DiaryWriteError},
+    diary::{CreateSystemEvent, DeleteEvent, DiaryReadError, DiaryWriteError},
 };
 use ga_domain::{
     event_input::{EventInput, ValidationMode},
@@ -27,7 +27,10 @@ use crate::{
 };
 
 const INSTRUCTIONS: &str = include_str!("../../../src/garmin_ai/prompts/mcp_server.txt");
-const CREATE_TOOL: &str = include_str!("../contracts/mcp-events-create.json");
+const WRITE_TOOLS: &[&str] = &[
+    include_str!("../contracts/mcp-events-create.json"),
+    include_str!("../contracts/mcp-events-delete.json"),
+];
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -35,7 +38,7 @@ struct Mcp {
     database: Database,
     owner: Uuid,
     events_tool: Tool,
-    create_tool: Option<Tool>,
+    write_tools: Vec<Tool>,
     active_reads: Semaphore,
 }
 
@@ -57,9 +60,11 @@ pub(crate) async fn run() -> Result<(), &'static str> {
         database,
         owner,
         events_tool: diary_tool()?,
-        create_tool: writes
-            .then(|| serde_json::from_str(CREATE_TOOL))
-            .transpose()
+        write_tools: WRITE_TOOLS
+            .iter()
+            .take(if writes { WRITE_TOOLS.len() } else { 0 })
+            .map(|schema| serde_json::from_str(schema))
+            .collect::<Result<_, _>>()
             .map_err(|_| "The MCP write descriptor is invalid")?,
         active_reads: Semaphore::new(2),
     };
@@ -111,7 +116,7 @@ impl ServerHandler for Mcp {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let mut tools = vec![self.events_tool.clone()];
-        tools.extend(self.create_tool.clone());
+        tools.extend(self.write_tools.iter().cloned());
         Ok(ListToolsResult::with_all_items(tools))
     }
 
@@ -120,14 +125,13 @@ impl ServerHandler for Mcp {
         call: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        let args = call.arguments.unwrap_or_default();
+        let is_cancelled = || context.ct.is_cancelled();
+        let enable_writes = !self.write_tools.is_empty();
         let result = match call.name.as_ref() {
-            "events" => self.events(call.arguments.unwrap_or_default()).await,
-            "events_create" if self.create_tool.is_some() => {
-                self.create(call.arguments.unwrap_or_default(), || {
-                    context.ct.is_cancelled()
-                })
-                .await
-            }
+            "events" => self.events(args).await,
+            "events_create" if enable_writes => self.create(args, is_cancelled).await,
+            "events_delete" if enable_writes => self.delete(args, is_cancelled).await,
             "events_create" | "events_update" | "events_delete" | "entries_create" => {
                 Err("PermissionError")
             }
@@ -142,6 +146,39 @@ impl ServerHandler for Mcp {
 }
 
 impl Mcp {
+    async fn delete(
+        &self,
+        args: serde_json::Map<String, Value>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<CallToolResult, &'static str> {
+        if args.len() != 2 {
+            return Err("ValidationError");
+        }
+        let event_id = args
+            .get("event_id")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .ok_or("ValidationError")?;
+        let expected_revision = args
+            .get("revision")
+            .and_then(positive_revision)
+            .ok_or("ValidationError")?;
+        let deleted = self
+            .database
+            .delete_event_unless_cancelled(
+                DeleteEvent {
+                    owner_id: self.owner,
+                    authenticated_actor: "mcp",
+                    event_id,
+                    expected_revision,
+                },
+                is_cancelled,
+            )
+            .await
+            .map_err(write_error)?;
+        tool_result(deleted.snapshot)
+    }
+
     async fn create(
         &self,
         mut args: serde_json::Map<String, Value>,
@@ -196,6 +233,30 @@ impl Mcp {
     }
 }
 
+fn positive_revision(value: &Value) -> Option<i32> {
+    let revision = match value {
+        Value::Number(number) => number.as_f64()?,
+        Value::Bool(true) => 1.0,
+        Value::String(text) => {
+            let text = text.trim();
+            if text.contains(['e', 'E']) {
+                return None;
+            }
+            text.replace('_', "").parse().ok()?
+        }
+        _ => return None,
+    };
+    if !revision.is_finite() || revision < 1.0 || revision.fract() != 0.0 {
+        return None;
+    }
+    // An out-of-range revision cannot match a stored PostgreSQL integer.
+    Some(if revision > f64::from(i32::MAX) {
+        0
+    } else {
+        revision as i32
+    })
+}
+
 fn tool_result(value: Value) -> Result<CallToolResult, &'static str> {
     let compact = serde_json::to_vec(&value).map_err(|_| "ValueError")?;
     let encoded =
@@ -208,7 +269,9 @@ fn tool_result(value: Value) -> Result<CallToolResult, &'static str> {
 
 fn write_error(error: DiaryWriteError) -> &'static str {
     match error {
-        DiaryWriteError::UnknownOwner => "PermissionError",
+        DiaryWriteError::UnknownOwner | DiaryWriteError::DeletionForbidden => "PermissionError",
+        DiaryWriteError::EventMissing => "LookupError",
+        DiaryWriteError::RevisionChanged | DiaryWriteError::LinkedObservations => "Conflict",
         DiaryWriteError::Storage(_)
         | DiaryWriteError::Cancelled
         | DiaryWriteError::Busy

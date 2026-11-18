@@ -156,11 +156,7 @@ impl Database {
             .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
         let written = Self::create_system_event_in(&mut txn, request).await?;
-        if is_cancelled() {
-            txn.rollback().await?;
-            return Err(DiaryWriteError::Cancelled);
-        }
-        txn.commit().await?;
+        commit_diary_write(txn, is_cancelled).await?;
         Ok(written)
     }
 
@@ -292,6 +288,18 @@ impl Database {
         }
         Ok(())
     }
+}
+
+async fn commit_diary_write(
+    txn: Transaction<'_, Postgres>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<(), DiaryWriteError> {
+    if is_cancelled() {
+        txn.rollback().await?;
+        return Err(DiaryWriteError::Cancelled);
+    }
+    txn.commit().await?;
+    Ok(())
 }
 
 struct AuditEntry<'a> {

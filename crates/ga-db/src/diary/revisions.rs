@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, check_pack,
+    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, check_pack, commit_diary_write,
     invalidate_migraine_insights, load_event, metrics, relation_id, stored_instant,
     validate_relation,
 };
@@ -36,6 +36,18 @@ impl Database {
         &self,
         request: DeleteEvent<'_>,
     ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        self.delete_event_unless_cancelled(request, || false).await
+    }
+
+    /// Delete only if the caller stays active through the audit and commit boundary.
+    pub async fn delete_event_unless_cancelled(
+        &self,
+        request: DeleteEvent<'_>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        if is_cancelled() {
+            return Err(DiaryWriteError::Cancelled);
+        }
         let mut txn = self.begin_diary_write(request.owner_id).await?;
         let (revision, deleted, deletion_allowed, query_allowed) =
             sqlx::query_as::<_, (i32, bool, bool, bool)>(
@@ -92,7 +104,7 @@ impl Database {
         if !query_allowed {
             deleted.snapshot = serde_json::json!({"id": id.to_string(), "revision": deleted.revision, "deleted": true});
         }
-        txn.commit().await?;
+        commit_diary_write(txn, is_cancelled).await?;
         Ok(deleted)
     }
 
