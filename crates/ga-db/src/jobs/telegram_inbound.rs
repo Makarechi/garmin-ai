@@ -1,6 +1,9 @@
 mod control;
 mod diary;
 mod history;
+mod local_text;
+
+pub use local_text::{LocalTelegramText, TelegramSafetyDecision};
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
@@ -70,6 +73,43 @@ impl TelegramInboundState {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InboxWork {
+    All,
+    Controls,
+    LocalDiary,
+    ScreenText,
+    TextWithoutProvider,
+}
+
+impl InboxWork {
+    fn commands(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Controls => Some(&[
+                "/forget_conversation",
+                "/today",
+                "/status",
+                "/goals",
+                "/pause",
+                "/resume",
+                "/help",
+                "/start",
+                "/debug",
+            ]),
+            Self::LocalDiary => Some(&["/history", "/cancel", "/undo"]),
+            _ => None,
+        }
+    }
+
+    fn text_stage(self) -> i32 {
+        match self {
+            Self::ScreenText => 1,
+            Self::TextWithoutProvider => 2,
+            _ => 0,
+        }
+    }
+}
+
 impl Database {
     /// Reserve the earliest native delivery for a confirmed owner and bot.
     /// Later diary work waits behind a running or delayed earlier delivery.
@@ -79,7 +119,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary, None, false)
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary, InboxWork::All)
             .await
     }
 
@@ -90,8 +130,14 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Control, None, false)
-            .await
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Control,
+            InboxWork::All,
+        )
+        .await
     }
 
     /// Claim commands served by the current local worker, for historical and new inbox rows.
@@ -106,18 +152,7 @@ impl Database {
             now,
             lease_seconds,
             InboxLane::Control,
-            Some(&[
-                "/forget_conversation",
-                "/today",
-                "/status",
-                "/goals",
-                "/pause",
-                "/resume",
-                "/help",
-                "/start",
-                "/debug",
-            ]),
-            false,
+            InboxWork::Controls,
         )
         .await
     }
@@ -134,8 +169,41 @@ impl Database {
             now,
             lease_seconds,
             InboxLane::Diary,
-            Some(&["/history", "/cancel", "/undo"]),
-            true,
+            InboxWork::LocalDiary,
+        )
+        .await
+    }
+
+    /// Screen the next unchecked text or voice caption without waiting on provider work.
+    pub async fn claim_telegram_local_screen(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Diary,
+            InboxWork::ScreenText,
+        )
+        .await
+    }
+
+    /// Resume the first screened report when no provider is configured and usable.
+    pub async fn claim_telegram_no_model_text(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Diary,
+            InboxWork::TextWithoutProvider,
         )
         .await
     }
@@ -146,8 +214,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
         lane: InboxLane,
-        commands: Option<&[&str]>,
-        history: bool,
+        work: InboxWork,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
         if !(1..=86_400).contains(&lease_seconds) {
             return Err(JobStoreError::InvalidLeaseDuration);
@@ -199,6 +266,13 @@ impl Database {
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
+                       AND ($12 = 0 OR (
+                           i.kind IN ('text','edit','voice') AND (
+                             (command.input<>'' AND command.input NOT LIKE '/%'
+                               AND (j.payload->>'local_safety_checked' IS NOT DISTINCT FROM 'true') = ($12 = 2))
+                             OR ($12 = 2 AND i.kind='voice' AND coalesce(command.input,'')='')
+                           )
+                       ))
                        AND ($9::text[] IS NULL OR (
                          (NOT $11 OR i.kind IN ('text','voice')) AND split_part(command.input,' ',1)=ANY($9))
                          OR ($11 AND i.kind='action' AND (
@@ -213,8 +287,8 @@ impl Database {
                                AND e.revision::text=split_part(i.envelope#>>'{action,action_id}','/',3)))
                          )))
                        AND (
-                         NOT $11 OR coalesce(split_part(command.input,' ',1),'') NOT IN ('/cancel','/undo')
-                         OR (command.input IN ('/cancel','/undo') AND ",
+                         ($12 <> 2 AND (NOT $11 OR coalesce(split_part(command.input,' ',1),'') NOT IN ('/cancel','/undo')))
+                         OR (($12 = 2 OR command.input IN ('/cancel','/undo')) AND ",
                          include_str!("telegram_inbound/no_prior_diary.sql"),
                          ")
                        )
@@ -237,9 +311,10 @@ impl Database {
             .bind(token)
             .bind(ATTEMPT_LIMIT)
             .bind(lane.label())
-            .bind(commands)
+            .bind(work.commands())
             .bind(COMMAND_WHITESPACE)
-            .bind(history)
+            .bind(work == InboxWork::LocalDiary)
+            .bind(work.text_stage())
             .fetch_optional(&mut *txn)
             .await?;
             let mut result =

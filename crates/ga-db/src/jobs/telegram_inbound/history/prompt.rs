@@ -13,18 +13,19 @@ use crate::{
     replay::REPLAY_MUTATION_LOCK,
 };
 
-pub(super) struct PromptState {
-    pub(super) notice: Option<&'static str>,
-    pub(super) draft: Option<SetupDraft>,
+pub(in crate::jobs::telegram_inbound) struct PromptState {
+    pub(in crate::jobs::telegram_inbound) notice: Option<&'static str>,
+    pub(in crate::jobs::telegram_inbound) draft: Option<SetupDraft>,
+    pub(in crate::jobs::telegram_inbound) pending: bool,
 }
 
-pub(super) struct SetupDraft {
-    pub(super) key: String,
-    pub(super) russian: bool,
-    pub(super) predates_step: bool,
+pub(in crate::jobs::telegram_inbound) struct SetupDraft {
+    pub(in crate::jobs::telegram_inbound) key: String,
+    pub(in crate::jobs::telegram_inbound) russian: bool,
+    pub(in crate::jobs::telegram_inbound) predates_step: bool,
 }
 
-pub(super) async fn blocked(
+pub(in crate::jobs::telegram_inbound) async fn blocked(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     lease: &TelegramInboundLease,
@@ -34,7 +35,7 @@ pub(super) async fn blocked(
     Ok(inspect(txn, binding, lease, envelope, at).await?.notice)
 }
 
-pub(super) async fn inspect(
+pub(in crate::jobs::telegram_inbound) async fn inspect(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     lease: &TelegramInboundLease,
@@ -137,6 +138,7 @@ pub(super) async fn inspect(
                     "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
                 ),
                 draft: None,
+                pending: pending.is_some(),
             });
         }
     }
@@ -148,13 +150,15 @@ pub(super) async fn inspect(
     }) {
         return Ok(PromptState {
             notice: Some("Сообщение отправлено до текущего выбора. Откройте актуальное меню."),
-            draft: None,
+            draft: setup,
+            pending: true,
         });
     }
     Ok(PromptState {
         notice: (setup.is_some() && envelope.kind() == InboundKind::Action)
             .then_some("Сначала завершите настройку трекера или отправьте /cancel."),
         draft: setup,
+        pending: pending.is_some(),
     })
 }
 

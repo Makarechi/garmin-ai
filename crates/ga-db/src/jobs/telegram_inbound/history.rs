@@ -1,7 +1,7 @@
 mod commands;
 mod labels;
 mod legacy;
-mod prompt;
+pub(super) mod prompt;
 mod selection;
 
 pub(crate) use legacy::resolve_legacy_history;
