@@ -28,6 +28,7 @@ pub enum DiaryReadError {
     InvalidEvent,
     ModelConsent,
     InvalidDestination,
+    InvalidZone,
     Owner,
     ContextChanged,
 }
@@ -45,6 +46,7 @@ impl fmt::Display for DiaryReadError {
             Self::InvalidEvent => "Recorded diary entry could not be interpreted",
             Self::ModelConsent => "The diary model category is disabled",
             Self::InvalidDestination => "Invalid diary sharing destination",
+            Self::InvalidZone => "Unknown diary display timezone",
             Self::Owner => "Diary entries belong to a different owner",
             Self::ContextChanged => "Analysis context changed during the question",
         })
@@ -110,6 +112,7 @@ macro_rules! select_events {
     };
 }
 
+mod export;
 mod model_context;
 pub use model_context::{
     InterpretationContext, InterpretationContextQuery, InterpretationEvents,

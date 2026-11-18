@@ -87,6 +87,15 @@ impl std::str::FromStr for StoredInstant {
 
 impl fmt::Display for StoredInstant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        OffsetTimestamp(self.0).fmt(f)
+    }
+}
+
+/// ISO display with the numeric offset and the stored microsecond precision.
+pub struct OffsetTimestamp(pub OffsetDateTime);
+
+impl fmt::Display for OffsetTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = self.0;
         write!(
             f,
@@ -102,6 +111,13 @@ impl fmt::Display for StoredInstant {
         if micros != 0 {
             write!(f, ".{micros:06}")?;
         }
-        f.write_str("+00:00")
+        let offset = value.offset().whole_seconds();
+        let sign = if offset < 0 { '-' } else { '+' };
+        let seconds = offset.unsigned_abs();
+        write!(f, "{sign}{:02}:{:02}", seconds / 3600, seconds / 60 % 60)?;
+        if !seconds.is_multiple_of(60) {
+            write!(f, ":{:02}", seconds % 60)?;
+        }
+        Ok(())
     }
 }

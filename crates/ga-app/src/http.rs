@@ -1,6 +1,7 @@
 mod browser;
 pub(crate) mod demo;
 mod diary;
+mod exports;
 mod garmin_auth;
 mod personal_goals;
 pub(crate) mod tools;
@@ -40,6 +41,7 @@ fn router(state: AppState) -> Router {
         .route("/events", any(diary::create))
         .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))
+        .route("/exports/diary", any(exports::diary))
         .route("/entries", any(diary::create_custom))
         .route("/entries/{event_id}", any(diary::edit_custom))
         .route("/tools", any(tools::list))
