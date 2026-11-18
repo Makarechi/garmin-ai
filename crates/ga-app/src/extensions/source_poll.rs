@@ -1,7 +1,14 @@
-use std::{collections::BTreeMap, env, error::Error, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env,
+    error::Error,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use ga_db::{
     Database,
+    jobs::{FailureReason, JobOutcome},
     source_pages::{PublicationState, SourcePoll},
 };
 use ga_domain::{
@@ -13,7 +20,10 @@ use ga_domain::{
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
-use tokio::sync::watch;
+use tokio::{
+    sync::watch,
+    time::{Instant, sleep},
+};
 
 use super::{Extension, ExtensionError, run_until_shutdown};
 use crate::configuration;
@@ -21,8 +31,10 @@ use crate::configuration;
 const MAX_PAGES: usize = 10;
 const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(45);
+const PLAN_INTERVAL: Duration = Duration::from_secs(30);
+const JOB_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SourceSettings {
     id: String,
@@ -135,10 +147,7 @@ pub(crate) async fn poll_source(executable: &Path, id: &str) -> Result<(), Box<d
     let url = url.ok_or("Source extension storage is unavailable.")?;
     let database =
         Database::connect_lazy(&url).map_err(|_| "Source extension storage is unavailable.")?;
-    let now = OffsetDateTime::now_utc()
-        .unix_timestamp_nanos()
-        .div_euclid(1000);
-    let now = StoredInstant::from_unix_microseconds(i64::try_from(now)?)?;
+    let now = clock()?;
     let (cancel, mut cancelled) = watch::channel(false);
     let report = run_until_shutdown(
         cancel,
@@ -148,6 +157,102 @@ pub(crate) async fn poll_source(executable: &Path, id: &str) -> Result<(), Box<d
     .await?;
     println!("{report}");
     Ok(())
+}
+
+pub(crate) struct ScheduledSourcePlugins {
+    sources: BTreeMap<String, (PathBuf, SourceSettings)>,
+}
+
+impl ScheduledSourcePlugins {
+    pub(crate) fn read() -> Result<Option<Self>, Box<dyn Error>> {
+        let [configured, executables] =
+            configuration::read(["GA_INTEGRATIONS", "GA_SOURCE_PLUGIN_EXECUTABLES"])?;
+        let Some(executables) = executables else {
+            return Ok(None);
+        };
+        if executables.len() > MAX_SETTINGS_BYTES {
+            return Err(ExtensionError::Configuration.into());
+        }
+        let executables: BTreeMap<String, PathBuf> =
+            serde_json::from_str(&executables).map_err(|_| ExtensionError::Configuration)?;
+        if executables.len() > 32 {
+            return Err(ExtensionError::Configuration.into());
+        }
+        let mut sources = BTreeMap::new();
+        for (id, executable) in executables {
+            let Some(source) = SourceSettings::selected(configured.as_deref(), &id)? else {
+                continue;
+            };
+            if source.provider == "garmin" {
+                continue;
+            }
+            Extension::source(&executable, &id)?;
+            sources.insert(id, (executable, source));
+        }
+        Ok((!sources.is_empty()).then_some(Self { sources }))
+    }
+
+    pub(crate) async fn run(&self, database: &Database) -> ! {
+        let sources: Vec<_> = self.sources.keys().map(String::as_str).collect();
+        let mut next_plan = Instant::now();
+        loop {
+            let Ok(now) = clock() else {
+                sleep(PLAN_INTERVAL).await;
+                continue;
+            };
+            if Instant::now() >= next_plan {
+                next_plan = Instant::now() + PLAN_INTERVAL;
+                if let Err(error) = database.schedule_source_plugin_polls(&sources, now).await {
+                    eprintln!("{error}");
+                }
+            }
+            match database.claim_source_plugin_poll(&sources, now).await {
+                Ok(Some(lease)) => {
+                    let (executable, source) = &self.sources[lease.instance()];
+                    let (_stop, mut cancelled) = watch::channel(false);
+                    let result = tokio::time::timeout(
+                        DEADLINE,
+                        poll(database, executable, source.clone(), now, &mut cancelled),
+                    )
+                    .await;
+                    let outcome = match result {
+                        Ok(Ok(_)) => JobOutcome::Completed,
+                        Ok(Err(error)) => {
+                            eprintln!("{error}");
+                            JobOutcome::Failed {
+                                reason: FailureReason::RuntimeError,
+                                retry_at: None,
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!("{}", ExtensionError::Timeout);
+                            JobOutcome::Failed {
+                                reason: FailureReason::RuntimeError,
+                                retry_at: None,
+                            }
+                        }
+                    };
+                    if let Ok(finished) = clock()
+                        && let Err(error) = database
+                            .finish_source_plugin_poll(&lease, finished, outcome)
+                            .await
+                    {
+                        eprintln!("{error}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("{error}"),
+            }
+            sleep(JOB_INTERVAL).await;
+        }
+    }
+}
+
+fn clock() -> Result<StoredInstant, Box<dyn Error>> {
+    let now = OffsetDateTime::now_utc()
+        .unix_timestamp_nanos()
+        .div_euclid(1000);
+    Ok(StoredInstant::from_unix_microseconds(i64::try_from(now)?)?)
 }
 
 async fn poll(

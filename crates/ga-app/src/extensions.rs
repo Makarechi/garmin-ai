@@ -1,6 +1,6 @@
 mod source_poll;
 
-pub(crate) use source_poll::poll_source;
+pub(crate) use source_poll::{ScheduledSourcePlugins, poll_source};
 
 use std::{
     collections::BTreeSet, error::Error, fmt, future::Future, path::Path, process::Stdio,
