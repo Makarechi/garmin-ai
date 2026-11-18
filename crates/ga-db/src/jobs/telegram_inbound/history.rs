@@ -1,5 +1,9 @@
 mod labels;
+mod legacy;
+mod prompt;
 mod selection;
+
+pub(crate) use legacy::resolve_legacy_history;
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -23,6 +27,7 @@ use crate::{
 
 const ALL_HISTORY: &str = "diary.history.page";
 const OPEN_MIGRAINES: &str = "diary.history.open";
+const EXPIRED_HISTORY: &str = "diary.history.expired";
 const PAGE_LENGTH: usize = 10;
 
 #[derive(Clone, Copy)]
@@ -136,6 +141,19 @@ async fn rows(
 }
 
 impl Database {
+    pub async fn apply_telegram_history(
+        &self,
+        lease: &TelegramInboundLease,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+            .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+        if HistoryPage::from_update(&envelope).is_some() || expired_history(&envelope) {
+            self.apply_telegram_history_page(lease).await
+        } else {
+            self.apply_telegram_history_selection(lease).await
+        }
+    }
+
     /// Process a diary history request from an authenticated Telegram inbox lease.
     pub async fn apply_telegram_history_page(
         &self,
@@ -143,8 +161,11 @@ impl Database {
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
         let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
-        let page = HistoryPage::from_update(&envelope)
-            .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?;
+        let page = HistoryPage::from_update(&envelope);
+        let expired = expired_history(&envelope);
+        if page.is_none() && !expired {
+            return Err(TelegramDiaryCommitError::UnsupportedMessage);
+        }
         if envelope.channel().channel() != "telegram" || envelope.message_id() != lease.message_id {
             return Err(TelegramDiaryCommitError::UnsupportedMessage);
         }
@@ -154,31 +175,45 @@ impl Database {
         };
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            clear_history_selection(&mut txn, binding)
-                .await
-                .map_err(TelegramDiaryCommitError::Clarification)?;
             let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn)
                 .await?;
             let timestamp =
                 StoredInstant::try_from(now).map_err(|_| TelegramDiaryCommitError::Database)?;
             let instance = envelope.channel().instance_id();
-            let records = rows(
-                &mut txn,
-                &format!("telegram:{instance}"),
-                page,
-                timestamp,
-                None,
-            )
-            .await?;
-            let intent = history_reply(
-                binding,
-                instance,
-                page,
-                timestamp,
-                &records,
-                lease.operation_id,
-            )?;
+            let blocked = prompt::blocked(&mut txn, binding, lease, &envelope, timestamp).await?;
+            let intent = if let Some(text) =
+                blocked.or(expired.then_some("Эта кнопка устарела. Откройте /history заново."))
+            {
+                OutboundIntent::normalize(json!({
+                    "owner_id":binding.owner_id.to_string(),
+                    "conversation_id":binding.conversation_id.to_string(),
+                    "channel_instance":{"channel":"telegram","instance_id":instance},
+                    "blocks":[{"text":text}],
+                }))
+                .map_err(|_| TelegramDiaryCommitError::Reply)?
+            } else {
+                let page = page.ok_or(TelegramDiaryCommitError::UnsupportedMessage)?;
+                clear_history_selection(&mut txn, binding)
+                    .await
+                    .map_err(TelegramDiaryCommitError::Clarification)?;
+                let records = rows(
+                    &mut txn,
+                    &format!("telegram:{instance}"),
+                    page,
+                    timestamp,
+                    None,
+                )
+                .await?;
+                history_reply(
+                    binding,
+                    instance,
+                    page,
+                    timestamp,
+                    &records,
+                    lease.operation_id,
+                )?
+            };
             let dedup = format!("inbound:{}:history", lease.message_id);
             let queued = queue_outbox_intent(
                 &mut txn,
@@ -203,6 +238,11 @@ impl Database {
         .await
         .map_err(|_| TelegramDiaryCommitError::Database)?
     }
+}
+
+fn expired_history(envelope: &InboundEnvelope) -> bool {
+    envelope.kind() == InboundKind::Action
+        && envelope.document()["action"]["action_id"] == EXPIRED_HISTORY
 }
 
 fn history_reply(

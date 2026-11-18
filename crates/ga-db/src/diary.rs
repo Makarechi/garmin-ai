@@ -2,7 +2,8 @@ mod clarification;
 pub use clarification::{ClarificationClock, ClarificationError, ClarificationReply};
 pub(crate) use clarification::{
     clarification_active_at, clear_history_selection, clear_selected_record,
-    record_history_selection, save_in as save_clarification_in,
+    pending_in as pending_clarification_in, record_history_selection,
+    save_in as save_clarification_in,
 };
 
 mod agent_batch;

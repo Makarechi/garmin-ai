@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{
     ALL_HISTORY, HistoryPage, OPEN_MIGRAINES, Record, TelegramDiaryCommitError,
-    TelegramInboundLease, TelegramInboundState, complete, labels, rows,
+    TelegramInboundLease, TelegramInboundState, complete, labels, prompt, rows,
 };
 use crate::{
     Database,
@@ -85,49 +85,58 @@ impl Database {
                 open_only: false,
                 before: None,
             };
-            let current = rows(
-                &mut txn,
-                &format!("telegram:{instance}"),
-                page,
-                now,
-                Some(selected.id),
-            )
-            .await?
-            .pop();
+            let blocked = prompt::blocked(&mut txn, binding, lease, &envelope, now).await?;
+            let current = if blocked.is_none() {
+                rows(
+                    &mut txn,
+                    &format!("telegram:{instance}"),
+                    page,
+                    now,
+                    Some(selected.id),
+                )
+                .await?
+                .pop()
+            } else {
+                None
+            };
             let mut pending = None;
-            let message = match current
-                .as_ref()
-                .filter(|current| current.revision == selected.revision)
-            {
-                None => unavailable(&mut txn, selected.id, selected.revision).await?,
-                Some(current) if selected.action == Action::Delete && current.can_delete => {
-                    let actor = format!("telegram:{}", envelope.sender_ref());
-                    Self::delete_event_in(
-                        &mut txn,
-                        DeleteEvent {
-                            owner_id: binding.owner_id,
-                            authenticated_actor: &actor,
-                            event_id: selected.id,
-                            expected_revision: selected.revision,
-                        },
-                        Some(lease.operation_id),
-                    )
-                    .await
-                    .map_err(TelegramDiaryCommitError::Diary)?;
-                    clear_selected_record(&mut txn, binding, selected.id)
+            let message = if let Some(text) = blocked {
+                text.to_owned()
+            } else {
+                match current
+                    .as_ref()
+                    .filter(|current| current.revision == selected.revision)
+                {
+                    None => unavailable(&mut txn, selected.id, selected.revision).await?,
+                    Some(current) if selected.action == Action::Delete && current.can_delete => {
+                        let actor = format!("telegram:{}", envelope.sender_ref());
+                        Self::delete_event_in(
+                            &mut txn,
+                            DeleteEvent {
+                                owner_id: binding.owner_id,
+                                authenticated_actor: &actor,
+                                event_id: selected.id,
+                                expected_revision: selected.revision,
+                            },
+                            Some(lease.operation_id),
+                        )
                         .await
-                        .map_err(TelegramDiaryCommitError::Clarification)?;
-                    "Запись удалена. Отменить последнее изменение: /undo.".to_owned()
-                }
-                Some(current) if selected.action != Action::Delete && current.can_update => {
-                    if current.kind.starts_with("user.") {
-                        return Err(TelegramDiaryCommitError::UnsupportedMessage);
+                        .map_err(TelegramDiaryCommitError::Diary)?;
+                        clear_selected_record(&mut txn, binding, selected.id)
+                            .await
+                            .map_err(TelegramDiaryCommitError::Clarification)?;
+                        "Запись удалена. Отменить последнее изменение: /undo.".to_owned()
                     }
-                    let (text, state) = selected_record(current, selected.action, now)?;
-                    pending = Some(state);
-                    text
+                    Some(current) if selected.action != Action::Delete && current.can_update => {
+                        if current.kind.starts_with("user.") {
+                            return Err(TelegramDiaryCommitError::UnsupportedMessage);
+                        }
+                        let (text, state) = selected_record(current, selected.action, now)?;
+                        pending = Some(state);
+                        text
+                    }
+                    Some(_) => "Доступ к этой записи изменился. Откройте /history заново.".into(),
                 }
-                Some(_) => "Доступ к этой записи изменился. Откройте /history заново.".into(),
             };
             let actions = if pending.is_some() {
                 let page_action = if selected.action == Action::Close {

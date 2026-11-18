@@ -255,7 +255,7 @@ struct Scope {
     destination: String,
 }
 
-pub(super) async fn pending_in(
+pub(crate) async fn pending_in(
     txn: &mut Transaction<'_, Postgres>,
     binding: ConversationBinding,
     clock: ClarificationClock,

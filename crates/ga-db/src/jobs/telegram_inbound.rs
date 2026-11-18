@@ -4,6 +4,7 @@ mod history;
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
+pub(crate) use history::resolve_legacy_history;
 
 use std::time::Duration;
 
@@ -74,7 +75,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary, None)
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Diary, None, false)
             .await
     }
 
@@ -85,7 +86,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Control, None)
+        self.claim_telegram_lane(target, now, lease_seconds, InboxLane::Control, None, false)
             .await
     }
 
@@ -112,6 +113,25 @@ impl Database {
                 "/start",
                 "/debug",
             ]),
+            false,
+        )
+        .await
+    }
+
+    /// Claim the history commands and selectors served by the local diary worker.
+    pub async fn claim_local_telegram_history(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Diary,
+            Some(&["/history"]),
+            true,
         )
         .await
     }
@@ -123,6 +143,7 @@ impl Database {
         lease_seconds: u32,
         lane: InboxLane,
         commands: Option<&[&str]>,
+        history: bool,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
         if !(1..=86_400).contains(&lease_seconds) {
             return Err(JobStoreError::InvalidLeaseDuration);
@@ -171,8 +192,20 @@ impl Database {
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
-                       AND ($9::text[] IS NULL OR split_part(ltrim(translate(
+                       AND ($9::text[] IS NULL OR (
+                         (NOT $11 OR i.kind IN ('text','voice')) AND split_part(ltrim(translate(
                            i.envelope->>'text',$10,repeat(' ',char_length($10)))), ' ',1)=ANY($9))
+                         OR ($11 AND i.kind='action' AND (
+                           split_part(i.envelope#>>'{action,action_id}','/',1)=ANY(ARRAY[
+                             'diary.history.page','diary.history.open','diary.history.delete','diary.history.expired'])
+                           OR (split_part(i.envelope#>>'{action,action_id}','/',1)=ANY(ARRAY[
+                             'diary.history.edit','diary.history.close'])
+                             AND NOT EXISTS(SELECT 1 FROM events e WHERE starts_with(e.kind,'user.')
+                               AND NOT e.deleted AND e.id=CASE
+                                 WHEN pg_input_is_valid(split_part(i.envelope#>>'{action,action_id}','/',2),'uuid')
+                                 THEN split_part(i.envelope#>>'{action,action_id}','/',2)::uuid END
+                               AND e.revision::text=split_part(i.envelope#>>'{action,action_id}','/',3)))
+                         )))
                      ORDER BY coalesce((j.payload->>'ordering_epoch')::bigint,0),
                               i.external_event_id::bigint,j.id
                      LIMIT 1
@@ -194,6 +227,7 @@ impl Database {
             .bind(lane.label())
             .bind(commands)
             .bind(COMMAND_WHITESPACE)
+            .bind(history)
             .fetch_optional(&mut *txn)
             .await?;
             let mut result =
