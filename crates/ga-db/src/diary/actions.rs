@@ -1,4 +1,6 @@
 mod forms;
+mod setup;
+pub use setup::TrackerSetupStoreError;
 
 use std::{error::Error, fmt, time::Duration};
 

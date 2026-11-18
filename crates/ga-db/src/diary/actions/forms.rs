@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{ActionRecord, TrackerActionError, localized_label, read_locale};
 use crate::{Database, diary::DiaryReadError};
 
-mod projection;
+pub(super) mod projection;
 
 enum FormAction {
     Create(Uuid),
