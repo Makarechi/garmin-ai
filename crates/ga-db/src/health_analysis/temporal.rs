@@ -102,56 +102,76 @@ impl Database {
         cutoff: StoredInstant,
         purpose: TemporalPurpose,
     ) -> Result<TemporalFeatures, HealthAnalysisError> {
-        let events: BTreeSet<_> = events.iter().copied().collect();
-        let Some(&earliest) = events.first() else {
+        if events.is_empty() {
             return Ok(BTreeMap::new());
-        };
-        if purpose == TemporalPurpose::AsKnown && cutoff > earliest {
+        }
+        if purpose == TemporalPurpose::AsKnown && events.iter().any(|event| cutoff > *event) {
             return Err(HealthAnalysisError::InvalidKnowledgeCutoff);
         }
-        let latest = events.last().copied().unwrap_or(earliest);
-        let mut result: TemporalFeatures = events
-            .iter()
-            .map(|event| (*event, BTreeMap::new()))
-            .collect();
-        let metrics: BTreeSet<_> = metrics.iter().copied().collect();
         if metrics.is_empty() {
-            return Ok(result);
+            return Ok(events
+                .iter()
+                .map(|event| (*event, BTreeMap::new()))
+                .collect());
         }
-        let clocks: Vec<_> = events.into_iter().map(OffsetDateTime::from).collect();
-        let metrics: Vec<_> = metrics.into_iter().map(str::to_owned).collect();
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = begin_verified_analysis(&self.work).await?;
-            {
-                let mut rows = sqlx::query_as::<_, Feature>(include_str!("temporal/features.sql"))
-                    .bind(&metrics)
-                    .bind(&clocks)
-                    .bind(OffsetDateTime::from(earliest))
-                    .bind(OffsetDateTime::from(latest))
-                    .bind(OffsetDateTime::from(cutoff))
-                    .bind(PRE_EVENT_FEATURE_VERSION)
-                    .fetch(&mut *txn);
-                while let Some(row) = rows.try_next().await? {
-                    let Some(event) = row.event else {
-                        return Err(HealthAnalysisError::TemporalVersionLimit);
-                    };
-                    let event = StoredInstant::try_from(event)
-                        .map_err(|_| HealthAnalysisError::Database)?;
-                    let metric = row
-                        .metric
-                        .as_ref()
-                        .ok_or(HealthAnalysisError::Database)?
-                        .to_owned();
-                    result
-                        .get_mut(&event)
-                        .ok_or(HealthAnalysisError::Database)?
-                        .insert(metric, row.document(event, cutoff, purpose)?);
-                }
-            }
+            let result = temporal_features_in(&mut txn, metrics, events, cutoff, purpose).await?;
             txn.commit().await?;
             Ok(result)
         })
         .await
         .map_err(|_| HealthAnalysisError::Database)?
     }
+}
+
+pub(super) async fn temporal_features_in(
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    metrics: &[&str],
+    events: &[StoredInstant],
+    cutoff: StoredInstant,
+    purpose: TemporalPurpose,
+) -> Result<TemporalFeatures, HealthAnalysisError> {
+    let events: BTreeSet<_> = events.iter().copied().collect();
+    let Some(&earliest) = events.first() else {
+        return Ok(BTreeMap::new());
+    };
+    if purpose == TemporalPurpose::AsKnown && cutoff > earliest {
+        return Err(HealthAnalysisError::InvalidKnowledgeCutoff);
+    }
+    let latest = events.last().copied().unwrap_or(earliest);
+    let mut result: TemporalFeatures = events
+        .iter()
+        .map(|event| (*event, BTreeMap::new()))
+        .collect();
+    let metrics: BTreeSet<_> = metrics.iter().copied().collect();
+    if metrics.is_empty() {
+        return Ok(result);
+    }
+    let clocks: Vec<_> = events.into_iter().map(OffsetDateTime::from).collect();
+    let metrics: Vec<_> = metrics.into_iter().map(str::to_owned).collect();
+    let mut rows = sqlx::query_as::<_, Feature>(include_str!("temporal/features.sql"))
+        .bind(&metrics)
+        .bind(&clocks)
+        .bind(OffsetDateTime::from(earliest))
+        .bind(OffsetDateTime::from(latest))
+        .bind(OffsetDateTime::from(cutoff))
+        .bind(PRE_EVENT_FEATURE_VERSION)
+        .fetch(&mut **txn);
+    while let Some(row) = rows.try_next().await? {
+        let Some(event) = row.event else {
+            return Err(HealthAnalysisError::TemporalVersionLimit);
+        };
+        let event = StoredInstant::try_from(event).map_err(|_| HealthAnalysisError::Database)?;
+        let metric = row
+            .metric
+            .as_ref()
+            .ok_or(HealthAnalysisError::Database)?
+            .to_owned();
+        result
+            .get_mut(&event)
+            .ok_or(HealthAnalysisError::Database)?
+            .insert(metric, row.document(event, cutoff, purpose)?);
+    }
+    Ok(result)
 }

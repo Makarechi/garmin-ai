@@ -1,4 +1,5 @@
 mod forms;
+mod settings;
 mod setup;
 
 pub use forms::{FileImportOutcome, FileImportStoreError};

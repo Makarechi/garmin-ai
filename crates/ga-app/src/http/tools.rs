@@ -34,11 +34,12 @@ pub(crate) enum ReadTool {
     Freshness,
     Baseline,
     ComparePeriods,
+    RunningEfficiency,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 7] = [
+    pub(crate) const GARMIN_READS: [Self; 8] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -46,8 +47,9 @@ impl ReadTool {
         Self::DeviceHistory,
         Self::Baseline,
         Self::ComparePeriods,
+        Self::RunningEfficiency,
     ];
-    const IMPLEMENTED: [Self; 11] = [
+    const IMPLEMENTED: [Self; 12] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -57,6 +59,7 @@ impl ReadTool {
         Self::Freshness,
         Self::Baseline,
         Self::ComparePeriods,
+        Self::RunningEfficiency,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -73,6 +76,7 @@ impl ReadTool {
             Self::Freshness => "data_freshness",
             Self::Baseline => "personal_baseline",
             Self::ComparePeriods => "analysis_compare_periods",
+            Self::RunningEfficiency => "analysis_running_efficiency",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -150,6 +154,14 @@ impl ReadTool {
                 json!({"metric":{"type":"string","title":"Metric"},"a_start":date("A Start"),"a_end":date("A End"),
                        "b_start":date("B Start"),"b_end":date("B End")}),
                 &["metric", "a_start", "a_end", "b_start", "b_end"][..],
+            ),
+            Self::RunningEfficiency => (
+                "Describe runs chronologically within the requested HR range, separating activity types; missing route/weather/sensor/RPE evidence prevents physiological ranking.",
+                "analysis_running_efficiencyArgs",
+                json!({"start":datetime("Start"),"end":datetime("End"),
+                       "hr_min":{"type":"number","title":"Hr Min","default":0},
+                       "hr_max":{"type":"number","title":"Hr Max","default":250}}),
+                &["start", "end"][..],
             ),
             Self::Sleep => (
                 "Main sleep timestamps in rows[].main_interval, stages and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. timing_only=true requires start=end and nap_policy=separate; it returns exactly one verified main sleep interval without waiting for unrelated history replay. For a multi-day pattern or summary use timing_only=false. Missing nap logs are unknown; no recovery or prediction claims.",

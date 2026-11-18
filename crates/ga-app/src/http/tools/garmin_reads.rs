@@ -78,6 +78,9 @@ pub(crate) async fn read_garmin(
                 HealthPeriod::new(b_start, b_end)?,
             )
             .await?),
+        Query::Running(start, end, min, max) => {
+            Ok(reader.running_efficiency(start, end, min, max).await?)
+        }
     }
 }
 
@@ -89,6 +92,7 @@ enum Query<'a> {
     Devices(StoredInstant, StoredInstant, u16),
     Baseline(&'a str, Date, Date),
     Compare(&'a str, [Date; 4]),
+    Running(StoredInstant, StoredInstant, f64, f64),
 }
 
 impl Query<'_> {
@@ -97,6 +101,7 @@ impl Query<'_> {
             Self::Snapshot(_) | Self::Range(..) => MODEL_HEALTH_PACKS,
             Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
             Self::Baseline(metric, ..) | Self::Compare(metric, ..) => model_metric_packs(metric),
+            Self::Running(..) => &["training", "sleep", "wellbeing"],
         }
     }
 }
@@ -155,8 +160,41 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
             };
             Ok(Query::Compare(metric, [a_start, a_end, b_start, b_end]))
         }
+        ReadTool::RunningEfficiency => running_arguments(arguments),
         _ => Err(GarminReadError::Arguments),
     }
+}
+
+fn running_arguments(arguments: &Map<String, Value>) -> Result<Query<'_>, GarminReadError> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "start" | "end" | "hr_min" | "hr_max"))
+    {
+        return Err(GarminReadError::Arguments);
+    }
+    let clock = |name| {
+        arguments
+            .get(name)
+            .and_then(StoredInstant::from_legacy_input)
+    };
+    let rate = |name, default| {
+        arguments
+            .get(name)
+            .map_or(Some(default), |value| match value {
+                Value::String(text) => text.trim().parse().ok(),
+                Value::Bool(value) => Some(f64::from(u8::from(*value))),
+                value => value.as_f64(),
+            })
+    };
+    let (Some(start), Some(end), Some(min), Some(max)) = (
+        clock("start"),
+        clock("end"),
+        rate("hr_min", 0.0),
+        rate("hr_max", 250.0),
+    ) else {
+        return Err(GarminReadError::Arguments);
+    };
+    Ok(Query::Running(start, end, min, max))
 }
 
 fn activity_arguments(

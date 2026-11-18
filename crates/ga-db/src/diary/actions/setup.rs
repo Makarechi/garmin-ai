@@ -17,6 +17,8 @@ pub enum TrackerSetupStoreError {
     Registry(CustomRegistryError),
     Contract(TrackerActionError),
     PreviewChanged,
+    TrackerMissing,
+    SettingsChanged,
     Database,
 }
 
@@ -26,6 +28,8 @@ impl fmt::Display for TrackerSetupStoreError {
             Self::Registry(error) => error.fmt(f),
             Self::Contract(error) => error.fmt(f),
             Self::PreviewChanged => f.write_str("Tracker preview changed; preview it again"),
+            Self::TrackerMissing => f.write_str("Tracker not found"),
+            Self::SettingsChanged => f.write_str("Tracker settings changed; reload before editing"),
             Self::Database => f.write_str("Tracker setup could not be saved"),
         }
     }
