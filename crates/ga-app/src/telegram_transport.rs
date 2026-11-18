@@ -1,5 +1,6 @@
 mod poller;
 mod send;
+mod worker;
 pub use poller::{PollBatch, PollProgress, TelegramLoopError};
 pub use send::TelegramSendOutcome;
 
@@ -70,6 +71,17 @@ pub struct TelegramTransport {
 impl TelegramTransport {
     pub fn new(token: &str) -> Result<Self, TelegramTransportError> {
         Self::connect(token, TELEGRAM_API, true)
+    }
+
+    /// Read the provider's current delivery mode without exposing the webhook URL.
+    async fn webhook_active(&self) -> Result<bool, TelegramTransportError> {
+        let value = self
+            .call(&self.polling, "getWebhookInfo", &json!({}), MAX_ACK_BYTES)
+            .await?;
+        value["url"]
+            .as_str()
+            .map(|url| !url.is_empty())
+            .ok_or(TelegramTransportError::InvalidResponse)
     }
 
     fn connect(
