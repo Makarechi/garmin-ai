@@ -11,13 +11,6 @@ LEFT JOIN event_definition_versions AS version ON version.id = event.definition_
 WHERE NOT event.deleted
   AND (event.definition_version_id IS NULL OR version.allowed_operations @> '["query"]'::jsonb)
   AND ($3::text IS NULL OR event.kind = $3)
-  AND event.start < $2
-  AND (
-      event."end" > $1
-      OR (event."end" IS NULL AND event.topology = 'open_interval')
-      OR ((event."end" IS NULL OR event."end" = event.start)
-          AND event.topology IN ('point', 'flexible') AND event.start >= $1)
-  )
   AND ($5 IS NULL OR CASE
       WHEN starts_with(event.kind,'user.') THEN version.id IS NOT NULL
         AND ($3 IS NULL OR EXISTS (

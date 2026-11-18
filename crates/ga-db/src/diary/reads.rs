@@ -88,6 +88,43 @@ struct ModelAudience<'a> {
     pack_denials: Vec<&'static str>,
 }
 
+type EventRow = (
+    String,
+    OffsetDateTime,
+    Option<OffsetDateTime>,
+    OffsetDateTime,
+    OffsetDateTime,
+    OffsetDateTime,
+    OffsetDateTime,
+    bool,
+);
+
+macro_rules! select_events {
+    ($scope:literal) => {
+        concat!(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/diary/reads/events.sql")),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/share_policy/consent.sql")),
+            ") IS NOT TRUE)) ELSE NOT (regexp_replace(event.kind, '^system[.]', '') = ANY($7::text[])) END) ",
+            $scope,
+        )
+    };
+}
+
+mod model_context;
+pub use model_context::{InterpretationEvents, InterpretationEventsQuery};
+
+const RANGE_EVENTS: &str = select_events!(
+    "
+    AND event.start < $2
+    AND (
+        event.\"end\" > $1
+        OR (event.\"end\" IS NULL AND event.topology = 'open_interval')
+        OR ((event.\"end\" IS NULL OR event.\"end\" = event.start)
+            AND event.topology IN ('point', 'flexible') AND event.start >= $1)
+    )
+    ORDER BY (event.start >= $1) DESC,event.start,event.id LIMIT $4"
+);
+
 impl Database {
     /// Read one entry with visibility evaluated against its recorded definition version.
     pub async fn owner_event(
@@ -403,16 +440,6 @@ async fn read_events(
     limit: u16,
     audience: Option<ModelAudience<'_>>,
 ) -> Result<ModelDiaryPage, DiaryReadError> {
-    type EventRow = (
-        String,
-        OffsetDateTime,
-        Option<OffsetDateTime>,
-        OffsetDateTime,
-        OffsetDateTime,
-        OffsetDateTime,
-        OffsetDateTime,
-        bool,
-    );
     let mut rows = Vec::new();
     let mut tracker_versions = BTreeSet::new();
     let model = audience.as_ref().map(|audience| audience.model);
@@ -420,12 +447,7 @@ async fn read_events(
     let denials = audience
         .as_ref()
         .map_or(&[][..], |audience| audience.pack_denials.as_slice());
-    let mut query = sqlx::query_as::<_, EventRow>(concat!(
-        include_str!("reads/events.sql"),
-        include_str!("../share_policy/consent.sql"),
-        ") IS NOT TRUE)) ELSE NOT (regexp_replace(event.kind, '^system[.]', '') = ANY($7::text[])) END)
-         ORDER BY (event.start >= $1) DESC,event.start,event.id LIMIT $4"
-    ))
+    let mut query = sqlx::query_as::<_, EventRow>(RANGE_EVENTS)
         .bind(start)
         .bind(end)
         .bind(kind)
