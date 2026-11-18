@@ -127,7 +127,8 @@ impl DailyHealthReader {
                 .finish()
                 .map_err(|_| SeriesReadError::Analysis(HealthAnalysisError::Database))
         };
-        tokio::time::timeout(Duration::from_secs(15), work)
+        // The normal analysis budget also applies to the maximum 100-episode request.
+        tokio::time::timeout(Duration::from_secs(120), work)
             .await
             .map_err(|_| HealthAnalysisError::Database)?
     }
