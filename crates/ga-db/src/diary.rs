@@ -60,6 +60,7 @@ pub struct StoredSystemEvent {
 #[derive(Debug)]
 pub enum DiaryWriteError {
     Storage(ReadinessError),
+    Cancelled,
     UnknownOwner,
     Input(InvalidEvent),
     InvalidBatch,
@@ -89,6 +90,7 @@ impl fmt::Display for DiaryWriteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Storage(_) => "Diary storage is unavailable",
+            Self::Cancelled => "Diary write was cancelled before commit",
             Self::UnknownOwner => "Diary owner could not be verified",
             Self::Input(error) => return error.fmt(formatter),
             Self::InvalidBatch => "Diary log batch is invalid",
@@ -132,12 +134,30 @@ impl Database {
         &self,
         request: CreateSystemEvent<'_>,
     ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        self.create_system_event_unless_cancelled(request, || false)
+            .await
+    }
+
+    /// Keep the entry, its audit, and projected metrics provisional until the
+    /// caller confirms the request is still active at the commit boundary.
+    pub async fn create_system_event_unless_cancelled(
+        &self,
+        request: CreateSystemEvent<'_>,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<StoredSystemEvent, DiaryWriteError> {
+        if is_cancelled() {
+            return Err(DiaryWriteError::Cancelled);
+        }
         request
             .report
             .validate_for_write()
             .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
         let written = Self::create_system_event_in(&mut txn, request).await?;
+        if is_cancelled() {
+            txn.rollback().await?;
+            return Err(DiaryWriteError::Cancelled);
+        }
         txn.commit().await?;
         Ok(written)
     }
