@@ -10,10 +10,9 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
+use super::garmin_context::{DiaryContextAvailability, availability_in};
 use super::{ProactiveControlError, policy::lock_notification_policy};
-use crate::{
-    Database, activity_documents::PARSER_VERSION, check_readiness, replay::projection_pending,
-};
+use crate::{Database, check_readiness};
 
 pub(super) mod context;
 
@@ -57,8 +56,8 @@ impl Database {
     ) -> Result<GeneratedDiaryQuestions, ProactiveControlError> {
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut txn = self.begin_diary_question_policy().await?;
-            let allow_context =
-                include_context && !projection_pending(&mut txn, PARSER_VERSION).await?;
+            let allow_context = include_context
+                && availability_in(&mut txn, now).await? == DiaryContextAvailability::Ready;
             let generated =
                 generate_in(&mut txn, owner, now, default_timezone, allow_context).await?;
             txn.commit().await?;
