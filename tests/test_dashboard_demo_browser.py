@@ -1,7 +1,7 @@
 """Exercise the public demo in a browser without an API, account, or secrets."""
 
 import json
-import re
+import os
 import sys
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -16,8 +16,11 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/serve_demo.py"
 
 @contextmanager
 def demo_server():
+    native = os.environ.get("GA_TEST_NATIVE_DEMO")
+    command = [native, "demo"] if native else [sys.executable, str(SCRIPT)]
     process = Popen(
-        [sys.executable, str(SCRIPT), "--port", "0"],
+        [*command, "--port", "0"],
+        env={} if native else None,
         stdout=PIPE,
         stderr=PIPE,
         text=True,
@@ -29,8 +32,7 @@ def demo_server():
         yield url, requests
     finally:
         process.terminate()
-        _, stderr = process.communicate(timeout=5)
-        requests.extend(re.findall(r'"GET (\S+) HTTP/', stderr))
+        process.communicate(timeout=5)
 
 
 def test_demo_create_correct_analyze_and_reset_in_browser():
@@ -39,6 +41,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("request", lambda request: requests.append(request.url))
         try:
             response = page.goto(url)
             assert "connect-src 'none'" in response.headers["content-security-policy"]
@@ -196,12 +199,12 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             assert not errors, errors
         finally:
             browser.close()
-    assert set(requests) <= {
-        "/dashboard",
-        "/dashboard-assets/app.js",
-        "/dashboard-assets/styles.css",
-        "/favicon.ico",
-    }, requests
+    origin = url.removesuffix("/dashboard")
+    required = {
+        origin + path
+        for path in ("/dashboard", "/dashboard-assets/app.js", "/dashboard-assets/styles.css")
+    }
+    assert required <= set(requests) <= required | {origin + "/favicon.ico"}, requests
 
 
 def test_community_pack_newer_file_selection_wins_in_browser():
