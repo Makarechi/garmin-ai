@@ -1,10 +1,11 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    body::to_bytes,
+    extract::{Path, Request, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use ga_db::diary::actions::TrackerActionError;
+use ga_db::diary::actions::{FormSubmission, FormSubmitError, TrackerActionError};
 use ga_domain::access::Scope;
 use serde_json::json;
 use uuid::Uuid;
@@ -100,6 +101,56 @@ pub(super) async fn form(
         }
     };
     private_cache(response, &headers)
+}
+
+pub(super) async fn submit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Response {
+    let (head, body) = request.into_parts();
+    let result = if head.method != Method::POST {
+        method_not_allowed("POST")
+    } else {
+        match authorized(
+            &state,
+            &head.headers,
+            &[Scope::ReadDiary, Scope::WriteDiary],
+        )
+        .await
+        {
+            Ok((database, owner)) => {
+                let submitted = async {
+                    let bytes = to_bytes(body, super::tools::MAX_REQUEST_BYTES)
+                        .await
+                        .map_err(|_| FormSubmitError::Invalid)?;
+                    let form = FormSubmission::parse(&bytes)?;
+                    database.submit_tracker_form(owner, &id, &form).await
+                }
+                .await;
+                match submitted {
+                    Ok(stored) => super::diary::event_response(stored.snapshot),
+                    Err(error) => submit_failure(error),
+                }
+            }
+            Err(status) => access_failure(status),
+        }
+    };
+    private_cache(result, &head.headers)
+}
+
+fn submit_failure(error: FormSubmitError) -> Response {
+    match error {
+        FormSubmitError::Action(error) => action_failure(error),
+        FormSubmitError::Diary(error) => super::diary::write_failure(error),
+        FormSubmitError::Invalid => detail(StatusCode::UNPROCESSABLE_ENTITY, "Invalid arguments"),
+        FormSubmitError::Conflict(message) => detail(StatusCode::CONFLICT, message),
+        FormSubmitError::Validation(issues) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail":"Form validation failed","errors":issues})),
+        )
+            .into_response(),
+    }
 }
 
 fn action_failure(error: TrackerActionError) -> Response {
