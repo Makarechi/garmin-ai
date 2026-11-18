@@ -2,6 +2,7 @@ mod authorization;
 mod backup_space;
 mod configuration;
 mod http;
+mod mcp_stdio;
 mod migrate;
 mod replay_worker;
 mod retention;
@@ -52,14 +53,16 @@ enum Command {
         #[arg(long)]
         status: bool,
     },
-    /// Run archive replay and Telegram receipt processing
-    Worker,
+    /// Serve MCP tools over standard input and output
+    Mcp,
     /// Restore projections from the local Garmin archive
     Replay {
         /// Run one planning pass and process at most one due job
         #[arg(long)]
         once: bool,
     },
+    /// Run archive replay and Telegram receipt processing
+    Worker,
 }
 
 fn main() -> ExitCode {
@@ -127,6 +130,12 @@ fn main() -> ExitCode {
         }
         Some(Command::Migrate { status }) => {
             if let Err(error) = migrate::run(status) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Mcp) => {
+            if let Err(error) = mcp_stdio::run() {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
