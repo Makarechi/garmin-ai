@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::to_bytes,
-    extract::{Request, State},
+    extract::{Path, Request, State},
     http::{Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -9,7 +9,10 @@ use ga_db::diary::{
     CustomRegistryError, ManageCustomDefinition,
     actions::{TrackerActionError, TrackerSetupStoreError},
 };
-use ga_domain::{access::Scope, event_schema::TrackerSetupDraft};
+use ga_domain::{
+    access::Scope,
+    event_schema::{TrackerSettingsUpdate, TrackerSetupDraft},
+};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -26,6 +29,62 @@ pub(super) async fn preview(State(state): State<AppState>, request: Request) -> 
 
 pub(super) async fn confirm(State(state): State<AppState>, request: Request) -> Response {
     tracker_setup(&state, request, true).await
+}
+
+pub(super) async fn settings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Response {
+    let (head, body) = request.into_parts();
+    let response = async {
+        if head.method != Method::PUT {
+            return method_not_allowed("PUT");
+        }
+        let (database, owner_id) =
+            match authorized(&state, &head.headers, &[Scope::ManageDefinitions]).await {
+                Ok(context) => context,
+                Err(status) => return access_failure(status),
+            };
+        let Ok(id) = id.parse::<Uuid>() else {
+            return invalid();
+        };
+        let Some(body) = to_bytes(body, MAX_REQUEST_BYTES)
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        else {
+            return invalid();
+        };
+        let Ok(settings) = TrackerSettingsUpdate::from_json(&body) else {
+            return invalid();
+        };
+        if settings.reminder_enabled
+            && !state
+                .authorization
+                .authenticate(head.headers.get(header::AUTHORIZATION))
+                .is_some_and(|scopes| scopes.permits(&[Scope::ManageIntegrations]))
+        {
+            return detail(
+                StatusCode::FORBIDDEN,
+                "Reminder setup requires integration management",
+            );
+        }
+        database
+            .update_tracker_settings(
+                ManageCustomDefinition {
+                    owner_id,
+                    authenticated_actor: "api",
+                    may_manage_definitions: true,
+                },
+                id,
+                &settings,
+            )
+            .await
+            .map_or_else(failure, |document| Json(document).into_response())
+    }
+    .await;
+    private_cache(response, &head.headers)
 }
 
 pub(super) async fn export_pack(State(state): State<AppState>, request: Request) -> Response {
@@ -149,6 +208,11 @@ fn invalid() -> Response {
 
 fn failure(error: TrackerSetupStoreError) -> Response {
     match error {
+        TrackerSetupStoreError::TrackerMissing => detail(StatusCode::NOT_FOUND, "Record not found"),
+        TrackerSetupStoreError::SettingsChanged => detail(
+            StatusCode::CONFLICT,
+            "Tracker settings changed; reload before editing",
+        ),
         TrackerSetupStoreError::PreviewChanged => detail(
             StatusCode::CONFLICT,
             "Tracker preview changed; preview it again",
