@@ -16,7 +16,7 @@ use super::{
 use crate::{
     Database,
     conversation_memory::ConversationBinding,
-    diary::{DeleteEvent, clear_selected_record, record_history_selection},
+    diary::{DeleteEvent, DiaryWriteError, clear_selected_record, record_history_selection},
     outbox_enqueue::{QueueIntent, QueuedIntent, queue_outbox_intent},
 };
 
@@ -110,7 +110,7 @@ impl Database {
                     None => unavailable(&mut txn, selected.id, selected.revision).await?,
                     Some(current) if selected.action == Action::Delete && current.can_delete => {
                         let actor = format!("telegram:{}", envelope.sender_ref());
-                        Self::delete_event_in(
+                        match Self::delete_event_in(
                             &mut txn,
                             DeleteEvent {
                                 owner_id: binding.owner_id,
@@ -120,12 +120,24 @@ impl Database {
                             },
                             Some(lease.operation_id),
                         )
-                        .await
-                        .map_err(TelegramDiaryCommitError::Diary)?;
-                        clear_selected_record(&mut txn, binding, selected.id)
-                            .await
-                            .map_err(TelegramDiaryCommitError::Clarification)?;
-                        "Запись удалена. Отменить последнее изменение: /undo.".to_owned()
+                        .await {
+                            Ok(_) => {
+                                clear_selected_record(&mut txn, binding, selected.id)
+                                    .await
+                                    .map_err(TelegramDiaryCommitError::Clarification)?;
+                                "Запись удалена. Отменить последнее изменение: /undo.".into()
+                            }
+                            Err(DiaryWriteError::LinkedObservations) => {
+                                "Сначала отвяжите от эпизода записи о лекарствах или симптомах. После этого эпизод можно удалить.".into()
+                            }
+                            Err(DiaryWriteError::EventMissing | DiaryWriteError::RevisionChanged) => {
+                                "Запись уже изменилась. Откройте /history и выберите её снова.".into()
+                            }
+                            Err(DiaryWriteError::DeletionForbidden) => {
+                                "Доступ к этой записи изменился. Откройте /history заново.".into()
+                            }
+                            Err(error) => return Err(TelegramDiaryCommitError::Diary(error)),
+                        }
                     }
                     Some(current) if selected.action != Action::Delete && current.can_update => {
                         if current.kind.starts_with("user.") {

@@ -335,6 +335,48 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
         }
     })
     .await??;
+    let linked: Uuid = cases[3]["event_id"]
+        .as_str()
+        .ok_or("Missing linked episode")?
+        .parse()?;
+    let revision: i32 =
+        sqlx::query_scalar("UPDATE events SET deleted=false WHERE id=$1 RETURNING revision")
+            .bind(linked)
+            .fetch_one(&pool)
+            .await?;
+    sqlx::query(
+        "UPDATE events SET payload=payload || jsonb_build_object('reason_event_id',$1::text)
+         WHERE kind='medication'",
+    )
+    .bind(linked.to_string())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO app_state(key,value) VALUES('telegram:selection:linked_deletion',$1::jsonb)",
+    )
+    .bind(
+        json!({"expires_at":expiry.to_string(),"action":"delete","event_id":linked.to_string(),
+            "revision":revision,"channel_instance_id":"telegram:primary"})
+        .to_string(),
+    )
+    .execute(&pool)
+    .await?;
+    binding
+        .accept_polled_update(&mut runtime, &callback(413, "h:linked_deletion"), now, true)
+        .await?;
+    let lease = database
+        .claim_local_telegram_history(target, now, 60)
+        .await?
+        .ok_or("Missing linked delete lease")?;
+    let queued = database.apply_telegram_history(&lease).await?;
+    let (text, deleted, done): (String, bool, bool) = sqlx::query_as(
+        "SELECT intent#>>'{blocks,0,text}',
+            (SELECT deleted FROM events WHERE id=$2),
+            EXISTS(SELECT 1 FROM inbound_messages WHERE external_event_id='413' AND status='processed')
+         FROM outbox_messages WHERE id=$1",
+    ).bind(queued.outbox_id).bind(linked).fetch_one(&pool).await?;
+    assert!(text.starts_with("Сначала отвяжите") && !deleted && done);
+    assert!(database.apply_telegram_history(&lease).await.is_err());
     Ok(())
 }
 
