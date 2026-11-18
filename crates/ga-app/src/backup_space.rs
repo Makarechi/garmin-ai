@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ga_archive::backup_space::{BackupSpace, ExportSize, estimate_backup_space};
+use ga_archive::backup_space::{BackupSpace, ExportSize, estimate_backup_space_cancellable};
 use ga_db::{Database, jobs::backup_capacity_report};
 
 #[tokio::main(flavor = "current_thread")]
@@ -10,7 +10,7 @@ pub async fn run(destination: &Path) -> Result<(), &'static str> {
     let database = Database::connect_lazy(&url.ok_or("Backup storage configuration is invalid")?)
         .map_err(|_| "Backup storage configuration is invalid")?;
     let (data, tokens) = paths(data, tokens);
-    let result = estimate(&database, data, tokens, destination.to_owned()).await?;
+    let result = estimate(&database, data, tokens, destination.to_owned(), || false).await?;
     println!("{}", backup_capacity_report(&result));
     Ok(())
 }
@@ -27,6 +27,7 @@ pub(crate) async fn estimate(
     data: PathBuf,
     tokens: PathBuf,
     destination: PathBuf,
+    is_cancelled: impl Fn() -> bool + Send + 'static,
 ) -> Result<BackupSpace, &'static str> {
     let bytes = database
         .backup_database_bytes()
@@ -34,11 +35,12 @@ pub(crate) async fn estimate(
         .map_err(|_| "Backup database size is unavailable")?;
     let unavailable = "Backup storage capacity could not be estimated";
     tokio::task::spawn_blocking(move || {
-        estimate_backup_space(
+        estimate_backup_space_cancellable(
             &data,
             &tokens,
             &destination,
             ExportSize::DatabaseBytes(bytes),
+            is_cancelled,
         )
         .map_err(|_| unavailable)
     })

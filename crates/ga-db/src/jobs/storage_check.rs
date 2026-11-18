@@ -8,7 +8,7 @@ use super::{
     ATTEMPT_LIMIT, FailureReason, JobOutcome, JobStoreError, STORAGE_QUEUE_LOCK, begin,
     fail_exhausted, finish_in_transaction,
 };
-use crate::Database;
+use crate::{Database, runtime_lease::RuntimeWorkerIdentity};
 
 const KIND: &str = "storage_check";
 const SIX_HOURS: i64 = 6 * 60 * 60;
@@ -16,6 +16,13 @@ const SIX_HOURS: i64 = 6 * 60 * 60;
 pub struct StorageCheckLease {
     id: Uuid,
     token: Uuid,
+    seconds: i32,
+}
+
+impl StorageCheckLease {
+    pub fn lease_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.seconds as u64)
+    }
 }
 
 /// The CLI and the worker expose the same sanitized estimate.
@@ -80,6 +87,7 @@ impl Database {
         let at = OffsetDateTime::from(now);
         fail_exhausted(&mut txn, at, Some(&[KIND])).await?;
         let token = Uuid::new_v4();
+        let seconds = lease_seconds as i32;
         let id: Option<Uuid> = sqlx::query_scalar(
             "WITH eligible AS (
                 SELECT job.id FROM jobs job WHERE job.kind=$1 AND job.attempts<$2
@@ -99,12 +107,21 @@ impl Database {
         .bind(KIND)
         .bind(ATTEMPT_LIMIT)
         .bind(at)
-        .bind(lease_seconds as i32)
+        .bind(seconds)
         .bind(token)
         .fetch_optional(&mut *txn)
         .await?;
         txn.commit().await?;
-        Ok(id.map(|id| StorageCheckLease { id, token }))
+        Ok(id.map(|id| StorageCheckLease { id, token, seconds }))
+    }
+
+    pub async fn renew_storage_check(
+        &self,
+        lease: &StorageCheckLease,
+        now: StoredInstant,
+    ) -> Result<bool, JobStoreError> {
+        self.renew_job(lease.id, lease.token, lease.seconds, KIND, now)
+            .await
     }
 
     /// Record the sanitized estimate and complete its lease together.
@@ -113,10 +130,14 @@ impl Database {
         lease: &StorageCheckLease,
         estimate: BackupSpace,
         observed_at: StoredInstant,
+        worker: RuntimeWorkerIdentity,
     ) -> Result<(), JobStoreError> {
         let mut report = backup_capacity_report(&estimate);
         report["at"] = Value::String(observed_at.to_string());
         let mut txn = begin(&self.work).await?;
+        if !worker.still_held(&mut txn).await? {
+            return Err(JobStoreError::LeaseLost);
+        }
         finish_in_transaction(
             &mut txn,
             lease.id,
