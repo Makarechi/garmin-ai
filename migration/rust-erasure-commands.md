@@ -1,0 +1,5 @@
+# Native erase and resume commands
+
+`erase-all` requires the legacy confirmation. It verifies both private file roots, publishes the local erasure markers, and commits the database fence before removing raw data and tokens. A separate in-progress marker keeps native recovery and resume closed until a partially completed erasure is retried. Completing the command leaves the original erased marker in place. `resume-storage` clears the file activation markers while the database maintenance locks are held, then removes the database fence.
+
+The native Linux ARM64 commands matched pinned Python on disposable TimescaleDB. `check_erasure_commands.py` killed the native process at the erasure checkpoint, ran a partial removal with an injected redirect, and then resumed erasure. Recovery and resume were refused during the partial operation. An injected activation failure kept the database fenced until a successful retry. All 30 tables, both sequences, and the independently stored backup matched the reference outcomes.
