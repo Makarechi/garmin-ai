@@ -16,8 +16,24 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from sqlalchemy import text
 
-NAMES = ("health_snapshot", "health_range", "activities", "activity_details", "device_history")
+NAMES = (
+    "health_snapshot",
+    "health_range",
+    "activities",
+    "activity_details",
+    "device_history",
+    "personal_baseline",
+    "analysis_compare_periods",
+)
 ACTIVITY_RANGE = {"start": "2026-10-25T09:00:00Z", "end": "2026-10-25T11:00:00Z"}
+BASELINE = {"metric": "steps", "start": "2026-10-23", "end": "2026-10-26"}
+PERIODS = {
+    "metric": "steps",
+    "a_start": "2026-10-23",
+    "a_end": "2026-10-24",
+    "b_start": "2026-10-25",
+    "b_end": "2026-10-26",
+}
 CASES = (
     ("health_snapshot", {"day": "2026-10-24"}),
     ("health_snapshot", {"day": "2026-10-25"}),
@@ -30,6 +46,12 @@ CASES = (
     ("activity_details", {"activity_id": "run", "limit": 1, "include_samples": True}),
     ("activity_details", {"activity_id": "absent"}),
     ("device_history", {**ACTIVITY_RANGE, "limit": 2}),
+    ("personal_baseline", BASELINE),
+    ("personal_baseline", {**BASELINE, "metric": "unsupported"}),
+    ("personal_baseline", {**BASELINE, "start": "not a day"}),
+    ("analysis_compare_periods", PERIODS),
+    ("analysis_compare_periods", {**PERIODS, "b_start": "2026-10-24"}),
+    ("analysis_compare_periods", {**PERIODS, "a_start": "2026-10-25"}),
 )
 
 
@@ -73,7 +95,7 @@ async def compare(binary, root, engine):
         if revoked:
             assert all(case["isError"] for case in actual[1])
         else:
-            assert sum(not case["isError"] for case in actual[1]) == 8
+            assert sum(not case["isError"] for case in actual[1]) == 10
 
 
 def main():
@@ -89,7 +111,7 @@ def main():
             asyncio.run(compare(args.binary.resolve(strict=True), Path(directory), engine))
     finally:
         engine.dispose()
-    print("Verified 22 pinned MCP Garmin read and revocation cases")
+    print(f"Verified {2 * len(CASES)} pinned MCP Garmin read and revocation cases")
 
 
 if __name__ == "__main__":
