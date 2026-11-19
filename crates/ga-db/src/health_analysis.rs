@@ -21,6 +21,7 @@ pub use device_history::DeviceHistoryError;
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;
 pub use sleep_timing::sleep_timing_result_hash;
+pub(crate) use sleep_timing::{main_sleep_timing_in, permits_timing_in};
 
 mod freshness;
 mod temporal;

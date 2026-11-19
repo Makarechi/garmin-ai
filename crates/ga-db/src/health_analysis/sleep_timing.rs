@@ -3,6 +3,7 @@ use std::time::Duration;
 use ga_domain::{
     garmin_summary::gmt_instant,
     legacy_json::{self, Utf8Layout},
+    model_consent::ModelCategories,
     sha256_hex,
     timestamp::StoredInstant,
 };
@@ -14,7 +15,10 @@ use uuid::Uuid;
 use super::{
     DailyHealthReader, HealthAnalysisError, NapPolicy, begin_daily_analysis, owner_timezone,
 };
-use crate::{Database, activity_documents::PARSER_VERSION};
+use crate::{
+    Database, activity_documents::PARSER_VERSION, model_gate::onboarding::onboarding_allows_model,
+    scenario_packs::model_disallowed_event_kinds,
+};
 
 impl Database {
     /// Read one verified main interval for the wake date. This does not wait for
@@ -47,9 +51,12 @@ impl Database {
     ) -> Result<Option<Value>, HealthAnalysisError> {
         let read = async {
             let mut reader = DailyHealthReader(begin_daily_analysis(&self.control).await?);
-            if !reader.permits_model_health(owner).await?
-                || !reader.permits_model_event_kind("nap").await?
-            {
+            let current: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT FROM people WHERE singleton AND id=$1)")
+                    .bind(owner)
+                    .fetch_one(&mut *reader.0)
+                    .await?;
+            if !current || !permits_timing_in(&mut reader.0).await? {
                 return Ok(None);
             }
             if start != end || policy != NapPolicy::Separate {
@@ -104,7 +111,19 @@ impl DailyHealthReader {
     }
 }
 
-async fn main_sleep_timing_in(
+pub(crate) async fn permits_timing_in(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<bool, HealthAnalysisError> {
+    Ok(
+        onboarding_allows_model(txn, ModelCategories::HEALTH_AND_DIARY).await?
+            && !model_disallowed_event_kinds(txn)
+                .await
+                .map_err(|_| HealthAnalysisError::Database)?
+                .contains(&"nap"),
+    )
+}
+
+pub(crate) async fn main_sleep_timing_in(
     txn: &mut Transaction<'_, Postgres>,
     day: Date,
     timezone: &str,
