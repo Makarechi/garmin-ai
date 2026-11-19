@@ -91,7 +91,13 @@ impl Database {
     ) -> Result<TrackerTextPreparation, TrackerTextError> {
         let work = async {
             loop {
-                let mut txn = self.work.begin().await?;
+                // Keep the operation fence across model work without occupying the shared work pool.
+                let pool = if destination.is_some() {
+                    &self.model_operations
+                } else {
+                    &self.work
+                };
+                let mut txn = pool.begin().await?;
                 sqlx::query("SET LOCAL statement_timeout = '750ms'")
                     .execute(&mut *txn)
                     .await?;

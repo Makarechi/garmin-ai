@@ -54,6 +54,9 @@ impl Sender for SyntheticTrackerModel {
         let text = prompt["text"]
             .as_str()
             .ok_or(ModelTransportError::InvalidConfiguration)?;
+        if text.ends_with("purple") {
+            tokio::time::sleep(Duration::from_millis(1600)).await;
+        }
         let target = text
             .split_whitespace()
             .last()
@@ -269,10 +272,21 @@ async fn applies_only_evidenced_tracker_text_and_replays_atomic_receipts()
     };
     let policy = || configured.current();
     let retry = gateway.tracker_text_with(&concurrent, context(scopes), &policy, &model);
-    let (first, retry) = tokio::join!(first, retry);
+    let web_chat = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut snapshot = database.web_chat_messages().await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = snapshot.next_json().await? {
+            body.extend(chunk);
+        }
+        assert!(serde_json::from_slice::<Value>(&body)?["messages"].is_array());
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let (first, retry, web_chat) = tokio::join!(first, retry, web_chat);
+    web_chat?;
     assert_eq!(first?, retry?);
     println!(
-        "Concurrent matching model requests returned one saved receipt without starving the provider connection"
+        "A 1.6-second provider request overlapped a successful web-chat read and a matching retry with one saved receipt"
     );
     assert_eq!(model.calls.load(Ordering::SeqCst), calls + 1);
     let after: (i64, i64) =

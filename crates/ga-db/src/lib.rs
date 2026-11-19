@@ -52,6 +52,7 @@ const OWNER_ENROLLMENT_LOCK: i64 = 72104625;
 pub struct Database {
     control: PgPool,
     work: PgPool,
+    model_operations: PgPool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,7 +78,8 @@ impl Database {
             .application_name("garmin-ai-rust");
         Ok(Self {
             control: small_pool(options.clone()),
-            work: small_pool(options),
+            work: small_pool(options.clone()),
+            model_operations: small_pool(options),
         })
     }
 

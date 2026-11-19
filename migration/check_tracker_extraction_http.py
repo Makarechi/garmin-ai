@@ -223,7 +223,7 @@ def synthetic_https(directory, calls):
                 prompt = json.loads(request["input"][1]["content"])
                 calls.append(prompt)
                 if "concurrent-response" in prompt["text"]:
-                    time.sleep(0.2)
+                    time.sleep(1.6)
                 result = TrackerExtraction.model_validate(extraction(prompt)).model_dump(
                     mode="json"
                 )
@@ -482,13 +482,28 @@ def exercise(engine, python, native, python_calls, native_calls):
     pinned(engine, body)
     headers = {"Authorization": "Bearer synthetic-tracker-nl-fallback-api-admin"}
     before = len(native_calls)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first, second = list(
-            executor.map(
-                lambda _: native.post("/natural-language/trackers", json=body, headers=headers),
-                range(2),
-            )
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first_request = executor.submit(
+            native.post, "/natural-language/trackers", json=body, headers=headers
         )
+        until = time.monotonic() + 5
+        while len(native_calls) == before and time.monotonic() < until:
+            time.sleep(0.01)
+        assert len(native_calls) == before + 1 and not first_request.done()
+        second_request = executor.submit(
+            native.post, "/natural-language/trackers", json=body, headers=headers
+        )
+        read_started = time.monotonic()
+        messages = native.get("/web-chat/messages", headers=headers)
+        read_elapsed = time.monotonic() - read_started
+        overlapped = not first_request.done()
+        first, second = first_request.result(), second_request.result()
+    print(
+        f"Slow-provider overlap returned tracker {first.status_code}/{second.status_code}, "
+        f"web chat {messages.status_code}, read {read_elapsed:.3f}s, overlapped {overlapped}",
+        flush=True,
+    )
+    assert messages.status_code == 200 and read_elapsed < 1.0 and overlapped, messages.text
     assert first.status_code == 200 and second.status_code == 200, (
         first.status_code,
         first.text,
@@ -500,7 +515,7 @@ def exercise(engine, python, native, python_calls, native_calls):
     repeated = python.post("/natural-language/trackers", json=body, headers=headers)
     assert repeated.status_code == 200 and repeated.json() == first.json()
     assert len(python_calls) == len(requests) + 4
-    count += 3
+    count += 4
     print(
         f"Matched {count} actual HTTP requests with {len(native_calls)} native HTTPS provider calls and {len(python_calls)} frozen provider calls",
         flush=True,
