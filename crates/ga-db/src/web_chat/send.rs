@@ -88,7 +88,7 @@ impl Database {
         let mut replies = std::collections::VecDeque::new();
         if let Some((id, inbound, state, at, count, raw)) = row
             && let Some(document) = binding_document(conversation, id, &raw)
-            && can_show(&mut txn, &state, &document).await?
+            && can_show(&mut txn, conversation, id, &state, &document, false).await?
         {
             replies.push_back((
                 id,
@@ -118,7 +118,7 @@ impl Database {
             active: None,
             first: true,
             closing,
-            permissions: txn,
+            permissions: Some(txn),
         })
     }
 }

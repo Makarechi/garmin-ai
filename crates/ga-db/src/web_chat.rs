@@ -1,3 +1,4 @@
+mod initiative;
 mod model;
 mod send;
 
@@ -9,6 +10,7 @@ pub use send::WebChatSubmission;
 use std::{collections::VecDeque, error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
+use initiative::can_show_checkin;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
@@ -76,7 +78,7 @@ pub struct WebChatSnapshot {
     active: Option<(Uuid, i32, i32)>,
     first: bool,
     closing: Option<&'static [u8]>,
-    permissions: Transaction<'static, Postgres>,
+    permissions: Option<Transaction<'static, Postgres>>,
 }
 
 impl WebChatSnapshot {
@@ -90,9 +92,10 @@ impl WebChatSnapshot {
                 self.active = None;
                 return Ok(Some(b"\"}".to_vec()));
             }
+            let permissions = self.permissions.as_mut().ok_or(WebChatError::Database)?;
             let text: String = sqlx::query_scalar(
                 "SELECT intent #>> ARRAY['blocks',$2::text,'text'] FROM outbox_messages WHERE id=$1",
-            ).bind(id).bind(index).fetch_one(&mut *self.permissions).await?;
+            ).bind(id).bind(index).fetch_one(&mut **permissions).await?;
             let mut fragment = serde_json::to_vec(&text).map_err(|_| WebChatError::Database)?;
             fragment.pop();
             if index == 0 {
@@ -113,7 +116,13 @@ impl WebChatSnapshot {
             self.active = Some((id, 0, count));
             return Ok(Some(bytes));
         }
-        Ok(self.closing.take().map(<[u8]>::to_vec))
+        if let Some(closing) = self.closing.take() {
+            return Ok(Some(closing.to_vec()));
+        }
+        if let Some(permissions) = self.permissions.take() {
+            permissions.commit().await?;
+        }
+        Ok(None)
     }
 }
 
@@ -129,7 +138,7 @@ impl Database {
     /// Load the authenticated owner's existing web conversation without recording a read.
     pub async fn web_chat_messages(&self) -> Result<WebChatSnapshot, WebChatError> {
         tokio::time::timeout(Duration::from_secs(4), async {
-            let mut txn = self.work.begin_with("BEGIN READ ONLY").await?;
+            let mut txn = self.work.begin().await?;
             let conversation = prepare(&mut txn, false).await?;
             let messages = sqlx::query_as::<_, (Uuid, Option<String>, OffsetDateTime)>(
                 "SELECT id,normalized_text,received_at FROM inbound_messages
@@ -147,7 +156,8 @@ impl Database {
                         (intent - ARRAY['blocks','attachments','form','actions'])::text
                  FROM outbox_messages
                  WHERE owner_id=$1 AND conversation_id=$2 AND state IN ('queued','read')
-                   AND (state='read' OR coalesce(intent->'initiative','false')='false')
+                   AND (state='read' OR coalesce(intent->'initiative','false')='false'
+                     OR (starts_with(dedup_key,'rule:') AND coalesce(next_attempt_at <= now(),true)))
                  ORDER BY created_at DESC,id DESC LIMIT $3",
             )
             .bind(conversation.owner).bind(conversation.id).bind(MAX_MESSAGES)
@@ -155,7 +165,7 @@ impl Database {
             let mut replies = VecDeque::with_capacity(recorded.len());
             for (id, inbound, state, at, count, raw) in recorded.into_iter().rev() {
                 if let Some(document) = binding_document(conversation, id, &raw)
-                    && can_show(&mut txn, &state, &document).await?
+                    && can_show(&mut txn, conversation, id, &state, &document, true).await?
                 {
                     replies.push_back((id, count, WebChatReply {
                         id:id.to_string(), inbound_message_id:inbound.map(|id| id.to_string()),
@@ -167,7 +177,7 @@ impl Database {
             serde_json::to_writer(&mut opening, &messages).map_err(|_| WebChatError::Database)?;
             opening.extend_from_slice(b",\"replies\":[");
             Ok(WebChatSnapshot {
-                opening:Some(opening), replies, active:None, first:true, closing:Some(b"]}"), permissions:txn,
+                opening:Some(opening), replies, active:None, first:true, closing:Some(b"]}"), permissions:Some(txn),
             })
         }).await.map_err(|_| WebChatError::Database)?
     }
@@ -189,8 +199,9 @@ impl Database {
                 return Err(WebChatError::Missing);
             }
             if !matches!(state.as_str(), "queued" | "read")
-                || !can_show(&mut txn, &state, &document).await?
+                || !can_show(&mut txn, conversation, outbox, &state, &document, true).await?
             {
+                txn.commit().await?;
                 return Err(WebChatError::Unavailable);
             }
             if state == "queued" {
@@ -249,11 +260,15 @@ async fn prepare(
         .await?;
     Ok(Conversation {
         owner,
-        id: Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("garmin-ai/web-chat/{owner}").as_bytes(),
-        ),
+        id: conversation_id(owner),
     })
+}
+
+pub(crate) fn conversation_id(owner: Uuid) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("garmin-ai/web-chat/{owner}").as_bytes(),
+    )
 }
 
 fn timestamp(at: OffsetDateTime) -> Result<StoredInstant, WebChatError> {
@@ -272,22 +287,35 @@ fn binding_document(conversation: Conversation, id: Uuid, raw: &str) -> Option<V
 
 async fn can_show(
     txn: &mut Transaction<'_, Postgres>,
+    conversation: Conversation,
+    outbox: Uuid,
     state: &str,
     document: &Value,
+    include_initiatives: bool,
 ) -> Result<bool, WebChatError> {
-    if (state == "queued" && document["initiative"] == true)
-        || document["evidence_refs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .any(|value| {
-                value.starts_with("sleep-timing:") || value.starts_with("analysis-sleep-timing:")
-            })
+    if document["evidence_refs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|value| {
+            value.starts_with("sleep-timing:") || value.starts_with("analysis-sleep-timing:")
+        })
     {
         return Ok(false);
     }
-    intent_sharing_allowed(txn, DESTINATION, document, &[])
+    let sharing = intent_sharing_allowed(txn, DESTINATION, document, &[])
         .await
-        .map_err(|_| WebChatError::Database)
+        .map_err(|_| WebChatError::Database)?;
+    if !sharing {
+        return Ok(false);
+    }
+    if state == "queued" && document["initiative"] == true {
+        return if include_initiatives {
+            can_show_checkin(txn, conversation, outbox).await
+        } else {
+            Ok(false)
+        };
+    }
+    Ok(true)
 }

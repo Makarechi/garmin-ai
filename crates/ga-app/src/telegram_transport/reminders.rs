@@ -247,7 +247,7 @@ impl TelegramTransport {
 }
 
 impl DiaryReminderSettings {
-    fn policy(&self) -> NotificationPolicy<'_> {
+    pub fn policy(&self) -> NotificationPolicy<'_> {
         NotificationPolicy {
             timezone: &self.timezone,
             default_enabled: self.enabled,

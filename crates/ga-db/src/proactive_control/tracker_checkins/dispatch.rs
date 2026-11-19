@@ -16,6 +16,7 @@ use crate::{
         NotificationDecision, NotificationExclusions, NotificationPolicy, ProactiveControlError,
         budget::usage_in, lock_policy, policy::decision_in,
     },
+    share_policy::{OWNER_ONBOARDING_LOCK, try_shared_lock},
 };
 
 pub(crate) enum TrackerCheckinDecision {
@@ -23,6 +24,11 @@ pub(crate) enum TrackerCheckinDecision {
     Cancel,
     Expire,
     Defer(StoredInstant),
+}
+
+pub(crate) enum TrackerCheckinFence {
+    Browser,
+    Provider,
 }
 
 /// Revalidate the recorded tracker, occurrence, recipient and owner policy immediately before sending.
@@ -33,9 +39,16 @@ pub(crate) async fn revalidate_tracker_checkin(
     key: &str,
     intent: &mut Value,
     now: StoredInstant,
+    fence: TrackerCheckinFence,
 ) -> Result<TrackerCheckinDecision, ProactiveControlError> {
     use TrackerCheckinDecision::{Cancel, Defer, Expire, Ready};
-    lock_policy(txn).await?;
+    if matches!(fence, TrackerCheckinFence::Provider) {
+        lock_policy(txn).await?;
+    } else {
+        try_shared_lock(txn, OWNER_ONBOARDING_LOCK)
+            .await
+            .map_err(|_| ProactiveControlError::Busy)?;
+    }
     let Some(((logical_key, route_index), id)) = route_key(key) else {
         return Ok(Cancel);
     };

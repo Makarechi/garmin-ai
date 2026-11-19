@@ -15,8 +15,8 @@ use crate::{
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
     jobs::{STORAGE_QUEUE_LOCK, telegram_notices::TelegramNoticeFence},
     proactive_control::{
-        ProactiveControlError, TrackerCheckinDecision, remember_tracker_fallback,
-        revalidate_tracker_checkin,
+        ProactiveControlError, TrackerCheckinDecision, TrackerCheckinFence,
+        remember_tracker_fallback, revalidate_tracker_checkin,
     },
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{
@@ -476,6 +476,7 @@ async fn prepare(
             &key,
             &mut intent,
             wall,
+            TrackerCheckinFence::Provider,
         )
         .await
         .map_err(|error| match error {
