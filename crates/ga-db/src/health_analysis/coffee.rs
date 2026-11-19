@@ -6,7 +6,7 @@ use ga_domain::{
     statistics::{block_mean_difference, describe},
 };
 use serde_json::{Value, json};
-use sqlx::{FromRow, Postgres, QueryBuilder, Row, postgres::PgRow};
+use sqlx::{FromRow, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -54,144 +54,157 @@ impl DailyHealthReader {
         late_hours: Option<f64>,
         outcome: &str,
     ) -> Result<Value, HealthAnalysisError> {
-        let period = HealthPeriod::new(start, end)?;
-        let hours = late_hours.unwrap_or(6.0);
-        if period.days() > 31
-            || !hours.is_finite()
-            || !(0.0 < hours && hours <= 24.0)
-            || !matches!(outcome, "sleep_score" | "sleep_seconds")
-        {
-            return Err(HealthAnalysisError::DateRange);
-        }
-        let work = async {
-            let days: Vec<_> = (0..period.days())
-                .map(|offset| start + time::Duration::days(offset))
-                .collect();
-            let ids: Vec<_> = days.iter().map(|day| format!("sleep:{day}")).collect();
-            let stored: Vec<(String,OffsetDateTime,OffsetDateTime,String)> = sqlx::query_as(
+        let result = coffee_sleep_in(&mut self.0, start, end, late_hours, outcome).await?;
+        self.0.commit().await?;
+        Ok(result)
+    }
+}
+
+pub(super) async fn coffee_sleep_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: Date,
+    end: Date,
+    late_hours: Option<f64>,
+    outcome: &str,
+) -> Result<Value, HealthAnalysisError> {
+    let period = HealthPeriod::new(start, end)?;
+    let hours = late_hours.unwrap_or(6.0);
+    if period.days() > 31
+        || !hours.is_finite()
+        || !(0.0 < hours && hours <= 24.0)
+        || !matches!(outcome, "sleep_score" | "sleep_seconds")
+    {
+        return Err(HealthAnalysisError::DateRange);
+    }
+    let work = async {
+        let days: Vec<_> = (0..period.days())
+            .map(|offset| start + time::Duration::days(offset))
+            .collect();
+        let ids: Vec<_> = days.iter().map(|day| format!("sleep:{day}")).collect();
+        let stored: Vec<(String,OffsetDateTime,OffsetDateTime,String)> = sqlx::query_as(
                 "SELECT id,start,\"end\",coalesce((evidence->'source_ref')::text,'null') FROM timeline_intervals WHERE id=ANY($1)",
-            ).bind(&ids).fetch_all(&mut *self.0).await?;
-            let mut nights = BTreeMap::new();
-            for (id, start, end, source) in stored {
-                nights.insert(
-                    id,
-                    Night {
-                        start,
-                        end,
-                        source: json_value(&source)?,
-                    },
-                );
+            ).bind(&ids).fetch_all(&mut **txn).await?;
+        let mut nights = BTreeMap::new();
+        for (id, start, end, source) in stored {
+            nights.insert(
+                id,
+                Night {
+                    start,
+                    end,
+                    source: json_value(&source)?,
+                },
+            );
+        }
+        let mut summary_sql = QueryBuilder::<Postgres>::new("SELECT day,");
+        summary_sql
+            .push(outcome)
+            .push("::double precision,coalesce((sources->")
+            .push_bind(format!("field:{outcome}"))
+            .push(")::text,'null') FROM health_days WHERE day BETWEEN ")
+            .push_bind(start)
+            .push(" AND ")
+            .push_bind(end);
+        let summaries: Vec<(Date, Option<f64>, String)> =
+            summary_sql.build_query_as().fetch_all(&mut **txn).await?;
+        let summaries: BTreeMap<_, _> = summaries
+            .into_iter()
+            .map(|(day, value, source)| json_value(&source).map(|source| (day, (value, source))))
+            .collect::<Result<_, _>>()?;
+        let mut events = Vec::new();
+        if let (Some(left), Some(right)) = (
+            nights
+                .values()
+                .map(|night| night.start - time::Duration::hours(24))
+                .min(),
+            nights.values().map(|night| night.end).max(),
+        ) {
+            events = sqlx::query_as(include_str!("coffee_inputs.sql"))
+                .bind(left)
+                .bind(right)
+                .fetch_all(&mut **txn)
+                .await?;
+            if events.len() > 1000 {
+                return Err(HealthAnalysisError::CoffeeInputLimit);
             }
-            let mut summary_sql = QueryBuilder::<Postgres>::new("SELECT day,");
-            summary_sql
-                .push(outcome)
-                .push("::double precision,coalesce((sources->")
-                .push_bind(format!("field:{outcome}"))
-                .push(")::text,'null') FROM health_days WHERE day BETWEEN ")
-                .push_bind(start)
-                .push(" AND ")
-                .push_bind(end);
-            let summaries: Vec<(Date, Option<f64>, String)> =
-                summary_sql.build_query_as().fetch_all(&mut *self.0).await?;
-            let summaries: BTreeMap<_, _> = summaries
-                .into_iter()
-                .map(|(day, value, source)| {
-                    json_value(&source).map(|source| (day, (value, source)))
-                })
-                .collect::<Result<_, _>>()?;
-            let mut events = Vec::new();
-            if let (Some(left), Some(right)) = (
-                nights
-                    .values()
-                    .map(|night| night.start - time::Duration::hours(24))
-                    .min(),
-                nights.values().map(|night| night.end).max(),
-            ) {
-                events = sqlx::query_as(include_str!("coffee_inputs.sql"))
-                    .bind(left)
-                    .bind(right)
-                    .fetch_all(&mut *self.0)
-                    .await?;
-                if events.len() > 1000 {
-                    return Err(HealthAnalysisError::CoffeeInputLimit);
-                }
-            }
-            self.0.commit().await?;
-            let mut rows = Vec::with_capacity(days.len());
-            let mut late = Vec::new();
-            let mut not_late = Vec::new();
-            for day in days {
-                let summary = summaries.get(&day);
-                let value = summary.and_then(|(value, _)| *value);
-                let mut row = json!({"day":day.to_string(),"outcome":value,"eligible":false,"exclusions":[],"inputs":[]});
-                match nights
-                    .get(&format!("sleep:{day}"))
-                    .filter(|night| night.end > night.start)
-                {
-                    None => row["exclusions"] = json!(["missing_sleep_interval"]),
-                    Some(night) => {
-                        let cohort = populate_row(&mut row, night, summary, &events, hours)?;
-                        if let (Some(cohort), Some(value)) = (cohort, value) {
-                            if cohort {
-                                late.push(value);
-                            } else {
-                                not_late.push(value);
-                            }
+        }
+        let mut rows = Vec::with_capacity(days.len());
+        let mut late = Vec::new();
+        let mut not_late = Vec::new();
+        for day in days {
+            let summary = summaries.get(&day);
+            let value = summary.and_then(|(value, _)| *value);
+            let mut row = json!({"day":day.to_string(),"outcome":value,"eligible":false,"exclusions":[],"inputs":[]});
+            match nights
+                .get(&format!("sleep:{day}"))
+                .filter(|night| night.end > night.start)
+            {
+                None => row["exclusions"] = json!(["missing_sleep_interval"]),
+                Some(night) => {
+                    let cohort = populate_row(&mut row, night, summary, &events, hours)?;
+                    if let (Some(cohort), Some(value)) = (cohort, value) {
+                        if cohort {
+                            late.push(value);
+                        } else {
+                            not_late.push(value);
                         }
                     }
                 }
-                rows.push(row);
-                // A partial row array already over budget cannot shrink in the final envelope.
-                if encoded_length(&json!(rows))? > 40000 {
-                    return Err(HealthAnalysisError::CoffeeEvidenceLimit);
-                }
             }
-            let spec = json!({
-                "outcome":outcome,"exposure":"recorded_caffeine_in_late_window",
-                "cohort_definitions":{
-                    "late":"At least one caffeine event in [sleep_start - late_hours, sleep_start)",
-                    "not_late":"No caffeine event in the late window; includes earlier caffeine and none in the complete 24-hour diary",
-                },
-                "late_hours":late_hours.map_or(json!(6),|hours| json!(hours)),
-                "lookback_hours":24,"start":start.to_string(),"end":end.to_string(),
-                "unit_of_observation":"main_sleep_session","minimum_per_cohort":5,
-                "method_version":"coffee-sleep-v1",
-                "exclusions":["missing_interval_or_outcome","inconsistent_sleep_source",
-                    "unconfirmed_caffeine_or_confounder","incomplete_diary","contradictory_absence","recorded_illness_or_travel"],
-            });
-            let sufficient = late.len().min(not_late.len()) >= 5;
-            let comparison = sufficient.then(|| block_mean_difference(&late,&not_late)).map(|estimate| json!({
-                "difference":estimate.difference,"ci95":estimate.ci95,"method":estimate.method,
-            }));
-            let eligible = rows.iter().filter(|row| row["eligible"] == true).count();
-            let input = serde_json::to_vec(&json!({"spec":spec,"rows":rows}))
-                .map_err(|_| HealthAnalysisError::Database)?;
-            let fingerprint = encode_ascii(&input, Utf8Layout::Archive, input.len())
-                .map_err(|_| HealthAnalysisError::Database)?;
-            let result = json!({
-                "spec":spec,"status":if sufficient {"exploratory"} else {"insufficient_evidence"},
-                "rows":rows,"eligible":eligible,"excluded":period.days()-eligible as i64,
-                "cohorts":{"late":description(&late),"not_late":description(&not_late)},
-                "comparison":comparison,
-                "limitations":[
-                    "Observational, not causal or a recommendation to change dose",
-                    "No diary record is not zero caffeine; explicit full-window coverage is required",
-                    "Unrecorded confounders and self-report errors remain possible",
-                    "Main sleep only; calendar gaps and repeated exploratory checks limit inference",
-                    "No confirmed replication or multiplicity adjustment",
-                ],
-                "next_data_needed":if sufficient {None} else {Some("Confirm completeness of caffeine records for the pre-sleep window; both timing cohorts need enough nights")},
-                "evidence_hash":sha256_hex(fingerprint.as_bytes()),
-            });
-            if encoded_length(&result)? > 40000 {
+            rows.push(row);
+            // A partial row array already over budget cannot shrink in the final envelope.
+            if encoded_length(&json!(rows))? > 40000 {
                 return Err(HealthAnalysisError::CoffeeEvidenceLimit);
             }
-            Ok(result)
-        };
-        tokio::time::timeout(Duration::from_millis(1800), work)
-            .await
-            .map_err(|_| HealthAnalysisError::Database)?
-    }
+        }
+        let spec = json!({
+            "outcome":outcome,"exposure":"recorded_caffeine_in_late_window",
+            "cohort_definitions":{
+                "late":"At least one caffeine event in [sleep_start - late_hours, sleep_start)",
+                "not_late":"No caffeine event in the late window; includes earlier caffeine and none in the complete 24-hour diary",
+            },
+            "late_hours":late_hours.map_or(json!(6),|hours| json!(hours)),
+            "lookback_hours":24,"start":start.to_string(),"end":end.to_string(),
+            "unit_of_observation":"main_sleep_session","minimum_per_cohort":5,
+            "method_version":"coffee-sleep-v1",
+            "exclusions":["missing_interval_or_outcome","inconsistent_sleep_source",
+                "unconfirmed_caffeine_or_confounder","incomplete_diary","contradictory_absence","recorded_illness_or_travel"],
+        });
+        let sufficient = late.len().min(not_late.len()) >= 5;
+        let comparison = sufficient
+            .then(|| block_mean_difference(&late, &not_late))
+            .map(|estimate| {
+                json!({
+                    "difference":estimate.difference,"ci95":estimate.ci95,"method":estimate.method,
+                })
+            });
+        let eligible = rows.iter().filter(|row| row["eligible"] == true).count();
+        let input = serde_json::to_vec(&json!({"spec":spec,"rows":rows}))
+            .map_err(|_| HealthAnalysisError::Database)?;
+        let fingerprint = encode_ascii(&input, Utf8Layout::Archive, input.len())
+            .map_err(|_| HealthAnalysisError::Database)?;
+        let result = json!({
+            "spec":spec,"status":if sufficient {"exploratory"} else {"insufficient_evidence"},
+            "rows":rows,"eligible":eligible,"excluded":period.days()-eligible as i64,
+            "cohorts":{"late":description(&late),"not_late":description(&not_late)},
+            "comparison":comparison,
+            "limitations":[
+                "Observational, not causal or a recommendation to change dose",
+                "No diary record is not zero caffeine; explicit full-window coverage is required",
+                "Unrecorded confounders and self-report errors remain possible",
+                "Main sleep only; calendar gaps and repeated exploratory checks limit inference",
+                "No confirmed replication or multiplicity adjustment",
+            ],
+            "next_data_needed":if sufficient {None} else {Some("Confirm completeness of caffeine records for the pre-sleep window; both timing cohorts need enough nights")},
+            "evidence_hash":sha256_hex(fingerprint.as_bytes()),
+        });
+        if encoded_length(&result)? > 40000 {
+            return Err(HealthAnalysisError::CoffeeEvidenceLimit);
+        }
+        Ok(result)
+    };
+    tokio::time::timeout(Duration::from_millis(1800), work)
+        .await
+        .map_err(|_| HealthAnalysisError::Database)?
 }
 
 fn populate_row(

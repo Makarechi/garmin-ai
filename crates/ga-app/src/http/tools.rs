@@ -770,7 +770,7 @@ pub(super) fn storage_unavailable() -> Response {
     )
 }
 
-fn health_failure(error: HealthAnalysisError) -> Response {
+pub(super) fn health_failure(error: HealthAnalysisError) -> Response {
     match error {
         HealthAnalysisError::TemporalCalendarOverflow => {
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()

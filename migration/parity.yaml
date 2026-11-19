@@ -882,7 +882,11 @@
         "migration/check_generic_interfaces.py",
         "crates/ga-domain/src/analysis_spec.rs::tests",
         "crates/ga-domain/src/metric_aggregate.rs::tests",
-        "crates/ga-domain/src/threshold_time.rs::tests::matches_frozen_local_hour_slices"
+        "crates/ga-domain/src/threshold_time.rs::tests::matches_frozen_local_hour_slices",
+        "migration/check_hypothesis_history.py",
+        "migration/check_hypotheses_http.py",
+        "crates/ga-domain/src/hypothesis.rs::tests",
+        "crates/ga-db/tests/hypotheses.rs::compares_hypothesis_history"
       ],
       "data_contracts": [
         "Unit/source comparability, period and bootstrap results, migraine controls, sampling/gaps and association boundaries."
@@ -895,8 +899,8 @@
       "verification": "e2e_synthetic",
       "owner_task": "R21",
       "known_limits": [
-        "Native read analytics and all seven generic operations have dedicated synthetic comparisons. Persistent hypothesis create/recheck/stop flows and complete R21 acceptance remain pending.",
-        "R36 still requires complete HTTP typed-validation response details, nonfinite generic values through HTTP/MCP, database/server/connection timezone configuration and DST arithmetic across all generic operations.",
+        "Native read analytics, all seven generic operations and durable hypothesis register/fetch/recheck/stop flows have dedicated synthetic comparisons. Combined R21 acceptance remains pending.",
+        "R36 still requires complete generic and hypothesis HTTP typed-validation response details, nonfinite generic values through HTTP/MCP, database/server/connection timezone configuration and DST arithmetic across all generic operations.",
         "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."
       ],
       "approved_deviations": []
