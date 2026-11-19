@@ -309,23 +309,16 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     let (recovered, wait_for_recovery) = watch::channel(false);
     let receive = async {
         if let Some(telegram) = &telegram {
-            if reminders_available {
-                telegram
-                    .transport
-                    .run_receiver_with_reminders(
-                        &database,
-                        &mut singleton,
-                        &telegram.settings,
-                        recovered,
-                    )
-                    .await
-            } else {
-                telegram
-                    .transport
-                    .run_receiver(&database, &mut singleton, &telegram.settings)
-                    .await
-            }
-            .map_err(ReplayServiceError::Lease)
+            telegram
+                .transport
+                .run_receiver_with_reminders(
+                    &database,
+                    &mut singleton,
+                    &telegram.settings,
+                    recovered,
+                )
+                .await
+                .map_err(ReplayServiceError::Lease)
         } else {
             singleton
                 .while_held(future::pending::<()>())
@@ -349,6 +342,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_tracker_forms(&database, settings, &config.timezone, &config.locale) => result,
                 result = transport.run_local_text(&database, settings, &config.locale, reminders_available) => result,
                 result = transport.run_replies_with_garmin_notices(&database, settings, garmin_notice.as_ref()) => result,
+                result = transport.run_tracker_checkins(&database, settings, reminders, wait_for_recovery.clone()) => result,
                 result = async {
                     if let (Some(selected), Some(gateway)) = (&model_configuration, &model_gateway) {
                         transport.run_model_diary(&database,settings,selected,gateway,&config.timezone,&config.locale).await
@@ -357,7 +351,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 } => result,
                 result = async {
                     if reminders_available {
-                        transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery).await
+                        transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery.clone()).await
                     }
                     future::pending().await
                 } => result,

@@ -11,6 +11,7 @@ use ga_db::{
 };
 use ga_domain::{channel::OutboundIntent, timestamp::StoredInstant};
 use time::OffsetDateTime;
+use tokio::sync::watch;
 
 use super::{TelegramSendOutcome, TelegramTransport};
 use crate::{
@@ -63,60 +64,92 @@ impl TelegramTransport {
                     let intent = OutboundIntent::normalize(body).ok()?;
                     let started = clock()?;
                     let result = self.send_reply(binding, &intent, started, launch).await;
-                    let observed_at = clock()?;
-                    let (state, provider_reference, detail) = match result {
-                        Ok(TelegramSendOutcome::Accepted {
-                            last_message_id, ..
-                        }) => (
-                            DeliveryState::ProviderAccepted,
-                            Some(last_message_id.to_string()),
-                            None,
-                        ),
-                        Ok(TelegramSendOutcome::RateLimited(delay)) => {
-                            return retry_after(observed_at, delay).map(ReplySendOutcome::RetryAt);
-                        }
-                        Ok(TelegramSendOutcome::Rejected) => (
-                            DeliveryState::Failed,
-                            None,
-                            Some("Telegram rejected the rendered message"),
-                        ),
-                        Ok(TelegramSendOutcome::Uncertain {
-                            last_message_id, ..
-                        }) => (
-                            DeliveryState::Uncertain,
-                            last_message_id.map(|id| id.to_string()),
-                            Some(if last_message_id.is_some() {
-                                "Telegram accepted only part of a multi-message intent"
-                            } else {
-                                "Telegram send outcome is unknown"
-                            }),
-                        ),
-                        Err(TelegramReplyError::Expired) => (DeliveryState::Expired, None, None),
-                        Err(TelegramReplyError::UnsupportedAttachments) => {
-                            return retry_after(observed_at, UNSUPPORTED_RETRY)
-                                .map(ReplySendOutcome::RetryAt);
-                        }
-                        Err(TelegramReplyError::WrongBinding) => {
-                            (DeliveryState::Cancelled, None, None)
-                        }
-                        Err(
-                            TelegramReplyError::InvalidButton | TelegramReplyError::InvalidContent,
-                        ) => (
-                            DeliveryState::Failed,
-                            None,
-                            Some("Telegram reply could not be rendered"),
-                        ),
-                    };
-                    Some(ReplySendOutcome::Observation(ReplyObservation {
-                        state,
-                        observed_at,
-                        provider_reference,
-                        detail: detail.map(str::to_owned),
-                    }))
+                    observe_delivery(result, clock()?)
                 },
             )
             .await
     }
+
+    pub(in crate::telegram_transport) async fn dispatch_tracker_checkin(
+        &self,
+        database: &Database,
+        binding: TelegramBinding<'_>,
+        claim: ReplyClaim,
+        ready: &watch::Receiver<bool>,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError> {
+        let destination = ReplyDestination {
+            owner_id: binding.owner_id,
+            channel: "telegram",
+            instance_id: binding.instance_id,
+        };
+        database
+            .dispatch_telegram_tracker_checkin(
+                destination,
+                binding.external_owner_id,
+                claim,
+                |body| async move {
+                    let now = clock()?;
+                    if !*ready.borrow() {
+                        return retry_after(now, Duration::from_secs(2))
+                            .map(ReplySendOutcome::RetryAt);
+                    }
+                    let intent = OutboundIntent::normalize(body).ok()?;
+                    let result = self.send_reply(binding, &intent, now, None).await;
+                    observe_delivery(result, clock()?)
+                },
+            )
+            .await
+    }
+}
+
+fn observe_delivery(
+    result: Result<TelegramSendOutcome, TelegramReplyError>,
+    observed_at: StoredInstant,
+) -> Option<ReplySendOutcome> {
+    let (state, provider_reference, detail) = match result {
+        Ok(TelegramSendOutcome::Accepted {
+            last_message_id, ..
+        }) => (
+            DeliveryState::ProviderAccepted,
+            Some(last_message_id.to_string()),
+            None,
+        ),
+        Ok(TelegramSendOutcome::RateLimited(delay)) => {
+            return retry_after(observed_at, delay).map(ReplySendOutcome::RetryAt);
+        }
+        Ok(TelegramSendOutcome::Rejected) => (
+            DeliveryState::Failed,
+            None,
+            Some("Telegram rejected the rendered message"),
+        ),
+        Ok(TelegramSendOutcome::Uncertain {
+            last_message_id, ..
+        }) => (
+            DeliveryState::Uncertain,
+            last_message_id.map(|id| id.to_string()),
+            Some(if last_message_id.is_some() {
+                "Telegram accepted only part of a multi-message intent"
+            } else {
+                "Telegram send outcome is unknown"
+            }),
+        ),
+        Err(TelegramReplyError::Expired) => (DeliveryState::Expired, None, None),
+        Err(TelegramReplyError::UnsupportedAttachments) => {
+            return retry_after(observed_at, UNSUPPORTED_RETRY).map(ReplySendOutcome::RetryAt);
+        }
+        Err(TelegramReplyError::WrongBinding) => (DeliveryState::Cancelled, None, None),
+        Err(TelegramReplyError::InvalidButton | TelegramReplyError::InvalidContent) => (
+            DeliveryState::Failed,
+            None,
+            Some("Telegram reply could not be rendered"),
+        ),
+    };
+    Some(ReplySendOutcome::Observation(ReplyObservation {
+        state,
+        observed_at,
+        provider_reference,
+        detail: detail.map(str::to_owned),
+    }))
 }
 
 fn clock() -> Option<StoredInstant> {
