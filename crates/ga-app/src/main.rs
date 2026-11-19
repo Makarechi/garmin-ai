@@ -115,6 +115,11 @@ enum Command {
         executable: PathBuf,
         instance_id: String,
     },
+    /// Check an explicitly supplied model extension with a synthetic schema
+    CheckModelExtension {
+        executable: PathBuf,
+        instance_id: String,
+    },
     /// Read a configured source extension and save its validated pages
     PollSourceExtension {
         executable: PathBuf,
@@ -270,6 +275,12 @@ fn main() -> ExitCode {
             instance_id,
         }) => {
             return report(extensions::check_channel(&executable, &instance_id));
+        }
+        Some(Command::CheckModelExtension {
+            executable,
+            instance_id,
+        }) => {
+            return report(extensions::check_model(&executable, &instance_id));
         }
         Some(Command::PollSourceExtension {
             executable,

@@ -1,7 +1,9 @@
 mod channel;
+mod model;
 mod source_poll;
 
 pub(crate) use channel::check_channel;
+pub(crate) use model::check_model;
 pub(crate) use source_poll::{ScheduledSourcePlugins, configured_source_fingerprint, poll_source};
 
 use std::{
@@ -44,6 +46,9 @@ enum ExtensionError {
     ChannelConfiguration,
     ChannelCapabilities,
     ChannelDelivery,
+    ModelConfiguration,
+    ModelCapabilities,
+    ModelResult,
 }
 
 impl fmt::Display for ExtensionError {
@@ -63,6 +68,9 @@ impl fmt::Display for ExtensionError {
             Self::ChannelDelivery => {
                 "The extension returned a delivery outside the channel contract."
             }
+            Self::ModelConfiguration => "The model extension configuration is invalid.",
+            Self::ModelCapabilities => "The extension's model capabilities are invalid.",
+            Self::ModelResult => "The extension returned a result outside the model contract.",
         })
     }
 }

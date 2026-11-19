@@ -154,6 +154,29 @@ is a standalone command for an explicitly supplied executable. The runner
 clears the child environment and bounds each response and call duration. The executable still
 runs with the application's operating-system permissions.
 
+## Native model probe
+
+The version 1 model `describe` reply identifies the `model` kind, instance and
+implementation version. The `structured_output` capability must be true. The
+`structured` request supplies the instruction, fictional prompt and original
+application schema. The reply provides a `value` and can include optional
+`usage` with integer `input_tokens` and `output_tokens`. The host validates
+the returned value against its own schema and checks the usage counts before
+reporting the result.
+
+Build and probe the independent fictional model from the repository root.
+
+```sh
+cargo build --locked --manifest-path examples/native-model/Cargo.toml
+cargo run --locked -p ga-app --bin garmin-ai-rust -- check-model-extension \
+  "$PWD/examples/native-model/target/debug/garmin-ai-synthetic-model" \
+  model:synthetic:probe
+```
+
+The probe checks structured output and accepts either Boolean value required
+by the synthetic schema. Worker registration and permission checks are
+separate from this local probe.
+
 Declarative scenario packs have a separate data-only format documented in
 [scenario packs](scenario-packs.md). The
 [`focus-walks.json`](../examples/declarative-pack/focus-walks.json) example can
