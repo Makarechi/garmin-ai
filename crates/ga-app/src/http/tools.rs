@@ -52,7 +52,7 @@ pub(crate) enum ReadTool {
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 15] = [
+    pub(crate) const GARMIN_READS: [Self; 16] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -68,6 +68,7 @@ impl ReadTool {
         Self::MigraineWindows,
         Self::CoffeeSleep,
         Self::Insights,
+        Self::Sleep,
     ];
     const IMPLEMENTED: [Self; 22] = [
         Self::Snapshot,
@@ -496,50 +497,25 @@ async fn execute_read_tool(
         Ok(reader) => reader,
         Err(error) => return health_failure(error),
     };
-    let outcome = match tool {
-        ReadTool::Sleep => {
-            let Some((start, end, policy, timing_only)) = sleep_input(&arguments) else {
-                return invalid_arguments();
-            };
-            if timing_only {
-                if start != end || policy != NapPolicy::Separate {
-                    return invalid_arguments();
-                }
-                reader
-                    .owner_main_sleep_timing(start, &state.configured_timezone)
-                    .await
-            } else {
-                reader
-                    .owner_sleep_analysis(start, end, &state.configured_timezone, policy)
-                    .await
-            }
-        }
-        ReadTool::Timeline if arguments.len() == 2 => {
-            let (Some(start), Some(end)) = (
-                arguments
-                    .get("start")
-                    .and_then(StoredInstant::legacy_input_with_offset),
-                arguments
-                    .get("end")
-                    .and_then(StoredInstant::legacy_input_with_offset),
-            ) else {
-                return invalid_arguments();
-            };
-            return match reader.owner_timeline(start, end).await {
-                Ok(document) => {
-                    ([(header::CONTENT_TYPE, "application/json")], document).into_response()
-                }
-                Err(TimelineError::Health(error)) => health_failure(error),
-                Err(TimelineError::Diary(error)) => diary_failure(error),
-                Err(TimelineError::Database) => storage_unavailable(),
-                Err(_) => invalid_arguments(),
-            };
-        }
-        _ => return invalid_arguments(),
+    if tool != ReadTool::Timeline || arguments.len() != 2 {
+        return invalid_arguments();
+    }
+    let (Some(start), Some(end)) = (
+        arguments
+            .get("start")
+            .and_then(StoredInstant::legacy_input_with_offset),
+        arguments
+            .get("end")
+            .and_then(StoredInstant::legacy_input_with_offset),
+    ) else {
+        return invalid_arguments();
     };
-    match outcome {
-        Ok(document) => Json(document).into_response(),
-        Err(error) => health_failure(error),
+    match reader.owner_timeline(start, end).await {
+        Ok(document) => ([(header::CONTENT_TYPE, "application/json")], document).into_response(),
+        Err(TimelineError::Health(error)) => health_failure(error),
+        Err(TimelineError::Diary(error)) => diary_failure(error),
+        Err(TimelineError::Database) => storage_unavailable(),
+        Err(_) => invalid_arguments(),
     }
 }
 

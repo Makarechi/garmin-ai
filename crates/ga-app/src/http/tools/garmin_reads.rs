@@ -3,7 +3,7 @@ use ga_db::{
     Database,
     health_analysis::{
         ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod,
-        MODEL_HEALTH_PACKS, SeriesReadError, model_metric_packs,
+        MODEL_HEALTH_PACKS, NapPolicy, SeriesReadError, model_metric_packs,
     },
 };
 use ga_domain::timestamp::StoredInstant;
@@ -11,7 +11,9 @@ use serde_json::{Map, Value};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{ReadTool, bool_input, date_input, device_arguments, integer_input, range_with_kind};
+use super::{
+    ReadTool, bool_input, date_input, device_arguments, integer_input, range_with_kind, sleep_input,
+};
 
 pub(crate) enum GarminReadError {
     Arguments,
@@ -53,6 +55,24 @@ pub(crate) async fn read_garmin(
     mcp_owner: Option<Uuid>,
     configured_timezone: &str,
 ) -> Result<JsonDocument, GarminReadError> {
+    if tool == ReadTool::Sleep && arguments.get("timing_only") == Some(&Value::Bool(true)) {
+        let (start, end, policy, _) = sleep_input(arguments).ok_or(GarminReadError::Arguments)?;
+        let value = match mcp_owner {
+            Some(owner) => database
+                .model_main_sleep_timing(owner, start, end, configured_timezone, policy)
+                .await?
+                .ok_or(GarminReadError::Permission)?,
+            None => {
+                if start != end || policy != NapPolicy::Separate {
+                    return Err(GarminReadError::Value);
+                }
+                database
+                    .owner_main_sleep_timing(start, configured_timezone)
+                    .await?
+            }
+        };
+        return spool(value);
+    }
     let mut reader = database.verified_health_reader().await?;
     let query = parse(tool, arguments)?;
     if let Some(owner) = mcp_owner
@@ -75,6 +95,7 @@ pub(crate) async fn read_garmin(
             Query::EventWindows(kind, ..) => Some(*kind),
             Query::Migraine(..) | Query::Insights(..) => Some("migraine"),
             Query::Coffee(..) => Some("caffeine"),
+            Query::Sleep(..) => Some("nap"),
             _ => None,
         };
         if let Some(kind) = kind
@@ -133,10 +154,28 @@ pub(crate) async fn read_garmin(
         Query::Coffee(start, end, hours, outcome) => {
             Ok(reader.coffee_sleep(start, end, hours, outcome).await?)
         }
+        Query::Sleep(start, end, policy, timing_only) => {
+            if timing_only {
+                if start != end || policy != NapPolicy::Separate {
+                    return Err(GarminReadError::Value);
+                }
+                Ok(reader
+                    .owner_main_sleep_timing(start, configured_timezone)
+                    .await?)
+            } else {
+                Ok(reader
+                    .owner_sleep_analysis(start, end, configured_timezone, policy)
+                    .await?)
+            }
+        }
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
     }?;
+    spool(value)
+}
+
+fn spool(value: Value) -> Result<JsonDocument, GarminReadError> {
     let mut document = JsonSpool::default();
     serde_json::to_writer(&mut document, &value)
         .map_err(|_| GarminReadError::Health(HealthAnalysisError::Database))?;
@@ -162,6 +201,7 @@ enum Query<'a> {
     Migraine(&'a str, Date, Date, Option<&'a str>),
     Coffee(Date, Date, Option<f64>, &'a str),
     Insights(u16, Option<&'a str>),
+    Sleep(Date, Date, NapPolicy, bool),
 }
 
 impl Query<'_> {
@@ -179,6 +219,7 @@ impl Query<'_> {
             Self::Stress(..) => &["wellbeing"],
             Self::Coffee(..) => &["caffeine", "sleep"],
             Self::Insights(..) => &["sleep", "wellbeing", "migraine"],
+            Self::Sleep(..) => &["sleep"],
         }
     }
 }
@@ -187,6 +228,11 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
     let day = |name| arguments.get(name).and_then(date_input);
     let metric = || arguments.get("metric").and_then(Value::as_str);
     match tool {
+        ReadTool::Sleep => {
+            let (start, end, policy, timing_only) =
+                sleep_input(arguments).ok_or(GarminReadError::Arguments)?;
+            Ok(Query::Sleep(start, end, policy, timing_only))
+        }
         ReadTool::Snapshot if arguments.len() == 1 => {
             let day = arguments
                 .get("day")
