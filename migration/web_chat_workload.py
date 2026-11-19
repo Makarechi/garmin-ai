@@ -16,6 +16,7 @@ HISTORY_LIMIT = 100
 NOTE_LENGTH = 4000
 MAX_MESSAGE_LENGTH = 16000
 LONG_MESSAGE_INTERVAL = 8
+MULTIBYTE_FILLER = "\U0001f7e6"
 
 
 def call(base, path, *, token=None, body=None):
@@ -64,8 +65,10 @@ def submit(base, token, index, text):
     return body, document, duration
 
 
-def run(base, count):
+def run(base, count, *, multibyte=False):
     token = os.environ["GA_API_KEY"]
+    filler = MULTIBYTE_FILLER if multibyte else "x"
+    maximum_message = filler * MAX_MESSAGE_LENGTH
     finished = Event()
     observations = []
     digest = hashlib.sha256()
@@ -76,10 +79,10 @@ def run(base, count):
         try:
             for index in range(count):
                 if (index + 1) % LONG_MESSAGE_INTERVAL == 0:
-                    text = "x" * MAX_MESSAGE_LENGTH
+                    text = maximum_message
                 else:
                     label = f"Synthetic benchmark note {index:04d} "
-                    note = label + "x" * (NOTE_LENGTH - len(label))
+                    note = label + filler * (NOTE_LENGTH - len(label))
                     text = f"/note {note}"
                     digest.update(note.encode())
                     notes += 1
@@ -94,7 +97,7 @@ def run(base, count):
             visible = min(count, HISTORY_LIMIT)
             if len(history["messages"]) != visible or len(history["replies"]) != visible:
                 raise RuntimeError("The retained web history did not honor the existing page cap")
-            if history["messages"][-1]["text"] != "x" * MAX_MESSAGE_LENGTH:
+            if history["messages"][-1]["text"] != maximum_message:
                 raise RuntimeError("The maximum-length message was not retained")
         finally:
             finished.set()
@@ -105,6 +108,8 @@ def run(base, count):
         "maximum_length_messages": count - notes,
         "note_characters": NOTE_LENGTH,
         "maximum_message_characters": MAX_MESSAGE_LENGTH,
+        "maximum_message_utf8_bytes": len(maximum_message.encode()),
+        "text_encoding": "four-byte UTF-8" if multibyte else "ASCII",
         "note_digest": digest.hexdigest(),
         "visible_messages": visible,
         "duration_seconds": round(monotonic() - started, 3),
@@ -118,5 +123,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base")
     parser.add_argument("messages", type=int, choices=(80, 800))
+    parser.add_argument("--multibyte", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(run(args.base, args.messages)))
+    print(json.dumps(run(args.base, args.messages, multibyte=args.multibyte)))

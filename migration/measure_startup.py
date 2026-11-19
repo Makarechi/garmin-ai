@@ -11,6 +11,8 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+from web_chat_workload import MAX_MESSAGE_LENGTH, MULTIBYTE_FILLER
+
 DATABASE = "garmin_resource_test"
 POSTGRES = (
     "timescale/timescaledb:latest-pg17@"
@@ -121,6 +123,8 @@ def collect_web_chat_workload(args, observer, db, api, worker, elapsed):
         f"http://{api}:8080",
         str(args.web_chat_messages),
     ]
+    if args.web_chat_multibyte:
+        command.append("--multibyte")
 
     def capture():
         return {
@@ -153,8 +157,9 @@ def collect_web_chat_workload(args, observer, db, api, worker, elapsed):
     return {**json.loads(stdout), "samples": samples, "after_workload": capture()}
 
 
-def verify_web_chat_storage(db, result):
+def verify_web_chat_storage(db, result, *, multibyte):
     psql = ["docker", "exec", db, "psql", "-X", "-U", "garmin", "-d", DATABASE, "-Atc"]
+    filler = MULTIBYTE_FILLER if multibyte else "x"
     counters = (
         subprocess.check_output(
             [
@@ -164,7 +169,7 @@ def verify_web_chat_storage(db, result):
                 "(SELECT count(*) FROM inbound_messages WHERE channel='web'), "
                 "(SELECT count(*) FROM outbox_messages), "
                 "(SELECT count(*) FROM inbound_messages WHERE channel='web' "
-                "AND normalized_text=repeat('x', 16000))",
+                f"AND normalized_text=repeat(chr({ord(filler)}), {MAX_MESSAGE_LENGTH}))",
             ],
             text=True,
             timeout=10,
@@ -418,7 +423,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
         workload_result = {}
         if args.web_chat_messages:
             result = collect_web_chat_workload(args, observer, db, api, worker, elapsed)
-            verify_web_chat_storage(db, result)
+            verify_web_chat_storage(db, result, multibyte=args.web_chat_multibyte)
             workload_result["web_chat_workload"] = result
         workload_modes = (
             ("fit", args.fit_records),
@@ -581,10 +586,13 @@ def main():
     workload.add_argument("--voice-rounds", type=int, choices=(1, 2))
     workload.add_argument("--replay-days", type=int, choices=(7, 30))
     workload.add_argument("--web-chat-messages", type=int, choices=(80, 800))
+    parser.add_argument("--web-chat-multibyte", action="store_true")
     parser.add_argument("--preload-history", action="store_true")
     parser.add_argument("--fit-developer", action="store_true")
     parser.add_argument("--controls-during-fit", action="store_true")
     args = parser.parse_args()
+    if args.web_chat_multibyte and not args.web_chat_messages:
+        parser.error("--web-chat-multibyte requires --web-chat-messages")
     if args.preload_history and args.sync_days not in (7, 30, 365):
         parser.error("--preload-history requires --sync-days 7, 30 or 365")
     if args.fit_developer and not args.fit_records:
@@ -630,6 +638,8 @@ def main():
                 "note_digest",
                 "visible_messages",
                 "maximum_length_messages",
+                "maximum_message_utf8_bytes",
+                "text_encoding",
             )
             before = baseline["web_chat_workload"]
             after = candidate["web_chat_workload"]

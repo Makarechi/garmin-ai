@@ -108,9 +108,35 @@ against four independent fresh databases, so their startup and cache charges can
 The 80-message runs yielded only 10 and 6 liveness probes and 4 and 3 memory samples.
 Treat their peaks and percentiles as individual observations.
 
-The fixtures use ASCII text in the core-only configuration. The remaining release
-comparison includes multibyte payloads, external integrations, background workloads,
-and the sustained run on a representative small host.
+The first trials use ASCII text in the core-only configuration.
+
+### Four-byte UTF-8
+
+Add `--web-chat-multibyte` to the same workload to fill the request text with
+four-byte characters. A 16,000-character message then carries 64,000 UTF-8 bytes of
+text. PostgreSQL verifies the full stored value of every maximum-length message,
+the UTF-8 digest of the notes, and the same reply and audit counts.
+
+The [80-message](evidence/python-rust-web-chat-utf8-80-linux-arm64.json.gz) and
+[800-message](evidence/python-rust-web-chat-utf8-800-linux-arm64.json.gz) trials
+used the pinned Python runtime and the same rebuilt native ARM64 package image
+for both message counts. The image carries the release executable built from tree
+`3bda127f1f3f0fb2ad972568dbea05dac8f7c999`. Both runtimes reached schema
+`c54f8a72d130` and stored matching results.
+
+| Observed UTF-8 workload | Python, 80 | Rust, 80 | Python, 800 | Rust, 800 |
+| --- | ---: | ---: | ---: | ---: |
+| Highest sampled API and worker charge | 275.54 MiB | 26.58 MiB | 292.42 MiB | 26.93 MiB |
+| Highest sampled charge including database | 414.73 MiB | 158.06 MiB | 444.03 MiB | 161.83 MiB |
+| Message write latency, p95 | 33.06 ms | 66.36 ms | 42.60 ms | 20.96 ms |
+| Liveness latency during writes, p95 | 29.49 ms | 39.72 ms | 7.31 ms | 14.16 ms |
+| Operations latency during writes, p95 | 27.92 ms | 33.48 ms | 38.05 ms | 14.37 ms |
+
+No sample showed swap use, a memory-limit event, or an OOM kill. The 80-message
+trials have 13 and 14 overlapping probes, and four memory samples per runtime.
+These results describe the stated local previews. The release comparison also
+needs external integrations, background workloads, and a sustained run on the
+representative small host.
 
 ## Verification boundary
 
