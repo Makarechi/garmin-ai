@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, error::Error, fmt, sync::LazyLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    sync::LazyLock,
+};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -115,32 +120,8 @@ impl Database {
         if !can_read_diary {
             return Err(ScenarioPackError::Forbidden);
         }
-        let catalog = catalog()?;
         let mut txn = self.begin_scenario_write(owner).await?;
-        ensure_scenario_packs(&mut txn, owner, catalog).await?;
-        let keys: Vec<_> = catalog.iter().map(|pack| pack.key).collect();
-        let rows = sqlx::query_as::<_, PackRow>(
-            "SELECT pack_key,revision,tracking_enabled,collection_enabled,
-                    reminders_enabled,visible,llm_enabled,outcome_goal
-             FROM module_configs WHERE owner_id=$1 AND pack_key=ANY($2::text[])",
-        )
-        .bind(owner)
-        .bind(keys)
-        .fetch_all(&mut *txn)
-        .await?;
-        let mut rows: BTreeMap<_, _> = rows
-            .into_iter()
-            .map(|row| (row.pack_key.clone(), row))
-            .collect();
-        let result = catalog
-            .iter()
-            .map(|pack| {
-                let row = rows
-                    .remove(pack.key)
-                    .ok_or(ScenarioPackError::IncompleteCatalog)?;
-                Ok(state(pack, row))
-            })
-            .collect::<Result<Vec<_>, ScenarioPackError>>()?;
+        let result = scenario_packs_in(&mut txn, owner).await?;
         txn.commit().await?;
         Ok(result)
     }
@@ -170,64 +151,13 @@ impl Database {
             return Err(ScenarioPackError::InvalidSelection);
         }
         let mut txn = self.begin_scenario_write(owner).await?;
-        ensure_scenario_packs(&mut txn, owner, catalog).await?;
-        let old: (i32, bool) = sqlx::query_as(
-            "SELECT revision,llm_enabled FROM module_configs
-             WHERE owner_id=$1 AND pack_key=$2 FOR UPDATE",
-        )
-        .bind(owner)
-        .bind(key)
-        .fetch_optional(&mut *txn)
-        .await?
-        .ok_or(ScenarioPackError::IncompleteCatalog)?;
-        if i64::from(old.0) != selection.revision {
-            return Err(ScenarioPackError::RevisionChanged);
-        }
-        if old.1 && !selection.llm_enabled {
-            forget_shared_context(&mut txn, owner, key).await?;
-        }
-        let row = sqlx::query_as::<_, PackRow>(
-            "UPDATE module_configs SET tracking_enabled=$3,collection_enabled=$4,
-                 reminders_enabled=$5,visible=$6,llm_enabled=$7,outcome_goal=$8,
-                 revision=revision+1,updated_at=clock_timestamp()
-             WHERE owner_id=$1 AND pack_key=$2
-             RETURNING pack_key,revision,tracking_enabled,collection_enabled,
-                 reminders_enabled,visible,llm_enabled,outcome_goal",
-        )
-        .bind(owner)
-        .bind(key)
-        .bind(selection.tracking_enabled)
-        .bind(selection.collection_enabled)
-        .bind(selection.reminders_enabled)
-        .bind(selection.visible)
-        .bind(selection.llm_enabled)
-        .bind(&selection.outcome_goal)
-        .fetch_one(&mut *txn)
-        .await?;
-        if !row.reminders_enabled
-            || (!row.tracking_enabled && matches!(key, "caffeine" | "migraine"))
-        {
-            let question_kind = match key {
-                "general_diary" | "wellbeing" => Some("context"),
-                "caffeine" => Some("caffeine"),
-                "migraine" => Some("migraine"),
-                _ => None,
-            };
-            if let Some(kind) = question_kind {
-                sqlx::query(
-                    "UPDATE pending_questions SET status='cancelled' WHERE kind=$1
-                     AND status IN ('pending','sending','sent','uncertain')",
-                )
-                .bind(kind)
-                .execute(&mut *txn)
-                .await?;
-            }
-        }
+        ensure_scenario_packs(&mut txn, owner, catalog, None).await?;
+        let result = save_pack(&mut txn, owner, pack, selection).await?;
         txn.commit().await?;
-        Ok(state(pack, row))
+        Ok(result)
     }
 
-    async fn begin_scenario_write(
+    pub(crate) async fn begin_scenario_write(
         &self,
         owner: Uuid,
     ) -> Result<Transaction<'static, Postgres>, ScenarioPackError> {
@@ -256,6 +186,149 @@ impl Database {
     }
 }
 
+pub(crate) async fn scenario_packs_in(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+) -> Result<Vec<Value>, ScenarioPackError> {
+    let catalog = catalog()?;
+    ensure_scenario_packs(txn, owner, catalog, None).await?;
+    let mut rows = pack_rows(txn, owner, catalog).await?;
+    catalog
+        .iter()
+        .map(|pack| {
+            let row = rows
+                .remove(pack.key)
+                .ok_or(ScenarioPackError::IncompleteCatalog)?;
+            Ok(state(pack, row))
+        })
+        .collect()
+}
+
+pub(crate) async fn apply_onboarding_packs(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    selected: &BTreeSet<String>,
+    reminders: &BTreeSet<String>,
+    llm: bool,
+) -> Result<Vec<Value>, ScenarioPackError> {
+    let catalog = catalog()?;
+    let keys: BTreeSet<_> = catalog.iter().map(|pack| pack.key).collect();
+    if selected
+        .union(reminders)
+        .any(|key| !keys.contains(key.as_str()))
+    {
+        return Err(ScenarioPackError::UnknownPack);
+    }
+    ensure_scenario_packs(txn, owner, catalog, Some(false)).await?;
+    let mut rows = pack_rows(txn, owner, catalog).await?;
+    let mut current = Vec::with_capacity(catalog.len());
+    for pack in catalog {
+        let row = rows
+            .remove(pack.key)
+            .ok_or(ScenarioPackError::IncompleteCatalog)?;
+        let enabled = selected.contains(pack.key);
+        current.push(
+            save_pack(
+                txn,
+                owner,
+                pack,
+                &PackSelection {
+                    revision: i64::from(row.revision),
+                    tracking_enabled: enabled,
+                    collection_enabled: enabled,
+                    reminders_enabled: reminders.contains(pack.key),
+                    visible: enabled,
+                    llm_enabled: enabled && llm,
+                    outcome_goal: row.outcome_goal,
+                },
+            )
+            .await?,
+        );
+    }
+    Ok(current)
+}
+
+async fn pack_rows(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    catalog: &[ScenarioPack],
+) -> Result<BTreeMap<String, PackRow>, sqlx::Error> {
+    let keys: Vec<_> = catalog.iter().map(|pack| pack.key).collect();
+    let rows = sqlx::query_as::<_, PackRow>(
+        "SELECT pack_key,revision,tracking_enabled,collection_enabled,
+                reminders_enabled,visible,llm_enabled,outcome_goal
+         FROM module_configs WHERE owner_id=$1 AND pack_key=ANY($2::text[])",
+    )
+    .bind(owner)
+    .bind(keys)
+    .fetch_all(&mut **txn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.pack_key.clone(), row))
+        .collect())
+}
+
+async fn save_pack(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    pack: &ScenarioPack,
+    selection: &PackSelection,
+) -> Result<Value, ScenarioPackError> {
+    let key = pack.key;
+    let old: (i32, bool) = sqlx::query_as(
+        "SELECT revision,llm_enabled FROM module_configs
+             WHERE owner_id=$1 AND pack_key=$2 FOR UPDATE",
+    )
+    .bind(owner)
+    .bind(key)
+    .fetch_optional(&mut **txn)
+    .await?
+    .ok_or(ScenarioPackError::IncompleteCatalog)?;
+    if i64::from(old.0) != selection.revision {
+        return Err(ScenarioPackError::RevisionChanged);
+    }
+    if old.1 && !selection.llm_enabled {
+        forget_shared_context(txn, owner, key).await?;
+    }
+    let row = sqlx::query_as::<_, PackRow>(
+        "UPDATE module_configs SET tracking_enabled=$3,collection_enabled=$4,
+                 reminders_enabled=$5,visible=$6,llm_enabled=$7,outcome_goal=$8,
+                 revision=revision+1,updated_at=clock_timestamp()
+             WHERE owner_id=$1 AND pack_key=$2
+             RETURNING pack_key,revision,tracking_enabled,collection_enabled,
+                 reminders_enabled,visible,llm_enabled,outcome_goal",
+    )
+    .bind(owner)
+    .bind(key)
+    .bind(selection.tracking_enabled)
+    .bind(selection.collection_enabled)
+    .bind(selection.reminders_enabled)
+    .bind(selection.visible)
+    .bind(selection.llm_enabled)
+    .bind(&selection.outcome_goal)
+    .fetch_one(&mut **txn)
+    .await?;
+    if !row.reminders_enabled || (!row.tracking_enabled && matches!(key, "caffeine" | "migraine")) {
+        let question_kind = match key {
+            "general_diary" | "wellbeing" => Some("context"),
+            "caffeine" => Some("caffeine"),
+            "migraine" => Some("migraine"),
+            _ => None,
+        };
+        if let Some(kind) = question_kind {
+            sqlx::query(
+                "UPDATE pending_questions SET status='cancelled' WHERE kind=$1
+                     AND status IN ('pending','sending','sent','uncertain')",
+            )
+            .bind(kind)
+            .execute(&mut **txn)
+            .await?;
+        }
+    }
+    Ok(state(pack, row))
+}
+
 fn catalog() -> Result<&'static [ScenarioPack], ScenarioPackError> {
     CATALOG
         .as_deref()
@@ -266,6 +339,7 @@ async fn ensure_scenario_packs(
     txn: &mut Transaction<'_, Postgres>,
     owner: Uuid,
     catalog: &[ScenarioPack],
+    legacy_install: Option<bool>,
 ) -> Result<(), ScenarioPackError> {
     let existing: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM module_configs WHERE owner_id=$1)")
@@ -275,8 +349,11 @@ async fn ensure_scenario_packs(
     if existing {
         return Ok(());
     }
-    let legacy: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM events)
+    let legacy = if let Some(legacy) = legacy_install {
+        legacy
+    } else {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM events)
              OR EXISTS (SELECT 1 FROM activities)
              OR EXISTS (SELECT 1 FROM health_days)
              OR EXISTS (SELECT 1 FROM measurements)
@@ -285,9 +362,10 @@ async fn ensure_scenario_packs(
              OR EXISTS (SELECT 1 FROM timeline_intervals)
              OR EXISTS (SELECT 1 FROM app_state WHERE key IN
                  ('preferences:personal-goals','migration:legacy-scenario-packs'))",
-    )
-    .fetch_one(&mut **txn)
-    .await?;
+        )
+        .fetch_one(&mut **txn)
+        .await?
+    };
     for pack in catalog {
         let enabled = legacy || pack.key == "general_diary";
         sqlx::query(
