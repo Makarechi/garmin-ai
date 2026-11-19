@@ -866,6 +866,8 @@
       "rust_tests": [
         "migration/check_health_analysis.py",
         "migration/check_running_efficiency.py",
+        "migration/check_temporal_features.py",
+        "migration/check_temporal_displays.py",
         "migration/check_stress_hours.py",
         "migration/check_lagged_association.py",
         "migration/check_event_windows.py",

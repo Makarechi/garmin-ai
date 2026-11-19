@@ -772,6 +772,9 @@ pub(super) fn storage_unavailable() -> Response {
 
 fn health_failure(error: HealthAnalysisError) -> Response {
     match error {
+        HealthAnalysisError::TemporalCalendarOverflow => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
+        }
         HealthAnalysisError::ReplayPending => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "60")],
@@ -782,6 +785,8 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         | HealthAnalysisError::DateRange
         | HealthAnalysisError::UnknownMetric
         | HealthAnalysisError::InvalidTimezone
+        | HealthAnalysisError::InvalidKnowledgeCutoff
+        | HealthAnalysisError::TemporalVersionLimit
         | HealthAnalysisError::Overlap
         | HealthAnalysisError::SleepRange
         | HealthAnalysisError::SleepNapLimit

@@ -4,18 +4,19 @@ use std::{
 };
 
 use futures_util::TryStreamExt;
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::timestamp::{OffsetTimestamp, StoredInstant};
 use serde_json::{Value, json};
 use sqlx::{FromRow, Row, postgres::PgRow};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{HealthAnalysisError, begin_verified_analysis};
+use super::{HealthAnalysisError, begin_verified_analysis, restore_display_timezone};
 use crate::Database;
 
 pub(crate) const PRE_EVENT_FEATURE_VERSION: &str = "pre-event-v1";
 
 pub type TemporalFeatures = BTreeMap<StoredInstant, BTreeMap<String, Value>>;
+pub type TemporalOffsetFeatures = BTreeMap<OffsetDateTime, BTreeMap<String, Value>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TemporalPurpose {
@@ -38,9 +39,9 @@ struct Feature {
     value: Option<f64>,
     observation: Option<Uuid>,
     source: Option<Uuid>,
-    observed: Option<OffsetDateTime>,
-    ingested: Option<OffsetDateTime>,
-    start: Option<OffsetDateTime>,
+    observed: Option<String>,
+    ingested: Option<String>,
+    start: Option<String>,
     timezone: Option<String>,
     day: Option<Date>,
 }
@@ -65,31 +66,25 @@ impl FromRow<'_, PgRow> for Feature {
 impl Feature {
     fn document(
         &self,
-        event: StoredInstant,
-        cutoff: StoredInstant,
+        event: OffsetDateTime,
+        cutoff: OffsetDateTime,
         purpose: TemporalPurpose,
-    ) -> Result<Value, HealthAnalysisError> {
-        let instant = |value: Option<OffsetDateTime>| -> Result<_, HealthAnalysisError> {
-            value
-                .map(|value| StoredInstant::try_from(value).map(|value| value.to_string()))
-                .transpose()
-                .map_err(|_| HealthAnalysisError::Database)
-        };
-        Ok(json!({
+    ) -> Value {
+        json!({
             "value": self.value,
-            "event_cutoff": event.to_string(),
-            "knowledge_cutoff": cutoff.to_string(),
+            "event_cutoff": OffsetTimestamp(event).to_string(),
+            "knowledge_cutoff": OffsetTimestamp(cutoff).to_string(),
             "purpose": purpose.label(),
             "feature_version": PRE_EVENT_FEATURE_VERSION,
             "observation_id": self.observation.map(|id| id.to_string()),
             "source_ref": self.source.map(|id| id.to_string()),
-            "observed_at": instant(self.observed)?,
-            "ingested_at": instant(self.ingested)?,
-            "effective_start": instant(self.start)?,
+            "observed_at": self.observed,
+            "ingested_at": self.ingested,
+            "effective_start": self.start,
             "interpretation_timezone": self.timezone,
             "source_calendar_date": self.day.map(|day| day.to_string()),
             "quality": if self.observation.is_some() { "observed" } else { "unknown" },
-        }))
+        })
     }
 }
 
@@ -102,16 +97,43 @@ impl Database {
         cutoff: StoredInstant,
         purpose: TemporalPurpose,
     ) -> Result<TemporalFeatures, HealthAnalysisError> {
+        let events: Vec<_> = events.iter().copied().map(OffsetDateTime::from).collect();
+        self.temporal_features_with_offsets(metrics, &events, cutoff.into(), purpose)
+            .await?
+            .into_iter()
+            .map(|(clock, values)| {
+                StoredInstant::try_from(clock)
+                    .map(|clock| (clock, values))
+                    .map_err(|_| HealthAnalysisError::Database)
+            })
+            .collect()
+    }
+
+    /// Preserve the original input offsets in temporal evidence and equal-instant keys.
+    pub async fn temporal_features_with_offsets(
+        &self,
+        metrics: &[&str],
+        events: &[OffsetDateTime],
+        cutoff: OffsetDateTime,
+        purpose: TemporalPurpose,
+    ) -> Result<TemporalOffsetFeatures, HealthAnalysisError> {
         if events.is_empty() {
             return Ok(BTreeMap::new());
         }
         if purpose == TemporalPurpose::AsKnown && events.iter().any(|event| cutoff > *event) {
             return Err(HealthAnalysisError::InvalidKnowledgeCutoff);
         }
+        let clocks = event_clocks(events);
+        lower_bound(
+            *clocks
+                .first_key_value()
+                .ok_or(HealthAnalysisError::Database)?
+                .0,
+        )?;
         if metrics.is_empty() {
-            return Ok(events
-                .iter()
-                .map(|event| (*event, BTreeMap::new()))
+            return Ok(clocks
+                .into_keys()
+                .map(|event| (event, BTreeMap::new()))
                 .collect());
         }
         tokio::time::timeout(Duration::from_millis(1500), async {
@@ -125,44 +147,67 @@ impl Database {
     }
 }
 
+fn event_clocks(events: &[OffsetDateTime]) -> BTreeMap<OffsetDateTime, OffsetDateTime> {
+    let mut clocks = BTreeMap::new();
+    for &event in events {
+        // Python's dict retains the first equal key and the last supplied value.
+        clocks
+            .entry(event)
+            .and_modify(|display| *display = event)
+            .or_insert(event);
+    }
+    clocks
+}
+
+fn lower_bound(event: OffsetDateTime) -> Result<OffsetDateTime, HealthAnalysisError> {
+    event
+        .checked_sub(time::Duration::hours(24))
+        .filter(|time| (1..=9999).contains(&time.year()))
+        .ok_or(HealthAnalysisError::TemporalCalendarOverflow)
+}
+
 pub(super) async fn temporal_features_in(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     metrics: &[&str],
-    events: &[StoredInstant],
-    cutoff: StoredInstant,
+    events: &[OffsetDateTime],
+    cutoff: OffsetDateTime,
     purpose: TemporalPurpose,
-) -> Result<TemporalFeatures, HealthAnalysisError> {
-    let events: BTreeSet<_> = events.iter().copied().collect();
-    let Some(&earliest) = events.first() else {
+) -> Result<TemporalOffsetFeatures, HealthAnalysisError> {
+    let events = event_clocks(events);
+    let Some((&earliest, _)) = events.first_key_value() else {
         return Ok(BTreeMap::new());
     };
     if purpose == TemporalPurpose::AsKnown && cutoff > earliest {
         return Err(HealthAnalysisError::InvalidKnowledgeCutoff);
     }
-    let latest = events.last().copied().unwrap_or(earliest);
-    let mut result: TemporalFeatures = events
-        .iter()
+    let latest = events
+        .last_key_value()
+        .map(|(clock, _)| *clock)
+        .unwrap_or(earliest);
+    let lower = lower_bound(earliest)?;
+    let mut result: TemporalOffsetFeatures = events
+        .keys()
         .map(|event| (*event, BTreeMap::new()))
         .collect();
     let metrics: BTreeSet<_> = metrics.iter().copied().collect();
     if metrics.is_empty() {
         return Ok(result);
     }
-    let clocks: Vec<_> = events.into_iter().map(OffsetDateTime::from).collect();
+    let clocks: Vec<_> = events.keys().copied().collect();
     let metrics: Vec<_> = metrics.into_iter().map(str::to_owned).collect();
+    restore_display_timezone(txn).await?;
     let mut rows = sqlx::query_as::<_, Feature>(include_str!("temporal/features.sql"))
         .bind(&metrics)
         .bind(&clocks)
-        .bind(OffsetDateTime::from(earliest))
-        .bind(OffsetDateTime::from(latest))
-        .bind(OffsetDateTime::from(cutoff))
+        .bind(lower)
+        .bind(latest)
+        .bind(cutoff)
         .bind(PRE_EVENT_FEATURE_VERSION)
         .fetch(&mut **txn);
     while let Some(row) = rows.try_next().await? {
         let Some(event) = row.event else {
             return Err(HealthAnalysisError::TemporalVersionLimit);
         };
-        let event = StoredInstant::try_from(event).map_err(|_| HealthAnalysisError::Database)?;
         let metric = row
             .metric
             .as_ref()
@@ -171,7 +216,14 @@ pub(super) async fn temporal_features_in(
         result
             .get_mut(&event)
             .ok_or(HealthAnalysisError::Database)?
-            .insert(metric, row.document(event, cutoff, purpose)?);
+            .insert(
+                metric,
+                row.document(
+                    *events.get(&event).ok_or(HealthAnalysisError::Database)?,
+                    cutoff,
+                    purpose,
+                ),
+            );
     }
     Ok(result)
 }

@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use ga_domain::timestamp::StoredInstant;
 use serde_json::{Value, json};
 use sqlx::{FromRow, Row, postgres::PgRow};
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use super::{
     ActivityReadError, DailyHealthReader, HealthAnalysisError, MAX_RANGE_DAYS, TemporalPurpose,
-    check_calendar_bounds, isoformat, temporal::temporal_features_in,
+    check_calendar_bounds, isoformat, restore_display_timezone, temporal::temporal_features_in,
 };
 
 const MAX_RUNS: usize = 2000;
@@ -33,9 +33,18 @@ struct Run {
 
 impl FromRow<'_, PgRow> for Run {
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        let start: OffsetDateTime = row.try_get("start")?;
+        let offset: i32 = row.try_get("start_offset")?;
+        let start = UtcOffset::from_whole_seconds(offset)
+            .ok()
+            .and_then(|offset| start.checked_to_offset(offset))
+            .filter(|start| (1..=9999).contains(&start.year()))
+            .ok_or_else(|| {
+                sqlx::Error::Decode("Activity time outside the supported calendar".into())
+            })?;
         Ok(Self {
             id: row.try_get("id")?,
-            start: row.try_get("start")?,
+            start,
             kind: row.try_get("kind")?,
             distance_m: row.try_get("distance_m")?,
             moving_seconds: row.try_get("moving_seconds")?,
@@ -87,15 +96,15 @@ impl DailyHealthReader {
         max: f64,
     ) -> Result<Value, ActivityReadError> {
         let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
-        check_calendar_bounds(start.date(), end.date())
-            .map_err(|_| ActivityReadError::CalendarRange)?;
+        check_calendar_bounds(start.date(), end.date())?;
         if end <= start || end - start > Duration::days(MAX_RANGE_DAYS) {
             return Err(ActivityReadError::Range);
         }
         if !(0.0 <= min && min < max && max <= 300.0) {
             return Err(ActivityReadError::HeartRateRange);
         }
-        let runs = sqlx::query_as::<_,Run>("SELECT id,start,kind,distance_m,moving_seconds,duration_seconds,avg_hr,ascent_m
+        restore_display_timezone(&mut self.0).await?;
+        let runs = sqlx::query_as::<_,Run>("SELECT id,start,extract(timezone FROM start)::integer AS start_offset,kind,distance_m,moving_seconds,duration_seconds,avg_hr,ascent_m
             FROM activities WHERE start >= $1 AND start < $2 AND kind IN ('running','trail_running','treadmill_running',
                 'track_running','indoor_running','ultra_run','virtual_run','obstacle_run') ORDER BY start LIMIT $3")
             .bind(start).bind(end).bind(MAX_RUNS as i64+1).fetch_all(&mut *self.0).await?;
@@ -103,15 +112,10 @@ impl DailyHealthReader {
         if total > MAX_RUNS {
             return Err(ActivityReadError::ActivityAnalysisLimit);
         }
-        let kept = runs
-            .into_iter()
-            .filter_map(|run| run.with_evidence(min, max))
-            .collect::<Vec<_>>();
-        let times = kept.iter().map(|run| run.at).collect::<Vec<_>>();
+        let times: Vec<_> = runs.iter().map(|run| run.start).collect();
         let cutoff: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *self.0)
             .await?;
-        let cutoff = StoredInstant::try_from(cutoff).map_err(|_| HealthAnalysisError::Database)?;
         let mut contexts = temporal_features_in(
             &mut self.0,
             &METRICS,
@@ -121,33 +125,21 @@ impl DailyHealthReader {
         )
         .await?;
         self.0.commit().await?;
+        let kept = runs
+            .into_iter()
+            .filter_map(|run| run.with_evidence(min, max))
+            .collect::<Vec<_>>();
         let mut groups = BTreeMap::<String, Vec<String>>::new();
         let mut rows = Vec::with_capacity(kept.len());
         let mut kept = kept.into_iter().peekable();
         while let Some(entry) = kept.next() {
             let run = entry.run;
-            let mut context = if kept.peek().is_some_and(|next| next.at == entry.at) {
-                contexts.get(&entry.at).cloned()
+            let context = if kept.peek().is_some_and(|next| next.at == entry.at) {
+                contexts.get(&run.start).cloned()
             } else {
-                contexts.remove(&entry.at)
+                contexts.remove(&run.start)
             }
             .ok_or(HealthAnalysisError::Database)?;
-            for feature in context.values_mut() {
-                for key in [
-                    "event_cutoff",
-                    "knowledge_cutoff",
-                    "observed_at",
-                    "ingested_at",
-                    "effective_start",
-                ] {
-                    if let Some(at) = feature[key]
-                        .as_str()
-                        .and_then(|at| at.parse::<StoredInstant>().ok())
-                    {
-                        feature[key] = json!(isoformat(at.into()));
-                    }
-                }
-            }
             rows.push(json!({"activity_id":run.id,"start":isoformat(run.start),"kind":run.kind,
                 "distance_m":entry.distance,"avg_hr":entry.hr,"pace_seconds_per_km":entry.seconds/entry.distance*1000.0,
                 "meters_per_heartbeat":entry.distance/entry.seconds*60.0/entry.hr,

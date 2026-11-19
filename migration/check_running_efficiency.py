@@ -9,7 +9,8 @@ from pathlib import Path
 
 import httpx
 from capture_reference import isolated_engine
-from check_temporal_features import EVENT, seed
+from check_temporal_displays import configure_zone
+from check_temporal_features import EVENT, SOURCE, seed
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -80,6 +81,7 @@ def exercise(engine, python, rust):
             candidate.text,
         )
         if status == 422:
+            assert original.json() == candidate.json()
             return None
         expected, actual = normalized(original.json()), normalized(candidate.json())
         assert expected == actual, (body, expected, actual)
@@ -99,6 +101,36 @@ def exercise(engine, python, rust):
     assert compare(request | {"hr_min": 251, "hr_max": 300})["n"] == 0
     compare(request | {"hr_min": 200, "hr_max": 100}, 422)
     compare(request | {"end": START}, 422)
+    first_day = {"start": "0001-01-01T00:00:00Z", "end": "0001-01-02T00:00:00Z"}
+    compare(first_day, 422)
+    compare({"start": "9999-12-31T00:00:00Z", "end": "9999-12-31T23:59:59Z"}, 422)
+    for zone in ["America/New_York", "Asia/Kathmandu", "UTC"]:
+        configure_zone(engine, zone)
+        assert compare(request)["n"] == 4
+    early = EVENT - timedelta(days=2)
+    observed = early - timedelta(hours=1)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO activities(id,kind,start,\"end\",timezone,details) VALUES ('old-unqualified','running',:start,:start,'UTC','{}'::jsonb)"
+            ),
+            {"start": early},
+        )
+        connection.execute(
+            text("""INSERT INTO metric_observations(id,source_ref,metric,unit,value,
+            source_calendar_date,observed_at,fetched_at,ingested_at,timezone,quality,sequence,feature_version,valid)
+            SELECT gen_random_uuid(),:source,'training_readiness_score','synthetic',1,DATE '2026-10-23',
+                :observed,:known,:known,'UTC','observed',index+1000,'pre-event-v1',true FROM generate_series(1,100001) AS items(index)"""),
+            {"source": SOURCE, "observed": observed, "known": EVENT},
+        )
+    compare({**request, "start": (EVENT - timedelta(days=3)).isoformat()}, 422)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM metric_observations WHERE source_ref=:source AND metric='training_readiness_score' AND observed_at=:observed"
+            ),
+            {"source": SOURCE, "observed": observed},
+        )
     with engine.begin() as connection:
         connection.execute(
             text("""
@@ -130,7 +162,7 @@ def main():
         seed_activities(engine)
         settings = Settings(_env_file=None, api_tokens=[ApiToken(**spec) for spec in TOKENS])
         with (
-            TestClient(create_app(settings, engine)) as python,
+            TestClient(create_app(settings, engine), raise_server_exceptions=False) as python,
             subprocess.Popen(
                 [args.binary.resolve(strict=True), "serve", "--port", "0"],
                 env={

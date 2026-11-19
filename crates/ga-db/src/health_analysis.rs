@@ -25,7 +25,7 @@ mod temporal;
 mod timeline;
 
 pub(crate) use temporal::PRE_EVENT_FEATURE_VERSION;
-pub use temporal::{TemporalFeatures, TemporalPurpose};
+pub use temporal::{TemporalFeatures, TemporalOffsetFeatures, TemporalPurpose};
 pub use timeline::TimelineError;
 
 use std::{error::Error, fmt};
@@ -84,6 +84,7 @@ pub enum HealthAnalysisError {
     InvalidTimezone,
     InvalidKnowledgeCutoff,
     TemporalVersionLimit,
+    TemporalCalendarOverflow,
     SleepRange,
     SleepNapLimit,
     SleepSessionLimit,
@@ -105,6 +106,7 @@ impl fmt::Display for HealthAnalysisError {
             Self::Database => "Daily metrics could not be read",
             Self::InvalidTimezone => "The analysis timezone is invalid",
             Self::InvalidKnowledgeCutoff => "As-known cutoff cannot follow the event",
+            Self::TemporalCalendarOverflow => "date value out of range",
             Self::SleepRange => "Sleep analysis requires at most 31 calendar days",
             Self::CoffeeInputLimit => "More than 1000 diary inputs; narrow the range",
             Self::CoffeeEvidenceLimit => "Coffee/sleep evidence exceeds budget; narrow the range",
@@ -264,6 +266,21 @@ async fn begin_verified_analysis(
         return Err(HealthAnalysisError::ReplayPending);
     }
     Ok(txn)
+}
+
+async fn restore_display_timezone(txn: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    // SQLx starts its connections in UTC. Restore database/role defaults before
+    // rendering stored timestamp strings, as the reference driver does.
+    sqlx::query(
+        "SELECT set_config('TimeZone', substring(setting FROM 10), true)
+         FROM pg_db_role_setting AS defaults
+         CROSS JOIN LATERAL unnest(defaults.setconfig) AS config(setting)
+         WHERE defaults.setdatabase IN (0,(SELECT oid FROM pg_database WHERE datname=current_database()))
+           AND defaults.setrole IN (0,(SELECT oid FROM pg_roles WHERE rolname=session_user))
+           AND lower(setting) LIKE 'timezone=%'
+         ORDER BY (defaults.setrole<>0) DESC,(defaults.setdatabase<>0) DESC LIMIT 1",
+    ).execute(&mut **txn).await?;
+    Ok(())
 }
 
 async fn begin_daily_analysis(
