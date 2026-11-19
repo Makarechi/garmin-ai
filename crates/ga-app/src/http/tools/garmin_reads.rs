@@ -74,6 +74,7 @@ pub(crate) async fn read_garmin(
         let kind = match &query {
             Query::EventWindows(kind, ..) => Some(*kind),
             Query::Migraine(..) => Some("migraine"),
+            Query::Coffee(..) => Some("caffeine"),
             _ => None,
         };
         if let Some(kind) = kind
@@ -128,6 +129,9 @@ pub(crate) async fn read_garmin(
                 configured_timezone,
             )
             .await?),
+        Query::Coffee(start, end, hours, outcome) => {
+            Ok(reader.coffee_sleep(start, end, hours, outcome).await?)
+        }
         Query::Series(metric, start, end, minutes) => {
             Ok(reader.metric_series(metric, start, end, minutes).await?)
         }
@@ -155,6 +159,7 @@ enum Query<'a> {
     Lagged(&'a str, &'a str, Date, Date, Vec<i64>),
     EventWindows(&'a str, &'a str, OffsetDateTime, OffsetDateTime),
     Migraine(&'a str, Date, Date, Option<&'a str>),
+    Coffee(Date, Date, Option<f64>, &'a str),
 }
 
 impl Query<'_> {
@@ -170,6 +175,7 @@ impl Query<'_> {
             | Self::EventWindows(_, metric, ..) => model_metric_packs(metric),
             Self::Running(..) => &["training", "sleep", "wellbeing"],
             Self::Stress(..) => &["wellbeing"],
+            Self::Coffee(..) => &["caffeine", "sleep"],
         }
     }
 }
@@ -244,6 +250,25 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
                 _ => return Err(GarminReadError::Arguments),
             };
             Ok(Query::Stress(start, end, timezone))
+        }
+        ReadTool::CoffeeSleep
+            if arguments
+                .keys()
+                .all(|key| matches!(key.as_str(), "start" | "end" | "late_hours" | "outcome")) =>
+        {
+            let (Some(start), Some(end)) = (day("start"), day("end")) else {
+                return Err(GarminReadError::Arguments);
+            };
+            let hours = match arguments.get("late_hours") {
+                None => None,
+                Some(value) => Some(float_input(value).ok_or(GarminReadError::Arguments)?),
+            };
+            let outcome = arguments
+                .get("outcome")
+                .map_or(Some("sleep_score"), Value::as_str)
+                .filter(|value| matches!(*value, "sleep_score" | "sleep_seconds"))
+                .ok_or(GarminReadError::Arguments)?;
+            Ok(Query::Coffee(start, end, hours, outcome))
         }
         ReadTool::MigraineWindows
             if arguments
@@ -345,15 +370,7 @@ fn running_arguments(arguments: &Map<String, Value>) -> Result<Query<'_>, Garmin
             .get(name)
             .and_then(StoredInstant::from_legacy_input)
     };
-    let rate = |name, default| {
-        arguments
-            .get(name)
-            .map_or(Some(default), |value| match value {
-                Value::String(text) => text.trim().parse().ok(),
-                Value::Bool(value) => Some(f64::from(u8::from(*value))),
-                value => value.as_f64(),
-            })
-    };
+    let rate = |name, default| arguments.get(name).map_or(Some(default), float_input);
     let (Some(start), Some(end), Some(min), Some(max)) = (
         clock("start"),
         clock("end"),
@@ -363,6 +380,21 @@ fn running_arguments(arguments: &Map<String, Value>) -> Result<Query<'_>, Garmin
         return Err(GarminReadError::Arguments);
     };
     Ok(Query::Running(start, end, min, max))
+}
+
+fn float_input(value: &Value) -> Option<f64> {
+    let parsed = match value {
+        Value::String(text) => {
+            let text = text.trim();
+            if text.starts_with('_') || text.ends_with('_') || text.contains("__") {
+                return None;
+            }
+            text.replace('_', "").parse().ok()
+        }
+        Value::Bool(value) => Some(f64::from(u8::from(*value))),
+        value => value.as_f64(),
+    };
+    parsed.filter(|value| value.is_finite())
 }
 
 fn activity_arguments(

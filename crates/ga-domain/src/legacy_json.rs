@@ -2,6 +2,9 @@ use std::{collections::BTreeMap, error::Error, fmt, fmt::Write};
 
 use jiter::JsonValue;
 
+mod numbers;
+pub use numbers::{multiply_numbers, sum_numbers};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Utf8Layout {
     /// The archive contract uses the default Python separator spacing.
