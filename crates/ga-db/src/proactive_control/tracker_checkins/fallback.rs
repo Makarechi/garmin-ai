@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{
     ChannelRef, ProactiveControlError, RULE_PREFIX, Routes, TrackerCheckinDecision,
-    revalidate_tracker_checkin, unique_conversation,
+    TrackerCheckinFence, revalidate_tracker_checkin, unique_conversation,
 };
 use crate::{
     outbox_claims::ReplyDestination,
@@ -121,9 +121,16 @@ async fn reroute(
         intent["intent_id"] = json!(Uuid::new_v4().to_string());
         intent["conversation_id"] = json!(target.to_string());
         intent["channel_instance"] = json!(channel);
-        let decision =
-            revalidate_tracker_checkin(txn, &destination, id, &fallback_key, &mut intent, now)
-                .await?;
+        let decision = revalidate_tracker_checkin(
+            txn,
+            &destination,
+            id,
+            &fallback_key,
+            &mut intent,
+            now,
+            TrackerCheckinFence::Provider,
+        )
+        .await?;
         let retry_at = match decision {
             TrackerCheckinDecision::Cancel | TrackerCheckinDecision::Expire => continue,
             TrackerCheckinDecision::Ready => None,

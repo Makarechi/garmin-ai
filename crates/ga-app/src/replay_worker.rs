@@ -1,5 +1,6 @@
 mod backups;
 mod garmin;
+mod reminders;
 
 use std::{
     env,
@@ -24,11 +25,8 @@ use ga_db::{
     replay::{ReplaySelectionError, RunReplayJob},
     runtime_lease::RuntimeLeaseError,
 };
-use ga_domain::{
-    event_input::known_timezone, event_payload::legacy_boolean, timestamp::StoredInstant,
-};
+use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
 use ga_fit::{ExportLimits, MAX_FIT_BYTES};
-use time::Time;
 use tokio::{signal, sync::watch, time::Instant};
 
 use crate::{
@@ -119,10 +117,6 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
         token,
         user,
         integrations,
-        budget,
-        enabled,
-        quiet_start,
-        quiet_end,
         garmin_auth_url,
         garmin_email,
         garmin_password,
@@ -131,10 +125,6 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
         "GA_TELEGRAM_BOT_TOKEN",
         "GA_TELEGRAM_USER_ID",
         "GA_INTEGRATIONS",
-        "GA_QUESTION_BUDGET",
-        "GA_PROACTIVE_ENABLED",
-        "GA_QUIET_START_HOUR",
-        "GA_QUIET_END_HOUR",
         "GA_GARMIN_AUTH_URL",
         "GA_GARMIN_EMAIL",
         "GA_GARMIN_PASSWORD_SECRET_VERSION",
@@ -152,25 +142,8 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
     };
     let transport =
         TelegramTransport::new(&token).map_err(|_| ReplayServiceError::TelegramConfiguration)?;
-    let question_budget = budget
-        .as_deref()
-        .unwrap_or("2")
-        .parse::<u8>()
-        .ok()
-        .filter(|value| *value <= 20)
-        .ok_or(ReplayServiceError::TelegramConfiguration)?;
-    let enabled = enabled
-        .map_or(Some(false), |value| {
-            legacy_boolean(&serde_json::Value::String(value))
-        })
-        .ok_or(ReplayServiceError::TelegramConfiguration)?;
-    let quiet = |hour: Option<&str>, fallback: &str| {
-        hour.unwrap_or(fallback)
-            .parse::<u8>()
-            .ok()
-            .and_then(|hour| Time::from_hms(hour, 0, 0).ok())
-            .ok_or(ReplayServiceError::TelegramConfiguration)
-    };
+    let reminders =
+        reminders::settings(timezone).map_err(|_| ReplayServiceError::TelegramConfiguration)?;
     Ok(Some(TelegramWorker {
         settings,
         transport,
@@ -183,13 +156,7 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
         )
         .ok()
         .flatten(),
-        reminders: DiaryReminderSettings {
-            timezone: timezone.to_owned(),
-            enabled,
-            daily_budget: question_budget,
-            quiet_start: quiet(quiet_start.as_deref(), "22")?,
-            quiet_end: quiet(quiet_end.as_deref(), "8")?,
-        },
+        reminders,
     }))
 }
 
@@ -406,6 +373,18 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             future::pending().await
         }
     };
+    let web_reminders = async {
+        if worker {
+            if let Some(telegram) = &telegram {
+                reminders::run_web(&database, &telegram.reminders).await;
+            }
+            match reminders::settings(&config.timezone) {
+                Ok(settings) => reminders::run_web(&database, &settings).await,
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+        future::pending().await
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
@@ -415,6 +394,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         result = backup_work => result,
         result = source_work => result,
         result = channel_work => result,
+        result = web_reminders => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

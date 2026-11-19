@@ -2,7 +2,9 @@ use std::time::Duration;
 
 mod dispatch;
 mod fallback;
-pub(crate) use dispatch::{TrackerCheckinDecision, revalidate_tracker_checkin};
+pub(crate) use dispatch::{
+    TrackerCheckinDecision, TrackerCheckinFence, revalidate_tracker_checkin,
+};
 pub(crate) use fallback::remember_tracker_fallback;
 
 use ga_domain::{
@@ -24,6 +26,7 @@ use super::{
 };
 use crate::{
     Database,
+    channel_ingress::telegram_poll::channel_primary,
     outbox_claims::ReplyDestination,
     outbox_enqueue::{QueueIntent, QueueIntentError, queue_outbox_intent},
     share_policy::{DestinationKind, ShareCategory, ShareDestination, ShareRequirement, allows},
@@ -183,6 +186,22 @@ async fn sync_page(
             (route.owner_id, route.channel, route.instance_id)
         }
     };
+    if channel == "web"
+        && (!channel_primary(txn, channel, instance).await?
+            || !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1 AND owner_id=$2
+                               AND channel='web' AND channel_instance_id='local')",
+            )
+            .bind(crate::web_chat::conversation_id(owner))
+            .bind(owner)
+            .fetch_one(&mut **txn)
+            .await?)
+    {
+        return Ok(TrackerRulePage {
+            next: None,
+            queued: 0,
+        });
+    }
     let trackers: Vec<Tracker> = sqlx::query(
         "SELECT t.id,t.revision,t.shortcut,t.reminder_enabled,t.reminder_time,t.reminder_timezone,
                 d.key,d.status,d.id AS definition_id,v.id AS version_id,

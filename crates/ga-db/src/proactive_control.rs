@@ -14,7 +14,8 @@ pub use policy::{NotificationDecision, NotificationPolicy, NotificationReason};
 pub use question_delivery::{DiaryQuestionOutcome, QuestionDispatchResult};
 pub use question_selection::{DiaryQuestionKind, ReservedDiaryQuestion};
 pub(crate) use tracker_checkins::{
-    TrackerCheckinDecision, remember_tracker_fallback, revalidate_tracker_checkin,
+    TrackerCheckinDecision, TrackerCheckinFence, remember_tracker_fallback,
+    revalidate_tracker_checkin,
 };
 pub use tracker_checkins::{TrackerReminderRoute, TrackerRulePage};
 
