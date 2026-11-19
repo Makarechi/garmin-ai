@@ -27,7 +27,9 @@ impl ModelGateway<'_> {
     ) -> Result<(), ga_db::jobs::telegram_inbound::TelegramDiaryCommitError> {
         use super::{ActiveModelJob, runtime::ModelRequestScope};
         use ga_db::{
-            jobs::telegram_inbound::{TelegramDiaryCommitError, TelegramTrackerTextPreparation},
+            jobs::telegram_inbound::{
+                TelegramDiaryCommitError, TelegramTrackerTextPreparation, TrackerSafetyStatus,
+            },
             share_policy::ModelChannelSharing,
         };
         use ga_domain::channel::InboundEnvelope;
@@ -43,46 +45,70 @@ impl ModelGateway<'_> {
             .database
             .telegram_tracker_model_requirement(lease)
             .await?];
-        let screen = self
-            .execute_with_context(
-                ModelInput::Structured {
-                    contract: ApprovedModelSchema::SafetyScreen,
-                    instruction: include_str!("../../../../src/garmin_ai/prompts/form_safety.txt")
-                        .trim(),
-                    prompt: envelope
-                        .text()
-                        .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?,
-                    categories: ModelCategories::HEALTH_AND_DIARY,
-                },
-                policy,
-                ModelRequestScope {
-                    requirements: &safety_requirements,
-                    channel: Some(ModelChannelSharing {
-                        destination: channel,
-                        requirements: &[],
-                        conversation: None,
-                    }),
-                    job,
-                },
-                sender,
-            )
-            .await;
-        if screen
-            .as_ref()
-            .is_ok_and(|screen| screen.value["urgent"] == true)
-        {
+        let destination = ShareDestination::new(DestinationKind::Model, self.selected.instance_id)
+            .map_err(|_| TelegramDiaryCommitError::Database)?;
+        let current = policy();
+        let cached = if current.configuration.enabled && current.consent.is_some() {
+            self.database
+                .cached_telegram_tracker_safety(lease, safety_requirements[0], destination)
+                .await?
+        } else {
+            Some(TrackerSafetyStatus::Unavailable)
+        };
+        let status = match cached {
+            Some(status) => status,
+            None => {
+                let screen = self
+                    .execute_with_context(
+                        ModelInput::Structured {
+                            contract: ApprovedModelSchema::SafetyScreen,
+                            instruction: include_str!(
+                                "../../../../src/garmin_ai/prompts/form_safety.txt"
+                            )
+                            .trim(),
+                            prompt: envelope
+                                .text()
+                                .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?,
+                            categories: ModelCategories::HEALTH_AND_DIARY,
+                        },
+                        policy,
+                        ModelRequestScope {
+                            requirements: &safety_requirements,
+                            channel: Some(ModelChannelSharing {
+                                destination: channel,
+                                requirements: &[],
+                                conversation: None,
+                            }),
+                            job,
+                        },
+                        sender,
+                    )
+                    .await;
+                let status = match screen
+                    .ok()
+                    .and_then(|screen| screen.value["urgent"].as_bool())
+                {
+                    Some(true) => TrackerSafetyStatus::Urgent,
+                    Some(false) => TrackerSafetyStatus::Checked,
+                    None => TrackerSafetyStatus::Unavailable,
+                };
+                self.database
+                    .record_telegram_tracker_safety(
+                        lease,
+                        safety_requirements[0].version_id,
+                        status,
+                    )
+                    .await?;
+                status
+            }
+        };
+        if status == TrackerSafetyStatus::Urgent {
             return self
                 .database
                 .finish_telegram_model_notice(lease, crate::urgent_screen::urgent_notice(locale))
                 .await;
         }
-        let safety_unavailable = screen
-            .as_ref()
-            .ok()
-            .and_then(|screen| screen.value["urgent"].as_bool())
-            .is_none();
-        let destination = ShareDestination::new(DestinationKind::Model, self.selected.instance_id)
-            .map_err(|_| TelegramDiaryCommitError::Database)?;
+        let safety_unavailable = status == TrackerSafetyStatus::Unavailable;
         let session = match self
             .database
             .prepare_telegram_tracker_text(lease, timezone, locale, destination, safety_unavailable)

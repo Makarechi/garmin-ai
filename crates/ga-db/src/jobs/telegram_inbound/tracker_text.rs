@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod reply;
+mod safety;
 use super::{TelegramDiaryCommitError, TelegramInboundLease, tracker_form};
 use crate::{
     Database,
@@ -13,6 +14,7 @@ use crate::{
 };
 use reply::{ReplyPreferences, finish_in, legacy_pending, request, selected_version};
 pub(super) use reply::{control_in, fallback_in};
+pub use safety::TrackerSafetyStatus;
 
 pub enum TelegramTrackerTextPreparation {
     Complete,

@@ -31,4 +31,4 @@ Offline conversations run with a 32 MiB container limit and model conversations 
 
 ## Remaining work
 
-Persisted safety-screen results across interrupted legacy tracker work remain pending under R25/R27. Complete voice transcription, malformed legacy states, all channel paths, combined acceptance, final-build resource workloads and the actual seven-day soak remain open.
+Persisted safety-screen results have dedicated recovery evidence in `rust-tracker-safety-recovery.md`. Complete voice transcription, malformed legacy states, all channel paths, combined acceptance, final-build resource workloads and the actual seven-day soak remain open.
