@@ -246,6 +246,8 @@ pub(super) async fn apply_in(
                     actor: &actor,
                     source: Some("telegram_text"),
                     idempotency_key: key.as_deref(),
+                    original_text: None,
+                    evidence_refs: None,
                 },
             )
             .await;

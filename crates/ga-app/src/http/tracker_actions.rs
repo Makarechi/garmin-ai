@@ -139,7 +139,7 @@ pub(super) async fn submit(
     private_cache(result, &head.headers)
 }
 
-fn submit_failure(error: FormSubmitError) -> Response {
+pub(super) fn submit_failure(error: FormSubmitError) -> Response {
     match error {
         FormSubmitError::Action(error) => action_failure(error),
         FormSubmitError::Diary(error) => super::diary::write_failure(error),

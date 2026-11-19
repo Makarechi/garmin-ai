@@ -190,7 +190,7 @@ fn telegram_configuration(timezone: &str) -> Result<Option<TelegramWorker>, Repl
     }))
 }
 
-fn model_settings() -> Option<RuntimeModelSettings> {
+pub(crate) fn model_settings() -> Option<RuntimeModelSettings> {
     let settings = RuntimeModelSettings::resolve(
         |name| {
             configuration::read([name])

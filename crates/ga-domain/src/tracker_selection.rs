@@ -54,7 +54,7 @@ fn patterns() -> Result<&'static Patterns, SelectionError> {
     }).as_ref().map_err(|_| SelectionError)
 }
 
-fn compile(source: &str) -> Result<Regex, SelectionError> {
+pub(crate) fn compile(source: &str) -> Result<Regex, SelectionError> {
     let alnum = unicode::ALNUM_CLASS;
     let word = format!("[{alnum}_]");
     let boundary = format!("(?:(?<!{word})(?={word})|(?<={word})(?!{word}))");

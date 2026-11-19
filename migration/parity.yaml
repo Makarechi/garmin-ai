@@ -700,7 +700,13 @@
         "migration/capture_tracker_nl_contracts.py",
         "migration/check_tracker_nl.py",
         "crates/ga-domain/src/tracker_nl.rs::tests::matches_frozen_tracker_text_requests_and_scores",
-        "crates/ga-app/tests/tracker_nl_fallback.rs::bounded_offline_tracker_forms_preserve_context_and_facts"
+        "crates/ga-app/tests/tracker_nl_fallback.rs::bounded_offline_tracker_forms_preserve_context_and_facts",
+        "migration/capture_tracker_extraction.py",
+        "migration/capture_tracker_extraction_models.py",
+        "crates/ga-domain/contracts/tracker-extraction-calendar-bounds.json",
+        "migration/check_tracker_extraction_http.py",
+        "crates/ga-domain/src/tracker_nl/extraction/tests.rs",
+        "crates/ga-app/src/model_gateway/tracker/tests.rs::applies_only_evidenced_tracker_text_and_replays_atomic_receipts"
       ],
       "data_contracts": [
         "Preview and confirmation, exact evidence text and offsets, ambiguity/clarification, deterministic fallbacks."
@@ -715,8 +721,9 @@
       "known_limits": [
         "Explicit local Telegram tracker setup matches 324 frozen field cases and 106 durable conversation steps, including delayed updates, privacy, preview confirmation, duplicate ingress and expired-lease recovery. A dedicated final-build scenario passed within 32 MiB with zero swap and zero memory-limit events.",
         "Local guided tracker creation, historical editing and interval closing match frozen typed-answer, prompt and calendar contracts. Dedicated conversations cover schema-only sensitive access, denied fact editing, consent revocation, oversized entry reset, duplicate ingress and expired-lease final submission.",
-        "Local tracker selection matches 9,741 frozen ranking/cue/proposal cases and 162 durable conversation steps per locale, including schema consent, tied choices, stale prompts, retired versions, analysis replies, duplicate ingress and recovered admission. Complete natural-language proposal/extraction and combined R19/R25 acceptance remain pending. Full voice transcription, other Telegram handlers and transport recovery remain part of R27 acceptance.",
-        "Offline POST /natural-language/trackers fallback matches request normalization, relevance scores, scoped form discovery, selected active definitions and historical entries, legacy receipt replay and pinned message context. Paired HTTP scenarios also submit returned forms through either runtime. Full provider-backed extraction and exact general HTTP validation envelopes remain part of R25/R36 acceptance.",
+        "Local tracker selection matches 9,741 frozen ranking/cue/proposal cases and 162 durable conversation steps per locale, including schema consent, tied choices, stale prompts, retired versions, analysis replies, duplicate ingress and recovered admission. Natural-language proposal/extraction across all channels and combined R19/R25 acceptance remain pending. Full voice transcription, other Telegram handlers and transport recovery remain part of R27 acceptance.",
+        "Offline POST /natural-language/trackers fallback matches request normalization, relevance scores, scoped form discovery, selected active definitions and historical entries, legacy receipt replay and pinned message context. Paired HTTP scenarios also submit returned forms through either runtime. Provider-backed tracker HTTP extraction has dedicated synthetic comparisons. Exact general HTTP validation envelopes remain part of R36 acceptance.",
+        "Tracker HTTP proposals/extraction match 360 frozen typed-model contracts and 1,178 evidence calls and ten calendar-bound cases captured while all 168 source natural-language tests passed. A paired HTTP proof compares created/corrected facts and provenance, refusals, proposals, privacy, permissions and cross-runtime receipts against an actual native synthetic HTTPS provider. Matching concurrent model requests return the same atomic receipt and use one provider call. Complete channel integration, broader malformed legacy state and combined R19/R25 acceptance remain pending.",
         "The calendar boundary matrix uses the exact frozen TZif bytes for 598 source timezone keys. Operating-system historical timezone data vary, and deployment timezone-data alignment remains part of R34/R36 verification.",
         "Callback notices after configuration-locale changes, malformed legacy state and complete R36 validation/transport behavior still require broader combined checks.",
         "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."

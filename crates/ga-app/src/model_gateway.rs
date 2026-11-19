@@ -2,6 +2,7 @@ mod analysis;
 mod configuration;
 mod interpretation;
 mod safety;
+mod tracker;
 
 pub use analysis::{
     AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult,
