@@ -43,6 +43,7 @@ pub(crate) enum ReadTool {
     LaggedAssociation,
     EventWindows,
     MigraineWindows,
+    WellbeingObservations,
     Sleep,
 }
 
@@ -62,7 +63,7 @@ impl ReadTool {
         Self::EventWindows,
         Self::MigraineWindows,
     ];
-    const IMPLEMENTED: [Self; 17] = [
+    const IMPLEMENTED: [Self; 18] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -78,6 +79,7 @@ impl ReadTool {
         Self::LaggedAssociation,
         Self::EventWindows,
         Self::MigraineWindows,
+        Self::WellbeingObservations,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -100,6 +102,7 @@ impl ReadTool {
             Self::LaggedAssociation => "analysis_lagged_association",
             Self::EventWindows => "analysis_event_windows",
             Self::MigraineWindows => "analysis_migraine_windows",
+            Self::WellbeingObservations => "wellbeing_observations",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -235,6 +238,13 @@ impl ReadTool {
                     "timezone":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Timezone"}}),
                 &["metric", "start", "end"][..],
             ),
+            Self::WellbeingObservations => (
+                "Reported energy, restedness, pain and daily-function impact, independent of Garmin scores. At most 31 days and 200 reports per bounded page; pass next_cursor as cursor with the same range to continue. Missing values remain unknown.",
+                "wellbeing_observationsArgs",
+                json!({"start":datetime("Start"),"end":datetime("End"),
+                    "cursor":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Cursor"}}),
+                &["start", "end"][..],
+            ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
                 "data_freshnessArgs",
@@ -331,6 +341,18 @@ async fn execute_read_tool(
             return invalid_arguments();
         };
         return match database.list_owner_events(start, end, kind, 500).await {
+            Ok(document) => Json(document).into_response(),
+            Err(error) => diary_failure(error),
+        };
+    }
+    if matches!(tool, ReadTool::WellbeingObservations) {
+        let Some((start, end, cursor)) = wellbeing_input(&arguments) else {
+            return invalid_arguments();
+        };
+        return match database
+            .wellbeing_observations(start, end, cursor, None)
+            .await
+        {
             Ok(document) => Json(document).into_response(),
             Err(error) => diary_failure(error),
         };
@@ -596,6 +618,25 @@ async fn arguments(body: Body) -> Result<Map<String, Value>, BodyError> {
     } else {
         Err(BodyError::Validation(errors))
     }
+}
+
+pub(crate) fn wellbeing_input(
+    arguments: &Map<String, Value>,
+) -> Option<(StoredInstant, StoredInstant, Option<&str>)> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "start" | "end" | "cursor"))
+    {
+        return None;
+    }
+    let start = StoredInstant::from_legacy_input(arguments.get("start")?)?;
+    let end = StoredInstant::from_legacy_input(arguments.get("end")?)?;
+    let cursor = match arguments.get("cursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(cursor)) => Some(cursor.as_str()),
+        _ => return None,
+    };
+    Some((start, end, cursor))
 }
 
 fn sleep_input(arguments: &Map<String, Value>) -> Option<(Date, Date, NapPolicy, bool)> {

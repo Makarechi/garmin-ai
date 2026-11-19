@@ -73,7 +73,8 @@ pub(crate) async fn run() -> Result<(), &'static str> {
         database,
         owner,
         timezone: timezone.unwrap_or_else(|| "Europe/Bratislava".to_owned()),
-        read_tools: std::iter::once(ReadTool::Events)
+        read_tools: [ReadTool::Events, ReadTool::WellbeingObservations]
+            .into_iter()
             .chain(ReadTool::GARMIN_READS)
             .chain(std::iter::once(ReadTool::Freshness))
             .map(read_tool)
@@ -128,6 +129,7 @@ impl Mcp {
         let enable_writes = !self.write_tools.is_empty();
         let result = match call.name.as_ref() {
             "events" => self.events(args).await,
+            "wellbeing_observations" => self.wellbeing(args).await,
             "data_freshness" => self.garmin(ReadTool::Freshness, args).await,
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
             "events_update" if enable_writes => self.update(args, is_cancelled).await,
@@ -151,6 +153,26 @@ impl Mcp {
 }
 
 impl Mcp {
+    async fn wellbeing(
+        &self,
+        args: serde_json::Map<String, Value>,
+    ) -> Result<ToolResult, &'static str> {
+        let (start, end, cursor) =
+            crate::http::tools::wellbeing_input(&args).ok_or("ValidationError")?;
+        let permit = self
+            .active_reads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "RuntimeError")?;
+        let value = self
+            .database
+            .wellbeing_observations(start, end, cursor, Some(self.owner))
+            .await
+            .map_err(diary_error)?;
+        ToolResult::from_value(value, Some(permit))
+    }
+
     async fn update(
         &self,
         mut args: Map<String, Value>,
