@@ -427,7 +427,9 @@ impl Database {
                            i.kind IN ('text','edit','voice') AND ($12<>3 OR i.kind IN ('text','edit')
                              OR j.payload->>'voice_transcribed'='true') AND (
                              (command.input<>'' AND (command.input NOT LIKE '/%'
-                               OR j.payload->>'voice_transcribed'='true')
+                               OR j.payload->>'voice_transcribed'='true' AND (
+                                  $12<>3 OR split_part(command.input,' ',1)
+                                    <>ALL(ARRAY['/cancel','/undo','/history','/newtracker'])) )
                                AND (j.payload->>'local_safety_checked' IS NOT DISTINCT FROM 'true') = ($12 >= 2))
                              OR ($12 = 2 AND i.kind='voice' AND coalesce(command.input,'')='')
                            )

@@ -127,6 +127,23 @@ impl Database {
             if prompt.draft.is_some() || (prompt.guided_form && !prompt.legacy_tracker) {
                 return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
             }
+            if lease.has_voice_text()
+                && envelope.text().is_some_and(|text| {
+                    text.trim_start_matches(ga_domain::event_payload::python_whitespace)
+                        .starts_with('/')
+                })
+            {
+                write_reply(
+                    &mut txn,
+                    lease,
+                    &envelope,
+                    at,
+                    "Неизвестная команда. Доступные команды: /help.",
+                )
+                .await?;
+                txn.commit().await?;
+                return Ok(TelegramModelAdmission::Replied);
+            }
             let timezone = owner_timezone(&mut txn, configured_timezone)
                 .await
                 .map_err(|_| TelegramDiaryCommitError::Database)?;

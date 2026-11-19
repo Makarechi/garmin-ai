@@ -2,6 +2,7 @@ use ga_domain::{
     channel::{InboundEnvelope, InboundError, InboundKind},
     event_input::EventSource,
     model_consent::ModelCategories,
+    telegram_control::TelegramControl,
     timestamp::StoredInstant,
 };
 use serde_json::Value;
@@ -9,7 +10,8 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
 use super::{
-    TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState, history::prompt,
+    InboxLane, TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState,
+    history::prompt,
 };
 use crate::{
     Database,
@@ -31,12 +33,10 @@ impl TelegramInboundLease {
     /// Its processing text can include the transcript saved for this job.
     pub fn processing_envelope(&self) -> Result<InboundEnvelope, InboundError> {
         let envelope = InboundEnvelope::parse(self.envelope_json().as_bytes())?;
-        if let Some(text) = &self.voice_text {
-            let mut document = envelope.document();
-            document["text"] = Value::String(text.clone());
-            return InboundEnvelope::parse(document.to_string().as_bytes());
+        match &self.voice_text {
+            Some(text) => with_transcript(&envelope, text),
+            None => Ok(envelope),
         }
-        Ok(envelope)
     }
 
     pub fn has_voice_text(&self) -> bool {
@@ -75,6 +75,15 @@ impl TelegramInboundLease {
             duration_seconds: self.voice_duration_seconds,
         }))
     }
+}
+
+fn with_transcript(
+    envelope: &InboundEnvelope,
+    text: &str,
+) -> Result<InboundEnvelope, InboundError> {
+    let mut document = envelope.document();
+    document["text"] = Value::String(text.to_owned());
+    InboundEnvelope::parse(document.to_string().as_bytes())
 }
 
 impl Database {
@@ -120,6 +129,13 @@ impl Database {
         if text.chars().take(100_001).count() > 100_000 {
             return Err(TelegramDiaryCommitError::UnsupportedMessage);
         }
+        let processing = with_transcript(&envelope, &text)
+            .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+        let lane = if TelegramControl::from_envelope(&processing).is_some() {
+            InboxLane::Control
+        } else {
+            InboxLane::Diary
+        };
         let mut txn = self.begin_telegram_text(lease, &envelope).await?;
         super::local_text::verify_order(&mut txn, lease).await?;
         if allowed(&mut txn, lease, &envelope, model).await?.as_deref() != Some(expected) {
@@ -129,7 +145,7 @@ impl Database {
             "UPDATE jobs SET status='pending', lease_token=NULL, lease_until=NULL, attempts=attempts-1,
                  payload=(payload - 'local_safety_checked')
                    || jsonb_build_object('voice_transcribed', true, 'tracker_caption_checked', true,
-                       'voice_model_instance',$3::text,'voice_tracker_version',$4::text)
+                       'voice_model_instance',$3::text,'voice_tracker_version',$4::text,'lane',$5::text)
              WHERE id=$1 AND lease_token=$2 AND status='running'
                AND lease_until>clock_timestamp() AND payload->>'voice_transcribed' IS DISTINCT FROM 'true'",
         )
@@ -137,6 +153,7 @@ impl Database {
         .bind(lease.job_identity().1)
         .bind(model.instance())
         .bind(expected.first().map(|requirement| requirement.version_id.to_string()))
+        .bind(lane.label())
         .execute(&mut *txn)
         .await?;
         if changed.rows_affected() != 1 {
@@ -255,6 +272,14 @@ async fn allowed(
         let Ok(version) = version.parse() else {
             return Ok(None);
         };
+        share_policy::try_shared_lock(txn, share_policy::MODEL_CONSENT_LOCK)
+            .await
+            .map_err(|error| match error {
+                share_policy::SharePolicyError::Busy => {
+                    TelegramDiaryCommitError::Outbox(crate::outbox_enqueue::QueueIntentError::Busy)
+                }
+                _ => TelegramDiaryCommitError::Database,
+            })?;
         let requirement = super::tracker_text::tracker_model_requirement(txn, version).await?;
         if !share_policy::allows(txn, requirement, model)
             .await

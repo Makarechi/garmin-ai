@@ -449,7 +449,9 @@ async fn runs_voice_ingress_transcription_and_cached_diary_processing() -> Resul
     assert_eq!(sender.transcriptions.load(Ordering::SeqCst), 2);
     set_audio_consent(&pool, true).await?;
 
-    let limited_wire = update(78006, at, 10, "");
+    recorded_commands(&worker, &transport, binding, &mut runtime, &pool, at).await?;
+
+    let limited_wire = update(78010, at, 10, "");
     let limited_id = accept(binding, &mut runtime, &limited_wire, at).await?;
     let transport = TelegramTransport::connect("100:synthetic-rate-limit", &origin, false)?;
     let limited = database
@@ -467,5 +469,128 @@ async fn runs_voice_ingress_transcription_and_cached_diary_processing() -> Resul
     println!(
         "Voice ingress, 601-second rejection, 429 delay, transcript recovery, revoked consent, bounded safety screening and one attributed diary write passed"
     );
+    Ok(())
+}
+
+async fn recorded_commands(
+    worker: &ModelDiaryWorker<'_, '_, VoiceProvider<'_>>,
+    transport: &TelegramTransport,
+    binding: TelegramBinding<'_>,
+    runtime: &mut RuntimeLease,
+    pool: &PgPool,
+    at: StoredInstant,
+) -> Result<(), Box<dyn Error>> {
+    use ga_db::jobs::telegram_inbound::TelegramControlError;
+
+    let database = worker.database;
+    let target = TelegramInboundTarget {
+        owner_id: binding.owner_id,
+        instance_id: binding.instance_id,
+    };
+    for (id, command) in [
+        (78006, "/pause"),
+        (78007, "/resume"),
+        (78008, "/history"),
+        (78009, "/synthetic-unknown"),
+    ] {
+        let sender = VoiceProvider {
+            transcriptions: AtomicUsize::new(0),
+            interpretations: AtomicUsize::new(0),
+            safety_screens: AtomicUsize::new(0),
+            at: worker.sender.at.clone(),
+            speech: command,
+        };
+        let worker = ModelDiaryWorker {
+            sender: &sender,
+            ..*worker
+        };
+        let wire = update(id, at, 10, "");
+        let message_id = accept(binding, runtime, &wire, at).await?;
+        let voice = database
+            .claim_telegram_voice(target, clock(pool).await?, LEASE)
+            .await?
+            .ok_or("Expected recorded command before transcription")?;
+        worker
+            .process_voice(transport, &voice, clock(pool).await?)
+            .await;
+        assert_eq!(sender.transcriptions.load(Ordering::SeqCst), 1);
+
+        if matches!(command, "/pause" | "/resume") {
+            let control = database
+                .claim_local_telegram_control(target, clock(pool).await?, LEASE)
+                .await?
+                .ok_or("Expected local control after transcription")?;
+            assert_eq!(control.processing_envelope()?.text(), Some(command));
+            assert_eq!(accept(binding, runtime, &wire, at).await?, message_id);
+            if command == "/resume" {
+                set_audio_consent(pool, false).await?;
+            }
+            let result = database
+                .apply_telegram_owner_control(&control, 2, "UTC")
+                .await;
+            if command == "/pause" {
+                assert!(result?.created);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(TelegramControlError::VoiceConsentChanged)
+                ));
+                database.finish_unavailable_telegram_voice(&control).await?;
+                set_audio_consent(pool, true).await?;
+            }
+            let enabled: bool = sqlx::query_scalar(
+                "SELECT (value->>'enabled')::bool FROM app_state WHERE key='proactive:enabled'",
+            )
+            .fetch_one(pool)
+            .await?;
+            assert!(!enabled);
+        } else if command == "/history" {
+            let history = database
+                .claim_local_telegram_history(target, clock(pool).await?, LEASE)
+                .await?
+                .ok_or("Expected local history after transcription")?;
+            assert!(
+                database
+                    .apply_local_telegram_diary(&history, "UTC")
+                    .await?
+                    .created
+            );
+        } else {
+            let screen = database
+                .claim_telegram_local_screen(target, clock(pool).await?, LEASE)
+                .await?
+                .ok_or("Expected submitted command to clear local screening")?;
+            database
+                .apply_local_telegram_text(
+                    &screen,
+                    LocalTelegramText::Safety(TelegramSafetyDecision::Clear),
+                    "en",
+                )
+                .await?;
+            let ready = database
+                .claim_telegram_model_text(target, clock(pool).await?, LEASE)
+                .await?
+                .ok_or("Expected local classification of unknown recorded command")?;
+            worker.process(&ready, clock(pool).await?).await;
+            let text: String = sqlx::query_scalar(
+                "SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE inbound_message_id=$1",
+            )
+            .bind(message_id)
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(text, "Неизвестная команда. Доступные команды: /help.");
+        }
+        assert_eq!(sender.interpretations.load(Ordering::SeqCst), 0);
+        assert_eq!(sender.safety_screens.load(Ordering::SeqCst), 0);
+        let receipt: (String, i64) = sqlx::query_as(
+            "SELECT i.status,count(o.id) FROM inbound_messages i
+             LEFT JOIN outbox_messages o ON o.inbound_message_id=i.id WHERE i.id=$1 GROUP BY i.status",
+        )
+        .bind(message_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(receipt, ("processed".into(), 1));
+    }
+    println!("Recorded pause, revoked resume, history and unknown command used local handlers");
     Ok(())
 }

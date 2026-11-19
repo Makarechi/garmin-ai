@@ -1,9 +1,7 @@
 use std::{error::Error, fmt, time::Duration};
 
 use ga_domain::{
-    channel::{InboundEnvelope, OutboundIntent},
-    telegram_control::TelegramControl,
-    timestamp::StoredInstant,
+    channel::OutboundIntent, telegram_control::TelegramControl, timestamp::StoredInstant,
 };
 use serde_json::json;
 use sqlx::{Postgres, Transaction};
@@ -11,8 +9,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    InboxLane, KIND, TelegramInboundLease, TelegramInboundState, complete, superseded,
-    try_ingress_lock,
+    InboxLane, KIND, TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState,
+    complete, superseded, try_ingress_lock,
 };
 use crate::{
     Database,
@@ -38,6 +36,7 @@ pub enum TelegramControlError {
     Outbox(QueueIntentError),
     Busy,
     BindingChanged,
+    VoiceConsentChanged,
     Unsupported,
     Malformed,
     Database,
@@ -55,6 +54,7 @@ impl fmt::Display for TelegramControlError {
             Self::Outbox(error) => error.fmt(f),
             Self::Busy => f.write_str("Telegram control policy is being updated"),
             Self::BindingChanged => f.write_str("Telegram owner or selected channel changed"),
+            Self::VoiceConsentChanged => f.write_str("Voice transcript sharing is unavailable"),
             Self::Unsupported => f.write_str("The command requires a separate handler"),
             Self::Malformed => f.write_str("The stored Telegram command is invalid"),
             Self::Database => f.write_str("The Telegram command could not be committed"),
@@ -114,7 +114,8 @@ impl Database {
         question_budget: u16,
         configured_timezone: &str,
     ) -> Result<QueuedIntent, TelegramControlError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramControlError::Malformed)?;
         if envelope.message_id() != lease.message_id || envelope.channel().channel() != "telegram" {
             return Err(TelegramControlError::Malformed);
@@ -140,6 +141,11 @@ impl Database {
                 return Err(TelegramControlError::BindingChanged);
             }
             let ordering_epoch = control_epoch(&mut txn, lease).await?;
+            if lease.has_voice_text() {
+                super::local_text::verify_order(&mut txn, lease).await.map_err(voice_error)?;
+                super::voice::require_current_transcript(&mut txn, lease).await.map_err(voice_error)?;
+            }
+
             let mut reply_fence = None;
             let text = match command {
                 TelegramControl::Help | TelegramControl::Start => HELP.to_owned(),
@@ -243,6 +249,9 @@ async fn control_epoch(
           AND j.lease_until>clock_timestamp() AND i.id=$4 AND i.status='pending'
           AND i.envelope=$5::jsonb AND i.operation_id=$6 AND i.legacy_telegram_update_id IS NULL
           AND j.payload->>'lane'=$7 AND j.payload->>'inbound_message_id'=i.id::text
+          AND CASE WHEN j.payload->>'voice_transcribed'='true'
+              THEN i.kind='voice' AND i.normalized_text=$8::text
+              ELSE $8::text IS NULL END
          FOR UPDATE OF j",
     )
     .bind(lease.job_id)
@@ -252,6 +261,7 @@ async fn control_epoch(
     .bind(lease.envelope_json())
     .bind(lease.operation_id)
     .bind(InboxLane::Control.label())
+    .bind(lease.voice_text.as_deref())
     .fetch_optional(&mut **txn)
     .await?;
     if let Some(epoch) = epoch
@@ -263,5 +273,13 @@ async fn control_epoch(
     }
     Err(TelegramControlError::Job(JobStoreError::LeaseLost))
 }
+fn voice_error(error: TelegramDiaryCommitError) -> TelegramControlError {
+    match error {
+        TelegramDiaryCommitError::VoiceConsentChanged => TelegramControlError::VoiceConsentChanged,
+        TelegramDiaryCommitError::Outbox(QueueIntentError::Busy) => TelegramControlError::Busy,
+        _ => TelegramControlError::Database,
+    }
+}
+
 mod debug;
 mod goals;
