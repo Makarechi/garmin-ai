@@ -97,6 +97,19 @@ async fn consume_outbox_action(
     if let Some(history) = resolve_legacy_history(txn, callback).await? {
         return Ok(history);
     }
+    if callback.channel == "telegram"
+        && callback
+            .token
+            .strip_prefix("create:")
+            .is_some_and(|id| id.parse::<Uuid>().is_ok())
+    {
+        let update = callback
+            .event_id
+            .parse::<i64>()
+            .map_err(|_| IngressError::InvalidEnvelope)?;
+        return Ok(json!({"action_id":callback.token,"label":"Tracker",
+            "operation_id":ga_domain::channel::legacy_telegram_action_id(update).to_string(),"token":null,"expires_at":null}));
+    }
     if callback.token.len() != 57 || !callback.token.is_ascii() {
         return Err(IngressError::ActionUnavailable);
     }

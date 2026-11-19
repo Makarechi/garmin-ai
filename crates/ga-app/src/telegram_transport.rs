@@ -4,6 +4,7 @@ mod model_worker;
 mod poller;
 mod reminders;
 mod send;
+mod tracker_form;
 mod tracker_setup;
 mod worker;
 pub use model_reply::{DiaryReplyOutcome, DiaryReplyPreferences, publish_telegram_interpretation};

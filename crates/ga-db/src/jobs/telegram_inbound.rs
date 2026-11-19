@@ -6,6 +6,7 @@ mod local_text;
 mod model_correction;
 mod model_publication;
 mod model_reply;
+mod tracker_form;
 mod tracker_setup;
 
 pub use control::TelegramControlError;
@@ -90,6 +91,7 @@ enum InboxWork {
     TextWithoutProvider,
     ModelText,
     TrackerSetup,
+    TrackerForm,
 }
 
 impl InboxWork {
@@ -117,6 +119,7 @@ impl InboxWork {
             Self::TextWithoutProvider => 2,
             Self::ModelText => 3,
             Self::TrackerSetup => 4,
+            Self::TrackerForm => 5,
             _ => 0,
         }
     }
@@ -254,6 +257,22 @@ impl Database {
         .await
     }
 
+    pub async fn claim_telegram_tracker_form(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Diary,
+            InboxWork::TrackerForm,
+        )
+        .await
+    }
+
     async fn claim_telegram_lane(
         &self,
         target: TelegramInboundTarget<'_>,
@@ -312,7 +331,27 @@ impl Database {
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
-                       AND ($12 = 0 OR ($12 = 4 AND i.kind IN ('text','edit','voice') AND (
+                       AND ($12 = 0 OR ($12 = 5 AND (
+                          (i.kind='action' AND (starts_with(i.envelope#>>'{action,action_id}','create:')
+                            OR split_part(i.envelope#>>'{action,action_id}','/',1)=ANY(ARRAY['diary.history.edit','diary.history.close'])
+                              AND EXISTS(SELECT 1 FROM events e WHERE starts_with(e.kind,'user.')
+                                AND NOT e.deleted AND e.id=CASE WHEN pg_input_is_valid(split_part(i.envelope#>>'{action,action_id}','/',2),'uuid')
+                                  THEN split_part(i.envelope#>>'{action,action_id}','/',2)::uuid END
+                                AND e.revision::text=split_part(i.envelope#>>'{action,action_id}','/',3))))
+                          OR (i.kind IN ('text','edit','voice') AND EXISTS(SELECT 1 FROM app_state p
+                              WHERE p.key=CASE WHEN $3='primary' THEN 'conversation:pending' ELSE concat('conversation:pending:telegram:',$3) END
+                                AND (jsonb_typeof(p.value->'chat_form')='object' OR jsonb_typeof(p.value->'chat_close')='object')
+                                AND CASE WHEN pg_input_is_valid(coalesce(p.value->>'preset_selected_at',p.value->>'created_at'),'timestamptz')
+                                  THEN (coalesce(p.value->>'preset_selected_at',p.value->>'created_at')::timestamptz
+                                    BETWEEN clock_timestamp()-interval '2 hours' AND clock_timestamp())
+                                    OR (coalesce(p.value->>'preset_selected_at',p.value->>'created_at')::timestamptz
+                                      BETWEEN coalesce((i.envelope->>'occurred_at')::timestamptz,i.received_at)-interval '2 hours'
+                                        AND coalesce((i.envelope->>'occurred_at')::timestamptz,i.received_at))
+                                  ELSE false END)
+                              AND (coalesce(command.input,'')='' OR (command.input LIKE '/%'
+                                AND split_part(command.input,' ',1)<>ALL(ARRAY['/cancel','/undo','/newtracker','/history']))
+                                OR i.kind='voice' AND j.payload->>'local_safety_checked'='true'))
+                       )) OR ($12 = 4 AND i.kind IN ('text','edit','voice') AND (
                            split_part(command.input,' ',1)='/newtracker'
                            OR (EXISTS(SELECT 1 FROM app_state WHERE key=concat('tracker:chat-setup:telegram:',$3))
                              AND (split_part(command.input,' ',1)=ANY(ARRAY['/preview','/confirm_tracker','/privacy','/remove_field'])

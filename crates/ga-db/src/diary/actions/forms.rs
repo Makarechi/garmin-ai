@@ -14,6 +14,7 @@ pub(super) mod projection;
 mod submit;
 
 pub use file::{FileImportOutcome, FileImportStoreError};
+pub(crate) use submit::TrackerFormWrite;
 pub use submit::{FormSubmission, FormSubmitError};
 
 enum FormAction {
@@ -111,17 +112,28 @@ impl Database {
         locale: Option<&str>,
         configured_locale: &str,
     ) -> Result<Value, TrackerActionError> {
-        let action = FormAction::parse(action_id)?;
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
             let locale = read_locale(&mut txn, owner, locale, configured_locale).await?;
-            let (contract, entry) = form_contract(&mut txn, owner, action).await?;
-            let form = contract.project(entry, &locale)?;
+            let form = Self::tracker_generated_form_in(&mut txn, owner, action_id, &locale).await?;
             txn.commit().await?;
             Ok(form)
         })
         .await
         .map_err(|_| DiaryReadError::Database)?
+    }
+}
+
+impl Database {
+    pub(crate) async fn tracker_generated_form_in(
+        txn: &mut Transaction<'_, Postgres>,
+        owner: Uuid,
+        action_id: &str,
+        locale: &str,
+    ) -> Result<Value, TrackerActionError> {
+        let action = FormAction::parse(action_id)?;
+        let (contract, entry) = form_contract(txn, owner, action).await?;
+        contract.project(entry, locale)
     }
 }
 

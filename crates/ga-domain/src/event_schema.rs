@@ -1,3 +1,4 @@
+pub mod chat_form;
 mod form;
 pub use form::{FormProjectionError, form_schema_flags, project_form_fields};
 

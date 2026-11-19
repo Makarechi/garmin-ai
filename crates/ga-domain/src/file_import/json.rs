@@ -225,6 +225,7 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
 struct JsonReader<'source> {
     input: &'source [u8],
     parser: Jiter<'source>,
+    number_parser: fn(&[u8]) -> Result<serde_json::Number, ImportFileError>,
 }
 
 impl<'source> JsonReader<'source> {
@@ -232,6 +233,7 @@ impl<'source> JsonReader<'source> {
         Self {
             input,
             parser: Jiter::new(input).with_allow_inf_nan(),
+            number_parser: numbers::parse,
         }
     }
 
@@ -250,7 +252,7 @@ impl<'source> JsonReader<'source> {
     fn number(&mut self, peek: Peek) -> Result<serde_json::Number, ImportFileError> {
         let start = self.parser.current_index();
         match self.parser.known_number_bytes(peek) {
-            Ok(bytes) => numbers::parse(bytes),
+            Ok(bytes) => (self.number_parser)(bytes),
             Err(error)
                 if error.error_type
                     == JiterErrorType::JsonError(JsonErrorType::NumberOutOfRange) =>
@@ -259,7 +261,7 @@ impl<'source> JsonReader<'source> {
                 // Python applies it only to integers, so validate and consume a long float.
                 let tail = &self.input[start..];
                 let bytes = numbers::long_float(tail)?;
-                let value = numbers::parse(bytes)?;
+                let value = (self.number_parser)(bytes)?;
                 let rest = &tail[bytes.len()..];
                 let parser = std::mem::replace(&mut self.parser, Jiter::new(rest));
                 self.parser = Jiter::with_tape(rest, parser.into_tape()).with_allow_inf_nan();
@@ -269,4 +271,18 @@ impl<'source> JsonReader<'source> {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// Reuse the strict duplicate-key and Unicode decoder for a single chat JSON answer.
+pub(crate) fn read_chat_value(
+    text: &str,
+    number_parser: fn(&[u8]) -> Result<serde_json::Number, ImportFileError>,
+) -> Result<Result<Value, JsonRowIssue>, ImportFileError> {
+    let input = strings::escape_unpaired(text)?;
+    let mut reader = JsonReader::new(input.as_bytes());
+    reader.number_parser = number_parser;
+    let peek = reader.parser.peek()?;
+    let item = read_value(&mut reader, peek)?;
+    reader.parser.finish()?;
+    Ok(item.issue.map_or(Ok(item.value), Err))
 }

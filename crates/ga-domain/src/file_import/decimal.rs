@@ -1,12 +1,12 @@
 #[derive(Eq, PartialEq)]
-pub(super) struct Decimal {
+pub(crate) struct Decimal {
     negative: bool,
     significant: Vec<u8>,
     exponent: i64,
 }
 
 impl Decimal {
-    pub(super) fn new(token: &str) -> Option<Self> {
+    pub(crate) fn new(token: &str) -> Option<Self> {
         let negative = token.starts_with('-');
         let token = token.strip_prefix(['-', '+']).unwrap_or(token);
         let (coefficient, exponent) = token.split_once(['e', 'E']).unwrap_or((token, "0"));
@@ -36,7 +36,7 @@ impl Decimal {
         })
     }
 
-    pub(super) fn adjusted(&self, zero_exponent: i64) -> Option<i64> {
+    pub(crate) fn adjusted(&self, zero_exponent: i64) -> Option<i64> {
         if self.significant.is_empty() {
             Some(zero_exponent)
         } else {
@@ -44,7 +44,11 @@ impl Decimal {
         }
     }
 
-    pub(super) fn integer_token(&self) -> Option<String> {
+    pub(crate) fn is_integral(&self) -> bool {
+        self.significant.is_empty() || self.exponent >= 0
+    }
+
+    pub(crate) fn integer_token(&self) -> Option<String> {
         if self.significant.is_empty() {
             return Some("0".to_owned());
         }

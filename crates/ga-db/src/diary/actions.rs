@@ -5,6 +5,7 @@ mod settings;
 mod setup;
 
 pub use community::{CommunityPackError, community_pack_catalog, parse_community_pack};
+pub(crate) use forms::TrackerFormWrite;
 pub use forms::{FileImportOutcome, FileImportStoreError};
 pub use forms::{FormSubmission, FormSubmitError};
 pub use setup::TrackerSetupStoreError;
