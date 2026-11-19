@@ -73,7 +73,7 @@ pub(crate) async fn read_garmin(
     if mcp_owner.is_some() {
         let kind = match &query {
             Query::EventWindows(kind, ..) => Some(*kind),
-            Query::Migraine(..) => Some("migraine"),
+            Query::Migraine(..) | Query::Insights(..) => Some("migraine"),
             Query::Coffee(..) => Some("caffeine"),
             _ => None,
         };
@@ -118,6 +118,7 @@ pub(crate) async fn read_garmin(
         Query::EventWindows(kind, metric, start, end) => {
             return Ok(reader.event_windows(kind, metric, start, end).await?);
         }
+        Query::Insights(limit, cursor) => return Ok(reader.insights(limit, cursor).await?),
         Query::Stress(start, end, timezone) => Ok(reader
             .stress_hours(start, end, timezone, configured_timezone)
             .await?),
@@ -160,6 +161,7 @@ enum Query<'a> {
     EventWindows(&'a str, &'a str, OffsetDateTime, OffsetDateTime),
     Migraine(&'a str, Date, Date, Option<&'a str>),
     Coffee(Date, Date, Option<f64>, &'a str),
+    Insights(u16, Option<&'a str>),
 }
 
 impl Query<'_> {
@@ -176,6 +178,7 @@ impl Query<'_> {
             Self::Running(..) => &["training", "sleep", "wellbeing"],
             Self::Stress(..) => &["wellbeing"],
             Self::Coffee(..) => &["caffeine", "sleep"],
+            Self::Insights(..) => &["sleep", "wellbeing", "migraine"],
         }
     }
 }
@@ -250,6 +253,26 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
                 _ => return Err(GarminReadError::Arguments),
             };
             Ok(Query::Stress(start, end, timezone))
+        }
+        ReadTool::Insights
+            if arguments
+                .keys()
+                .all(|key| matches!(key.as_str(), "limit" | "cursor")) =>
+        {
+            let limit = match arguments.get("limit") {
+                None => 30,
+                Some(value) => ga_domain::legacy_json::integer_argument(value)
+                    .ok_or(GarminReadError::Arguments)?
+                    .to_string()
+                    .parse::<u16>()
+                    .unwrap_or(0),
+            };
+            let cursor = match arguments.get("cursor") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) => Some(value.as_str()),
+                _ => return Err(GarminReadError::Arguments),
+            };
+            Ok(Query::Insights(limit, cursor))
         }
         ReadTool::CoffeeSleep
             if arguments

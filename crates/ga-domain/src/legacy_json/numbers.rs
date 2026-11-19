@@ -3,6 +3,55 @@ use serde_json::Value;
 
 use super::JsonError;
 
+/// Coerce the legacy typed integer argument while retaining large integer values.
+pub fn integer_argument(value: &Value) -> Option<BigInt> {
+    let parsed = match value {
+        Value::Bool(value) => BigInt::from(u8::from(*value)),
+        Value::Number(value) if !value.as_str().contains(['.', 'e', 'E']) => {
+            bounded_integer_text(value.as_str())?
+        }
+        Value::Number(_) => {
+            let value = number(value).ok()?;
+            if value.fract() != 0.0 || value.abs() >= i64::MAX as f64 {
+                return None;
+            }
+            bounded_integer_text(&format!("{value:.0}"))?
+        }
+        Value::String(value) => {
+            let value = value.trim();
+            let integral = match value.split_once('.') {
+                Some((integral, fraction))
+                    if !fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0') =>
+                {
+                    integral
+                }
+                Some(_) => return None,
+                None => value,
+            };
+            let digits = integral.strip_prefix(['+', '-']).unwrap_or(integral);
+            if !digits.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                || !digits.as_bytes().last().is_some_and(u8::is_ascii_digit)
+                || digits.contains("__")
+            {
+                return None;
+            }
+            bounded_integer_text(&integral.replace('_', ""))?
+        }
+        _ => return None,
+    };
+    Some(parsed)
+}
+
+fn bounded_integer_text(text: &str) -> Option<BigInt> {
+    let significant = text.trim_start_matches(['+', '-']).trim_start_matches('0');
+    let sign = usize::from(text.starts_with('-') && !significant.is_empty());
+    // The pinned validator bounds the canonical signed decimal representation.
+    if significant.len() + sign > 4300 {
+        return None;
+    }
+    BigInt::parse_bytes(text.as_bytes(), 10)
+}
+
 /// Keep integer/float distinctions when multiplying archived numeric fields.
 pub fn multiply_numbers(first: &Value, second: &Value) -> Result<Value, JsonError> {
     if let (Some(first), Some(second)) = (integer(first), integer(second)) {

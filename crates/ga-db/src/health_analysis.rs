@@ -2,6 +2,7 @@ mod activity_reads;
 mod coffee;
 mod device_history;
 mod event_windows;
+mod insights;
 mod lagged;
 mod migraine;
 mod read_daily;
@@ -88,6 +89,7 @@ pub enum HealthAnalysisError {
     MigraineEpisodeLimit,
     CoffeeInputLimit,
     CoffeeEvidenceLimit,
+    InsightArguments,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -105,6 +107,7 @@ impl fmt::Display for HealthAnalysisError {
             Self::SleepRange => "Sleep analysis requires at most 31 calendar days",
             Self::CoffeeInputLimit => "More than 1000 diary inputs; narrow the range",
             Self::CoffeeEvidenceLimit => "Coffee/sleep evidence exceeds budget; narrow the range",
+            Self::InsightArguments => "Invalid insight limit or cursor",
             Self::MigraineEpisodeLimit => "Limit migraine comparison to at most 200 observed episode days; narrow the date range",
             Self::SleepNapLimit => "Sleep analysis exceeds 200 naps; narrow the interval",
             Self::SleepSessionLimit => {

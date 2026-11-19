@@ -22,7 +22,7 @@ impl Error for InvalidStoredInstant {}
 impl StoredInstant {
     /// Parse an aware legacy Python cursor timestamp at its retained microsecond precision.
     pub fn from_python_isoformat(value: &str) -> Option<Self> {
-        python_isoformat::parse(value)
+        Self::from_unix_microseconds(python_isoformat_microseconds(value)?).ok()
     }
 
     /// Interpret a timestamp using the legacy typed application input contract.
@@ -74,6 +74,11 @@ impl TryFrom<OffsetDateTime> for StoredInstant {
         }
         Ok(Self(utc))
     }
+}
+
+/// Parse a legacy cursor's UTC position, including offsets crossing the storage calendar bounds.
+pub fn python_isoformat_microseconds(value: &str) -> Option<i64> {
+    python_isoformat::parse(value)
 }
 
 impl From<StoredInstant> for OffsetDateTime {
