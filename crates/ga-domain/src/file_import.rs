@@ -1,6 +1,6 @@
 mod csv;
-mod decimal;
-mod json;
+pub(crate) mod decimal;
+pub(crate) mod json;
 mod mapping;
 
 pub use csv::{CsvRows, read_csv_rows};
@@ -29,6 +29,7 @@ pub enum ImportFileError {
     JsonNonfinite,
     JsonFloatOverflow,
     JsonPrecision,
+    JsonDecimalRange,
 }
 
 impl fmt::Display for ImportFileError {
@@ -46,6 +47,7 @@ impl fmt::Display for ImportFileError {
             Self::JsonNonfinite => "Non-finite JSON value",
             Self::JsonFloatOverflow => "non-finite JSON value",
             Self::JsonPrecision => "JSON number exceeds the supported precision",
+            Self::JsonDecimalRange => "JSON decimal exponent exceeds the supported range",
         })
     }
 }

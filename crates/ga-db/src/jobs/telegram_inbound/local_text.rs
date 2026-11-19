@@ -89,6 +89,18 @@ impl Database {
                 .await?;
             let now =
                 StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
+            if super::tracker_form::apply_in(
+                &mut txn,
+                lease,
+                &envelope,
+                configured_timezone,
+                configured_locale,
+            )
+            .await?
+            {
+                txn.commit().await?;
+                return Ok(TelegramModelAdmission::Replied);
+            }
             if let Some(reply) = super::tracker_setup::reply_in(
                 &mut txn,
                 lease,
@@ -163,6 +175,11 @@ impl Database {
             let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn).await?;
             let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
+            if matches!(work, LocalTelegramText::ProviderUnavailable)
+                && super::tracker_form::apply_in(&mut txn,lease,&envelope,"UTC",configured_locale).await? {
+                txn.commit().await?;
+                return Ok(());
+            }
             if matches!(work, LocalTelegramText::ProviderUnavailable)
                 && let Some(reply) = super::tracker_setup::reply_in(
                     &mut txn, lease, &envelope, "UTC", configured_locale,
