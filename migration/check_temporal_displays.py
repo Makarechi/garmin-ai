@@ -15,7 +15,7 @@ from check_temporal_features import (
     large_context,
     seed,
 )
-from sqlalchemy import text
+from sqlalchemy import literal, text
 from sqlalchemy.orm import Session
 
 from garmin_ai.models import MetricObservation
@@ -117,13 +117,14 @@ def distinct_history(engine, count):
 
 def configure_zone(engine, zone, role=False):
     database = engine.dialect.identifier_preparer.quote(engine.url.database)
+    zone = literal(zone).compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
         if role:
             connection.execute(
-                text(f"ALTER ROLE CURRENT_USER IN DATABASE {database} SET TimeZone='{zone}'")
+                text(f"ALTER ROLE CURRENT_USER IN DATABASE {database} SET TimeZone={zone}")
             )
         else:
-            connection.execute(text(f"ALTER DATABASE {database} SET TimeZone='{zone}'"))
+            connection.execute(text(f"ALTER DATABASE {database} SET TimeZone={zone}"))
     engine.dispose()
 
 
@@ -135,12 +136,23 @@ def run(binary):
         large_context(engine)
         seed_clocks(engine)
         requests = cases()
-        for zone in ["UTC", "America/New_York", "Asia/Kathmandu"]:
+        for zone in [
+            "UTC",
+            "America/New_York",
+            "Asia/Kathmandu",
+            "GMT+3",
+            "GMT-3",
+            "<+0545>-5:45",
+            "EST5EDT",
+            "Etc/GMT+3",
+        ]:
             configure_zone(engine, zone)
             compare_cases(binary, engine, requests, "database timezone " + zone)
         configure_zone(engine, "America/New_York")
         configure_zone(engine, "Asia/Kathmandu", role=True)
         compare_cases(binary, engine, requests, "database/role precedence")
+        configure_zone(engine, "GMT+3", role=True)
+        compare_cases(binary, engine, requests, "database/role POSIX precedence")
         configure_zone(engine, "UTC", role=True)
         for count in [1000, 10000, 100000]:
             distinct_history(engine, count)

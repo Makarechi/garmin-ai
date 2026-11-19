@@ -118,7 +118,17 @@ def transition_cases(engine, compare):
                 {"id": f"synthetic-clock-{index}", "at": at},
             )
     count = 0
-    for zone in ["UTC", "America/New_York", "Europe/Bratislava", "Australia/Lord_Howe"]:
+    for zone in [
+        "UTC",
+        "America/New_York",
+        "Europe/Bratislava",
+        "Australia/Lord_Howe",
+        "GMT+3",
+        "GMT-3",
+        "<+0545>-5:45",
+        "EST5EDT",
+        "Etc/GMT+3",
+    ]:
         configure_zone(engine, zone)
         for at in clocks:
             result = compare(
@@ -132,6 +142,21 @@ def transition_cases(engine, compare):
         result = compare({"start": "2026-11-01T05:00:00Z", "end": "2026-11-01T07:00:00Z"})
         assert result["n"] == 4
         count += 1
+    configure_zone(engine, "America/New_York")
+    configure_zone(engine, "GMT+3", role=True)
+    for at in clocks:
+        result = compare(
+            {
+                "start": (at - timedelta(microseconds=1)).isoformat(),
+                "end": (at + timedelta(microseconds=1)).isoformat(),
+            }
+        )
+        assert result["n"] == 1
+        count += 1
+    result = compare({"start": "2026-11-01T05:00:00Z", "end": "2026-11-01T07:00:00Z"})
+    assert result["n"] == 4
+    count += 1
+    configure_zone(engine, "UTC", role=True)
     configure_zone(engine, "UTC")
     print("Matched running regional-clock and DST batches", count, flush=True)
 

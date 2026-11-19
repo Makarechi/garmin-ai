@@ -139,7 +139,7 @@ pub fn regional_clock_instant(
     clock: time::PrimitiveDateTime,
     timezone: &str,
 ) -> Option<OffsetDateTime> {
-    let zone = jiff::tz::db().get(timezone).ok()?;
+    let zone = python_timezone(timezone)?;
     let civil = jiff::civil::DateTime::new(
         clock.year().try_into().ok()?,
         clock.month() as i8,
@@ -152,4 +152,28 @@ pub fn regional_clock_instant(
     .ok()?;
     let timestamp = zone.to_ambiguous_timestamp(civil).compatible().ok()?;
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(timestamp.as_microsecond()) * 1000).ok()
+}
+
+/// Match timezone keys supported by the reference PostgreSQL driver's ZoneInfo lookup.
+pub fn source_timezone_available(name: &str) -> bool {
+    python_timezone(name).is_some()
+}
+
+pub(crate) fn python_timezone(name: &str) -> Option<jiff::tz::TimeZone> {
+    let base = name
+        .strip_prefix("posix/")
+        .or_else(|| name.strip_prefix("right/"))
+        .unwrap_or(name);
+    if !crate::event_input::known_timezone(base) {
+        return None;
+    }
+    let zone = jiff::tz::db().get(base).ok()?;
+    if !name.starts_with("right/") || zone.to_fixed_offset().is_ok() {
+        return Some(zone);
+    }
+    // ZoneInfo ignores leap records but retains the right/ file's transition table.
+    jiff::tz::TimeZoneDatabase::from_dir("/usr/share/zoneinfo/right")
+        .ok()?
+        .get(base)
+        .ok()
 }

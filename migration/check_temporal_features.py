@@ -137,13 +137,15 @@ def compare_cases(binary, engine, cases, label):
     with TemporaryDirectory() as directory:
         path = Path(directory) / "temporal-features.json"
         path.write_text(json.dumps(requests), encoding="utf-8")
-        output = subprocess.run(
+        result = subprocess.run(
             [binary, "--ignored", "--exact", "select_feature_evidence", "--nocapture"],
-            check=True,
+            check=False,
             text=True,
             capture_output=True,
             env={**os.environ, "GA_TEST_TEMPORAL_FEATURES": str(path)},
-        ).stdout
+        )
+        assert result.returncode == 0, (label, result.stderr, result.stdout[-2000:])
+        output = result.stdout
         prefix = "temporal: "
         actual = [
             json.loads(line.removeprefix(prefix))

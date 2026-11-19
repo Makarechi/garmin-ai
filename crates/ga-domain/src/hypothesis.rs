@@ -7,7 +7,7 @@ use speedate::{DateTime, DateTimeConfig, MicrosecondsPrecisionOverflowBehavior, 
 use time::{Date, Month};
 use uuid::Uuid;
 
-use crate::event_input::known_timezone;
+use crate::timestamp::python_timezone;
 
 pub struct HypothesisSpec {
     document: Value,
@@ -64,7 +64,7 @@ impl HypothesisSpec {
         }
         let timezone = value["timezone"]
             .as_str()
-            .filter(|zone| hypothesis_timezone(zone).is_some())
+            .filter(|zone| python_timezone(zone).is_some())
             .ok_or(InvalidHypothesisSpec)?;
         let outcome = fields
             .get("outcome")
@@ -136,7 +136,7 @@ impl HypothesisSpec {
     }
 
     pub fn local_date(&self, at: crate::timestamp::StoredInstant) -> Option<Date> {
-        let zone = hypothesis_timezone(self.document["timezone"].as_str()?)?;
+        let zone = python_timezone(self.document["timezone"].as_str()?)?;
         let utc = time::OffsetDateTime::from(at).to_offset(time::UtcOffset::UTC);
         let timestamp = match jiff::Timestamp::from_microsecond(at.unix_microseconds()) {
             Ok(timestamp) => timestamp,
@@ -194,25 +194,6 @@ fn supports_direction(direction: &str, interval: &[Value]) -> bool {
         "higher" => interval[0].as_f64().is_some_and(|value| value > 0.0),
         _ => false,
     }
-}
-
-fn hypothesis_timezone(name: &str) -> Option<jiff::tz::TimeZone> {
-    let base = name
-        .strip_prefix("posix/")
-        .or_else(|| name.strip_prefix("right/"))
-        .unwrap_or(name);
-    if !known_timezone(base) {
-        return None;
-    }
-    let zone = jiff::tz::db().get(base).ok()?;
-    if !name.starts_with("right/") || zone.to_fixed_offset().is_ok() {
-        return Some(zone);
-    }
-    // ZoneInfo ignores leap records but retains the right/ file's transition table.
-    jiff::tz::TimeZoneDatabase::from_dir("/usr/share/zoneinfo/right")
-        .ok()?
-        .get(base)
-        .ok()
 }
 
 fn float_argument(value: &Value) -> Option<f64> {

@@ -197,6 +197,22 @@ fn lower_bound(event: OffsetDateTime) -> Result<OffsetDateTime, HealthAnalysisEr
         .ok_or(HealthAnalysisError::TemporalCalendarOverflow)
 }
 
+pub(super) async fn restore_clock_timezone(
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    restore_display_timezone(txn).await?;
+    let timezone: String = sqlx::query_scalar("SELECT current_setting('TimeZone')")
+        .fetch_one(&mut **txn)
+        .await?;
+    if !ga_domain::timestamp::source_timezone_available(&timezone) {
+        // The reference driver falls back to UTC for PostgreSQL-only timezone names.
+        sqlx::query("SET LOCAL TimeZone='UTC'")
+            .execute(&mut **txn)
+            .await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn temporal_features_in(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     metrics: &[&str],
@@ -217,7 +233,7 @@ pub(super) async fn temporal_features_in(
     }
     let latest = ordered.last().map(|(clock, _)| *clock).unwrap_or(earliest);
     let mut lower = lower_bound(earliest)?;
-    restore_display_timezone(txn).await?;
+    restore_clock_timezone(txn).await?;
     if clock_source == TemporalClock::DatabaseTimezone {
         let timezone: String = sqlx::query_scalar("SELECT current_setting('TimeZone')")
             .fetch_one(&mut **txn)

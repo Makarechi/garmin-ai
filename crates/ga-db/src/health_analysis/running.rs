@@ -7,8 +7,8 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 
 use super::{
     ActivityReadError, DailyHealthReader, HealthAnalysisError, MAX_RANGE_DAYS, TemporalPurpose,
-    check_calendar_bounds, isoformat, restore_display_timezone,
-    temporal::{TemporalClock, local_event_clocks, temporal_features_in},
+    check_calendar_bounds, isoformat,
+    temporal::{TemporalClock, local_event_clocks, restore_clock_timezone, temporal_features_in},
 };
 
 const MAX_RUNS: usize = 2000;
@@ -101,7 +101,7 @@ impl DailyHealthReader {
         if !(0.0 <= min && min < max && max <= 300.0) {
             return Err(ActivityReadError::HeartRateRange);
         }
-        restore_display_timezone(&mut self.0).await?;
+        restore_clock_timezone(&mut self.0).await?;
         let runs = sqlx::query_as::<_,Run>("SELECT id,start,extract(timezone FROM start)::integer AS start_offset,kind,distance_m,moving_seconds,duration_seconds,avg_hr,ascent_m
             FROM activities WHERE start >= $1 AND start < $2 AND kind IN ('running','trail_running','treadmill_running',
                 'track_running','indoor_running','ultra_run','virtual_run','obstacle_run') ORDER BY start LIMIT $3")
