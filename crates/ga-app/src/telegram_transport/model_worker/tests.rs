@@ -12,7 +12,7 @@ use ga_db::{
 };
 use ga_domain::model_response::StructuredModelOutput;
 use ga_model::ModelTransportError;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -26,6 +26,7 @@ use crate::{
 };
 
 const HEALTH_QUESTION: &str = "What is the synthetic Garmin sleep baseline?";
+const FRESHNESS_QUESTION: &str = "How recent is the synthetic Garmin sleep summary?";
 const SLEEP_QUESTION: &str = "When did the synthetic sleep interval start?";
 const SLEEP_DAY: &str = "2024-02-18";
 const SLEEP_START: &str = "2024-02-17T22:15:02.119000+00:00";
@@ -147,6 +148,29 @@ impl Sender for SyntheticProvider {
                 json!({"evidence_ids":[1],"timestamp_claims":[{
                     "evidence_id":1,"path":["rows",0,"main_interval","start"],"value":start
                 }],"response_language":"en"})
+            }
+            13 => {
+                assert_eq!(prompt["text"], FRESHNESS_QUESTION);
+                json!({"intent":"question","confidence":1.0,"response_language":"en"})
+            }
+            14 => {
+                assert_eq!(prompt["question"], FRESHNESS_QUESTION);
+                assert_eq!(prompt["quality_context"], json!({}));
+                assert_eq!(prompt["planning_only"], true);
+                json!({"calls":[{"name":"data_freshness","arguments_json":"{}"}]})
+            }
+            15 => {
+                assert_eq!(
+                    prompt["quality_context"]["sleep_score"]["semantics"],
+                    "daily_summary"
+                );
+                assert_eq!(
+                    prompt["evidence"][0]["result"]["channels"]["sleep_score"],
+                    prompt["quality_context"]["sleep_score"]
+                );
+                assert!(prompt["evidence"][0]["result"].get("source_ref").is_none());
+                json!({"answer":"The synthetic summary is saved.","evidence_ids":[1],
+                       "include_current_state_freshness":true,"response_language":"en"})
             }
             _ => panic!("Unexpected provider retry"),
         };
@@ -493,6 +517,50 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
         database
             .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
                 panic!("Invalid sleep evidence escaped to Telegram")
+            })
+            .await?,
+        ReplyDispatchResult::Cancelled
+    );
+    sqlx::query("INSERT INTO health_days(day,sleep_score,sources) VALUES($1,80,'{}')")
+        .bind(at.date())
+        .execute(&pool)
+        .await?;
+    sqlx::query(allow_sleep)
+        .bind(owner_id)
+        .bind(true)
+        .execute(&pool)
+        .await?;
+    process(&mut runtime, 7, FRESHNESS_QUESTION).await?;
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 16);
+    let (reply, body, proof): (Uuid, String, String) = sqlx::query_as(
+        "SELECT o.id,o.intent#>>'{blocks,0,text}',(o.memory_fence->'telegram_diary_analysis')::text
+         FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+         WHERE i.normalized_text=$1",
+    )
+    .bind(FRESHNESS_QUESTION)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        body.contains("Data recency at the time of your question:"),
+        "{body}"
+    );
+    let proof: Value = serde_json::from_str(&proof)?;
+    assert_eq!(proof["reads"][0]["query"]["tool"], "data_freshness");
+    assert!(proof["reads"][0]["checked_at"].is_string());
+    let claim = database
+        .claim_outbox_reply(destination(), started, LEASE)
+        .await?
+        .ok_or("Expected claimed freshness reply")?;
+    assert_eq!(claim.outbox_id, reply);
+    sqlx::query(allow_sleep)
+        .bind(owner_id)
+        .bind(false)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        database
+            .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
+                panic!("Revoked freshness evidence escaped to Telegram")
             })
             .await?,
         ReplyDispatchResult::Cancelled

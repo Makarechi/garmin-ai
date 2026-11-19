@@ -18,7 +18,6 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use ga_model::fallback::FallbackError;
-use serde_json::json;
 use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 
@@ -285,10 +284,10 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
             memory: &memory.fence,
             goals_revision: goals.revision,
         };
-        let effective = analysis_clock(
-            envelope.occurred_at().unwrap_or(envelope.received_at()),
-            timezone,
-        )?;
+        let question_at = envelope.occurred_at().unwrap_or(envelope.received_at());
+        let effective = analysis_clock(question_at, timezone)?;
+        let question_clock = StoredInstant::try_from(question_at)
+            .map_err(|_| Disposition::Text("agent.data_changed"))?;
         let channel = format!("telegram:{}", envelope.channel().instance_id());
         let tools =
             DiaryAnalysisTools::new(self.database, context, self.gateway.binding().instance_id)
@@ -299,6 +298,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     started,
                     lease.has_voice_text(),
                     self.timezone,
+                    question_clock,
                 )
                 .await;
         let conversation = analysis_conversation(memory.turns);
@@ -312,7 +312,6 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     text,
                     locale: language,
                     conversation: &conversation,
-                    quality_context: &json!({}),
                     personal_goals: &goals_document,
                     replay_notice: None,
                     tools: &tools.offered_tools(),
@@ -338,6 +337,11 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 .finish_telegram_model_notice(lease, urgent_notice(&language))
                 .await
                 .map_err(commit_disposition),
+            AnalysisResult::Replay { language } => self
+                .database
+                .finish_telegram_model_notice(lease, template(&language, "agent.replay"))
+                .await
+                .map_err(commit_disposition),
             AnalysisResult::NoAnswer { language } => self
                 .database
                 .finish_telegram_model_notice(lease, template(&language, "agent.steps_exhausted"))
@@ -348,15 +352,13 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 narrative,
                 numbers,
                 timestamps,
-                include_current_state_freshness,
+                freshness,
                 used_evidence,
                 ..
             } => {
-                if include_current_state_freshness {
-                    return Err(Disposition::Text("agent.answer_unverified"));
-                }
                 let body = format_analysis_answer(
                     &language,
+                    freshness,
                     narrative,
                     numbers,
                     timestamps,

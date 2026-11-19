@@ -5,6 +5,7 @@ use ga_domain::{
     model_consent::ModelCategories,
     sha256_hex,
     statistics::describe,
+    timestamp::StoredInstant,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -13,9 +14,9 @@ use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
     HealthAnalysisError, HealthPeriod, NapPolicy, begin_daily_analysis, daily_metric,
-    main_sleep_timing_in, model_metric_packs, observed_values, owner_timezone, period_comparison,
-    period_document, permits_timing_in, read_daily::model_packs_allowed,
-    require_current_projection, sleep_analysis::sleep_analysis_in,
+    freshness_report::model_freshness_in, main_sleep_timing_in, model_metric_packs,
+    observed_values, owner_timezone, period_comparison, period_document, permits_timing_in,
+    read_daily::model_packs_allowed, require_current_projection, sleep_analysis::sleep_analysis_in,
 };
 use crate::{
     Database,
@@ -26,6 +27,7 @@ use crate::{
 pub const PERSONAL_BASELINE: &str = "personal_baseline";
 pub const PERIOD_COMPARISON: &str = "analysis_compare_periods";
 pub const SLEEP_ANALYSIS: &str = "analysis_sleep";
+pub const DATA_FRESHNESS: &str = "data_freshness";
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "tool", content = "arguments", deny_unknown_fields)]
@@ -53,6 +55,8 @@ pub enum DailyAnalysisQuery {
         #[serde(default)]
         timing_only: bool,
     },
+    #[serde(rename = "data_freshness")]
+    Freshness {},
 }
 
 impl DailyAnalysisQuery {
@@ -65,9 +69,19 @@ impl DailyAnalysisQuery {
         txn: &mut Transaction<'_, Postgres>,
         context: AnalysisSubject<'_>,
         configured_timezone: &str,
+        checked_at: Option<StoredInstant>,
     ) -> Result<Option<Value>, HealthAnalysisError> {
         if !health_allowed(txn, context).await? {
             return Ok(None);
+        }
+        if matches!(self, Self::Freshness {}) {
+            let Some(at) = checked_at else {
+                return Ok(None);
+            };
+            let timezone = owner_timezone(txn, configured_timezone).await?;
+            return model_freshness_in(txn, context.binding().owner_id, at, &timezone)
+                .await
+                .map(|(report, _)| Some(report));
         }
         if let Self::Sleep {
             start,
@@ -134,6 +148,7 @@ impl DailyAnalysisQuery {
                 .document()
             }
             Self::Sleep { .. } => return Err(HealthAnalysisError::SleepRange),
+            Self::Freshness {} => return Ok(None),
         };
         Ok(Some(result))
     }
@@ -145,11 +160,16 @@ pub struct DailyAnalysisEvidence {
     result_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checked_at: Option<String>,
 }
 
 impl DailyAnalysisEvidence {
     pub fn is_daily_tool(tool: &str) -> bool {
-        matches!(tool, PERSONAL_BASELINE | PERIOD_COMPARISON | SLEEP_ANALYSIS)
+        matches!(
+            tool,
+            PERSONAL_BASELINE | PERIOD_COMPARISON | SLEEP_ANALYSIS | DATA_FRESHNESS
+        )
     }
 
     pub(crate) fn single_sleep_timing(&self) -> bool {
@@ -162,22 +182,27 @@ impl DailyAnalysisEvidence {
         )
     }
 
-    pub fn from_read(evidence: &Value) -> Option<Self> {
+    pub fn from_read(evidence: &Value, timezone: &str) -> Option<Self> {
         let arguments = evidence["arguments"].as_object()?;
         let query = DailyAnalysisQuery::from_arguments(evidence["tool"].as_str()?, arguments)?;
         let result = &evidence["result"];
         if !result.is_object() || result.get("error").is_some() {
             return None;
         }
-        let timezone = if matches!(query, DailyAnalysisQuery::Sleep { .. }) {
-            Some(result["timezone"].as_str()?.to_owned())
-        } else {
-            None
+        let (timezone, checked_at) = match &query {
+            DailyAnalysisQuery::Sleep { .. } => (Some(result["timezone"].as_str()?.into()), None),
+            DailyAnalysisQuery::Freshness {} => {
+                let checked_at = result["checked_at"].as_str()?;
+                StoredInstant::from_python_isoformat(checked_at)?;
+                (Some(timezone.into()), Some(checked_at.into()))
+            }
+            _ => (None, None),
         };
         Some(Self {
             query,
             result_hash: result_hash(result)?,
             timezone,
+            checked_at,
         })
     }
 
@@ -186,12 +211,25 @@ impl DailyAnalysisEvidence {
         txn: &mut Transaction<'_, Postgres>,
         context: AnalysisSubject<'_>,
     ) -> Result<bool, HealthAnalysisError> {
-        if matches!(self.query, DailyAnalysisQuery::Sleep { .. }) && self.timezone.is_none() {
+        if matches!(
+            self.query,
+            DailyAnalysisQuery::Sleep { .. } | DailyAnalysisQuery::Freshness {}
+        ) && self.timezone.is_none()
+        {
             return Ok(false);
         }
+        let checked_at = self
+            .checked_at
+            .as_deref()
+            .and_then(StoredInstant::from_python_isoformat);
         let value = self
             .query
-            .read_in(txn, context, self.timezone.as_deref().unwrap_or("UTC"))
+            .read_in(
+                txn,
+                context,
+                self.timezone.as_deref().unwrap_or("UTC"),
+                checked_at,
+            )
             .await?;
         Ok(value.as_ref().and_then(result_hash).as_deref() == Some(&self.result_hash))
     }
@@ -229,14 +267,35 @@ impl Database {
         context: AnalysisSubject<'_>,
         query: &DailyAnalysisQuery,
         configured_timezone: &str,
+        at: StoredInstant,
     ) -> Result<Option<Value>, HealthAnalysisError> {
         timeout_read(async {
             let mut txn = begin_daily_analysis(&self.work).await?;
             let result = query
-                .read_in(&mut txn, context, configured_timezone)
+                .read_in(&mut txn, context, configured_timezone, Some(at))
                 .await?;
             txn.commit().await?;
             Ok(result)
+        })
+        .await
+    }
+
+    pub async fn read_analysis_quality(
+        &self,
+        context: AnalysisSubject<'_>,
+        configured_timezone: &str,
+        at: StoredInstant,
+    ) -> Result<Option<(Value, bool)>, HealthAnalysisError> {
+        timeout_read(async {
+            let mut txn = begin_daily_analysis(&self.work).await?;
+            if !health_allowed(&mut txn, context).await? {
+                return Ok(None);
+            }
+            let timezone = owner_timezone(&mut txn, configured_timezone).await?;
+            let report =
+                model_freshness_in(&mut txn, context.binding().owner_id, at, &timezone).await?;
+            txn.commit().await?;
+            Ok(Some(report))
         })
         .await
     }

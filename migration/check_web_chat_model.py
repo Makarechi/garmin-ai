@@ -29,7 +29,7 @@ from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import HealthDay, Person
+from garmin_ai.models import HealthDay, Person, SourcePayload
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
@@ -61,6 +61,7 @@ DIARY_ANSWER = "The diary lists the synthetic detail."
 DIARY_START = datetime(2026, 9, 19, 20, tzinfo=UTC)
 DIARY_DETAIL = "Synthetic detail from the saved diary"
 HEALTH_QUESTION = "Compare synthetic daily Garmin values."
+FRESHNESS_QUESTION = "How recent are the synthetic Garmin measurements?"
 HEALTH_READS = {
     "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
     "analysis_compare_periods": {
@@ -77,6 +78,8 @@ def output(prompt):
     if "question" in prompt:
         if prompt["question"].startswith(HEALTH_QUESTION):
             return health_output(prompt)
+        if prompt["question"].startswith(FRESHNESS_QUESTION):
+            return freshness_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -102,7 +105,7 @@ def output(prompt):
     if sentence.startswith("Undo"):
         confidence = 0.84 if "synthetic low confidence" in sentence else 1
         return Interpretation(intent="undo", confidence=confidence, response_language="en")
-    if sentence.startswith((DIARY_QUESTION, HEALTH_QUESTION)):
+    if sentence.startswith((DIARY_QUESTION, HEALTH_QUESTION, FRESHNESS_QUESTION)):
         return Interpretation(intent="question", confidence=1, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
@@ -183,6 +186,28 @@ def health_output(prompt):
             {"evidence_id": 1, "path": ["mean"], "value": 70},
             {"evidence_id": 2, "path": ["difference"], "value": 20},
         ],
+    )
+
+
+def freshness_output(prompt):
+    replaying = prompt["question"].endswith(" during replay")
+    if replaying or prompt.get("planning_only"):
+        assert prompt["quality_context"] == {}
+    else:
+        assert set(prompt["quality_context"]) == {"sleep_score"}
+        assert prompt["quality_context"]["sleep_score"]["semantics"] == "daily_summary"
+    if not prompt["evidence"]:
+        assert any(tool["name"] == "data_freshness" for tool in prompt["tools"])
+        return AgentStep(calls=[{"name": "data_freshness", "arguments_json": "{}"}])
+    [evidence] = prompt["evidence"]
+    assert evidence["tool"] == "data_freshness"
+    assert set(evidence["result"]["channels"]) == (set() if replaying else {"sleep_score"})
+    assert "endpoints" not in evidence["result"] and "archive_replay" not in evidence["result"]
+    return AgentStep(
+        answer="The stored report provides the age of the available observations.",
+        evidence_ids=[1],
+        include_current_state_freshness=True,
+        response_language="en",
     )
 
 
@@ -386,6 +411,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_undo(engine, python, native, native_calls, active, release)
     exercise_analysis(engine, python, native, native_calls)
     exercise_health_analysis(engine, python, native)
+    exercise_current_freshness(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -690,6 +716,59 @@ def exercise_health_analysis(engine, python, native):
     assert withheld["text"] == reference["text"], (withheld, reference)
     assert "The analysis could not be completed" in withheld["text"], withheld
     print("Matched cited daily Garmin aggregates and withheld stale or disallowed evidence")
+
+
+def exercise_current_freshness(engine, python, native):
+    at = datetime.now(UTC)
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for key in ("training", "wellbeing"):
+            packs[key].llm_enabled = False
+        packs["sleep"].llm_enabled = True
+        session.add(HealthDay(day=at.date(), sleep_score=80))
+
+    reference = submit(python, FRESHNESS_QUESTION)["reply"]
+    result = submit(native, FRESHNESS_QUESTION)["reply"]
+    assert reference["text"] == result["text"], (reference, result)
+    assert "Data recency at the time of your question:" in result["text"]
+    assert f"summary for {at.date()}" in result["text"]
+    assert "Heart rate" not in result["text"] and "Training readiness" not in result["text"]
+    result_id = result["id"]
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["sleep"].llm_enabled = False
+    hidden = native.get("/web-chat/messages", headers=HEADERS)
+    assert hidden.status_code == 200
+    assert result_id not in {reply["id"] for reply in hidden.json()["replies"]}
+    assert native.post(f"/web-chat/messages/{result_id}/read", headers=HEADERS).status_code == 409
+
+    source_id = uuid4()
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["sleep"].llm_enabled = True
+        session.add(
+            SourcePayload(
+                id=source_id,
+                source="garmin_connect",
+                endpoint="stress",
+                source_key=at.date().isoformat(),
+                payload_hash="a" * 64,
+                archive_key="synthetic/replay-pending.json",
+                payload={},
+                fetched_at=at,
+                parser_version=1,
+                status="normalized",
+            )
+        )
+    result = native.get("/web-chat/messages", headers=HEADERS)
+    assert result.status_code == 200, result.text
+    assert not any(reply["id"] == result_id for reply in result.json()["replies"]), result.text
+    question = FRESHNESS_QUESTION + " during replay"
+    reference = submit(python, question)["reply"]
+    result = submit(native, question)["reply"]
+    assert reference["text"] == result["text"], (reference, result)
+    assert "being recalculated" in result["text"]
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM source_payloads WHERE id=:id"), {"id": source_id})
+    print("Matched stored freshness while withholding denied channels and pending replay evidence")
 
 
 def main():
