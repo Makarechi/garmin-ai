@@ -182,3 +182,99 @@ async fn worker_recovers_and_sends_one_current_reminder() -> Result<(), Box<dyn 
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires migration/check_tracker_checkins.py --worker and its disposable database"]
+async fn tracker_worker_retries_refusal_and_holds_uncertain() -> Result<(), Box<dyn Error>> {
+    let url = env::var("GA_TEST_DATABASE_URL")?;
+    let raw = url
+        .strip_prefix("postgresql+psycopg://")
+        .ok_or("Expected fixture URL")?;
+    let options = format!("postgresql://{raw}")
+        .parse::<PgConnectOptions>()?
+        .disable_statement_logging();
+    let target = options
+        .get_database()
+        .filter(|name| name.ends_with("_test"))
+        .ok_or("Expected disposable database")?;
+    let pool = PgPool::connect_with(options.clone()).await?;
+    let actual: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(actual, target);
+    let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    let (listener, transport) = bind().await?;
+    let binding =
+        TelegramIngressSettings::selected(Some("918724"), None)?.ok_or("Missing fixture bot")?;
+    let settings = DiaryReminderSettings {
+        timezone: "UTC".into(),
+        enabled: false,
+        daily_budget: 2,
+        quiet_start: Time::MIDNIGHT,
+        quiet_end: Time::MIDNIGHT,
+    };
+    let (recovered, ready) = watch::channel(false);
+    let observer = async {
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        recovered.send(true)?;
+        let (mut first, _) = listener.accept().await?;
+        let sent = request(&mut first).await?;
+        assert_eq!(sent["endpoint"], "sendMessage");
+        assert_eq!(sent["fields"]["chat_id"], 918724);
+        assert_eq!(
+            sent["fields"]["text"],
+            "Напоминание: Синтетическая запись private_fixture."
+        );
+        respond(
+            &mut first,
+            "429 Too Many Requests",
+            &[],
+            r#"{"ok":false,"error_code":429,"parameters":{"retry_after":1}}"#,
+        )
+        .await?;
+        let (mut second, _) = listener.accept().await?;
+        assert_eq!(request(&mut second).await?, sent);
+        // The provider read the second request and disconnected without a result.
+        drop(second);
+        loop {
+            let state: (String, i32) = sqlx::query_as("SELECT state,attempts FROM outbox_messages")
+                .fetch_one(&pool)
+                .await?;
+            if state.0 == "uncertain" {
+                assert_eq!(state.1, 2);
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, Box<dyn Error>>(())
+    };
+    tokio::select! {
+        never = transport.run_tracker_checkins(&database, &binding, &settings, ready.clone()) => never,
+        result = timeout(Duration::from_secs(8), observer) => result??,
+    };
+    let after_restart = async {
+        assert!(
+            timeout(Duration::from_millis(500), listener.accept())
+                .await
+                .is_err()
+        );
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM outbox_messages WHERE state='uncertain'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(rows, 1);
+        Ok::<_, Box<dyn Error>>(())
+    };
+    tokio::select! {
+        never = transport.run_tracker_checkins(&database, &binding, &settings, ready) => never,
+        result = after_restart => result?,
+    };
+    println!(
+        "Verified the ordinary tracker worker, a known refusal retry, and no automatic resend after losing the response"
+    );
+    Ok(())
+}

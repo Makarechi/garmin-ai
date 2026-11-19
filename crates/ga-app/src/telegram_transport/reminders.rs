@@ -5,7 +5,7 @@ use ga_db::{
     outbox_claims::ReplyDestination,
     proactive_control::{
         DiaryContextAvailability, DiaryQuestionOutcome, NotificationExclusions, NotificationPolicy,
-        ProactiveControlError, ReservedDiaryQuestion,
+        ProactiveControlError, ReservedDiaryQuestion, TrackerReminderRoute,
     },
 };
 use ga_domain::{
@@ -14,13 +14,17 @@ use ga_domain::{
 };
 use serde_json::json;
 use time::Time;
-use tokio::{sync::watch, time::sleep};
+use tokio::{
+    sync::watch,
+    time::{Instant, sleep},
+};
 
 use super::{TelegramSendOutcome, TelegramTransport, poller::wall_clock};
 use crate::{telegram_input::TelegramBinding, telegram_settings::TelegramIngressSettings};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const CHECKIN_LEASE_SECONDS: u32 = 90;
 
 pub struct DiaryReminderSettings {
     pub timezone: String,
@@ -31,6 +35,75 @@ pub struct DiaryReminderSettings {
 }
 
 impl TelegramTransport {
+    /// Process scheduled tracker check-ins independently of model-assisted reminders.
+    pub async fn run_tracker_checkins(
+        &self,
+        database: &Database,
+        settings: &TelegramIngressSettings,
+        configured: &DiaryReminderSettings,
+        mut ready: watch::Receiver<bool>,
+    ) -> ! {
+        let policy = configured.policy();
+        let mut after = None;
+        let mut scan_at = Instant::now();
+        loop {
+            if ready.wait_for(|ready| *ready).await.is_err() {
+                future::pending::<()>().await;
+            }
+            if let (Ok(binding), Ok(now)) =
+                (settings.confirmed_binding(database).await, wall_clock())
+            {
+                if Instant::now() >= scan_at {
+                    let route = TrackerReminderRoute {
+                        owner: binding.owner_id,
+                        telegram_instance: binding.instance_id,
+                        telegram_chat: binding.external_owner_id,
+                    };
+                    match database
+                        .queue_tracker_checkins(route, &policy, now, after)
+                        .await
+                    {
+                        Ok(page) => {
+                            after = page.next;
+                            scan_at = Instant::now()
+                                + if after.is_none() {
+                                    CHECK_INTERVAL
+                                } else {
+                                    RETRY_INTERVAL
+                                };
+                        }
+                        Err(_) => scan_at = Instant::now() + RETRY_INTERVAL,
+                    }
+                }
+                let destination = ReplyDestination {
+                    owner_id: binding.owner_id,
+                    channel: "telegram",
+                    instance_id: binding.instance_id,
+                };
+                if let Ok(Some(claim)) = database
+                    .claim_telegram_tracker_checkin(destination, now, CHECKIN_LEASE_SECONDS)
+                    .await
+                {
+                    if self
+                        .dispatch_tracker_checkin(database, binding, claim, &ready)
+                        .await
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    if let DiaryQuestionOutcome::RetryAt(retry_at) =
+                        retry_outcome(wall_clock().unwrap_or(now), RETRY_INTERVAL)
+                    {
+                        let _ = database
+                            .defer_unsent_reply(binding.owner_id, claim, retry_at)
+                            .await;
+                    }
+                }
+            }
+            sleep(RETRY_INTERVAL).await;
+        }
+    }
+
     /// Process the diary reminder queue while acknowledgement and control lanes remain independent.
     pub async fn run_diary_reminders(
         &self,
@@ -39,16 +112,7 @@ impl TelegramTransport {
         configured: &DiaryReminderSettings,
         mut ready: watch::Receiver<bool>,
     ) -> ! {
-        let policy = NotificationPolicy {
-            timezone: &configured.timezone,
-            default_enabled: configured.enabled,
-            daily_budget: Some(configured.daily_budget),
-            quiet_start: configured.quiet_start,
-            quiet_end: configured.quiet_end,
-            snoozed_until: None,
-            destination: None,
-            exclusions: NotificationExclusions::default(),
-        };
+        let policy = configured.policy();
         let mut current = None;
         loop {
             if ready.wait_for(|ready| *ready).await.is_err() {
@@ -178,6 +242,21 @@ impl TelegramTransport {
                 retry_outcome(wall_clock().unwrap_or(now), delay)
             }
             _ => DiaryQuestionOutcome::Uncertain,
+        }
+    }
+}
+
+impl DiaryReminderSettings {
+    fn policy(&self) -> NotificationPolicy<'_> {
+        NotificationPolicy {
+            timezone: &self.timezone,
+            default_enabled: self.enabled,
+            daily_budget: Some(self.daily_budget),
+            quiet_start: self.quiet_start,
+            quiet_end: self.quiet_end,
+            snoozed_until: None,
+            destination: None,
+            exclusions: NotificationExclusions::default(),
         }
     }
 }

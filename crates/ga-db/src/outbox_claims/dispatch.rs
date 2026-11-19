@@ -14,6 +14,9 @@ use crate::{
     check_readiness,
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
     jobs::{STORAGE_QUEUE_LOCK, telegram_notices::TelegramNoticeFence},
+    proactive_control::{
+        ProactiveControlError, TrackerCheckinDecision, revalidate_tracker_checkin,
+    },
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{
         CHANNEL_CONSENT_LOCK, MODEL_CONSENT_LOCK, ShareRequirement, intent_sharing_allowed,
@@ -77,6 +80,7 @@ impl From<sqlx::Error> for ReplyDispatchError {
 enum Dispatch {
     Unavailable,
     Cancelled,
+    Deferred(StoredInstant),
     Started {
         intent: Value,
         token: Uuid,
@@ -133,8 +137,10 @@ impl Database {
         if destination.channel == "telegram" {
             return Ok(ReplyDispatchResult::ClaimUnavailable);
         }
-        self.dispatch_reply(destination, claim, requirements, None, |body, _| send(body))
-            .await
+        self.dispatch_reply(destination, claim, requirements, None, false, |body, _| {
+            send(body)
+        })
+        .await
     }
 
     /// Deliver to the current, paired Telegram chat.
@@ -175,8 +181,40 @@ impl Database {
         if destination.channel != "telegram" {
             return Ok(ReplyDispatchResult::ClaimUnavailable);
         }
-        self.dispatch_reply(destination, claim, requirements, Some(expected_chat), send)
-            .await
+        self.dispatch_reply(
+            destination,
+            claim,
+            requirements,
+            Some(expected_chat),
+            false,
+            send,
+        )
+        .await
+    }
+
+    /// Send a claimed tracker reminder through the guarded Telegram delivery path.
+    pub async fn dispatch_telegram_tracker_checkin<F>(
+        &self,
+        destination: ReplyDestination<'_>,
+        expected_chat: i64,
+        claim: ReplyClaim,
+        send: impl FnOnce(Value) -> F,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError>
+    where
+        F: Future<Output = Option<ReplySendOutcome>>,
+    {
+        if destination.channel != "telegram" {
+            return Ok(ReplyDispatchResult::ClaimUnavailable);
+        }
+        self.dispatch_reply(
+            destination,
+            claim,
+            &[],
+            Some(expected_chat),
+            true,
+            |body, _| send(body),
+        )
+        .await
     }
 
     async fn dispatch_reply<F>(
@@ -185,6 +223,7 @@ impl Database {
         claim: ReplyClaim,
         requirements: &[ShareRequirement<'_>],
         expected_chat: Option<i64>,
+        tracker: bool,
         send: impl FnOnce(Value, Option<String>) -> F,
     ) -> Result<ReplyDispatchResult, ReplyDispatchError>
     where
@@ -199,6 +238,7 @@ impl Database {
                 claim,
                 requirements,
                 expected_chat,
+                tracker,
             )
             .await?;
             Ok::<_, ReplyDispatchError>((connection, prepared))
@@ -208,6 +248,7 @@ impl Database {
         let (intent, token, deadline, (wall, started), telegram_notice) = match dispatch {
             Dispatch::Unavailable => return Ok(ReplyDispatchResult::ClaimUnavailable),
             Dispatch::Cancelled => return Ok(ReplyDispatchResult::Cancelled),
+            Dispatch::Deferred(retry_at) => return Ok(ReplyDispatchResult::Deferred { retry_at }),
             Dispatch::Started {
                 intent,
                 token,
@@ -303,6 +344,7 @@ async fn prepare(
     claim: ReplyClaim,
     requirements: &[ShareRequirement<'_>],
     expected_chat: Option<i64>,
+    tracker: bool,
 ) -> Result<Dispatch, ReplyDispatchError> {
     for lock in [
         STORAGE_LIFECYCLE_LOCK,
@@ -326,7 +368,7 @@ async fn prepare(
         .map_err(ReplyDispatchError::Storage)?;
     let row = sqlx::query(
         "SELECT o.id,o.conversation_id,o.operation_id,o.inbound_message_id,o.memory_fence::text AS fence,
-                c.memory_epoch,c.share_owner_memory,o.intent::text AS intent
+                c.memory_epoch,c.share_owner_memory,o.intent::text AS intent,o.dedup_key
          FROM outbox_messages o JOIN conversations c ON c.id=o.conversation_id AND c.owner_id=o.owner_id
          WHERE o.id=$1 AND o.state='sending' AND o.lease_token=$2 AND o.lease_until>clock_timestamp()
            AND o.owner_id=$3 AND c.channel=$4 AND c.channel_instance_id=$5
@@ -340,10 +382,11 @@ async fn prepare(
     .bind(destination.owner_id)
     .bind(destination.channel)
     .bind(destination.instance_id)
-    .try_map(|row: PgRow| Ok((Candidate::read(&row)?, row.try_get::<String, _>("intent")?)))
+    .try_map(|row: PgRow| Ok((Candidate::read(&row)?, row.try_get::<String, _>("intent")?,
+                             row.try_get::<String, _>("dedup_key")?)))
     .fetch_optional(&mut *txn)
     .await?;
-    let Some((candidate, raw)) = row else {
+    let Some((candidate, raw, key)) = row else {
         txn.rollback().await?;
         return Ok(Dispatch::Unavailable);
     };
@@ -367,7 +410,7 @@ async fn prepare(
     let fence = check_fence(&mut txn, destination, &candidate).await?;
     let ready = match (serde_json::from_str::<Value>(&raw), fence) {
         (Ok(mut intent), FenceStatus::Current(projection))
-            if matches_intent(&intent, destination, &candidate)
+            if matches_intent(&intent, destination, &candidate, tracker)
                 && intent_sharing_allowed(&mut txn, &share_target, &intent, requirements)
                     .await
                     .map_err(|_| ReplyDispatchError::Database)? =>
@@ -386,7 +429,7 @@ async fn prepare(
         }
         _ => None,
     };
-    let Some(intent) = ready else {
+    let Some(mut intent) = ready else {
         close_claim(&mut txn, claim.outbox_id, "cancelled").await?;
         txn.commit().await?;
         return Ok(Dispatch::Cancelled);
@@ -395,6 +438,55 @@ async fn prepare(
     let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *txn)
         .await?;
+    let wall = StoredInstant::try_from(now).map_err(|_| ReplyDispatchError::Database)?;
+    if tracker {
+        let expiry = intent["expires_at"].clone();
+        let decision = revalidate_tracker_checkin(
+            &mut txn,
+            destination,
+            candidate.id,
+            &key,
+            &mut intent,
+            wall,
+        )
+        .await
+        .map_err(|error| match error {
+            ProactiveControlError::Busy => ReplyDispatchError::Busy,
+            _ => ReplyDispatchError::Database,
+        })?;
+        if expiry != intent["expires_at"] {
+            sqlx::query("UPDATE outbox_messages SET intent=$2::jsonb WHERE id=$1")
+                .bind(candidate.id)
+                .bind(intent.to_string())
+                .execute(&mut *txn)
+                .await?;
+        }
+        match decision {
+            TrackerCheckinDecision::Ready => {}
+            TrackerCheckinDecision::Cancel | TrackerCheckinDecision::Expire => {
+                let state = if matches!(decision, TrackerCheckinDecision::Expire) {
+                    "expired"
+                } else {
+                    "cancelled"
+                };
+                close_claim(&mut txn, candidate.id, state).await?;
+                txn.commit().await?;
+                return Ok(Dispatch::Cancelled);
+            }
+            TrackerCheckinDecision::Defer(retry_at) => {
+                defer(
+                    &mut txn,
+                    destination.owner_id,
+                    claim.outbox_id,
+                    claim.lease_token,
+                    retry_at,
+                )
+                .await?;
+                txn.commit().await?;
+                return Ok(Dispatch::Deferred(retry_at));
+            }
+        }
+    }
     let expiry = if let Some(value) = intent.get("expires_at").filter(|value| !value.is_null()) {
         let Some(expiry) = StoredInstant::from_legacy_input(value).map(OffsetDateTime::from) else {
             close_claim(&mut txn, claim.outbox_id, "cancelled").await?;
@@ -422,7 +514,6 @@ async fn prepare(
     };
     let remaining = Duration::try_from(expiry.map_or(until, |expiry| until.min(expiry)) - now)
         .map_err(|_| ReplyDispatchError::Database)?;
-    let wall = StoredInstant::try_from(now).map_err(|_| ReplyDispatchError::Database)?;
     if let Some(notice) = &telegram_notice {
         notice
             .start(&mut txn, destination.instance_id, wall)
@@ -478,7 +569,12 @@ async fn telegram_authorized(
     }
 }
 
-fn matches_intent(intent: &Value, destination: &ReplyDestination<'_>, row: &Candidate) -> bool {
+fn matches_intent(
+    intent: &Value,
+    destination: &ReplyDestination<'_>,
+    row: &Candidate,
+    tracker: bool,
+) -> bool {
     intent["intent_id"]
         .as_str()
         .and_then(|value| value.parse().ok())
@@ -493,7 +589,11 @@ fn matches_intent(intent: &Value, destination: &ReplyDestination<'_>, row: &Cand
             == Some(row.conversation_id)
         && intent["channel_instance"]["channel"].as_str() == Some(destination.channel)
         && intent["channel_instance"]["instance_id"].as_str() == Some(destination.instance_id)
-        && matches!(intent.get("initiative"), None | Some(Value::Bool(false)))
+        && match intent.get("initiative") {
+            Some(Value::Bool(initiative)) => *initiative == tracker,
+            None => !tracker,
+            Some(_) => false,
+        }
 }
 
 async fn close_claim(

@@ -142,6 +142,31 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<ReplyClaim>, ReplyClaimError> {
+        self.claim_reply(destination, now, lease_seconds, false)
+            .await
+    }
+
+    /// Claim a generated tracker reminder for Telegram, leaving other initiatives for their workers.
+    pub async fn claim_telegram_tracker_checkin(
+        &self,
+        destination: ReplyDestination<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<ReplyClaim>, ReplyClaimError> {
+        if destination.channel != "telegram" {
+            return Err(ReplyClaimError::InvalidRequest);
+        }
+        self.claim_reply(destination, now, lease_seconds, true)
+            .await
+    }
+
+    async fn claim_reply(
+        &self,
+        destination: ReplyDestination<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+        tracker: bool,
+    ) -> Result<Option<ReplyClaim>, ReplyClaimError> {
         if !(1..=3600).contains(&lease_seconds)
             || !(1..=100).contains(&destination.channel.chars().count())
             || !(1..=200).contains(&destination.instance_id.chars().count())
@@ -167,7 +192,7 @@ impl Database {
             if !locked {
                 return Err(ReplyClaimError::Busy);
             }
-            let claim = next_claim(&mut txn, &destination, now, until).await?;
+            let claim = next_claim(&mut txn, &destination, now, until, tracker).await?;
             txn.commit().await?;
             Ok(claim)
         })
@@ -181,9 +206,10 @@ async fn next_claim(
     destination: &ReplyDestination<'_>,
     now: StoredInstant,
     until: StoredInstant,
+    tracker: bool,
 ) -> Result<Option<ReplyClaim>, ReplyClaimError> {
     for _ in 0..CANDIDATES_PER_CLAIM {
-        let Some(candidate) = candidate(txn, destination, now).await? else {
+        let Some(candidate) = candidate(txn, destination, now, tracker).await? else {
             return Ok(None);
         };
         if matches!(
@@ -221,6 +247,7 @@ async fn candidate(
     txn: &mut Transaction<'_, Postgres>,
     destination: &ReplyDestination<'_>,
     now: StoredInstant,
+    tracker: bool,
 ) -> Result<Option<Candidate>, sqlx::Error> {
     sqlx::query(
         "SELECT o.id,o.conversation_id,o.operation_id,o.inbound_message_id,o.memory_fence::text AS fence,
@@ -228,7 +255,12 @@ async fn candidate(
          FROM outbox_messages o JOIN conversations c ON c.id=o.conversation_id AND c.owner_id=o.owner_id
          WHERE o.owner_id=$1 AND c.channel=$2 AND c.channel_instance_id=$3
            AND o.state='queued' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=$4)
-           AND o.legacy_key IS NULL AND coalesce(o.intent->'initiative','false'::jsonb)='false'
+           AND o.legacy_key IS NULL AND coalesce(o.intent->'initiative','false'::jsonb)=to_jsonb($5::boolean)
+           AND (NOT $5 OR (o.inbound_message_id IS NULL AND EXISTS(
+             SELECT 1 FROM app_state rule WHERE rule.key='initiative:rule:' || split_part(o.dedup_key,':',2)
+               AND split_part(o.dedup_key,':',1)='rule'
+               AND rule.value->>'topic' LIKE 'tracker:%' AND rule.value#>>'{rule,kind}'='missing_entry'
+           )))
            AND o.intent->>'owner_id'=o.owner_id::text AND o.intent->>'conversation_id'=o.conversation_id::text
            AND o.intent->>'intent_id'=o.id::text
            AND o.intent->'channel_instance'->>'channel'=$2 AND o.intent->'channel_instance'->>'instance_id'=$3
@@ -240,6 +272,7 @@ async fn candidate(
     .bind(destination.channel)
     .bind(destination.instance_id)
     .bind(OffsetDateTime::from(now))
+    .bind(tracker)
     .try_map(|row: PgRow| Candidate::read(&row))
     .fetch_optional(&mut **txn)
     .await

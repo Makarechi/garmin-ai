@@ -6,12 +6,15 @@ mod garmin_context;
 mod policy;
 mod question_delivery;
 mod question_selection;
+mod tracker_checkins;
 pub use budget::NotificationExclusions;
 pub use diary_questions::GeneratedDiaryQuestions;
 pub use garmin_context::DiaryContextAvailability;
 pub use policy::{NotificationDecision, NotificationPolicy, NotificationReason};
 pub use question_delivery::{DiaryQuestionOutcome, QuestionDispatchResult};
 pub use question_selection::{DiaryQuestionKind, ReservedDiaryQuestion};
+pub(crate) use tracker_checkins::{TrackerCheckinDecision, revalidate_tracker_checkin};
+pub use tracker_checkins::{TrackerReminderRoute, TrackerRulePage};
 
 use std::{error::Error, fmt, time::Duration};
 
