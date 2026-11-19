@@ -98,7 +98,7 @@ def exercise(engine, python, native, initial):
     with engine.connect() as connection:
         assert (
             connection.scalar(
-            text("SELECT count(*) FROM app_state WHERE starts_with(key,'tracker-consent:')")
+                text("SELECT count(*) FROM app_state WHERE starts_with(key,'tracker-consent:')")
             )
             == 0
         )
