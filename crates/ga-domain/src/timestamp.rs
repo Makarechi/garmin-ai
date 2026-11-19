@@ -133,3 +133,23 @@ impl fmt::Display for OffsetTimestamp {
         Ok(())
     }
 }
+
+/// Resolve a regional wall clock using Python's first-fold and pre-gap offsets.
+pub fn regional_clock_instant(
+    clock: time::PrimitiveDateTime,
+    timezone: &str,
+) -> Option<OffsetDateTime> {
+    let zone = jiff::tz::db().get(timezone).ok()?;
+    let civil = jiff::civil::DateTime::new(
+        clock.year().try_into().ok()?,
+        clock.month() as i8,
+        clock.day() as i8,
+        clock.hour() as i8,
+        clock.minute() as i8,
+        clock.second() as i8,
+        clock.nanosecond().try_into().ok()?,
+    )
+    .ok()?;
+    let timestamp = zone.to_ambiguous_timestamp(civil).compatible().ok()?;
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(timestamp.as_microsecond()) * 1000).ok()
+}

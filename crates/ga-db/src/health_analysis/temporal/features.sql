@@ -27,15 +27,16 @@ WITH RECURSIVE eligible AS MATERIALIZED (
     CROSS JOIN unnest($2::timestamptz[]) AS events(clock)
     UNION ALL
     SELECT search.metric,search.clock,
-        CASE WHEN indexed.times[(low+high)/2+1]<search.clock THEN (low+high)/2+1 ELSE low END,
-        CASE WHEN indexed.times[(low+high)/2+1]<search.clock THEN high ELSE (low+high)/2 END
+        CASE WHEN CASE WHEN $7 THEN indexed.times[(low+high)/2+1]::timestamp<search.clock::timestamp ELSE indexed.times[(low+high)/2+1]<search.clock END THEN (low+high)/2+1 ELSE low END,
+        CASE WHEN CASE WHEN $7 THEN indexed.times[(low+high)/2+1]::timestamp<search.clock::timestamp ELSE indexed.times[(low+high)/2+1]<search.clock END THEN high ELSE (low+high)/2 END
     FROM search JOIN indexed USING(metric) WHERE low<high
 ), selected AS (
     SELECT search.clock,search.metric,preferred.value,preferred.id,preferred.source_ref,
         preferred.observed_at,preferred.ingested_at,preferred.effective_start,
         preferred.timezone,preferred.source_calendar_date FROM search
     LEFT JOIN preferred ON preferred.metric=search.metric AND preferred.position=search.low
-        AND preferred.observed_at>=search.clock-interval '24 hours'
+        AND CASE WHEN $7 THEN preferred.observed_at::timestamp>=search.clock::timestamp-interval '24 hours'
+            ELSE preferred.observed_at>=search.clock-interval '24 hours' END
     WHERE low=high
 )
 SELECT selected.clock,selected.metric,selected.value,selected.id,selected.source_ref,

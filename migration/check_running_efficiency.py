@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import subprocess
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -68,6 +68,74 @@ def normalized(document):
     return document
 
 
+def transition_cases(engine, compare):
+    observations = [
+        ("training_readiness_score", "2026-11-01T05:45:00Z", 45),
+        ("training_readiness_score", "2026-11-01T06:15:00Z", 15),
+        ("sleep_score", "2026-11-01T05:45:00Z", 65),
+        ("hrv_nightly_avg", "2026-10-31T05:45:00Z", 35),
+        ("hrv_nightly_avg", "2026-03-07T08:00:00Z", 38),
+        ("sleep_score", "2026-03-08T07:15:00Z", 78),
+        ("training_readiness_score", "2026-10-25T00:45:00Z", 25),
+        ("training_readiness_score", "2026-10-25T01:15:00Z", 26),
+        ("training_readiness_score", "2026-04-04T14:55:00Z", 44),
+        ("training_readiness_score", "2026-04-04T15:10:00Z", 45),
+    ]
+    clocks = [
+        "2026-11-01T05:20:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-01T06:20:00Z",
+        "2026-11-01T06:30:00Z",
+        "2026-11-02T06:20:00Z",
+        "2026-03-08T07:30:00Z",
+        "2026-03-09T06:30:00Z",
+        "2026-10-25T01:20:00Z",
+        "2026-04-04T15:20:00Z",
+    ]
+    clocks = [datetime.fromisoformat(clock) for clock in clocks]
+    with engine.begin() as connection:
+        for index, (metric, observed, value) in enumerate(observations):
+            at = datetime.fromisoformat(observed)
+            connection.execute(
+                text("""INSERT INTO metric_observations(id,source_ref,metric,unit,value,
+                source_calendar_date,observed_at,fetched_at,ingested_at,timezone,quality,sequence,feature_version,valid)
+                VALUES(gen_random_uuid(),:source,:metric,'synthetic',:value,:day,:at,:known,:known,'UTC','observed',:sequence,'pre-event-v1',true)"""),
+                {
+                    "source": SOURCE,
+                    "metric": metric,
+                    "value": value,
+                    "day": at.date(),
+                    "at": at,
+                    "known": at - timedelta(days=1),
+                    "sequence": 1000000 + index,
+                },
+            )
+        for index, at in enumerate(clocks):
+            connection.execute(
+                text("""INSERT INTO activities(id,kind,start,"end",timezone,
+                distance_m,moving_seconds,duration_seconds,avg_hr,details)
+                VALUES(:id,'running',:at,:at,'UTC',5000,1500,1500,135,'{}'::jsonb)"""),
+                {"id": f"synthetic-clock-{index}", "at": at},
+            )
+    count = 0
+    for zone in ["UTC", "America/New_York", "Europe/Bratislava", "Australia/Lord_Howe"]:
+        configure_zone(engine, zone)
+        for at in clocks:
+            result = compare(
+                {
+                    "start": (at - timedelta(microseconds=1)).isoformat(),
+                    "end": (at + timedelta(microseconds=1)).isoformat(),
+                }
+            )
+            assert result["n"] == 1
+            count += 1
+        result = compare({"start": "2026-11-01T05:00:00Z", "end": "2026-11-01T07:00:00Z"})
+        assert result["n"] == 4
+        count += 1
+    configure_zone(engine, "UTC")
+    print("Matched running regional-clock and DST batches", count, flush=True)
+
+
 def exercise(engine, python, rust):
     def compare(body, status=200, token=HEALTH):
         headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -107,6 +175,7 @@ def exercise(engine, python, rust):
     for zone in ["America/New_York", "Asia/Kathmandu", "UTC"]:
         configure_zone(engine, zone)
         assert compare(request)["n"] == 4
+    transition_cases(engine, compare)
     early = EVENT - timedelta(days=2)
     observed = early - timedelta(hours=1)
     with engine.begin() as connection:

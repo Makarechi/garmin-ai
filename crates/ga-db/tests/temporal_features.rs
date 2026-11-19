@@ -78,7 +78,8 @@ async fn select_feature_evidence() -> Result<(), Box<dyn Error>> {
                 serde_json::to_writer(&mut output, &entries)?;
             }
             Err(
-                err @ (HealthAnalysisError::InvalidKnowledgeCutoff
+                err @ (HealthAnalysisError::InvalidTemporalTimestamp
+                | HealthAnalysisError::InvalidKnowledgeCutoff
                 | HealthAnalysisError::TemporalVersionLimit
                 | HealthAnalysisError::TemporalCalendarOverflow),
             ) => serde_json::to_writer(
@@ -102,6 +103,34 @@ async fn select_feature_evidence() -> Result<(), Box<dyn Error>> {
                 fs::read_to_string(format!("/sys/fs/cgroup/{name}"))?
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_unsupported_temporal_precision_before_database_access()
+-> Result<(), Box<dyn Error>> {
+    let db =
+        Database::connect_lazy("postgresql+psycopg://garmin@127.0.0.1:1/invalid_timestamp_test")
+            .map_err(|_| "Invalid isolated fixture URL")?;
+    let precise = OffsetDateTime::parse("2026-11-01T12:00:00.123456789Z", &Rfc3339)?;
+    let supported = OffsetDateTime::parse("2026-11-01T12:00:00.123456Z", &Rfc3339)?;
+    for (events, cutoff, metrics) in [
+        (vec![precise], supported, vec!["unknown"]),
+        (vec![precise], supported, vec![]),
+        (vec![supported], precise, vec!["unknown"]),
+        (vec![], precise, vec![]),
+    ] {
+        assert!(matches!(
+            db.temporal_features_with_offsets(
+                &metrics,
+                &events,
+                cutoff,
+                TemporalPurpose::Retrospective
+            )
+            .await,
+            Err(HealthAnalysisError::InvalidTemporalTimestamp)
+        ));
     }
     Ok(())
 }

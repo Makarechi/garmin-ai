@@ -785,6 +785,7 @@ pub(super) fn health_failure(error: HealthAnalysisError) -> Response {
         | HealthAnalysisError::DateRange
         | HealthAnalysisError::UnknownMetric
         | HealthAnalysisError::InvalidTimezone
+        | HealthAnalysisError::InvalidTemporalTimestamp
         | HealthAnalysisError::InvalidKnowledgeCutoff
         | HealthAnalysisError::TemporalVersionLimit
         | HealthAnalysisError::Overlap

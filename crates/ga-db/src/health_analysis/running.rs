@@ -7,7 +7,8 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 
 use super::{
     ActivityReadError, DailyHealthReader, HealthAnalysisError, MAX_RANGE_DAYS, TemporalPurpose,
-    check_calendar_bounds, isoformat, restore_display_timezone, temporal::temporal_features_in,
+    check_calendar_bounds, isoformat, restore_display_timezone,
+    temporal::{TemporalClock, local_event_clocks, temporal_features_in},
 };
 
 const MAX_RUNS: usize = 2000;
@@ -57,7 +58,6 @@ impl FromRow<'_, PgRow> for Run {
 
 struct KeptRun {
     run: Run,
-    at: StoredInstant,
     distance: f64,
     seconds: f64,
     hr: f64,
@@ -75,10 +75,8 @@ impl Run {
         let hr = self
             .avg_hr
             .filter(|value| *value != 0.0 && (min..=max).contains(value))?;
-        let at = StoredInstant::try_from(self.start).ok()?;
         (seconds >= 1200.0).then_some(KeptRun {
             run: self,
-            at,
             distance,
             seconds,
             hr,
@@ -116,12 +114,14 @@ impl DailyHealthReader {
         let cutoff: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *self.0)
             .await?;
-        let mut contexts = temporal_features_in(
+        let context_clocks = local_event_clocks(&times);
+        let contexts = temporal_features_in(
             &mut self.0,
             &METRICS,
             &times,
             cutoff,
             TemporalPurpose::Retrospective,
+            TemporalClock::DatabaseTimezone,
         )
         .await?;
         self.0.commit().await?;
@@ -131,15 +131,16 @@ impl DailyHealthReader {
             .collect::<Vec<_>>();
         let mut groups = BTreeMap::<String, Vec<String>>::new();
         let mut rows = Vec::with_capacity(kept.len());
-        let mut kept = kept.into_iter().peekable();
-        while let Some(entry) = kept.next() {
+        for entry in kept {
             let run = entry.run;
-            let context = if kept.peek().is_some_and(|next| next.at == entry.at) {
-                contexts.get(&run.start).cloned()
-            } else {
-                contexts.remove(&run.start)
-            }
-            .ok_or(HealthAnalysisError::Database)?;
+            let clock = context_clocks
+                .get(&run.start.date().with_time(run.start.time()))
+                .map(|(clock, _)| clock)
+                .ok_or(HealthAnalysisError::Database)?;
+            let context = contexts
+                .get(clock)
+                .cloned()
+                .ok_or(HealthAnalysisError::Database)?;
             rows.push(json!({"activity_id":run.id,"start":isoformat(run.start),"kind":run.kind,
                 "distance_m":entry.distance,"avg_hr":entry.hr,"pace_seconds_per_km":entry.seconds/entry.distance*1000.0,
                 "meters_per_heartbeat":entry.distance/entry.seconds*60.0/entry.hr,

@@ -4,10 +4,10 @@ use std::{
 };
 
 use futures_util::TryStreamExt;
-use ga_domain::timestamp::{OffsetTimestamp, StoredInstant};
+use ga_domain::timestamp::{OffsetTimestamp, StoredInstant, regional_clock_instant};
 use serde_json::{Value, json};
 use sqlx::{FromRow, Row, postgres::PgRow};
-use time::{Date, OffsetDateTime};
+use time::{Date, OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 
 use super::{HealthAnalysisError, begin_verified_analysis, restore_display_timezone};
@@ -17,6 +17,12 @@ pub(crate) const PRE_EVENT_FEATURE_VERSION: &str = "pre-event-v1";
 
 pub type TemporalFeatures = BTreeMap<StoredInstant, BTreeMap<String, Value>>;
 pub type TemporalOffsetFeatures = BTreeMap<OffsetDateTime, BTreeMap<String, Value>>;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum TemporalClock {
+    FixedOffset,
+    DatabaseTimezone,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TemporalPurpose {
@@ -117,6 +123,10 @@ impl Database {
         cutoff: OffsetDateTime,
         purpose: TemporalPurpose,
     ) -> Result<TemporalOffsetFeatures, HealthAnalysisError> {
+        for &clock in events.iter().chain(std::iter::once(&cutoff)) {
+            StoredInstant::try_from(clock)
+                .map_err(|_| HealthAnalysisError::InvalidTemporalTimestamp)?;
+        }
         if events.is_empty() {
             return Ok(BTreeMap::new());
         }
@@ -138,7 +148,15 @@ impl Database {
         }
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = begin_verified_analysis(&self.work).await?;
-            let result = temporal_features_in(&mut txn, metrics, events, cutoff, purpose).await?;
+            let result = temporal_features_in(
+                &mut txn,
+                metrics,
+                events,
+                cutoff,
+                purpose,
+                TemporalClock::FixedOffset,
+            )
+            .await?;
             txn.commit().await?;
             Ok(result)
         })
@@ -159,6 +177,19 @@ fn event_clocks(events: &[OffsetDateTime]) -> BTreeMap<OffsetDateTime, OffsetDat
     clocks
 }
 
+pub(super) fn local_event_clocks(
+    events: &[OffsetDateTime],
+) -> BTreeMap<PrimitiveDateTime, (OffsetDateTime, OffsetDateTime)> {
+    let mut clocks = BTreeMap::new();
+    for &event in events {
+        clocks
+            .entry(event.date().with_time(event.time()))
+            .and_modify(|(_, display)| *display = event)
+            .or_insert((event, event));
+    }
+    clocks
+}
+
 fn lower_bound(event: OffsetDateTime) -> Result<OffsetDateTime, HealthAnalysisError> {
     event
         .checked_sub(time::Duration::hours(24))
@@ -172,19 +203,29 @@ pub(super) async fn temporal_features_in(
     events: &[OffsetDateTime],
     cutoff: OffsetDateTime,
     purpose: TemporalPurpose,
+    clock_source: TemporalClock,
 ) -> Result<TemporalOffsetFeatures, HealthAnalysisError> {
-    let events = event_clocks(events);
-    let Some((&earliest, _)) = events.first_key_value() else {
+    let ordered: Vec<_> = match clock_source {
+        TemporalClock::FixedOffset => event_clocks(events).into_iter().collect(),
+        TemporalClock::DatabaseTimezone => local_event_clocks(events).into_values().collect(),
+    };
+    let Some(&(earliest, _)) = ordered.first() else {
         return Ok(BTreeMap::new());
     };
-    if purpose == TemporalPurpose::AsKnown && cutoff > earliest {
+    if purpose == TemporalPurpose::AsKnown && events.iter().any(|event| cutoff > *event) {
         return Err(HealthAnalysisError::InvalidKnowledgeCutoff);
     }
-    let latest = events
-        .last_key_value()
-        .map(|(clock, _)| *clock)
-        .unwrap_or(earliest);
-    let lower = lower_bound(earliest)?;
+    let latest = ordered.last().map(|(clock, _)| *clock).unwrap_or(earliest);
+    let mut lower = lower_bound(earliest)?;
+    restore_display_timezone(txn).await?;
+    if clock_source == TemporalClock::DatabaseTimezone {
+        let timezone: String = sqlx::query_scalar("SELECT current_setting('TimeZone')")
+            .fetch_one(&mut **txn)
+            .await?;
+        lower = regional_clock_instant(lower.date().with_time(lower.time()), &timezone)
+            .ok_or(HealthAnalysisError::Database)?;
+    }
+    let events: BTreeMap<_, _> = ordered.into_iter().collect();
     let mut result: TemporalOffsetFeatures = events
         .keys()
         .map(|event| (*event, BTreeMap::new()))
@@ -195,7 +236,6 @@ pub(super) async fn temporal_features_in(
     }
     let clocks: Vec<_> = events.keys().copied().collect();
     let metrics: Vec<_> = metrics.into_iter().map(str::to_owned).collect();
-    restore_display_timezone(txn).await?;
     let mut rows = sqlx::query_as::<_, Feature>(include_str!("temporal/features.sql"))
         .bind(&metrics)
         .bind(&clocks)
@@ -203,6 +243,7 @@ pub(super) async fn temporal_features_in(
         .bind(latest)
         .bind(cutoff)
         .bind(PRE_EVENT_FEATURE_VERSION)
+        .bind(clock_source == TemporalClock::DatabaseTimezone)
         .fetch(&mut **txn);
     while let Some(row) = rows.try_next().await? {
         let Some(event) = row.event else {
