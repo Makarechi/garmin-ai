@@ -385,6 +385,12 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         }
         future::pending().await
     };
+    let trend_generation = async {
+        if worker {
+            reminders::run_trend_generation(&database, &config.timezone).await;
+        }
+        future::pending().await
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
@@ -395,6 +401,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         result = source_work => result,
         result = channel_work => result,
         result = web_reminders => result,
+        result = trend_generation => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

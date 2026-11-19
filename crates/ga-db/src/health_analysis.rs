@@ -25,6 +25,7 @@ pub use sleep_timing::sleep_timing_result_hash;
 mod freshness;
 mod temporal;
 mod timeline;
+mod trend_insights;
 
 pub(crate) use temporal::PRE_EVENT_FEATURE_VERSION;
 pub use temporal::{TemporalFeatures, TemporalOffsetFeatures, TemporalPurpose};
@@ -215,19 +216,50 @@ impl DailyHealthReader {
         first: HealthPeriod,
         second: HealthPeriod,
     ) -> Result<Value, HealthAnalysisError> {
-        if first.start.max(second.start) <= first.end.min(second.end) {
-            return Err(HealthAnalysisError::Overlap);
-        }
-        let (metric, query) = daily_metric(metric)?;
-        let first_values = observed_values(&mut self.0, query, first).await?;
-        let second_values = observed_values(&mut self.0, query, second).await?;
+        let comparison = period_comparison(&mut self.0, metric, first, second).await?;
         self.0.commit().await?;
+        Ok(comparison.document())
+    }
+}
+
+type ObservedDays = Vec<(Date, f64)>;
+
+struct PeriodComparison {
+    metric: &'static str,
+    first: (HealthPeriod, ObservedDays),
+    second: (HealthPeriod, ObservedDays),
+}
+
+async fn period_comparison(
+    txn: &mut Transaction<'_, Postgres>,
+    metric: &str,
+    first: HealthPeriod,
+    second: HealthPeriod,
+) -> Result<PeriodComparison, HealthAnalysisError> {
+    if first.start.max(second.start) <= first.end.min(second.end) {
+        return Err(HealthAnalysisError::Overlap);
+    }
+    let (metric, query) = daily_metric(metric)?;
+    Ok(PeriodComparison {
+        metric,
+        first: (first, observed_values(txn, query, first).await?),
+        second: (second, observed_values(txn, query, second).await?),
+    })
+}
+
+impl PeriodComparison {
+    fn document(self) -> Value {
+        let Self {
+            metric,
+            first: (first, first_values),
+            second: (second, second_values),
+        } = self;
         let first_description = describe(first_values.iter().map(|(_, value)| Some(*value)));
         let second_description = describe(second_values.iter().map(|(_, value)| Some(*value)));
         let first_samples: Vec<_> = first_values.iter().map(|(_, value)| *value).collect();
         let second_samples: Vec<_> = second_values.iter().map(|(_, value)| *value).collect();
         let estimate = block_mean_difference(&first_samples, &second_samples);
-        Ok(json!({
+        json!({
             "metric": metric,
             "a": period_document(metric, first, &first_values, first_description),
             "b": period_document(metric, second, &second_values, second_description),
@@ -238,7 +270,7 @@ impl DailyHealthReader {
                 "Missing days can bias estimates; blocks follow observations, not calendar gaps",
                 "No adjustment for multiple comparisons or unmeasured confounders",
             ],
-        }))
+        })
     }
 }
 
@@ -306,7 +338,7 @@ async fn observed_values(
     txn: &mut Transaction<'_, Postgres>,
     query: &'static str,
     period: HealthPeriod,
-) -> Result<Vec<(Date, f64)>, HealthAnalysisError> {
+) -> Result<ObservedDays, HealthAnalysisError> {
     Ok(sqlx::query_as(query)
         .bind(period.start)
         .bind(period.end)
