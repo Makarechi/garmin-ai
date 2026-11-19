@@ -193,8 +193,21 @@ cargo run --locked -p ga-app --bin garmin-ai-rust -- check-model-extension \
 ```
 
 The probe checks structured output and accepts either Boolean value required
-by the synthetic schema. Worker registration and permission checks are
-separate from this local probe.
+by the synthetic schema.
+
+To run a native model extension through the application, select the model
+instance in `GA_INTEGRATIONS`, enable model calls and register its absolute
+executable path in `GA_NATIVE_MODEL_PLUGINS`. The registry is a JSON object
+with integration IDs as keys. An enabled integration supplies `config.model`
+and can name `GA_PLUGIN_*` references in `secret_refs`. Current consent must
+cover the provider, instance, model and categories the application requests.
+
+The runtime includes `model` in the `structured` request and supplies the
+selected configuration and resolved secret references in `context`. The host
+checks the versioned descriptor before sending the prompt. It uses the same
+deadline and sharing checks as the built-in gateway and validates each returned
+value against the approved application schema before saving it. The native
+extension runtime supports structured output.
 
 Declarative scenario packs have a separate data-only format documented in
 [scenario packs](scenario-packs.md). The

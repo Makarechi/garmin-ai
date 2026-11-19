@@ -105,7 +105,7 @@ impl ModelGateway<'_> {
         let prepared = self.prepare(input)?;
         let models: Vec<_> = match prepared {
             PreparedRequest::Gemini(_) => approved.iter().copied().map(Some).collect(),
-            PreparedRequest::Structured(_) => vec![None],
+            PreparedRequest::Structured(_) | PreparedRequest::Extension(_) => vec![None],
         };
         let fingerprint = job
             .map(|_| fingerprint(&prepared, &approved, wire_categories))
@@ -174,7 +174,7 @@ fn fingerprint(
     categories.sort_unstable();
     match request {
         PreparedRequest::Gemini(request) => request.resume_fingerprint(models, &categories),
-        PreparedRequest::Structured(_) => {
+        PreparedRequest::Structured(_) | PreparedRequest::Extension(_) => {
             // Python's plugin gate receives a closed request, hence its empty kwargs.
             let categories = categories
                 .iter()

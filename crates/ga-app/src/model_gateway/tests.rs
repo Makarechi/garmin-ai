@@ -56,6 +56,7 @@ impl Sender for Mock {
         let model = match request {
             PreparedRequest::Gemini(request) => &request.body()["model"],
             PreparedRequest::Structured(request) => &request.body()["model"],
+            PreparedRequest::Extension(request) => &request.params()["model"],
         }
         .as_str()
         .ok_or(ModelTransportError::InvalidConfiguration)?;
@@ -150,6 +151,9 @@ impl Sender for Mock {
                 };
                 request.decode_response(response)
             }
+            PreparedRequest::Extension(request) => request.decode_response(
+                br#"{"value":{"urgent":false},"usage":{"input_tokens":10,"output_tokens":5}}"#,
+            ),
         }
         .map_err(ModelTransportError::Response)
     }

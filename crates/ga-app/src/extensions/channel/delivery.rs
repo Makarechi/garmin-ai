@@ -216,7 +216,9 @@ impl ChannelSettings {
         let Some(secrets) = secrets else {
             return retry_at(now).map(ReplySendOutcome::RetryAt);
         };
-        extension.context = Some(json!({"config":self.config,"secrets":secrets}));
+        extension
+            .process
+            .set_context(json!({"config":self.config,"secrets":secrets}));
         extension.deliver_checkin(intent, now).await
     }
 }

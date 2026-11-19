@@ -1,5 +1,6 @@
 mod analysis;
 mod configuration;
+mod extensions;
 mod interpretation;
 mod safety;
 mod tracker;
@@ -9,6 +10,7 @@ pub use analysis::{
     AnalysisToolRead, DiaryAnalysisTools, OfferedReadTool,
 };
 pub use configuration::{ConfiguredModel, ModelEnvironmentError, RuntimeModelSettings};
+pub use extensions::extension_structured_capability;
 pub use interpretation::{
     DiaryInterpretationError, DiaryInterpretationRequest, ModelDiaryContext,
     TelegramDiaryInterpretation,
@@ -20,7 +22,7 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, time::Duration};
+use std::{collections::BTreeMap, error::Error, fmt, future::Future, path::Path, time::Duration};
 
 use ga_db::{
     Database,
@@ -34,14 +36,18 @@ use ga_domain::{
     },
     model_gate::ModelGateIdentity,
     model_request::{
-        ApprovedModelSchema, GeminiModelRequest, ModelRequestError, StructuredModelRequest,
+        ApprovedModelSchema, ExtensionModelRequest, GeminiModelRequest, ModelRequestError,
+        StructuredModelRequest,
     },
     model_response::{StructuredModelOutput, StructuredProvider},
     sha256_hex,
     timestamp::StoredInstant,
 };
 use ga_model::{GeminiTransport, ModelTransport, ModelTransportError, fallback::FallbackError};
+use serde_json::Value;
 use uuid::Uuid;
+
+use extensions::ExtensionModelTransport;
 
 const MAX_GEMINI_ATTEMPT: Duration = Duration::from_secs(60);
 
@@ -164,16 +170,19 @@ enum RequestOptions<'a> {
         provider: StructuredProvider,
         max_output_tokens: u16,
     },
+    Extension,
 }
 
 enum Transport {
     Gemini(GeminiTransport),
     Structured(ModelTransport),
+    Extension(ExtensionModelTransport),
 }
 
 pub(crate) enum PreparedRequest {
     Gemini(GeminiModelRequest),
     Structured(StructuredModelRequest),
+    Extension(ExtensionModelRequest),
 }
 
 pub(crate) trait Sender: Sync {
@@ -203,6 +212,9 @@ impl Sender for Transport {
             }
             (Self::Structured(transport), PreparedRequest::Structured(request)) => {
                 transport.send(request).await
+            }
+            (Self::Extension(transport), PreparedRequest::Extension(request)) => {
+                transport.structured(request, remaining).await
             }
             _ => Err(ModelTransportError::InvalidConfiguration),
         }
@@ -291,6 +303,28 @@ impl<'a> ModelGateway<'a> {
             primary_model: self.selected.primary_model,
             credential_generation: &self.generation,
         }
+    }
+
+    fn extension(
+        database: Database,
+        selected: SelectedModel<'a>,
+        executable: &Path,
+        context: &Value,
+        identity: ModelGateIdentity,
+    ) -> Result<Self, GatewayError> {
+        validate_selection(&selected)?;
+        let transport = ExtensionModelTransport::new(executable, selected.instance_id, context)
+            .map_err(|_| GatewayError::Configuration)?;
+        Ok(Self {
+            database,
+            selected,
+            generation: identity.configuration().to_owned(),
+            identity,
+            provider: ModelProvider::Extension,
+            request_options: RequestOptions::Extension,
+            transport: Transport::Extension(transport),
+            notify_quota: false,
+        })
     }
 
     /// Evaluate live policy before sending anything and again before every candidate.
@@ -435,7 +469,20 @@ impl<'a> ModelGateway<'a> {
                 prompt,
             )
             .map(PreparedRequest::Structured),
-            (RequestOptions::Structured { .. }, ModelInput::Voice { .. }) => {
+            (
+                RequestOptions::Extension,
+                ModelInput::Structured {
+                    contract,
+                    instruction,
+                    prompt,
+                    ..
+                },
+            ) => ExtensionModelRequest::prepare(contract, Some(model), instruction, prompt)
+                .map(PreparedRequest::Extension),
+            (
+                RequestOptions::Structured { .. } | RequestOptions::Extension,
+                ModelInput::Voice { .. },
+            ) => {
                 return Err(GatewayError::Consent(
                     ModelConsentError::UnsupportedCapability,
                 ));

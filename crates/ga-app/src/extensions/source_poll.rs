@@ -274,7 +274,7 @@ async fn poll(
         SourcePoll::Ready(_) => {}
     }
     let mut extension = Extension::new(executable, &source.id)?;
-    extension.context = Some(source.context()?);
+    extension.process.set_context(source.context()?);
     let hash = source.source_hash()?;
     let capabilities = extension.describe(cancelled).await?;
     let limit = capabilities.max_page_size.min(100);

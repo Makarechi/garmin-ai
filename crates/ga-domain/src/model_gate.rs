@@ -15,6 +15,7 @@ const PRIMARY_GEMINI_LOCK: i64 = 72104634;
 const MAX_CONFIGURATION_BYTES: usize = 64 * 1024;
 
 /// The existing state, resume and PostgreSQL lock identities for an integration.
+#[derive(Clone)]
 pub struct ModelGateIdentity {
     state_key: String,
     lock_key: i64,
