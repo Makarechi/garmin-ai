@@ -11,7 +11,9 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{DailyHealthReader, HealthAnalysisError, begin_daily_analysis, owner_timezone};
+use super::{
+    DailyHealthReader, HealthAnalysisError, NapPolicy, begin_daily_analysis, owner_timezone,
+};
 use crate::{Database, activity_documents::PARSER_VERSION};
 
 impl Database {
@@ -32,6 +34,35 @@ impl Database {
     ) -> Result<Value, HealthAnalysisError> {
         self.read_main_sleep_timing(day, configured_timezone, true)
             .await
+    }
+
+    /// Verify both model categories and the sleep pack in the timing snapshot.
+    pub async fn model_main_sleep_timing(
+        &self,
+        owner: Uuid,
+        start: Date,
+        end: Date,
+        configured_timezone: &str,
+        policy: NapPolicy,
+    ) -> Result<Option<Value>, HealthAnalysisError> {
+        let read = async {
+            let mut reader = DailyHealthReader(begin_daily_analysis(&self.control).await?);
+            if !reader.permits_model_health(owner).await?
+                || !reader.permits_model_event_kind("nap").await?
+            {
+                return Ok(None);
+            }
+            if start != end || policy != NapPolicy::Separate {
+                return Err(HealthAnalysisError::SleepRange);
+            }
+            reader
+                .owner_main_sleep_timing(start, configured_timezone)
+                .await
+                .map(Some)
+        };
+        tokio::time::timeout(Duration::from_millis(1500), read)
+            .await
+            .map_err(|_| HealthAnalysisError::Database)?
     }
 
     async fn read_main_sleep_timing(

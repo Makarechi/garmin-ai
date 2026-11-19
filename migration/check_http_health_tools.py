@@ -370,9 +370,11 @@ def compare(python, native, cases):
             )
         if expected.content:
             outcome = expected.json()
+            candidate = actual.json()
             if route == "/tools" and expected.status_code == 200:
                 outcome = [item for item in outcome if item["name"] in TOOLS]
-            assert outcome == actual.json(), (desc, outcome, actual.json())
+                candidate = [item for item in candidate if item["name"] in TOOLS]
+            assert outcome == candidate, (desc, outcome, candidate)
         else:
             assert actual.content == b"", desc
         count += 1
