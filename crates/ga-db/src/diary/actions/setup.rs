@@ -58,6 +58,20 @@ impl Database {
         request: ManageCustomDefinition<'_>,
         draft: &TrackerSetupDraft,
     ) -> Result<Value, TrackerSetupStoreError> {
+        tokio::time::timeout(Duration::from_millis(1800), async {
+            let mut txn = self.begin_definition_management(request).await?;
+            let result = Self::preview_tracker_setup_in(&mut txn, draft).await?;
+            txn.commit().await?;
+            Ok(result)
+        })
+        .await
+        .map_err(|_| TrackerSetupStoreError::Database)?
+    }
+
+    pub(crate) async fn preview_tracker_setup_in(
+        txn: &mut Transaction<'_, Postgres>,
+        draft: &TrackerSetupDraft,
+    ) -> Result<Value, TrackerSetupStoreError> {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let document = draft.document();
         let definition = draft.definition().contract();
@@ -75,24 +89,32 @@ impl Database {
                 .position(|draft| draft["key"] == field["name"])
                 .unwrap_or(order.len())
         });
-        tokio::time::timeout(Duration::from_millis(1800), async {
-            let mut txn = self.begin_definition_management(request).await?;
-            let now = setup_clock(&mut txn).await?;
-            let expires = now.checked_add(time::Duration::minutes(15)).ok_or(TrackerSetupStoreError::Database)?;
-            let encoded = |stamp: OffsetDateTime| StoredInstant::try_from(stamp)
-                .map(|stamp| stamp.to_string().replace('Z',"+00:00"))
-                .map_err(|_|TrackerSetupStoreError::Database);
-            sqlx::query("DELETE FROM app_state WHERE key LIKE 'tracker-preview:%' AND value->>'expires_at'<$1")
-                .bind(encoded(now)?).execute(&mut *txn).await?;
-            sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
-                .bind(format!("tracker-preview:{token}")).bind(json!({"draft_hash":draft.hash(),"expires_at":encoded(expires)?}).to_string())
-                .execute(&mut *txn).await?;
-            txn.commit().await?;
-            Ok(json!({"confirmation_token":token,"definition":definition,"form":{
-                "title":document["name"],"topology":document["topology"],"fields":projected,
-            },"settings":{"shortcut":document["shortcut"],"reminder_enabled":document["reminder_enabled"],
-                "reminder_time":document["reminder_time"],"reminder_timezone":document["reminder_timezone"]}}))
-        }).await.map_err(|_|TrackerSetupStoreError::Database)?
+        let now = setup_clock(txn).await?;
+        let expires = now
+            .checked_add(time::Duration::minutes(15))
+            .ok_or(TrackerSetupStoreError::Database)?;
+        let encoded = |stamp: OffsetDateTime| {
+            StoredInstant::try_from(stamp)
+                .map(|stamp| stamp.to_string())
+                .map_err(|_| TrackerSetupStoreError::Database)
+        };
+        sqlx::query(
+            "DELETE FROM app_state WHERE key LIKE 'tracker-preview:%' AND value->>'expires_at'<$1",
+        )
+        .bind(encoded(now)?)
+        .execute(&mut **txn)
+        .await?;
+        sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
+            .bind(format!("tracker-preview:{token}"))
+            .bind(json!({"draft_hash":draft.hash(),"expires_at":encoded(expires)?}).to_string())
+            .execute(&mut **txn)
+            .await?;
+        Ok(
+            json!({"confirmation_token":token,"definition":definition,"form":{
+            "title":document["name"],"topology":document["topology"],"fields":projected,
+        },"settings":{"shortcut":document["shortcut"],"reminder_enabled":document["reminder_enabled"],
+            "reminder_time":document["reminder_time"],"reminder_timezone":document["reminder_timezone"]}}),
+        )
     }
 
     /// Recheck the exact preview and activate the definition, tracker and metric bindings atomically.
@@ -111,32 +133,42 @@ impl Database {
         }
         tokio::time::timeout(Duration::from_millis(2500), async {
             let mut txn = self.begin_definition_management(request).await?;
-            let key = format!("tracker-preview:{token}");
-            let recorded: Option<String> =
-                sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1 FOR UPDATE")
-                    .bind(&key)
-                    .fetch_optional(&mut *txn)
-                    .await?;
-            let now = StoredInstant::try_from(setup_clock(&mut txn).await?)
-                .map_err(|_| TrackerSetupStoreError::Database)?;
-            let current = recorded.and_then(|value| serde_json::from_str::<Value>(&value).ok());
-            if !current.is_some_and(|current| {
-                current["draft_hash"] == draft.hash()
-                    && StoredInstant::from_legacy_input(&current["expires_at"])
-                        .is_some_and(|deadline| deadline > now)
-            }) {
-                return Err(TrackerSetupStoreError::PreviewChanged);
-            }
-            sqlx::query("DELETE FROM app_state WHERE key=$1")
-                .bind(key)
-                .execute(&mut *txn)
-                .await?;
-            let created = Self::create_tracker_in(&mut txn, request, draft).await?;
+            let created = Self::confirm_tracker_setup_in(&mut txn, request, draft, token).await?;
             txn.commit().await?;
             Ok(created)
         })
         .await
         .map_err(|_| TrackerSetupStoreError::Database)?
+    }
+
+    pub(crate) async fn confirm_tracker_setup_in(
+        txn: &mut Transaction<'_, Postgres>,
+        request: ManageCustomDefinition<'_>,
+        draft: &TrackerSetupDraft,
+        token: &str,
+    ) -> Result<Value, TrackerSetupStoreError> {
+        let key = format!("tracker-preview:{token}");
+        let recorded: Option<String> =
+            sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1 FOR UPDATE")
+                .bind(&key)
+                .fetch_optional(&mut **txn)
+                .await?;
+        let now = StoredInstant::try_from(setup_clock(txn).await?)
+            .map_err(|_| TrackerSetupStoreError::Database)?;
+        let current = recorded.and_then(|value| serde_json::from_str::<Value>(&value).ok());
+        if !current.is_some_and(|current| {
+            current["draft_hash"] == draft.hash()
+                && StoredInstant::from_legacy_input(&current["expires_at"])
+                    .is_some_and(|deadline| deadline > now)
+        }) {
+            return Err(TrackerSetupStoreError::PreviewChanged);
+        }
+        sqlx::query("DELETE FROM app_state WHERE key=$1")
+            .bind(key)
+            .execute(&mut **txn)
+            .await?;
+        let created = Self::create_tracker_in(txn, request, draft).await?;
+        Ok(created)
     }
 
     pub(super) async fn create_tracker_in(

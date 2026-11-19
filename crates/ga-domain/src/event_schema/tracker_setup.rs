@@ -1,3 +1,6 @@
+mod chat;
+pub use chat::parse_tracker_chat_field;
+
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use num_bigint::BigInt;

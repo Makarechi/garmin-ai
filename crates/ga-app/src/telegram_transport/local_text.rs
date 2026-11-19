@@ -9,15 +9,18 @@ use ga_db::{
     },
     outbox_enqueue::QueueIntentError,
 };
-use ga_domain::channel::InboundEnvelope;
+use ga_domain::{
+    channel::InboundEnvelope, event_payload::python_whitespace,
+    event_schema::parse_tracker_chat_field,
+};
 use tokio::time::sleep;
 
 use super::{TelegramTransport, poller::wall_clock};
 use crate::{
     telegram_settings::TelegramIngressSettings,
     urgent_screen::{
-        UrgentScreenUnavailable, decimal_digit, obvious_third_party_emergency,
-        obvious_urgent_symptoms, urgent_notice,
+        UrgentScreenUnavailable, obvious_third_party_emergency, obvious_urgent_symptoms,
+        urgent_notice,
     },
 };
 
@@ -102,91 +105,33 @@ struct SetupPatterns {
     name_is_report: Regex,
     acute: Regex,
     breathing: Regex,
-    bounds: Regex,
 }
 
 impl SetupPatterns {
     fn build() -> Result<Self, fancy_regex::Error> {
         Ok(Self {
             label_is_report: Regex::new(
-                r"(?i)(?:i|my|we|our|я|мне|меня|мой|моя|моё|мои|нас|наш\w*)",
+                r"(?i)\b(?:i|my|we|our|я|мне|меня|мой|моя|моё|мои|нас|наш\w*)\b",
             )?,
             tracker_title: Regex::new(
-                r"(?i)(?:diary|tracker|journal|log|recovery|дневник|журнал|трекер|восстановление)",
+                r"(?i)\b(?:diary|tracker|journal|log|recovery|дневник|журнал|трекер|восстановление)\b",
             )?,
-            title_personal: Regex::new(r"(?i)(?:i|my|у меня|я|мне|мой|моя|моё)")?,
+            title_personal: Regex::new(r"(?i)\b(?:i|my|у меня|я|мне|мой|моя|моё)\b")?,
             name_is_report: Regex::new(
-                r"(?i)(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)",
+                r"(?i)\b(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)\b",
             )?,
-            acute: Regex::new(r"(?i)(?:sudden|acute|внезапн\w*|резк\w*)")?,
+            acute: Regex::new(r"(?i)\b(?:sudden|acute|внезапн\w*|резк\w*)\b")?,
             breathing: Regex::new(
-                r"(?i)(?:can't|cannot|can\s+not|unable\s+to|struggling\s+to)\s+breathe|не\s+могу\s+дышать",
+                r"(?i)\b(?:can't|cannot|can\s+not|unable\s+to|struggling\s+to)\s+breathe\b|\bне\s+могу\s+дышать\b",
             )?,
-            bounds: Regex::new(r"\A(-?\d+)\s*[-–]\s*(-?\d+)\z")?,
         })
-    }
-
-    fn field_label<'a>(&self, text: &'a str) -> Result<Option<&'a str>, UrgentScreenUnavailable> {
-        let Some((label, specification)) = text.split_once('|') else {
-            return Ok(None);
-        };
-        let label = label.trim();
-        let specification = specification.trim();
-        if !(1..=120).contains(&label.chars().count()) || specification.contains('|') {
-            return Ok(None);
-        }
-        let end = specification
-            .find(char::is_whitespace)
-            .unwrap_or(specification.len());
-        let kind = specification[..end].to_lowercase();
-        let argument = specification[end..].trim();
-        let accepted = match kind.as_str() {
-            "text" | "текст" | "yes/no" | "да/нет" | "boolean" => argument.is_empty(),
-            "choice" | "выбор" => {
-                let mut options = std::collections::BTreeSet::new();
-                argument.split(',').map(str::trim).all(|option| {
-                    (1..=120).contains(&option.chars().count()) && options.insert(option)
-                }) && options.len() <= 50
-            }
-            "scale" | "шкала" | "count" | "счётчик" | "счетчик" => {
-                let bounds = self.bounds.captures(argument)?;
-                let range = bounds.and_then(|bounds| {
-                    Some((
-                        parse_bound(bounds.get(1)?.as_str())?,
-                        parse_bound(bounds.get(2)?.as_str())?,
-                    ))
-                });
-                let scale = matches!(kind.as_str(), "scale" | "шкала");
-                range.is_some_and(|(lower, upper)| {
-                    lower <= upper
-                        && if scale {
-                            upper - lower <= 20 && format!("score_{lower}-{upper}").len() <= 32
-                        } else {
-                            lower >= 0
-                        }
-                })
-            }
-            _ => false,
-        };
-        Ok(accepted.then_some(label))
     }
 }
 
-fn parse_bound(value: &str) -> Option<i64> {
-    if value.chars().count() > 100 {
-        return None;
-    }
-    let negative = value.starts_with('-');
-    let magnitude = value
-        .trim_start_matches('-')
-        .chars()
-        .try_fold(0i64, |number, digit| {
-            let next = number
-                .checked_mul(10)?
-                .checked_add(i64::from(decimal_digit(digit)?))?;
-            (next <= (1i64 << 53)).then_some(next)
-        })?;
-    Some(if negative { -magnitude } else { magnitude })
+fn field_label(text: &str) -> Option<&str> {
+    parse_tracker_chat_field(text.trim_matches(python_whitespace), "field").ok()?;
+    text.split_once('|')
+        .map(|(label, _)| label.trim_matches(python_whitespace))
 }
 
 fn setup_metadata(text: &str) -> Result<SetupMetadata, UrgentScreenUnavailable> {
@@ -198,7 +143,7 @@ fn setup_metadata(text: &str) -> Result<SetupMetadata, UrgentScreenUnavailable> 
         .get_or_init(SetupPatterns::build)
         .as_ref()
         .map_err(|_| UrgentScreenUnavailable)?;
-    if let Some(label) = patterns.field_label(text)?
+    if let Some(label) = field_label(text)
         && !(patterns.label_is_report.is_match(label)? && obvious_urgent_symptoms(label)?)
     {
         return Ok(SetupMetadata::Field);
@@ -223,7 +168,7 @@ fn setup_metadata(text: &str) -> Result<SetupMetadata, UrgentScreenUnavailable> 
     )
 }
 
-async fn complete_or_retry(
+pub(super) async fn complete_or_retry(
     database: &Database,
     lease: &TelegramInboundLease,
     result: Result<(), TelegramDiaryCommitError>,
@@ -245,5 +190,36 @@ async fn complete_or_retry(
             false
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod setup_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_personal_emergencies_while_accepting_explicit_tracker_metadata() {
+        for text in [
+            "I can't breathe",
+            "Я не могу дышать",
+            "I can't breathe | text",
+        ] {
+            assert!(
+                matches!(setup_metadata(text), Ok(SetupMetadata::None)),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            setup_metadata("Chest pain diary"),
+            Ok(SetupMetadata::Name)
+        ));
+        assert!(matches!(
+            setup_metadata("Sudden severe chest pain | text"),
+            Ok(SetupMetadata::Field)
+        ));
+        assert!(matches!(
+            setup_metadata("Sudden severe chest pain | ſcale 1-5"),
+            Ok(SetupMetadata::Field)
+        ));
     }
 }

@@ -6,6 +6,7 @@ mod local_text;
 mod model_correction;
 mod model_publication;
 mod model_reply;
+mod tracker_setup;
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
@@ -88,6 +89,7 @@ enum InboxWork {
     ScreenText,
     TextWithoutProvider,
     ModelText,
+    TrackerSetup,
 }
 
 impl InboxWork {
@@ -114,6 +116,7 @@ impl InboxWork {
             Self::ScreenText => 1,
             Self::TextWithoutProvider => 2,
             Self::ModelText => 3,
+            Self::TrackerSetup => 4,
             _ => 0,
         }
     }
@@ -234,6 +237,23 @@ impl Database {
         .await
     }
 
+    /// Reserve an ordered setup command or a locally screened draft answer.
+    pub async fn claim_telegram_tracker_setup(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Diary,
+            InboxWork::TrackerSetup,
+        )
+        .await
+    }
+
     async fn claim_telegram_lane(
         &self,
         target: TelegramInboundTarget<'_>,
@@ -292,13 +312,24 @@ impl Database {
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
-                       AND ($12 = 0 OR (
+                       AND ($12 = 0 OR ($12 = 4 AND i.kind IN ('text','edit','voice') AND (
+                           split_part(command.input,' ',1)='/newtracker'
+                           OR (EXISTS(SELECT 1 FROM app_state WHERE key=concat('tracker:chat-setup:telegram:',$3))
+                             AND (split_part(command.input,' ',1)=ANY(ARRAY['/preview','/confirm_tracker','/privacy','/remove_field'])
+                               OR (split_part(command.input,' ',1)='/cancel' AND command.input<>'/cancel')
+                               OR (i.kind IN ('text','edit') AND coalesce(command.input,'')='')
+                               OR (i.kind='voice' AND coalesce(command.input,'') NOT LIKE '/%'
+                                 AND (j.payload->>'local_safety_checked' IS NOT DISTINCT FROM 'true'
+                                   OR (i.kind='voice' AND coalesce(command.input,'')='')))))
+                       )) OR ($12 BETWEEN 1 AND 3 AND (
                            i.kind IN ('text','edit','voice') AND ($12<>3 OR i.kind IN ('text','edit')) AND (
                              (command.input<>'' AND command.input NOT LIKE '/%'
                                AND (j.payload->>'local_safety_checked' IS NOT DISTINCT FROM 'true') = ($12 >= 2))
                              OR ($12 = 2 AND i.kind='voice' AND coalesce(command.input,'')='')
                            )
-                       ))
+                       )))
+                       AND (NOT $11 OR coalesce(split_part(command.input,' ',1),'')<>'/cancel' OR command.input='/cancel'
+                           OR NOT EXISTS(SELECT 1 FROM app_state WHERE key=concat('tracker:chat-setup:telegram:',$3)))
                        AND ($9::text[] IS NULL OR (
                          (NOT $11 OR i.kind IN ('text','voice')) AND split_part(command.input,' ',1)=ANY($9))
                          OR ($11 AND i.kind='action' AND (

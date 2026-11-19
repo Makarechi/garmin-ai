@@ -680,7 +680,13 @@
         "tests/test_tracker_temporal_safety.py",
         "tests/test_natural_language.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_tracker_setup.py",
+        "migration/capture_tracker_chat_fields.py",
+        "migration/capture_tracker_chat_setup.py",
+        "crates/ga-domain/src/event_schema/tracker_setup/chat.rs::tests::matches_frozen_chat_fields",
+        "crates/ga-app/tests/telegram_tracker_setup.rs::local_tracker_setup_matches_frozen_conversation"
+      ],
       "data_contracts": [
         "Preview and confirmation, exact evidence text and offsets, ambiguity/clarification, deterministic fallbacks."
       ],
@@ -688,10 +694,15 @@
         "Protect tracker schema and facts by destination; untrusted extraction may only propose or invoke validated commands."
       ],
       "resource_scenario": "Bounded tracker setup and validation with ambiguous input",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R19",
-      "known_limits": [],
+      "known_limits": [
+        "Explicit local Telegram tracker setup matches 324 frozen field cases and 106 durable conversation steps, including delayed updates, privacy, preview confirmation, duplicate ingress and expired-lease recovery. A dedicated final-build scenario passed within 32 MiB with zero swap and zero memory-limit events.",
+        "Natural-language tracker selection, guided entry/edit/close chat forms, stale-button handling and complete combined R19 acceptance remain pending.",
+        "Callback notices after configuration-locale changes and broader legacy malformed-state compatibility require the remaining chat-form and R36 transport checks.",
+        "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."
+      ],
       "approved_deviations": []
     },
     {

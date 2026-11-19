@@ -320,7 +320,7 @@ impl Database {
     ) -> Result<Transaction<'_, Postgres>, TelegramDiaryCommitError> {
         let mut txn = begin(&self.work).await?;
         if !try_ingress_lock(&mut txn).await? {
-            return Err(JobStoreError::Database.into());
+            return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
         }
         let owner = envelope.owner_id();
         let instance = envelope.channel().instance_id();
@@ -361,7 +361,10 @@ impl Database {
         }
         Self::require_diary_owner(&mut txn, owner)
             .await
-            .map_err(TelegramDiaryCommitError::Diary)?;
+            .map_err(|error| match error {
+                DiaryWriteError::Busy => TelegramDiaryCommitError::Outbox(QueueIntentError::Busy),
+                error => TelegramDiaryCommitError::Diary(error),
+            })?;
         Ok(txn)
     }
 }
