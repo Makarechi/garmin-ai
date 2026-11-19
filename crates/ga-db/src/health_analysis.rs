@@ -2,6 +2,7 @@ mod activity_reads;
 mod coffee;
 mod device_history;
 mod event_windows;
+pub mod generic;
 mod insights;
 mod lagged;
 mod migraine;
