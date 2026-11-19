@@ -10,7 +10,9 @@ mod tracker_form;
 mod tracker_setup;
 mod tracker_text;
 
-pub use tracker_text::{TelegramTrackerTextPreparation, TelegramTrackerTextSession};
+pub use tracker_text::{
+    TelegramTrackerTextPreparation, TelegramTrackerTextSession, TrackerSafetyStatus,
+};
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;

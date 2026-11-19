@@ -3,11 +3,13 @@ use std::fs;
 use super::*;
 
 mod atomic;
+mod recovery;
 #[path = "../../../../tests/support/tracker_snapshot.rs"]
 mod tracker_snapshot;
 
 struct LegacyTrackerProvider {
     calls: AtomicUsize,
+    safety_outcome: AtomicUsize,
 }
 
 impl Sender for LegacyTrackerProvider {
@@ -24,7 +26,11 @@ impl Sender for LegacyTrackerProvider {
         let output = if request.body()["system_instruction"]
             == include_str!("../../../../../../src/garmin_ai/prompts/form_safety.txt").trim()
         {
-            json!({"urgent":false,"response_language":"en"})
+            match self.safety_outcome.load(Ordering::SeqCst) {
+                0 => json!({"urgent":false,"response_language":"en"}),
+                1 => json!({"urgent":true,"response_language":"en"}),
+                _ => return Err(ModelTransportError::RequestRejected),
+            }
         } else {
             let prompt: Value = serde_json::from_str(
                 request.body()["input"]
@@ -159,6 +165,7 @@ async fn legacy_tracker_model_messages_match_the_frozen_conversation() -> Result
     let gateway = configured.gateway(database.clone(), false, started)?;
     let provider = LegacyTrackerProvider {
         calls: AtomicUsize::new(0),
+        safety_outcome: AtomicUsize::new(0),
     };
     let worker = ModelDiaryWorker {
         database: &database,
@@ -311,6 +318,7 @@ async fn legacy_tracker_model_messages_match_the_frozen_conversation() -> Result
         cases.len(),
         provider.calls.load(Ordering::SeqCst)
     );
+    recovery::assert_safety_recovery(&worker, &pool, &mut runtime).await?;
     if let Ok(status) = fs::read_to_string("/proc/self/status") {
         for line in status
             .lines()

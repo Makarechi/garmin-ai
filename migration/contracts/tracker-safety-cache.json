@@ -1,0 +1,386 @@
+[
+  {
+    "initial": null,
+    "outcome": "checked",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": false,
+    "outcome": "checked",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": 0,
+    "outcome": "checked",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": "unknown",
+    "outcome": "checked",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": "CHECKED",
+    "outcome": "checked",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": "checked",
+    "outcome": "checked",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": "urgent",
+    "outcome": "checked",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": "unavailable",
+    "outcome": "checked",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": null,
+    "outcome": "urgent",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": false,
+    "outcome": "urgent",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": 0,
+    "outcome": "urgent",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": "unknown",
+    "outcome": "urgent",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": "CHECKED",
+    "outcome": "urgent",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": "checked",
+    "outcome": "urgent",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": "urgent",
+    "outcome": "urgent",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": "unavailable",
+    "outcome": "urgent",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": null,
+    "outcome": "unavailable",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": false,
+    "outcome": "unavailable",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": 0,
+    "outcome": "unavailable",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": "unknown",
+    "outcome": "unavailable",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": "CHECKED",
+    "outcome": "unavailable",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 1,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  },
+  {
+    "initial": "checked",
+    "outcome": "unavailable",
+    "statuses": [
+      "checked",
+      "checked",
+      "checked"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "checked"
+    }
+  },
+  {
+    "initial": "urgent",
+    "outcome": "unavailable",
+    "statuses": [
+      "urgent",
+      "urgent",
+      "urgent"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "urgent"
+    }
+  },
+  {
+    "initial": "unavailable",
+    "outcome": "unavailable",
+    "statuses": [
+      "unavailable",
+      "unavailable",
+      "unavailable"
+    ],
+    "calls": 0,
+    "payload": {
+      "retained": {
+        "synthetic": true
+      },
+      "form_safety": "unavailable"
+    }
+  }
+]
