@@ -116,7 +116,11 @@ async fn export(state: AppState, headers: &HeaderMap, uri: &Uri) -> Response {
         .into_response()
 }
 
-fn instant(value: Option<&str>, field: &str, errors: &mut Vec<Value>) -> Option<StoredInstant> {
+pub(super) fn instant(
+    value: Option<&str>,
+    field: &str,
+    errors: &mut Vec<Value>,
+) -> Option<StoredInstant> {
     let Some(value) = value else {
         errors.push(
             json!({"type":"missing","loc":["query",field],"msg":"Field required","input":null}),

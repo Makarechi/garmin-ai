@@ -1,4 +1,5 @@
 mod browser;
+mod calendar_context;
 mod community_packs;
 pub(crate) mod demo;
 mod diary;
@@ -46,6 +47,8 @@ fn router(state: AppState) -> Router {
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
+        .route("/context/calendar", any(calendar_context::plans))
+        .route("/context/calendar/import", any(calendar_context::import))
         .route("/actions", any(tracker_actions::available))
         .route("/natural-language/trackers", any(natural_language::tracker))
         .route(
