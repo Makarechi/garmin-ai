@@ -84,10 +84,11 @@ def delay_write(engine, action):
             connection.execute(text("DROP FUNCTION wait_for_mcp_fixture()"))
 
 
-async def cancel_write(binary, engine, root, env, name, arguments):
+@asynccontextmanager
+async def open_wire(command, args, root, env):
     process = await asyncio.create_subprocess_exec(
-        binary,
-        "mcp",
+        command,
+        *args,
         cwd=root,
         env=env,
         stdin=asyncio.subprocess.PIPE,
@@ -115,25 +116,43 @@ async def cancel_write(binary, engine, root, env, name, arguments):
                 },
             }
         )
-        assert (await read())["id"] == 1
+        result = await read()
+        assert result["id"] == 1 and result["result"]["protocolVersion"] == "2025-11-25"
         await write({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        await write(
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
-            }
-        )
+        yield write, read
+        process.stdin.close()
+        assert await asyncio.wait_for(process.wait(), timeout=5) == 0
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
+async def begin_write(write, name, arguments):
+    await write(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+    )
+
+
+async def notify_cancel(write):
+    await write({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})
+
+
+async def cancel_write(binary, engine, root, env, name, arguments):
+    async with open_wire(binary, ["mcp"], root, env) as (write, read):
+        await begin_write(write, name, arguments)
         for _ in range(30):
             if await asyncio.to_thread(sleeping, engine):
                 break
             await asyncio.sleep(0.01)
         else:
             raise AssertionError("The MCP write never reached the cancellable database operation")
-        await write(
-            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}}
-        )
+        await notify_cancel(write)
         await asyncio.sleep(0.6)
         await write({"jsonrpc": "2.0", "id": 3, "method": "ping"})
         response = await read()
@@ -141,12 +160,6 @@ async def cancel_write(binary, engine, root, env, name, arguments):
             assert "error" in response or response["result"]["isError"]
             response = await read()
         assert response["id"] == 3 and response["result"] == {}
-        process.stdin.close()
-        assert await asyncio.wait_for(process.wait(), timeout=5) == 0
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
 
 
 async def compare(binary, root, engine):
