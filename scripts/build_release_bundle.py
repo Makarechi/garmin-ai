@@ -42,6 +42,10 @@ CONTENTS = (
     "docs/wearable-capability-spike.md",
     "tests/universal_acceptance_manifest.json",
 )
+NATIVE_CONTENTS = tuple(name for name in CONTENTS if not name.startswith(("scripts/", "src/"))) + (
+    "migration/rust-native-image.md",
+    "migration/rust-native-schema.md",
+)
 
 
 def release_compose(source: str) -> str:
@@ -62,16 +66,23 @@ def check_compose() -> None:
         raise ValueError("compose.release.yml differs from the reviewed development layout")
 
 
-def build_bundle(app_image: str, *, sha: str, output: Path) -> tuple[Path, Path]:
+def build_bundle(
+    app_image: str, *, sha: str, output: Path, runtime: str = "python"
+) -> tuple[Path, Path]:
     if not APP_IMAGE_RE.fullmatch(app_image):
         raise ValueError("Application image must include a full sha256 digest")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("Git revision must be a complete commit SHA")
-    check_compose()
+    if runtime not in ("python", "rust"):
+        raise ValueError("Unsupported application runtime")
+    native = runtime == "rust"
+    if not native:
+        check_compose()
+    compose_source = ROOT / ("compose.rust-release.yml" if native else "compose.release.yml")
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
     database_image = re.search(
         r"^    image: (timescale/timescaledb:[^\s]+@sha256:[0-9a-f]{64})$",
-        (ROOT / "compose.release.yml").read_text(),
+        compose_source.read_text(),
         re.MULTILINE,
     )
     if database_image is None:
@@ -86,15 +97,25 @@ def build_bundle(app_image: str, *, sha: str, output: Path) -> tuple[Path, Path]
         "validated_platforms": [],
         "release_status": "candidate; operational and license acceptance pending",
     }
-    prefix = f"garmin-ai-{version}-{sha[:8]}"
+    if native:
+        manifest["runtime"] = "rust"
+    native_suffix = "-native" if native else ""
+    prefix = f"garmin-ai-{version}{native_suffix}-{sha[:8]}"
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{prefix}.tar.gz"
     with archive.open("wb") as raw:
         with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-            for name in CONTENTS:
-                data = (ROOT / name).read_bytes()
+            for name in NATIVE_CONTENTS if native else CONTENTS:
+                source = compose_source if name == "compose.release.yml" else ROOT / name
+                data = source.read_bytes()
                 _add(tar, f"{prefix}/{name}", data, 0o755 if name in {"install.sh"} else 0o644)
-            _add(tar, f"{prefix}/release.env", f"GA_APP_IMAGE={app_image}\n".encode(), 0o644)
+            runtime_setting = "GA_APP_RUNTIME=rust\n" if native else ""
+            _add(
+                tar,
+                f"{prefix}/release.env",
+                f"GA_APP_IMAGE={app_image}\n{runtime_setting}".encode(),
+                0o644,
+            )
             _add(
                 tar,
                 f"{prefix}/release-manifest.json",
@@ -119,6 +140,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-compose", action="store_true")
     parser.add_argument("--app-image")
+    parser.add_argument("--runtime", choices=("python", "rust"), default="python")
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     if args.check_compose:
@@ -134,7 +156,9 @@ def main() -> None:
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, capture_output=True, text=True
     ).stdout.strip()
-    archive, checksum = build_bundle(args.app_image, sha=sha, output=args.output)
+    archive, checksum = build_bundle(
+        args.app_image, sha=sha, output=args.output, runtime=args.runtime
+    )
     print(f"Created {archive} and {checksum}")
 
 

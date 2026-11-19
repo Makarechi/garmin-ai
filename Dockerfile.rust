@@ -19,7 +19,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0700 -o 1000 -g 1000 /app/data/raw /app/tokens/garmin /app/state /app/backups \
     && chown 1000:1000 /app /app/data /app/tokens \
-    && chmod 0700 /app/data /app/tokens
+    && chmod 0700 /app/data \
+    && chmod 0755 /app/tokens
 COPY --from=builder /garmin-ai-rust /usr/local/bin/garmin-ai-rust
 COPY LICENSE /usr/share/doc/garmin-ai/LICENSE
 COPY crates/ga-domain/src/statistics/LICENSE-scipy.txt /usr/share/doc/garmin-ai/LICENSE-scipy.txt

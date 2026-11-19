@@ -1,0 +1,71 @@
+name: Native release installation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/native-release-install.yml"
+      - "Dockerfile.rust"
+      - "compose.rust-release.yml"
+      - "install.sh"
+      - "scripts/build_release_bundle.py"
+      - "scripts/smoke_release_install.sh"
+      - "scripts/verify_release_install.py"
+      - "crates/ga-app/src/setup.rs"
+      - "crates/ga-app/src/setup/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/native-release-install.yml"
+      - "Dockerfile.rust"
+      - "compose.rust-release.yml"
+      - "install.sh"
+      - "scripts/build_release_bundle.py"
+      - "scripts/smoke_release_install.sh"
+      - "scripts/verify_release_install.py"
+      - "crates/ga-app/src/setup.rs"
+      - "crates/ga-app/src/setup/**"
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Native bundle (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - run: uv sync --locked --no-dev
+      - name: Install and restart a source-free native bundle
+        env:
+          GA_SMOKE_RUNTIME: rust
+        run: bash scripts/smoke_release_install.sh
+      - name: Upgrade a historical installation with the native bundle
+        env:
+          GA_SMOKE_RUNTIME: rust
+          GA_SMOKE_HISTORICAL: "true"
+        run: bash scripts/smoke_release_install.sh
+      - name: Preserve non-sensitive platform evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-rust-install-${{ matrix.architecture }}
+          path: |
+            test-results/native-rust-install.json
+            test-results/native-rust-upgrade.json
+          if-no-files-found: warn
