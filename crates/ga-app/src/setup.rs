@@ -2,6 +2,7 @@ mod database;
 mod dotenv;
 mod integrations;
 mod mounts;
+mod preferences;
 
 use std::{
     collections::BTreeMap,
@@ -29,6 +30,7 @@ use serde_json::Value;
 use crate::{
     authorization::{Authorization, is_placeholder},
     backup::decode_key,
+    configuration::garmin_history_days,
 };
 use dotenv::SetupFile;
 
@@ -257,18 +259,13 @@ fn validate_runtime(values: &ValueMap) -> Result<(), &'static str> {
         values.get("GA_INTEGRATIONS").map(String::as_str),
         values.get("GA_TELEGRAM_USER_ID").map(String::as_str),
     )?;
-    for key in [
-        "GA_CAFFEINE_PRESETS",
-        "GA_CALENDAR_SOURCES",
-        "GA_GEMINI_FALLBACK_MODELS",
-    ] {
-        if values
-            .get(key)
-            .is_some_and(|value| serde_json::from_str::<Vec<Value>>(value).is_err())
-        {
-            return Err(INVALID_SETTINGS);
-        }
+    if values
+        .get("GA_BACKFILL_DAYS")
+        .is_some_and(|raw| garmin_history_days(raw).is_none())
+    {
+        return Err(INVALID_SETTINGS);
     }
+    preferences::validate(values)?;
     ga_app::model_gateway::RuntimeModelSettings::validate_saved_consent(&values["GA_LLM_CONSENT"])
         .map_err(|_| INVALID_SETTINGS)
 }

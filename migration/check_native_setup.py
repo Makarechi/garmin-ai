@@ -218,6 +218,75 @@ def validate_integrations_before_writes(binary):
     print("Verified rejected integrations leave existing settings and storage untouched")
 
 
+def validate_runtime_preferences(binary):
+    preset = {
+        "id": "673ac7ca-70f1-4a67-ad4c-705d9939af86",
+        "name": "Synthetic drink",
+        "recipe": {
+            "beverage": "Synthetic recipe",
+            "dose_basis": "total",
+            "caffeine_mg_estimate": 5,
+        },
+    }
+    other = {**preset, "id": "483b710b-0423-4edb-95ea-83eb98c476b0"}
+    source = {
+        "id": "cc5f37b3-c15a-4035-bbb8-70328a4261ac",
+        "categories": ["work", "travel"],
+        "granted_at": "2026-01-01T00:00:00Z",
+    }
+    malformed = [
+        ("GA_BACKFILL_DAYS", "-1"),
+        ("GA_BACKFILL_DAYS", "3661"),
+        ("GA_BACKFILL_DAYS", "not-a-number"),
+        ("GA_MODEL_REQUEST_TIMEOUT_SECONDS", "0.049"),
+        ("GA_MODEL_REQUEST_TIMEOUT_SECONDS", "301"),
+        ("GA_MODEL_REQUEST_TIMEOUT_SECONDS", "NaN"),
+        ("GA_TELEGRAM_DISPATCHER_VERSION", "synthetic-unknown-dispatcher"),
+        ("GA_GARMIN_AUTH_URL", "http://garmin.invalid/garmin-auth"),
+        ("GA_GARMIN_AUTH_URL", "https://garmin.invalid/garmin-auth?context=test"),
+        ("GA_GEMINI_FALLBACK_MODELS", json.dumps([""])),
+        ("GA_GEMINI_FALLBACK_MODELS", json.dumps(["synthetic-test-model"] * 9)),
+        ("GA_CALENDAR_SOURCES", json.dumps([{**source, "categories": ["synthetic"]}])),
+        ("GA_CALENDAR_SOURCES", json.dumps([{**source, "granted_at": "2026-01-01T00:00:00"}])),
+        ("GA_CAFFEINE_PRESETS", json.dumps([preset, preset])),
+        ("GA_CAFFEINE_PRESETS", json.dumps([preset, other])),
+        ("GA_CAFFEINE_PRESETS", json.dumps([{**preset, "recipe": {"beverage": ""}}])),
+    ]
+    for key, bad_value in malformed:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / ".env"
+            current = f"{key}='{bad_value}'\n"
+            settings.write_text(current)
+            with pytest.raises(ValueError):
+                Settings(_env_file=settings)
+            result = command(binary, root)
+            assert (
+                result.returncode != 0 and "Invalid preserved runtime settings" in result.stderr
+            ), key
+            assert settings.read_text() == current and set(root.iterdir()) == {settings}, key
+
+    for days, timeout in (("0", "0.05"), ("3660", "300")):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / ".env"
+            choices = {
+                "GA_BACKFILL_DAYS": days,
+                "GA_MODEL_REQUEST_TIMEOUT_SECONDS": timeout,
+                "GA_TELEGRAM_DISPATCHER_VERSION": "legacy-v1",
+                "GA_GARMIN_AUTH_URL": "https://garmin.invalid/garmin-auth",
+                "GA_GEMINI_FALLBACK_MODELS": json.dumps(["synthetic-test-model"]),
+                "GA_CALENDAR_SOURCES": json.dumps([source]),
+                "GA_CAFFEINE_PRESETS": json.dumps([preset]),
+            }
+            settings.write_text("".join(f"{key}='{value}'\n" for key, value in choices.items()))
+            assert Settings(_env_file=settings).backfill_days == int(days)
+            assert command(binary, root).returncode == 0
+            prepared = dotenv_values(settings, interpolate=False)
+            assert {key: prepared[key] for key in choices} == choices
+    print("Verified preserved runtime preferences and exact backfill and timeout bounds")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -238,6 +307,7 @@ def main():
     preserved_regional_credentials(binary)
     replace_runtime_placeholders(binary)
     validate_integrations_before_writes(binary)
+    validate_runtime_preferences(binary)
     if reject_new_case_aliases(binary):
         print("Verified overlapping storage paths whose case aliases did not exist before setup")
     print("Verified native setup and repeat runs against the deployment contract")

@@ -3,6 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) fn garmin_history_days(value: &str) -> Option<u16> {
+    value
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|days| *days <= 3660)
+}
+
 pub(crate) fn read<const N: usize>(keys: [&str; N]) -> Result<[Option<String>; N], &'static str> {
     const ERROR: &str = "Storage configuration is invalid";
     let mut values = std::array::from_fn(|_| None);
