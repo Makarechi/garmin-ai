@@ -469,6 +469,7 @@ fn garmin_error(error: GarminReadError) -> &'static str {
         GarminReadError::Missing => "LookupError",
         GarminReadError::Permission => "PermissionError",
         GarminReadError::Health(HealthAnalysisError::ReplayPending) => "ReplayUnavailable",
+        GarminReadError::Health(HealthAnalysisError::TemporalCalendarOverflow) => "OverflowError",
         GarminReadError::Health(
             HealthAnalysisError::Storage(_) | HealthAnalysisError::Database,
         ) => "RuntimeError",

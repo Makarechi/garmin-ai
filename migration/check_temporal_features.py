@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import struct
 import subprocess
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -105,6 +106,59 @@ def large_context(engine):
         )
 
 
+def comparable(value):
+    if isinstance(value, float):
+        return ("float64", struct.pack(">d", value).hex())
+    if isinstance(value, list):
+        return [comparable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: comparable(item) for key, item in value.items()}
+    return value
+
+
+def compare_cases(binary, engine, cases, label):
+    requests = []
+    expected = []
+    with Session(engine) as session:
+        for metrics, events, cutoff, purpose in cases:
+            try:
+                reference = features_at(session, metrics, events, cutoff, purpose)
+                expected.append([[at.isoformat(), data] for at, data in sorted(reference.items())])
+            except (ValueError, OverflowError) as error:
+                expected.append({"error": str(error), "class": type(error).__name__})
+            requests.append(
+                {
+                    "metrics": metrics,
+                    "events": [event.isoformat() for event in events],
+                    "cutoff": cutoff.isoformat(),
+                    "purpose": purpose,
+                }
+            )
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "temporal-features.json"
+        path.write_text(json.dumps(requests), encoding="utf-8")
+        result = subprocess.run(
+            [binary, "--ignored", "--exact", "select_feature_evidence", "--nocapture"],
+            check=False,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "GA_TEST_TEMPORAL_FEATURES": str(path)},
+        )
+        assert result.returncode == 0, (label, result.stderr, result.stdout[-2000:])
+        output = result.stdout
+        prefix = "temporal: "
+        actual = [
+            json.loads(line.removeprefix(prefix))
+            for line in output.splitlines()
+            if line.startswith(prefix)
+        ]
+    assert len(actual) == len(expected)
+    for index, (left, right) in enumerate(zip(actual, expected, strict=True)):
+        assert comparable(left) == comparable(right), (label, index, left, right)
+    print("Matched temporal batches", label, len(actual), flush=True)
+    return expected
+
+
 def run(binary):
     engine = isolated_engine()
     try:
@@ -133,26 +187,9 @@ def run(binary):
                 "as_known",
             ),
         ]
-        requests = []
-        expected = []
-        with Session(engine) as session:
-            for metrics, events, cutoff, purpose in cases:
-                try:
-                    reference = features_at(session, metrics, events, cutoff, purpose)
-                    expected.append(
-                        [[at.isoformat(), data] for at, data in sorted(reference.items())]
-                    )
-                except ValueError as exc:
-                    expected.append({"error": str(exc)})
-                requests.append(
-                    {
-                        "metrics": metrics,
-                        "events": [event.isoformat() for event in events],
-                        "cutoff": cutoff.isoformat(),
-                        "purpose": purpose,
-                    }
-                )
-
+        expected = compare_cases(
+            binary, engine, cases, "original history and 100001-version limits"
+        )
         assert expected[0][0][1][METRICS[0]]["value"] == 70
         assert expected[1][0][1][METRICS[0]]["value"] == 65
         assert expected[1][0][1][METRICS[2]]["value"] == 0
@@ -160,27 +197,6 @@ def run(binary):
         assert "100000" in expected[8]["error"]
         assert len(expected[10]) == 2000
         assert all(metrics["synthetic_load"]["value"] == 99997 for _, metrics in expected[10])
-
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "temporal-features.json"
-            path.write_text(json.dumps(requests), encoding="utf-8")
-            output = subprocess.run(
-                [binary, "--ignored", "--nocapture"],
-                check=True,
-                text=True,
-                capture_output=True,
-                env={**os.environ, "GA_TEST_TEMPORAL_FEATURES": str(path)},
-            ).stdout
-            prefix = "temporal: "
-            actual = [
-                json.loads(line.removeprefix(prefix))
-                for line in output.splitlines()
-                if line.startswith(prefix)
-            ]
-        assert len(actual) == len(expected)
-        for index, (left, right) in enumerate(zip(actual, expected, strict=True)):
-            assert left == right, (index, left, right)
-        print(f"Matched {len(actual)} temporal batches including the 100,001-version rejection")
     finally:
         engine.dispose()
 
