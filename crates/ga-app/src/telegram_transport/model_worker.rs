@@ -15,7 +15,6 @@ use ga_db::{
 };
 use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError},
-    channel::InboundEnvelope,
     event_input::source_offset_datetime,
     localization::catalog_text,
     timestamp::StoredInstant,
@@ -33,7 +32,7 @@ use crate::{
     model_gateway::{
         ActiveModelJob, AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisResult,
         ConfiguredModel, DiaryAnalysisTools, DiaryInterpretationError, GatewayError, ModelGateway,
-        Sender, TelegramDiaryInterpretation,
+        ReplySafetyIntent, Sender, TelegramDiaryInterpretation,
     },
     telegram_settings::TelegramIngressSettings,
     urgent_screen::urgent_notice,
@@ -41,9 +40,11 @@ use crate::{
 
 #[cfg(test)]
 mod tests;
+mod voice;
 
 const LEASE: u32 = 150;
 const IDLE: Duration = Duration::from_millis(250);
+const VOICE_REPLY_RESERVE: Duration = Duration::from_secs(4);
 
 impl TelegramTransport {
     /// Run ordered model work separately from polling, local safety screening and reply delivery.
@@ -76,6 +77,10 @@ impl TelegramTransport {
                     database.claim_telegram_model_text(target, now, LEASE).await
                 {
                     worker.process(&lease, now).await;
+                } else if let Ok(Some(lease)) =
+                    database.claim_telegram_voice(target, now, LEASE).await
+                {
+                    worker.process_voice(self, &lease, now).await;
                 }
             }
             sleep(IDLE).await;
@@ -94,6 +99,16 @@ struct ModelDiaryWorker<'a, 'c, S> {
 
 impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
     async fn process(&self, lease: &TelegramInboundLease, started: StoredInstant) {
+        if lease.has_voice_text()
+            && self
+                .gateway
+                .authorize_transcription(self.configured.current(), started)
+                .is_err()
+        {
+            self.finish(lease, self.locale, Disposition::VoiceUnavailable)
+                .await;
+            return;
+        }
         let admission = self
             .database
             .admit_telegram_model_text(lease, self.timezone, self.locale)
@@ -133,7 +148,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
             }
             return;
         }
-        let envelope = match InboundEnvelope::parse(lease.envelope_json().as_bytes()) {
+        let envelope = match lease.processing_envelope() {
             Ok(envelope) => envelope,
             Err(_) => {
                 self.finish(lease, &locale, Disposition::Gone).await;
@@ -169,6 +184,13 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
             .await
         {
             Ok(request) => request,
+            Err(DiaryInterpretationError::RequiresSafetyScreen) if lease.has_voice_text() => {
+                let result = self.handle_long_voice_text(lease, &locale, &budget).await;
+                if let Err(error) = result {
+                    self.finish(lease, &locale, commit_disposition(error)).await;
+                }
+                return;
+            }
             Err(error) => {
                 self.finish(lease, &locale, interpretation_disposition(error))
                     .await;
@@ -199,6 +221,38 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
         }
     }
 
+    async fn handle_long_voice_text(
+        &self,
+        lease: &TelegramInboundLease,
+        locale: &str,
+        budget: &AnalysisBudget,
+    ) -> Result<(), TelegramDiaryCommitError> {
+        let lease_remaining =
+            Duration::try_from(lease.expires_at() - time::OffsetDateTime::now_utc())
+                .unwrap_or_default()
+                .saturating_sub(VOICE_REPLY_RESERVE);
+        let deadline = tokio::time::Instant::now()
+            + lease_remaining.min(budget.remaining(Instant::now()).unwrap_or_default());
+        let safety = self
+            .gateway
+            .screen_voice_reply_safety_with(
+                lease,
+                locale,
+                &|| self.configured.current(),
+                deadline,
+                self.sender,
+            )
+            .await?;
+        let message = if safety.intent == ReplySafetyIntent::Safety && !safety.oversized_notice {
+            urgent_notice(&safety.language)
+        } else {
+            template(&safety.language, "agent.oversized")
+        };
+        self.database
+            .finish_telegram_model_notice(lease, message)
+            .await
+    }
+
     async fn answer(
         &self,
         lease: &TelegramInboundLease,
@@ -208,8 +262,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
         timezone: &str,
         language: &str,
     ) -> Result<(), Disposition> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
-            .map_err(|_| Disposition::Gone)?;
+        let envelope = lease.processing_envelope().map_err(|_| Disposition::Gone)?;
         let text = envelope.text().ok_or(Disposition::Gone)?;
         let binding = ConversationBinding {
             owner_id: envelope.owner_id(),
@@ -271,6 +324,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     },
                     tracker_versions: &interpretation.channel_versions,
                     job: ActiveModelJob { id, lease_token },
+                    uses_voice_text: lease.has_voice_text(),
                 },
                 self.sender,
             )
@@ -334,6 +388,9 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
     async fn finish(&self, lease: &TelegramInboundLease, language: &str, disposition: Disposition) {
         match disposition {
             Disposition::Gone => {}
+            Disposition::VoiceUnavailable => {
+                let _ = self.database.finish_unavailable_telegram_voice(lease).await;
+            }
             Disposition::Text(key) => {
                 let _ = self
                     .database
@@ -374,6 +431,7 @@ fn analysis_turns(turns: Vec<Value>) -> Value {
 
 enum Disposition {
     Gone,
+    VoiceUnavailable,
     Retry(Duration),
     Text(&'static str),
 }
@@ -389,6 +447,7 @@ fn commit_disposition(error: TelegramDiaryCommitError) -> Disposition {
         }
         TelegramDiaryCommitError::Outbox(QueueIntentError::Busy) => Disposition::Retry(IDLE),
         TelegramDiaryCommitError::ModelContextChanged => Disposition::Text("agent.data_changed"),
+        TelegramDiaryCommitError::VoiceConsentChanged => Disposition::VoiceUnavailable,
         _ => Disposition::Text("agent.record_details"),
     }
 }

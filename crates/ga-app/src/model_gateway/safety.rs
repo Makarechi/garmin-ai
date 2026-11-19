@@ -1,13 +1,19 @@
 use std::{error::Error, fmt, future::Future};
 
-use ga_db::share_policy::ShareRequirement;
+use ga_db::{
+    jobs::telegram_inbound::{TelegramDiaryCommitError, TelegramInboundLease},
+    share_policy::{DestinationKind, ModelChannelSharing, ShareDestination, ShareRequirement},
+};
 use ga_domain::{
     language_tags::normalize_language_tag, model_consent::ModelCategories,
     model_request::ApprovedModelSchema, text_offsets::from_code_points,
 };
 use serde_json::Value;
 
-use super::{ActiveModelJob, CurrentModelPolicy, GatewayError, ModelGateway, ModelInput};
+use super::{
+    ActiveModelJob, CurrentModelPolicy, GatewayError, ModelGateway, ModelInput, Sender,
+    runtime::ModelRequestScope,
+};
 
 const REPLY_LIMIT: usize = 16_000;
 const TOTAL_CHARS: usize = 48_000;
@@ -74,6 +80,73 @@ impl ModelGateway<'_> {
             Ok(output.value)
         })
         .await
+    }
+
+    pub(crate) async fn screen_voice_reply_safety_with<'policy, S: Sender>(
+        &self,
+        lease: &TelegramInboundLease,
+        locale: &str,
+        policy: &(impl Fn() -> CurrentModelPolicy<'policy> + Sync),
+        deadline: tokio::time::Instant,
+        sender: &S,
+    ) -> Result<ReplySafety, TelegramDiaryCommitError> {
+        let envelope = lease
+            .processing_envelope()
+            .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+        let text = envelope
+            .text()
+            .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?;
+        let model = ShareDestination::new(DestinationKind::Model, self.binding().instance_id)
+            .map_err(|_| TelegramDiaryCommitError::VoiceConsentChanged)?;
+        let instance = format!("telegram:{}", envelope.channel().instance_id());
+        let destination = ShareDestination::new(DestinationKind::Channel, &instance)
+            .map_err(|_| TelegramDiaryCommitError::BindingChanged)?;
+        let requirements = self
+            .database
+            .telegram_voice_sharing(lease, model)
+            .await?
+            .ok_or(TelegramDiaryCommitError::VoiceConsentChanged)?;
+        let (id, lease_token) = lease.job_identity();
+        let safety = screen_with(text, locale, |instruction, prompt| {
+            let request = self.execute_with_context(
+                ModelInput::Structured {
+                    contract: ApprovedModelSchema::SafetyScreen,
+                    instruction,
+                    prompt,
+                    categories: ModelCategories::HEALTH_AND_DIARY,
+                },
+                policy,
+                ModelRequestScope {
+                    uses_voice_text: true,
+                    requirements: &requirements,
+                    channel: Some(ModelChannelSharing {
+                        destination,
+                        requirements: &[],
+                        conversation: None,
+                    }),
+                    job: Some(ActiveModelJob { id, lease_token }),
+                },
+                sender,
+            );
+            async move {
+                let timed_out = || {
+                    SafetyScreenError::Model(GatewayError::Attempt(
+                        ga_model::fallback::FallbackError::Deadline,
+                    ))
+                };
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(timed_out());
+                }
+                tokio::time::timeout_at(deadline, request)
+                    .await
+                    .map_err(|_| timed_out())?
+                    .map(|output| output.value)
+                    .map_err(SafetyScreenError::Model)
+            }
+        })
+        .await
+        .unwrap_or_else(|_| decision(true, true, locale.to_owned()));
+        Ok(safety)
     }
 }
 

@@ -311,15 +311,15 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         )
         .await?;
     let caption = database
-        .claim_telegram_tracker_form(probe_target, clock(&pool).await?, 10)
+        .claim_telegram_tracker_form(probe_target, clock(&pool).await?, 10, false)
         .await?
         .ok_or("Expected fresh caption claim")?;
     database
-        .apply_telegram_tracker_form(&caption, "UTC", &locale)
+        .apply_telegram_tracker_form(&caption, "UTC", &locale, false)
         .await?;
     assert!(
         database
-            .claim_telegram_tracker_form(probe_target, clock(&pool).await?, 10)
+            .claim_telegram_tracker_form(probe_target, clock(&pool).await?, 10, false)
             .await?
             .is_none()
     );
@@ -458,8 +458,8 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
     };
     tokio::select! {
         result=proof=>result?,
-        worker=transport.run_tracker_forms(&database,&settings,"UTC",&locale)=>worker,
-        worker=transport.run_tracker_setup(&database,&settings,"UTC",&locale)=>worker,
+        worker=transport.run_tracker_forms(&database,&settings,"UTC",&locale,false)=>worker,
+        worker=transport.run_tracker_setup(&database,&settings,"UTC",&locale,false)=>worker,
         worker=transport.run_local_text(&database,&settings,&locale,provider_available)=>worker,
         worker=transport.run_local_diary(&database,&settings,"UTC")=>worker,
         result=model_admission=>result?,

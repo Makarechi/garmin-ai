@@ -52,6 +52,7 @@ pub struct AnalysisDestination<'a> {
     pub conversation: ConversationReadContext<'a>,
     pub tracker_versions: &'a BTreeSet<Uuid>,
     pub job: ActiveModelJob,
+    pub uses_voice_text: bool,
 }
 
 struct AnalysisScope<'a> {
@@ -223,6 +224,7 @@ impl ModelGateway<'_> {
                         },
                         policy,
                         ModelRequestScope {
+                            uses_voice_text: destination.is_some_and(|scope| scope.uses_voice_text),
                             requirements: &current_requirements,
                             channel,
                             job,

@@ -149,6 +149,7 @@ pub(in crate::jobs::telegram_inbound) async fn control_in(
     envelope: &InboundEnvelope,
     timezone: &str,
     locale: &str,
+    transcribe_voice: bool,
 ) -> Result<bool, TelegramDiaryCommitError> {
     if legacy_pending(txn, envelope).await?.is_none() {
         return Ok(false);
@@ -161,7 +162,8 @@ pub(in crate::jobs::telegram_inbound) async fn control_in(
         "Пришлите текст или голосовое сообщение."
     } else if text.starts_with('/') {
         "Неизвестная команда. Доступные команды: /help."
-    } else if envelope.kind() == InboundKind::Voice {
+    } else if envelope.kind() == InboundKind::Voice && !transcribe_voice && !lease.has_voice_text()
+    {
         return fallback_in(txn, lease, envelope, timezone, locale).await;
     } else {
         return Ok(false);

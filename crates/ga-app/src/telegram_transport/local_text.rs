@@ -9,10 +9,7 @@ use ga_db::{
     },
     outbox_enqueue::QueueIntentError,
 };
-use ga_domain::{
-    channel::InboundEnvelope, event_payload::python_whitespace,
-    event_schema::parse_tracker_chat_field,
-};
+use ga_domain::{event_payload::python_whitespace, event_schema::parse_tracker_chat_field};
 use tokio::time::sleep;
 
 use super::{TelegramTransport, poller::wall_clock};
@@ -85,7 +82,8 @@ impl TelegramTransport {
 fn local_screen(
     lease: &TelegramInboundLease,
 ) -> Result<TelegramSafetyDecision<'static>, UrgentScreenUnavailable> {
-    let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+    let envelope = lease
+        .processing_envelope()
         .map_err(|_| UrgentScreenUnavailable)?;
     let text = envelope.text().ok_or(UrgentScreenUnavailable)?;
     if !obvious_urgent_symptoms(text)? {
@@ -175,6 +173,10 @@ pub(super) async fn complete_or_retry(
 ) -> bool {
     match result {
         Ok(()) => true,
+        Err(TelegramDiaryCommitError::VoiceConsentChanged) => database
+            .finish_unavailable_telegram_voice(lease)
+            .await
+            .is_ok(),
         Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy)) => {
             if let Ok(now) = wall_clock() {
                 let _ = database.defer_telegram_owner_control(lease, now).await;

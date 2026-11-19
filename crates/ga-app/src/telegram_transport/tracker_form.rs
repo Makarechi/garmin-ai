@@ -14,6 +14,7 @@ impl TelegramTransport {
         settings: &TelegramIngressSettings,
         timezone: &str,
         locale: &str,
+        transcribe_voice: bool,
     ) -> ! {
         loop {
             if let (Ok(binding), Ok(now)) =
@@ -23,10 +24,12 @@ impl TelegramTransport {
                     owner_id: binding.owner_id,
                     instance_id: binding.instance_id,
                 };
-                if let Ok(Some(lease)) = database.claim_telegram_tracker_form(target, now, 10).await
+                if let Ok(Some(lease)) = database
+                    .claim_telegram_tracker_form(target, now, 10, transcribe_voice)
+                    .await
                 {
                     let result = database
-                        .apply_telegram_tracker_form(&lease, timezone, locale)
+                        .apply_telegram_tracker_form(&lease, timezone, locale, transcribe_voice)
                         .await;
                     if complete_or_retry(database, &lease, result).await {
                         continue;

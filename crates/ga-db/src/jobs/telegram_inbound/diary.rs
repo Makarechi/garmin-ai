@@ -3,7 +3,6 @@ use std::{error::Error, fmt, time::Duration};
 use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation, TimeClarification},
     channel::{InboundEnvelope, InboundKind, OutboundIntent},
-    event_input::EventSource,
     model_consent::ModelCategories,
     timestamp::StoredInstant,
 };
@@ -40,6 +39,7 @@ pub enum TelegramDiaryCommitError {
     TimeClarification(TimeClarification),
     ExistingContextRequired,
     ModelContextChanged,
+    VoiceConsentChanged,
     MedicationEvidenceRequired,
     Reply,
     Diary(DiaryWriteError),
@@ -65,6 +65,7 @@ impl fmt::Display for TelegramDiaryCommitError {
                 f.write_str("This report requires a current, explicitly offered record")
             }
             Self::ModelContextChanged => f.write_str("The context used by the model has changed"),
+            Self::VoiceConsentChanged => f.write_str("Voice transcript sharing is unavailable"),
             Self::MedicationEvidenceRequired => {
                 f.write_str("Medication reports require explicit intake evidence")
             }
@@ -172,7 +173,7 @@ impl Database {
                 command,
                 authenticated_actor: &actor,
                 message_text: text,
-                source: EventSource::TelegramText,
+                source: lease.diary_source(),
                 operation_id: operation,
                 idempotency_prefix: &key,
             }).await.map_err(TelegramDiaryCommitError::Diary)?;
@@ -328,6 +329,18 @@ impl Database {
         lease: &TelegramInboundLease,
         envelope: &InboundEnvelope,
     ) -> Result<(), TelegramDiaryCommitError> {
+        Self::verify_telegram_binding_in(txn, lease, envelope).await?;
+        if lease.has_voice_text() {
+            super::voice::require_current_transcript(txn, lease).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn verify_telegram_binding_in(
+        txn: &mut Transaction<'_, Postgres>,
+        lease: &TelegramInboundLease,
+        envelope: &InboundEnvelope,
+    ) -> Result<(), TelegramDiaryCommitError> {
         if !try_ingress_lock(txn).await? {
             return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
         }
@@ -381,9 +394,10 @@ impl Database {
 pub(super) fn text_envelope(
     lease: &TelegramInboundLease,
 ) -> Result<InboundEnvelope, TelegramDiaryCommitError> {
-    let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+    let envelope = lease
+        .processing_envelope()
         .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
-    if !matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit)
+    if !(matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit) || lease.has_voice_text())
         || envelope.message_id() != lease.message_id
         || envelope.channel().channel() != "telegram"
     {

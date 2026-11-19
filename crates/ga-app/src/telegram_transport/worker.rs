@@ -3,7 +3,7 @@ use std::time::Duration;
 use ga_db::{
     Database,
     jobs::telegram_inbound::{
-        TelegramDiaryCommitError, TelegramInboundState, TelegramInboundTarget,
+        TelegramControlError, TelegramDiaryCommitError, TelegramInboundState, TelegramInboundTarget,
     },
     outbox_claims::ReplyDestination,
     outbox_enqueue::QueueIntentError,
@@ -195,6 +195,15 @@ impl TelegramTransport {
                         .await
                     {
                         Ok(_) => continue,
+                        Err(TelegramControlError::VoiceConsentChanged) => {
+                            if database
+                                .finish_unavailable_telegram_voice(&lease)
+                                .await
+                                .is_ok()
+                            {
+                                continue;
+                            }
+                        }
                         Err(error) if error.is_busy() => {
                             if let Ok(now) = wall_clock() {
                                 let _ = database.defer_telegram_owner_control(&lease, now).await;
@@ -236,6 +245,15 @@ impl TelegramTransport {
                         .await
                     {
                         Ok(_) => continue,
+                        Err(TelegramDiaryCommitError::VoiceConsentChanged) => {
+                            if database
+                                .finish_unavailable_telegram_voice(&lease)
+                                .await
+                                .is_ok()
+                            {
+                                continue;
+                            }
+                        }
                         Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy)) => {
                             if let Ok(now) = wall_clock() {
                                 let _ = database.defer_telegram_owner_control(&lease, now).await;

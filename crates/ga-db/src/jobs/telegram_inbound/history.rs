@@ -156,7 +156,8 @@ impl Database {
         lease: &TelegramInboundLease,
         configured_timezone: &str,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         if let Some(command) = commands::Command::from_envelope(&envelope) {
             return self
@@ -175,7 +176,8 @@ impl Database {
         &self,
         lease: &TelegramInboundLease,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         let page = HistoryPage::from_update(&envelope);
         let expired = expired_history(&envelope);

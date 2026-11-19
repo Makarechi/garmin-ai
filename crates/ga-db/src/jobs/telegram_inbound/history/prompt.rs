@@ -19,6 +19,8 @@ pub(in crate::jobs::telegram_inbound) struct PromptState {
     pub(in crate::jobs::telegram_inbound) pending: bool,
     pub(in crate::jobs::telegram_inbound) guided_form: bool,
     pub(in crate::jobs::telegram_inbound) legacy_tracker: bool,
+    pub(in crate::jobs::telegram_inbound) tracker_selection: bool,
+    pub(in crate::jobs::telegram_inbound) tracker_version: Option<String>,
 }
 
 pub(in crate::jobs::telegram_inbound) struct SetupDraft {
@@ -26,6 +28,7 @@ pub(in crate::jobs::telegram_inbound) struct SetupDraft {
     pub(in crate::jobs::telegram_inbound) russian: bool,
     pub(in crate::jobs::telegram_inbound) awaiting_name: bool,
     pub(in crate::jobs::telegram_inbound) predates_step: bool,
+    pub(in crate::jobs::telegram_inbound) sensitive: bool,
 }
 
 pub(in crate::jobs::telegram_inbound) async fn blocked(
@@ -106,6 +109,13 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             && !form["chat_form"].is_object()
             && !form["chat_close"].is_object()
     });
+    let tracker_selection = pending
+        .as_ref()
+        .is_some_and(|form| form["button"] == "tracker_select");
+    let tracker_version = pending
+        .as_ref()
+        .and_then(|form| form["definition_version_id"].as_str())
+        .map(str::to_owned);
     let key = format!("tracker:chat-setup:{destination}");
     let draft: Option<(String, OffsetDateTime)> =
         sqlx::query_as("SELECT value::text,updated_at FROM app_state WHERE key=$1")
@@ -154,6 +164,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
                 russian,
                 awaiting_name: draft["name"].is_null(),
                 predates_step: last_update.is_some_and(|last| order <= (last_epoch, last)),
+                sensitive: draft["privacy"] == "sensitive",
             });
         } else if active(clock) {
             return Ok(PromptState {
@@ -164,6 +175,8 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
                 pending: pending.is_some(),
                 guided_form,
                 legacy_tracker,
+                tracker_selection,
+                tracker_version,
             });
         }
     }
@@ -179,6 +192,8 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             pending: true,
             guided_form,
             legacy_tracker,
+            tracker_selection,
+            tracker_version,
         });
     }
     Ok(PromptState {
@@ -196,6 +211,8 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
         pending: pending.is_some(),
         guided_form,
         legacy_tracker,
+        tracker_selection,
+        tracker_version,
     })
 }
 

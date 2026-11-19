@@ -109,6 +109,7 @@ impl ModelGateway<'_> {
             budget,
             &policy,
             ModelRequestScope {
+                uses_voice_text: false,
                 requirements,
                 channel: None,
                 job,

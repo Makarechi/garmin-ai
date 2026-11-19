@@ -41,12 +41,14 @@ impl Database {
         lease: &TelegramInboundLease,
         timezone: &str,
         locale: &str,
+        transcribe_voice: bool,
     ) -> Result<(), TelegramDiaryCommitError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         tokio::time::timeout(Duration::from_millis(2500), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            let handled = apply_in(&mut txn, lease, &envelope, timezone, locale).await?;
+            let handled = apply_in(&mut txn, lease, &envelope, timezone, locale, transcribe_voice).await?;
             if !handled && envelope.kind() == InboundKind::Voice {
                 let (id, token) = lease.job_identity();
                 let released = sqlx::query(
@@ -82,6 +84,7 @@ pub(super) async fn apply_in(
     envelope: &InboundEnvelope,
     timezone: &str,
     configured_locale: &str,
+    transcribe_voice: bool,
 ) -> Result<bool, TelegramDiaryCommitError> {
     verify_order(txn, lease).await?;
     let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -126,7 +129,16 @@ pub(super) async fn apply_in(
         pending["chat_form"].is_object() || pending["chat_close"].is_object()
     });
     if action.is_none() && !active_form {
-        if super::tracker_text::control_in(txn, lease, envelope, timezone, &locale).await? {
+        if super::tracker_text::control_in(
+            txn,
+            lease,
+            envelope,
+            timezone,
+            &locale,
+            transcribe_voice,
+        )
+        .await?
+        {
             return Ok(true);
         }
         return selection::apply_in(txn, lease, envelope, timezone, &locale, now, pending).await;
@@ -252,7 +264,7 @@ pub(super) async fn apply_in(
                 TrackerFormWrite {
                     owner_id: envelope.owner_id(),
                     actor: &actor,
-                    source: Some("telegram_text"),
+                    source: Some(lease.diary_source().label()),
                     idempotency_key: key.as_deref(),
                     original_text: None,
                     evidence_refs: None,

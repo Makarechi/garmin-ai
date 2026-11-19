@@ -32,9 +32,9 @@ impl ModelGateway<'_> {
             },
             share_policy::ModelChannelSharing,
         };
-        use ga_domain::channel::InboundEnvelope;
 
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         let channel = format!("telegram:{}", envelope.channel().instance_id());
         let channel = ShareDestination::new(DestinationKind::Channel, &channel)
@@ -73,6 +73,7 @@ impl ModelGateway<'_> {
                         },
                         policy,
                         ModelRequestScope {
+                            uses_voice_text: lease.has_voice_text(),
                             requirements: &safety_requirements,
                             channel: Some(ModelChannelSharing {
                                 destination: channel,
@@ -134,6 +135,7 @@ impl ModelGateway<'_> {
                 },
                 policy,
                 ModelRequestScope {
+                    uses_voice_text: lease.has_voice_text(),
                     requirements: &requirements,
                     channel: Some(ModelChannelSharing {
                         destination: channel,

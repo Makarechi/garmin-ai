@@ -1,0 +1,23 @@
+purpose:
+  stands_in_for: Telegram Bot API file metadata, audio download and rate limiting with synthetic data.
+  unblocks: Local verification of voice ingestion and retries without a Telegram account.
+assumptions:
+  - id: synthetic-download-and-retry
+    status: supported
+    claim: The native worker follows getFile with one file download for a newly claimed synthetic voice message and delays another job on a 429 response.
+    reason: A local stand-in exercises the worker and HTTP client with controlled audio and retry metadata.
+    verification: The one-port simulation returned metadata and four audio bytes. The worker saved one attributed diary entry after lease recovery and a duplicate delivery. The rate-limited job stayed pending past the requested delay threshold.
+    source: crates/ga-app/src/telegram_transport/model_worker/tests/voice.rs, postman/mocks/telegram-voice/default.js
+    updated_at: "2026-11-19"
+  - id: live-telegram-file-delivery
+    status: unknown
+    claim: The selected bot can download voice files on the live Telegram Bot API under its deployed network conditions.
+    reason: The stand-in exercises loopback HTTP with synthetic credentials and local audio.
+    verification: Live bot access and production delivery conditions require an approved private-bot smoke test.
+    source: postman/simulations/telegram-voice.sim.yaml, migration/check_telegram_voice_download.py
+    updated_at: "2026-11-19"
+fingerprints:
+  - id: local-voice-worker
+    date: "2026-11-19"
+    commit: 6f819de28959c46a8b5adbcdf83fddd9cbb4b95b with the voice worker changes
+    cli: "1.76.0"

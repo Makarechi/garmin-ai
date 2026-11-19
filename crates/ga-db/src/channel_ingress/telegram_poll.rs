@@ -44,6 +44,7 @@ pub struct TelegramPollInput<'a> {
     pub received_at: StoredInstant,
     pub event: TelegramPollEvent<'a>,
     pub callback_id: Option<&'a str>,
+    pub voice_duration_seconds: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -262,9 +263,16 @@ async fn persist(
     let new_ordering_epoch = if let Some(receipt) = inbound.filter(|receipt| receipt.created) {
         let epoch =
             record_native_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?;
-        native_telegram::enqueue(&mut txn, receipt.message_id, epoch, lane, input.received_at)
-            .await
-            .map_err(TelegramPollError::Processing)?;
+        native_telegram::enqueue(
+            &mut txn,
+            receipt.message_id,
+            epoch,
+            lane,
+            input.received_at,
+            input.voice_duration_seconds,
+        )
+        .await
+        .map_err(TelegramPollError::Processing)?;
         if advances_ordering {
             Some(record_telegram_ordering(&mut txn, input.instance_id, input.received_at).await?)
         } else {
@@ -415,6 +423,9 @@ fn validate_binding(input: &TelegramPollInput<'_>) -> Result<(), TelegramPollErr
     if !(1..i64::MAX).contains(&input.update_id)
         || !(1..=200).contains(&input.instance_id.chars().count())
         || input.instance_id.contains('\0')
+        || (input.voice_duration_seconds.is_some()
+            && !matches!(&input.event, TelegramPollEvent::Message(envelope)
+                if envelope.kind() == InboundKind::Voice))
     {
         return Err(TelegramPollError::InvalidBinding);
     }

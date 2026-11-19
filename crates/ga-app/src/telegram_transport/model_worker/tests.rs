@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::*;
 mod tracker;
+mod voice;
 use crate::{
     model_gateway::{PreparedRequest, RuntimeModelSettings},
     telegram_input::TelegramBinding,
