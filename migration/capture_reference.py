@@ -43,6 +43,10 @@ def isolated_engine():
     ):
         raise ValueError("A fresh, dedicated PostgreSQL database ending in _test is required")
     engine = create_engine(url, hide_parameters=True)
+    with engine.connect() as connection:
+        if connection.scalar(select(func.current_database())) != url.database:
+            engine.dispose()
+            raise ValueError("The connected database must exactly match the dedicated test target")
     # Extension-internal relations may exist. Apply the pinned schema only to an empty public schema.
     if inspect(engine).get_table_names(schema="public"):
         engine.dispose()

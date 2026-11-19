@@ -165,6 +165,52 @@ async fn wire(
     id: i64,
     at: StoredInstant,
 ) -> Result<Value, Box<dyn Error>> {
+    if let Some(states) = case["states"].as_object() {
+        for (key, value) in states {
+            sqlx::query("DELETE FROM app_state WHERE key=$1")
+                .bind(key)
+                .execute(pool)
+                .await?;
+            if !value.is_null() {
+                sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
+                    .bind(key)
+                    .bind(value.to_string())
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
+    if let Some(statuses) = case["tracker_status"].as_object() {
+        for (name, status) in statuses {
+            let status = status.as_str().ok_or("Expected synthetic tracker status")?;
+            sqlx::query("UPDATE event_definitions SET status=$1 WHERE key=$2")
+                .bind(status)
+                .bind(format!("user.synthetic_chat_{name}"))
+                .execute(pool)
+                .await?;
+        }
+    }
+    if case["native_reply"].is_object() {
+        let proof = &case["native_reply"];
+        let key = proof["legacy_key"]
+            .as_str()
+            .ok_or("Expected synthetic legacy key")?;
+        sqlx::query("DELETE FROM app_state WHERE key=$1")
+            .bind(key)
+            .execute(pool)
+            .await?;
+        let reference = proof["message_id"]
+            .as_i64()
+            .ok_or("Expected synthetic provider reference")?
+            .to_string();
+        let fence =
+            (proof["analysis"] == true).then(|| json!({"telegram_diary_analysis":{}}).to_string());
+        let changed=sqlx::query(
+            "UPDATE outbox_messages SET provider_reference=$1,state='delivered',memory_fence=$2::jsonb
+             WHERE id=(SELECT id FROM outbox_messages ORDER BY created_at,id LIMIT 1)"
+        ).bind(reference).bind(fence).execute(pool).await?;
+        assert_eq!(changed.rows_affected(), 1);
+    }
     if case["grant"].is_array() || case["revoke"] == true {
         let definition: Uuid = sqlx::query_scalar(
             "SELECT id FROM event_definitions WHERE key='user.synthetic_chat_sensitive'",
@@ -414,7 +460,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         .ok_or("Expected duplicate recovery receipt")?;
     assert!(!duplicate.created);
     println!(
-        "Matched local tracker entry steps {} and recovered final submission exactly once",
+        "Matched local tracker entry steps {} and recovered the final tracker step exactly once",
         cases.len()
     );
     if let Ok(status) = fs::read_to_string("/proc/self/status") {

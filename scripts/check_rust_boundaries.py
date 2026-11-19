@@ -7,6 +7,7 @@ DOMAIN_DEPENDENCIES = {
     "base64",  # Gemini inline audio encoding
     "jiff",
     "jiter",
+    "fancy-regex",
     "jsonschema",
     "num-bigint",
     "serde_json",

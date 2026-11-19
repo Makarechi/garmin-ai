@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+mod selection;
+
 use ga_domain::{
     channel::{InboundEnvelope, InboundKind, OutboundIntent},
     event_payload::python_whitespace,
@@ -102,7 +104,7 @@ pub(super) async fn apply_in(
         pending["chat_form"].is_object() || pending["chat_close"].is_object()
     });
     if action.is_none() && !active_form {
-        return Ok(false);
+        return selection::apply_in(txn, lease, envelope, timezone, &locale, now, pending).await;
     }
     let inspected = prompt::inspect(txn, binding, lease, envelope, now).await?;
     if let Some(notice) = inspected.notice {
@@ -506,19 +508,35 @@ async fn write_reply(
     text: &str,
     shared: Option<(Uuid, bool)>,
 ) -> Result<(), TelegramDiaryCommitError> {
+    write_shared_reply(txn, lease, envelope, text, shared.as_slice()).await
+}
+
+async fn write_shared_reply(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+    envelope: &InboundEnvelope,
+    text: &str,
+    shared: &[(Uuid, bool)],
+) -> Result<(), TelegramDiaryCommitError> {
     let mut refs = Vec::new();
-    if let Some((version, editing)) = shared {
+    for &(version, editing) in shared {
         let definition: Uuid =
             sqlx::query_scalar("SELECT definition_id FROM event_definition_versions WHERE id=$1")
                 .bind(version)
                 .fetch_one(&mut **txn)
                 .await?;
-        refs.push(format!("definition:{definition}"));
-        refs.push(if editing {
+        let definition = format!("definition:{definition}");
+        if !refs.contains(&definition) {
+            refs.push(definition);
+        }
+        let version = if editing {
             format!("definition-version:{version}")
         } else {
             format!("definition-schema-version:{version}")
-        });
+        };
+        if !refs.contains(&version) {
+            refs.push(version);
+        }
     }
     let intent=OutboundIntent::normalize(json!({"owner_id":envelope.owner_id().to_string(),"conversation_id":envelope.conversation_id().to_string(),
         "channel_instance":{"channel":"telegram","instance_id":envelope.channel().instance_id()},"blocks":[{"text":text}],"evidence_refs":refs})).map_err(|_|TelegramDiaryCommitError::Reply)?;

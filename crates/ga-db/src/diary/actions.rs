@@ -1,6 +1,7 @@
 mod community;
 mod forms;
 mod pack_export;
+mod selection;
 mod settings;
 mod setup;
 

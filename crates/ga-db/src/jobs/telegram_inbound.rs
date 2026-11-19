@@ -340,7 +340,8 @@ impl Database {
                                 AND e.revision::text=split_part(i.envelope#>>'{action,action_id}','/',3))))
                           OR (i.kind IN ('text','edit','voice') AND EXISTS(SELECT 1 FROM app_state p
                               WHERE p.key=CASE WHEN $3='primary' THEN 'conversation:pending' ELSE concat('conversation:pending:telegram:',$3) END
-                                AND (jsonb_typeof(p.value->'chat_form')='object' OR jsonb_typeof(p.value->'chat_close')='object')
+                                AND (jsonb_typeof(p.value->'chat_form')='object' OR jsonb_typeof(p.value->'chat_close')='object'
+                                  OR p.value->>'button'='tracker_select')
                                 AND CASE WHEN pg_input_is_valid(coalesce(p.value->>'preset_selected_at',p.value->>'created_at'),'timestamptz')
                                   THEN (coalesce(p.value->>'preset_selected_at',p.value->>'created_at')::timestamptz
                                     BETWEEN clock_timestamp()-interval '2 hours' AND clock_timestamp())

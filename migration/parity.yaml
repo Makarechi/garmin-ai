@@ -692,7 +692,11 @@
         "migration/capture_tracker_chat_entries.py",
         "crates/ga-domain/src/event_schema/chat_form.rs::tests::matches_frozen_answers_and_clock_refusals",
         "crates/ga-app/tests/telegram_tracker_forms.rs::local_tracker_entry_forms_match_frozen_conversation",
-        "crates/ga-db/tests/outbox_schema.rs::schema_only_delivery_preserves_exact_version_and_fact_boundaries"
+        "crates/ga-db/tests/outbox_schema.rs::schema_only_delivery_preserves_exact_version_and_fact_boundaries",
+        "migration/capture_tracker_chat_selection.py",
+        "migration/capture_tracker_chat_selection_conversation.py",
+        "crates/ga-domain/src/tracker_selection.rs::tests::frozen_tracker_selection",
+        "crates/ga-domain/src/tracker_selection.rs::tests::compact_class_matches_every_frozen_unicode_scalar"
       ],
       "data_contracts": [
         "Preview and confirmation, exact evidence text and offsets, ambiguity/clarification, deterministic fallbacks."
@@ -700,14 +704,14 @@
       "permissions": [
         "Protect tracker schema and facts by destination; untrusted extraction may only propose or invoke validated commands."
       ],
-      "resource_scenario": "Bounded tracker setup, guided entry/edit/close forms, ambiguous local clocks and oversized entry recovery",
+      "resource_scenario": "Bounded tracker setup, permitted local tracker selection, guided entry/edit/close forms, ambiguous local clocks and oversized entry recovery",
       "status": "implemented",
       "verification": "e2e_synthetic",
       "owner_task": "R19",
       "known_limits": [
         "Explicit local Telegram tracker setup matches 324 frozen field cases and 106 durable conversation steps, including delayed updates, privacy, preview confirmation, duplicate ingress and expired-lease recovery. A dedicated final-build scenario passed within 32 MiB with zero swap and zero memory-limit events.",
         "Local guided tracker creation, historical editing and interval closing match frozen typed-answer, prompt and calendar contracts. Dedicated conversations cover schema-only sensitive access, denied fact editing, consent revocation, oversized entry reset, duplicate ingress and expired-lease final submission.",
-        "Natural-language tracker selection and complete combined R19 acceptance remain pending. Full voice transcription, other Telegram handlers and transport recovery remain part of R27 acceptance.",
+        "Local tracker selection matches 9,741 frozen ranking/cue/proposal cases and 154 durable conversation steps per locale, including schema consent, tied choices, stale prompts, retired versions, analysis replies, duplicate ingress and recovered admission. Complete natural-language proposal/extraction and combined R19/R25 acceptance remain pending. Full voice transcription, other Telegram handlers and transport recovery remain part of R27 acceptance.",
         "The calendar boundary matrix uses the exact frozen TZif bytes for 598 source timezone keys. Operating-system historical timezone data vary, and deployment timezone-data alignment remains part of R34/R36 verification.",
         "Callback notices after configuration-locale changes, malformed legacy state and complete R36 validation/transport behavior still require broader combined checks.",
         "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."
