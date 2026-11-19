@@ -77,6 +77,7 @@ pub(crate) async fn run() -> Result<(), &'static str> {
             ReadTool::Events,
             ReadTool::WellbeingObservations,
             ReadTool::EventDefinitions,
+            ReadTool::ResourceCatalog,
         ]
         .into_iter()
         .chain(ReadTool::GARMIN_READS)
@@ -134,6 +135,7 @@ impl Mcp {
         let result = match call.name.as_ref() {
             "events" => self.events(args).await,
             "event_definitions" => self.definitions(args).await,
+            "resource_catalog" => self.catalog(args).await,
             "wellbeing_observations" => self.wellbeing(args).await,
             "data_freshness" => self.garmin(ReadTool::Freshness, args).await,
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
@@ -158,6 +160,30 @@ impl Mcp {
 }
 
 impl Mcp {
+    async fn catalog(&self, args: Map<String, Value>) -> Result<ToolResult, &'static str> {
+        let page = crate::http::tools::catalog_input(&args)?;
+        let permit = self
+            .active_reads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "RuntimeError")?;
+        let document = self
+            .database
+            .resource_catalog(page, Some(self.owner), true)
+            .await
+            .map_err(|error| {
+                use ga_db::resource_catalog::CatalogError;
+                match error {
+                    CatalogError::Arguments => "ValueError",
+                    CatalogError::ModelConsent => "PermissionError",
+                    CatalogError::Health(HealthAnalysisError::ReplayPending) => "ReplayUnavailable",
+                    CatalogError::Health(_) | CatalogError::Database => "RuntimeError",
+                }
+            })?;
+        Ok(ToolResult::data(document, Some(permit)))
+    }
+
     async fn definitions(&self, args: Map<String, Value>) -> Result<ToolResult, &'static str> {
         let page = crate::http::tools::definition_input(&args)?;
         let permit = self

@@ -33,6 +33,7 @@ pub(crate) enum ReadTool {
     ActivityDetails,
     Events,
     EventDefinitions,
+    ResourceCatalog,
     Timeline,
     DeviceHistory,
     Freshness,
@@ -68,13 +69,14 @@ impl ReadTool {
         Self::CoffeeSleep,
         Self::Insights,
     ];
-    const IMPLEMENTED: [Self; 21] = [
+    const IMPLEMENTED: [Self; 22] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
         Self::ActivityDetails,
         Self::Events,
         Self::EventDefinitions,
+        Self::ResourceCatalog,
         Self::Timeline,
         Self::Freshness,
         Self::Baseline,
@@ -100,6 +102,7 @@ impl ReadTool {
             Self::ActivityDetails => "activity_details",
             Self::Events => "events",
             Self::EventDefinitions => "event_definitions",
+            Self::ResourceCatalog => "resource_catalog",
             Self::Timeline => "timeline",
             Self::DeviceHistory => "device_history",
             Self::Freshness => "data_freshness",
@@ -282,6 +285,18 @@ impl ReadTool {
                 }),
                 &[][..],
             ),
+            Self::ResourceCatalog => (
+                "Discover permitted versioned resources; request details by key and page with next_cursor.",
+                "resource_catalogArgs",
+                json!({
+                    "kind":{"enum":["events","system_metrics","tracker_metrics","raw_sources"],"title":"Kind","type":"string"},
+                    "after_key":{"anyOf":[{"type":"string","maxLength":200},{"type":"null"}],"default":null,"title":"After Key"},
+                    "resource_key":{"anyOf":[{"type":"string","maxLength":200},{"type":"null"}],"default":null,"title":"Resource Key"},
+                    "limit":{"default":10,"title":"Limit","type":"integer"},
+                    "detail":{"default":false,"title":"Detail","type":"boolean"}
+                }),
+                &["kind"][..],
+            ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
                 "data_freshnessArgs",
@@ -373,6 +388,28 @@ async fn execute_read_tool(
         Ok(arguments) => arguments,
         Err(error) => return error.into_response(),
     };
+    if matches!(tool, ReadTool::ResourceCatalog) {
+        let Ok(page) = catalog_input(&arguments) else {
+            return invalid_arguments();
+        };
+        if !scopes.permits_tool(tool.name(), ReadToolInput::Catalog(page.kind.name())) {
+            return forbidden();
+        }
+        return match database
+            .resource_catalog(
+                page,
+                None,
+                scopes.permits(&[ga_domain::access::Scope::ReadHealth]),
+            )
+            .await
+        {
+            Ok(document) => document_response(document),
+            Err(ga_db::resource_catalog::CatalogError::Health(error)) => health_failure(error),
+            Err(ga_db::resource_catalog::CatalogError::Arguments) => invalid_arguments(),
+            Err(ga_db::resource_catalog::CatalogError::ModelConsent) => forbidden(),
+            Err(ga_db::resource_catalog::CatalogError::Database) => storage_unavailable(),
+        };
+    }
     if matches!(tool, ReadTool::EventDefinitions) {
         let Ok(page) = definition_input(&arguments) else {
             return invalid_arguments();
@@ -824,5 +861,49 @@ pub(crate) fn definition_input(
         definition_key: text("definition_key")?,
         before_version,
         limit,
+    })
+}
+
+pub(crate) fn catalog_input(
+    arguments: &Map<String, Value>,
+) -> Result<ga_db::resource_catalog::ResourcePage<'_>, &'static str> {
+    use ga_db::resource_catalog::{ResourceKind, ResourcePage};
+    if arguments.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "kind" | "after_key" | "resource_key" | "limit" | "detail"
+        )
+    }) {
+        return Err("ValidationError");
+    }
+    let kind = match arguments.get("kind").and_then(Value::as_str) {
+        Some("events") => ResourceKind::Events,
+        Some("system_metrics") => ResourceKind::SystemMetrics,
+        Some("tracker_metrics") => ResourceKind::TrackerMetrics,
+        Some("raw_sources") => ResourceKind::RawSources,
+        _ => return Err("ValidationError"),
+    };
+    let text = |key| match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.chars().count() <= 200 => Ok(Some(value.as_str())),
+        _ => Err("ValidationError"),
+    };
+    let limit = match arguments.get("limit") {
+        None => 10,
+        Some(value) => ga_domain::legacy_json::integer_argument(value)
+            .ok_or("ValidationError")?
+            .try_into()
+            .unwrap_or(0),
+    };
+    let detail = match arguments.get("detail") {
+        None => false,
+        Some(value) => bool_input(value).ok_or("ValidationError")?,
+    };
+    Ok(ResourcePage {
+        kind,
+        after_key: text("after_key")?,
+        resource_key: text("resource_key")?,
+        limit,
+        detail,
     })
 }
