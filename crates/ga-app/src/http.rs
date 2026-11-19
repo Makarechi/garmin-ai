@@ -6,6 +6,7 @@ mod exports;
 mod garmin_auth;
 mod hypotheses;
 mod natural_language;
+mod operations;
 mod personal_goals;
 mod source_mappings;
 pub(crate) mod tools;
@@ -45,6 +46,8 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
+        .route("/metrics", any(operations::metrics))
+        .route("/operations", any(operations::snapshot))
         .route("/capabilities", any(capabilities))
         .route("/actions", any(tracker_actions::available))
         .route("/natural-language/trackers", any(natural_language::tracker))
