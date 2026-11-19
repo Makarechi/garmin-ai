@@ -1,4 +1,5 @@
 mod browser;
+mod calendar_context;
 mod community_packs;
 mod definitions;
 pub(crate) mod demo;
@@ -51,6 +52,8 @@ fn router(state: AppState) -> Router {
         .route("/metrics", any(operations::metrics))
         .route("/operations", any(operations::snapshot))
         .route("/capabilities", any(capabilities))
+        .route("/context/calendar", any(calendar_context::plans))
+        .route("/context/calendar/import", any(calendar_context::import))
         .route("/scenario-packs", any(scenario_packs::collection))
         .route("/scenario-packs/{key}", any(scenario_packs::selection))
         .route("/actions", any(tracker_actions::available))

@@ -153,4 +153,5 @@ async fn check_readiness(txn: &mut Transaction<'_, Postgres>) -> Result<(), Read
     }
 }
 
+pub mod calendar_context;
 pub mod garmin_integration;
