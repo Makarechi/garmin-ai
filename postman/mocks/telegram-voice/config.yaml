@@ -1,0 +1,10 @@
+version: 1
+id: 96620930-3039-4fc5-a0fa-85a2e894f07e
+name: telegram-voice
+slug: telegram-voice
+protocol: http
+interceptRequests: true
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

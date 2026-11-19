@@ -30,6 +30,7 @@ use super::{
 const BUSY_RETRY: Duration = Duration::from_secs(1);
 
 pub(super) struct ModelRequestScope<'a> {
+    pub uses_voice_text: bool,
     pub requirements: &'a [ShareRequirement<'a>],
     pub channel: Option<ModelChannelSharing<'a>>,
     pub job: Option<ActiveModelJob>,
@@ -52,6 +53,7 @@ impl ModelGateway<'_> {
             input,
             policy,
             ModelRequestScope {
+                uses_voice_text: false,
                 requirements,
                 channel: None,
                 job,
@@ -73,13 +75,14 @@ impl ModelGateway<'_> {
         S: Sender,
     {
         let ModelRequestScope {
+            uses_voice_text,
             requirements,
             channel,
             job,
         } = scope;
         let clock = RequestClock::new()?;
         let deadline = clock.started + self.selected.deadline;
-        let operation = input.operation();
+        let operation = input.operation(uses_voice_text);
         let approved = self
             .authorize(policy(), operation, clock.now())
             .map_err(GatewayError::Consent)?;
@@ -96,13 +99,16 @@ impl ModelGateway<'_> {
             return Err(GatewayError::Attempt(FallbackError::ConsentRequired));
         }
 
+        // The resume signature follows the provider request. Audio consent is
+        // also required for derived text, but the request still carries text.
+        let wire_categories = input.operation(false).categories();
         let prepared = self.prepare(input)?;
         let models: Vec<_> = match prepared {
             PreparedRequest::Gemini(_) => approved.iter().copied().map(Some).collect(),
             PreparedRequest::Structured(_) => vec![None],
         };
         let fingerprint = job
-            .map(|_| fingerprint(&prepared, &approved, categories))
+            .map(|_| fingerprint(&prepared, &approved, wire_categories))
             .transpose()
             .map_err(GatewayError::Request)?;
         let resume = job

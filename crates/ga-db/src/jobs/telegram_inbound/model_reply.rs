@@ -137,7 +137,7 @@ impl Database {
     }
 }
 
-async fn queue_local_notice(
+pub(super) async fn queue_local_notice(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,

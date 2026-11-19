@@ -44,7 +44,8 @@ impl Database {
         configured_timezone: &str,
         configured_locale: &str,
     ) -> Result<(), TelegramDiaryCommitError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         if envelope.channel().channel() != "telegram"
             || envelope.message_id() != lease.message_id()

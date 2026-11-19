@@ -81,8 +81,11 @@ pub enum ModelInput<'a> {
 }
 
 impl ModelInput<'_> {
-    fn operation(&self) -> ModelOperation {
+    fn operation(&self, uses_voice_text: bool) -> ModelOperation {
         match self {
+            Self::Structured { categories, .. } if uses_voice_text => {
+                ModelOperation::StructuredFromVoice(*categories)
+            }
             Self::Structured { categories, .. } => ModelOperation::Structured(*categories),
             Self::Voice { .. } => ModelOperation::Transcribe,
         }
@@ -316,6 +319,7 @@ impl<'a> ModelGateway<'a> {
             input,
             &policy,
             runtime::ModelRequestScope {
+                uses_voice_text: false,
                 requirements,
                 channel: Some(channel),
                 job,
@@ -353,6 +357,42 @@ impl<'a> ModelGateway<'a> {
             return Err(ModelConsentError::ConsentRequired);
         }
         Ok(authorized)
+    }
+
+    pub(crate) fn authorize_transcription(
+        &self,
+        policy: CurrentModelPolicy<'_>,
+        now: StoredInstant,
+    ) -> Result<(), ModelConsentError> {
+        self.authorize(policy, ModelOperation::Transcribe, now)
+            .map(|_| ())
+    }
+
+    pub(crate) async fn transcribe_telegram_voice_with<'policy, S: Sender>(
+        &self,
+        input: ModelInput<'_>,
+        policy: &(impl Fn() -> CurrentModelPolicy<'policy> + Sync),
+        requirements: &[ShareRequirement<'_>],
+        channel: ShareDestination<'_>,
+        job: ActiveModelJob,
+        sender: &S,
+    ) -> Result<StructuredModelOutput, GatewayError> {
+        self.execute_with_context(
+            input,
+            policy,
+            runtime::ModelRequestScope {
+                uses_voice_text: false,
+                requirements,
+                channel: Some(ModelChannelSharing {
+                    destination: channel,
+                    requirements: &[],
+                    conversation: None,
+                }),
+                job: Some(job),
+            },
+            sender,
+        )
+        .await
     }
 
     fn prepare(&self, input: ModelInput<'_>) -> Result<PreparedRequest, GatewayError> {

@@ -12,7 +12,6 @@ use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation},
     analysis_budget::AnalysisBudget,
     channel::{InboundEnvelope, InboundKind},
-    event_input::EventSource,
     timestamp::StoredInstant,
 };
 use serde_json::Value;
@@ -179,7 +178,7 @@ impl ModelGateway<'_> {
                 DiaryInterpretationRequest {
                     now: clock.message_at,
                     timezone,
-                    source: EventSource::TelegramText,
+                    source: lease.diary_source(),
                     text,
                     context: ModelDiaryContext {
                         recent_analysis_question,
@@ -192,6 +191,7 @@ impl ModelGateway<'_> {
                 budget,
                 policy,
                 ModelRequestScope {
+                    uses_voice_text: lease.has_voice_text(),
                     requirements: &model_requirements,
                     channel: Some(ModelChannelSharing {
                         destination,
@@ -231,11 +231,13 @@ impl<'a> TelegramText<'a> {
         timezone: &'a str,
         now: StoredInstant,
     ) -> Result<Self, DiaryInterpretationError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| DiaryInterpretationError::InvalidTelegramMessage)?;
         if envelope.channel().channel() != "telegram"
             || envelope.message_id() != lease.message_id()
-            || !matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit)
+            || !(matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit)
+                || lease.has_voice_text())
             || !envelope.text().is_some_and(|text| !text.trim().is_empty())
         {
             return Err(DiaryInterpretationError::InvalidTelegramMessage);

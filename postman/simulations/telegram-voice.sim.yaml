@@ -1,0 +1,8 @@
+simulation: telegram-voice
+routing: path
+mocks:
+  - name: telegram-voice
+    routeKey: telegram
+    origin:
+      - api.telegram.org
+    path: postman/mocks/telegram-voice

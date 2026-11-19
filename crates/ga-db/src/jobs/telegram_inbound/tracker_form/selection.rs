@@ -46,6 +46,16 @@ pub(super) async fn apply_in(
     let selection = if selecting {
         None
     } else {
+        if lease.has_voice_text() {
+            let original = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+                .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+            if original
+                .text()
+                .is_some_and(|caption| !caption.trim_matches(python_whitespace).is_empty())
+            {
+                return Ok(false);
+            }
+        }
         if is_tracker_proposal(text).map_err(|_| TelegramDiaryCommitError::Database)? {
             return Ok(false);
         }

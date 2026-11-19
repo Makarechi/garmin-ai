@@ -68,7 +68,7 @@ impl TelegramTrackerTextSession {
                     .await?
                 {
                     if let Some(extraction) = extraction {
-                        self.inner.source = "telegram_text";
+                        self.inner.source = lease.diary_source().label();
                         match self.inner.apply_uncommitted(extraction).await {
                             Ok(value) => value,
                             Err(
@@ -140,22 +140,9 @@ impl Database {
             .await?
             .ok_or(TelegramDiaryCommitError::ModelContextChanged)?;
         let version_id = selected_version(&pending)?;
-        let sensitive: bool = sqlx::query_scalar(
-            "SELECT coalesce((SELECT privacy='sensitive' FROM event_definition_versions WHERE id=$1),false)",
-        ).bind(version_id).fetch_one(&mut *txn).await?;
+        let requirement = tracker_model_requirement(&mut txn, version_id).await?;
         txn.commit().await?;
-        Ok(ShareRequirement {
-            version_id,
-            categories: if sensitive {
-                &[
-                    ShareCategory::Schema,
-                    ShareCategory::Facts,
-                    ShareCategory::OriginalText,
-                ]
-            } else {
-                &[ShareCategory::Schema, ShareCategory::Facts]
-            },
-        })
+        Ok(requirement)
     }
 
     pub async fn prepare_telegram_tracker_text(
@@ -251,4 +238,25 @@ impl Database {
             }
         }
     }
+}
+
+pub(super) async fn tracker_model_requirement(
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    version_id: Uuid,
+) -> Result<ShareRequirement<'static>, TelegramDiaryCommitError> {
+    let sensitive: bool = sqlx::query_scalar(
+            "SELECT coalesce((SELECT privacy='sensitive' FROM event_definition_versions WHERE id=$1),false)",
+        ).bind(version_id).fetch_one(&mut **txn).await?;
+    Ok(ShareRequirement {
+        version_id,
+        categories: if sensitive {
+            &[
+                ShareCategory::Schema,
+                ShareCategory::Facts,
+                ShareCategory::OriginalText,
+            ]
+        } else {
+            &[ShareCategory::Schema, ShareCategory::Facts]
+        },
+    })
 }

@@ -596,6 +596,7 @@ async fn verify_tracker_channel_fence(
             .await?;
     }
     let scope = || runtime::ModelRequestScope {
+        uses_voice_text: false,
         requirements: &model_requirements,
         channel: Some(ModelChannelSharing {
             destination: channel,

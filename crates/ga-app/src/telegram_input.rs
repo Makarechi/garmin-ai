@@ -223,6 +223,13 @@ impl<'wire, 'binding> PreparedUpdate<'wire, 'binding> {
                 _ => None,
             })
             .filter(|id| (1..=1000).contains(&id.len()) && !id.contains('\0'));
+        let voice_duration_seconds = match &event {
+            TelegramPollEvent::Message(envelope) if envelope.kind() == InboundKind::Voice => self
+                .owner_update
+                .as_ref()
+                .and_then(|update| update.message["voice"]["duration"].as_u64()),
+            _ => None,
+        };
         TelegramPollInput {
             owner_id: self.binding.owner_id,
             instance_id: self.binding.instance_id,
@@ -230,6 +237,7 @@ impl<'wire, 'binding> PreparedUpdate<'wire, 'binding> {
             received_at: self.received_at,
             event,
             callback_id,
+            voice_duration_seconds,
         }
     }
 

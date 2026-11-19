@@ -195,7 +195,7 @@ async fn avoids_redirects_retries_and_destructive_negative_offsets() -> Result<(
     Ok(())
 }
 
-async fn bind() -> Result<(TcpListener, TelegramTransport), Box<dyn Error>> {
+pub(super) async fn bind() -> Result<(TcpListener, TelegramTransport), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let transport = TelegramTransport::connect(
         FIXTURE_TOKEN,
@@ -205,7 +205,7 @@ async fn bind() -> Result<(TcpListener, TelegramTransport), Box<dyn Error>> {
     Ok((listener, transport))
 }
 
-async fn request(stream: &mut TcpStream) -> Result<Value, Box<dyn Error>> {
+pub(super) async fn request(stream: &mut TcpStream) -> Result<Value, Box<dyn Error>> {
     const MAX: usize = 16 * 1024;
     let mut data = Vec::new();
     loop {
@@ -249,7 +249,7 @@ async fn request(stream: &mut TcpStream) -> Result<Value, Box<dyn Error>> {
     }
 }
 
-async fn respond(
+pub(super) async fn respond(
     stream: &mut TcpStream,
     status: &str,
     extra: &[(&str, &str)],

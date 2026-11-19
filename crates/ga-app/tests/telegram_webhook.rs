@@ -173,6 +173,7 @@ async fn matches_webhook_auth_replays_and_storage_backpressure() -> Result<(), B
                 received_at: StoredInstant::from_unix_microseconds(1_794_916_800_000_000)?,
                 event: TelegramPollEvent::Ignore,
                 callback_id: None,
+                voice_duration_seconds: None,
             },
             42,
             |_| None,

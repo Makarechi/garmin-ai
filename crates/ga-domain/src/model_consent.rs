@@ -22,6 +22,10 @@ impl ModelCategories {
         Some(Self(categories))
     }
 
+    const fn with_audio(self) -> Self {
+        Self(self.0 | Self::AUDIO.0)
+    }
+
     pub fn labels(self) -> impl Iterator<Item = &'static str> {
         CATEGORY_NAMES
             .into_iter()
@@ -44,6 +48,7 @@ pub enum ModelProvider {
 pub enum ModelOperation {
     Configure,
     Structured(ModelCategories),
+    StructuredFromVoice(ModelCategories),
     Transcribe,
 }
 
@@ -52,6 +57,7 @@ impl ModelOperation {
         match self {
             Self::Configure => ModelCategories::default(),
             Self::Structured(categories) => categories,
+            Self::StructuredFromVoice(categories) => categories.with_audio(),
             Self::Transcribe => ModelCategories::AUDIO,
         }
     }
@@ -115,13 +121,18 @@ pub fn authorized_models<'a>(
 ) -> Result<Vec<&'a str>, ModelConsentError> {
     let binding = config.binding;
     match operation {
-        ModelOperation::Structured(_) if !config.structured_output => {
+        ModelOperation::Structured(_) | ModelOperation::StructuredFromVoice(_)
+            if !config.structured_output =>
+        {
             return Err(ModelConsentError::UnsupportedCapability);
         }
-        ModelOperation::Transcribe if binding.provider != ModelProvider::Gemini => {
+        ModelOperation::Transcribe | ModelOperation::StructuredFromVoice(_)
+            if binding.provider != ModelProvider::Gemini =>
+        {
             return Err(ModelConsentError::UnsupportedCapability);
         }
         ModelOperation::Structured(categories)
+        | ModelOperation::StructuredFromVoice(categories)
             if categories.0 == 0 || categories.covers(ModelCategories::AUDIO) =>
         {
             return Err(ModelConsentError::InvalidCategories);

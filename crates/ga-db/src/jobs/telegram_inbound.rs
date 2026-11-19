@@ -9,10 +9,12 @@ mod model_reply;
 mod tracker_form;
 mod tracker_setup;
 mod tracker_text;
+mod voice;
 
 pub use tracker_text::{
     TelegramTrackerTextPreparation, TelegramTrackerTextSession, TrackerSafetyStatus,
 };
+pub use voice::TelegramVoice;
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
@@ -52,7 +54,11 @@ pub struct TelegramInboundLease {
     operation_id: Uuid,
     token: Uuid,
     envelope: String,
+    voice_text: Option<String>,
+    voice_duration_seconds: Option<u64>,
 }
+
+type ClaimedTelegramInbound = (Uuid, Uuid, Uuid, String, Option<String>, Option<String>);
 
 impl TelegramInboundLease {
     pub fn message_id(&self) -> Uuid {
@@ -95,8 +101,9 @@ enum InboxWork {
     ScreenText,
     TextWithoutProvider,
     ModelText,
-    TrackerSetup,
-    TrackerForm,
+    TrackerSetup { transcribe_voice: bool },
+    TrackerForm { transcribe_voice: bool },
+    Voice,
 }
 
 impl InboxWork {
@@ -123,10 +130,22 @@ impl InboxWork {
             Self::ScreenText => 1,
             Self::TextWithoutProvider => 2,
             Self::ModelText => 3,
-            Self::TrackerSetup => 4,
-            Self::TrackerForm => 5,
+            Self::TrackerSetup { .. } => 4,
+            Self::TrackerForm { .. } => 5,
+            Self::Voice => 6,
             _ => 0,
         }
+    }
+
+    fn allows_voice_before_transcription(self) -> bool {
+        !matches!(
+            self,
+            Self::TrackerSetup {
+                transcribe_voice: true
+            } | Self::TrackerForm {
+                transcribe_voice: true
+            }
+        )
     }
 }
 
@@ -245,8 +264,8 @@ impl Database {
         .await
     }
 
-    /// Reserve an ordered setup command or a locally screened draft answer.
-    pub async fn claim_telegram_tracker_setup(
+    /// Claim the next voice note after the local caption paths have had their turn.
+    pub async fn claim_telegram_voice(
         &self,
         target: TelegramInboundTarget<'_>,
         now: StoredInstant,
@@ -257,7 +276,25 @@ impl Database {
             now,
             lease_seconds,
             InboxLane::Diary,
-            InboxWork::TrackerSetup,
+            InboxWork::Voice,
+        )
+        .await
+    }
+
+    /// Reserve an ordered setup command or a locally screened draft answer.
+    pub async fn claim_telegram_tracker_setup(
+        &self,
+        target: TelegramInboundTarget<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+        transcribe_voice: bool,
+    ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
+        self.claim_telegram_lane(
+            target,
+            now,
+            lease_seconds,
+            InboxLane::Diary,
+            InboxWork::TrackerSetup { transcribe_voice },
         )
         .await
     }
@@ -267,13 +304,14 @@ impl Database {
         target: TelegramInboundTarget<'_>,
         now: StoredInstant,
         lease_seconds: u32,
+        transcribe_voice: bool,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
         self.claim_telegram_lane(
             target,
             now,
             lease_seconds,
             InboxLane::Diary,
-            InboxWork::TrackerForm,
+            InboxWork::TrackerForm { transcribe_voice },
         )
         .await
     }
@@ -323,20 +361,31 @@ impl Database {
             .execute(&mut *txn)
             .await?;
             let token = Uuid::new_v4();
-            let found: Option<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
+            let found: Option<ClaimedTelegramInbound> = sqlx::query_as(
                 concat!("WITH oldest AS (
-                     SELECT j.id,i.id AS message_id,i.operation_id,i.envelope
+                     SELECT j.id,i.id AS message_id,i.operation_id,i.envelope,
+                            CASE WHEN j.payload->>'voice_transcribed'='true' THEN i.normalized_text END AS voice_text
                      FROM jobs j JOIN inbound_messages i
                        ON j.dedup_key=concat('telegram:inbound:native:',i.id)
                        AND j.payload->>'inbound_message_id'=i.id::text
                      CROSS JOIN LATERAL (
-                         SELECT btrim(translate(i.envelope->>'text', $10, repeat(' ',char_length($10)))) AS input
+                         SELECT btrim(translate(
+                             CASE WHEN j.payload->>'voice_transcribed'='true' THEN i.normalized_text
+                                  ELSE i.envelope->>'text' END,
+                             $10, repeat(' ',char_length($10)))) AS input
                      ) command
                      WHERE j.kind=$1 AND j.status IN ('pending','running')
                        AND coalesce(j.payload->>'lane','diary')=$8
                        AND i.owner_id=$2 AND i.channel='telegram' AND i.channel_instance_id=$3
                        AND i.status='pending' AND i.legacy_telegram_update_id IS NULL
-                       AND ($12 = 0 OR ($12 = 5 AND (
+                       AND ($13 OR i.kind<>'voice' OR coalesce(command.input,'')<>''
+                         OR j.payload->>'voice_transcribed'='true')
+                       AND ($12 = 0 OR ($12 = 6 AND i.kind='voice'
+                           AND j.payload->>'voice_transcribed' IS DISTINCT FROM 'true'
+                           AND (coalesce(command.input,'')='' OR (command.input NOT LIKE '/%'
+                             AND j.payload->>'local_safety_checked'='true'
+                             AND j.payload->>'tracker_caption_checked'='true')))
+                         OR ($12 = 5 AND (
                           (i.kind='action' AND (starts_with(i.envelope#>>'{action,action_id}','create:')
                             OR split_part(i.envelope#>>'{action,action_id}','/',1)=ANY(ARRAY['diary.history.edit','diary.history.close'])
                               AND EXISTS(SELECT 1 FROM events e WHERE starts_with(e.kind,'user.')
@@ -375,8 +424,10 @@ impl Database {
                                  AND (j.payload->>'local_safety_checked' IS NOT DISTINCT FROM 'true'
                                    OR (i.kind='voice' AND coalesce(command.input,'')='')))))
                        )) OR ($12 BETWEEN 1 AND 3 AND (
-                           i.kind IN ('text','edit','voice') AND ($12<>3 OR i.kind IN ('text','edit')) AND (
-                             (command.input<>'' AND command.input NOT LIKE '/%'
+                           i.kind IN ('text','edit','voice') AND ($12<>3 OR i.kind IN ('text','edit')
+                             OR j.payload->>'voice_transcribed'='true') AND (
+                             (command.input<>'' AND (command.input NOT LIKE '/%'
+                               OR j.payload->>'voice_transcribed'='true')
                                AND (j.payload->>'local_safety_checked' IS NOT DISTINCT FROM 'true') = ($12 >= 2))
                              OR ($12 = 2 AND i.kind='voice' AND coalesce(command.input,'')='')
                            )
@@ -411,7 +462,9 @@ impl Database {
                  FROM oldest WHERE j.id=oldest.id AND j.attempts<$7
                    AND ((j.status='pending' AND j.run_at<=$4)
                          OR (j.status='running' AND j.lease_until<$4))
-                 RETURNING j.id,oldest.message_id,oldest.operation_id,oldest.envelope::text"),
+                 RETURNING j.id AS job_id,oldest.message_id,oldest.operation_id,
+                           oldest.envelope::text AS envelope,oldest.voice_text,
+                           j.payload->>'voice_duration_seconds' AS voice_duration"),
             )
             .bind(KIND)
             .bind(target.owner_id)
@@ -425,18 +478,22 @@ impl Database {
             .bind(COMMAND_WHITESPACE)
             .bind(work == InboxWork::LocalDiary)
             .bind(work.text_stage())
+            .bind(work.allows_voice_before_transcription())
             .fetch_optional(&mut *txn)
             .await?;
-            let mut result =
-                found.map(
-                    |(job_id, message_id, operation_id, envelope)| TelegramInboundLease {
+            let mut result = found.map(
+                |(job_id, message_id, operation_id, envelope, voice_text, duration)| {
+                    TelegramInboundLease {
                         job_id,
                         message_id,
                         operation_id,
                         token,
                         envelope,
-                    },
-                );
+                        voice_text,
+                        voice_duration_seconds: duration.and_then(|seconds| seconds.parse().ok()),
+                    }
+                },
+            );
             if let Some(lease) = result.as_ref()
                 && superseded(&mut txn, lease.message_id).await?
             {

@@ -63,15 +63,24 @@ pub(super) async fn enqueue(
     epoch: i64,
     lane: InboxLane,
     received_at: StoredInstant,
+    voice_duration_seconds: Option<u64>,
 ) -> Result<(), JobStoreError> {
     let dedup_key = format!("telegram:inbound:native:{message_id}");
+    let mut payload = json!({
+        "inbound_message_id": message_id.to_string(),
+        "ordering_epoch": epoch,
+        "lane": lane.label(),
+    });
+    if let Some(duration) = voice_duration_seconds {
+        payload["voice_duration_seconds"] = json!(duration);
+    }
     sqlx::query(
         "INSERT INTO jobs(id,kind,payload,dedup_key,status,run_at,attempts)
          VALUES($1,$2,$3::jsonb,$4,'pending',$5,0)",
     )
     .bind(Uuid::new_v4())
     .bind(KIND)
-    .bind(json!({"inbound_message_id":message_id.to_string(),"ordering_epoch":epoch,"lane":lane.label()}).to_string())
+    .bind(payload.to_string())
     .bind(dedup_key)
     .bind(OffsetDateTime::from(received_at))
     .execute(&mut **txn)

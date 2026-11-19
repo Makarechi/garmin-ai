@@ -56,14 +56,16 @@ impl Database {
         configured_timezone: &str,
         configured_locale: &str,
     ) -> Result<TelegramModelAdmission, TelegramDiaryCommitError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         if envelope.channel().channel() != "telegram"
             || envelope.message_id() != lease.message_id()
-            || !matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit)
+            || !(matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit)
+                || lease.has_voice_text())
             || !envelope.text().is_some_and(|text| {
                 let text = text.trim();
-                !text.is_empty() && !text.starts_with('/')
+                !text.is_empty() && (!text.starts_with('/') || lease.has_voice_text())
             })
         {
             return Err(TelegramDiaryCommitError::UnsupportedMessage);
@@ -96,6 +98,7 @@ impl Database {
                 &envelope,
                 configured_timezone,
                 configured_locale,
+                true,
             )
             .await?
             {
@@ -149,11 +152,12 @@ impl Database {
         work: LocalTelegramText<'_>,
         configured_locale: &str,
     ) -> Result<(), TelegramDiaryCommitError> {
-        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+        let envelope = lease
+            .processing_envelope()
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
         let has_report_text = envelope.text().is_some_and(|text| {
             let text = text.trim();
-            !text.is_empty() && !text.starts_with('/')
+            !text.is_empty() && (!text.starts_with('/') || lease.has_voice_text())
         });
         let bare_voice = envelope.kind() == InboundKind::Voice
             && envelope.text().is_none_or(|text| text.trim().is_empty())
@@ -178,7 +182,7 @@ impl Database {
                 .fetch_one(&mut *txn).await?;
             let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
             if matches!(work, LocalTelegramText::ProviderUnavailable)
-                && super::tracker_form::apply_in(&mut txn,lease,&envelope,"UTC",configured_locale).await? {
+                && super::tracker_form::apply_in(&mut txn,lease,&envelope,"UTC",configured_locale,false).await? {
                 txn.commit().await?;
                 return Ok(());
             }

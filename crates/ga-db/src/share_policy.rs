@@ -96,7 +96,7 @@ impl ShareCategory {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ShareRequirement<'a> {
     pub version_id: Uuid,
     pub categories: &'a [ShareCategory],
