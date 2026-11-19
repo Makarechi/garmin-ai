@@ -29,6 +29,7 @@ pub mod source_contract;
 pub mod statistics;
 pub mod telegram_control;
 pub mod text_offsets;
+pub mod threshold_time;
 pub mod timestamp;
 pub mod wearable;
 

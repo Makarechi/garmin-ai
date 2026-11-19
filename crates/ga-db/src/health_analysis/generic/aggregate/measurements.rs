@@ -1,6 +1,6 @@
 use futures_util::TryStreamExt;
 use ga_domain::sha256_hex;
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -29,9 +29,12 @@ pub(super) struct MeasurementQuery<'a> {
 pub(super) struct MeasurementSnapshot {
     pub id: Option<Uuid>,
     pub observed: i64,
+    pub observed_local: i64,
     pub metric: String,
     pub source: String,
-    pub value: Value,
+    pub value: f64,
+    pub unit: String,
+    pub observed_display: String,
     pub source_ref: Option<Uuid>,
     pub quality: String,
     pub contract: Option<Uuid>,
@@ -53,12 +56,13 @@ impl MeasurementSnapshot {
         let observed = row.try_get("observed")?;
         let metric: String = row.try_get("metric")?;
         let source: String = row.try_get("source")?;
-        let value = floating(row.try_get("value")?)?;
+        let value: f64 = row.try_get("value")?;
+        let unit: String = row.try_get("unit")?;
+        let observed_display: String = row.try_get("observed_display")?;
         let source_ref: Option<Uuid> = row.try_get("source_ref")?;
         let quality: String = row.try_get("quality")?;
         let ingested_display: String = row.try_get("ingested_display")?;
         let evidence = if retain_evidence {
-            let observed_display: String = row.try_get("observed_display")?;
             let reference = format!(
                 "measurement:{}",
                 ascii_json(&json!([observed_display, metric, source]))?
@@ -66,7 +70,6 @@ impl MeasurementSnapshot {
             let token = match id {
                 Some(id) => id.to_string(),
                 None => {
-                    let unit: String = row.try_get("unit")?;
                     let details: String = row.try_get("details")?;
                     let mut payload = json!({
                         "value":value,"unit":unit,"source_ref":source_ref.map(|id|id.to_string()),
@@ -74,7 +77,23 @@ impl MeasurementSnapshot {
                     });
                     payload["details"] = serde_json::from_str(&details)
                         .map_err(|_| GenericAnalysisError::Database)?;
-                    format!("legacy:{}", sha256_hex(ascii_json(&payload)?.as_bytes()))
+                    let mut encoded = ascii_json(&payload)?;
+                    // Python's revision token retains nonfinite legacy doubles.
+                    // The sorted root object's last field is always `value`.
+                    if !value.is_finite() {
+                        let prefix = encoded
+                            .strip_suffix("null}")
+                            .ok_or(GenericAnalysisError::Database)?;
+                        let number = if value.is_nan() {
+                            "NaN"
+                        } else if value.is_sign_negative() {
+                            "-Infinity"
+                        } else {
+                            "Infinity"
+                        };
+                        encoded = format!("{prefix}{number}}}");
+                    }
+                    format!("legacy:{}", sha256_hex(encoded.as_bytes()))
                 }
             };
             Some((reference, token))
@@ -84,9 +103,12 @@ impl MeasurementSnapshot {
         Ok(Self {
             id,
             observed,
+            observed_local: row.try_get("observed_local")?,
             metric,
             source,
             value,
+            unit,
+            observed_display,
             source_ref,
             quality,
             contract: row.try_get("metric_definition_version_id")?,
@@ -101,15 +123,15 @@ impl MeasurementSnapshot {
         (self.observed, self.metric.clone(), self.source.clone())
     }
 
-    pub fn into_aggregate(self) -> AggregateRow {
-        AggregateRow {
+    pub fn into_aggregate(self) -> Result<AggregateRow, GenericAnalysisError> {
+        Ok(AggregateRow {
             id: format!(
                 "measurement-revision:{}",
                 self.id
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "legacy".to_owned())
             ),
-            value: self.value,
+            value: floating(self.value)?,
             observed: self.observed,
             effective_start: Some(self.observed),
             effective_end: None,
@@ -122,7 +144,7 @@ impl MeasurementSnapshot {
             source_entry: None,
             projection_version: None,
             coverage: None,
-        }
+        })
     }
 }
 

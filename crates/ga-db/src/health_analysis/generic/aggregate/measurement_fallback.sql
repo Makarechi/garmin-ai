@@ -41,4 +41,11 @@ SELECT historical,id,(extract(epoch FROM ts)*1000000)::bigint AS observed,metric
     overlay(to_jsonb(date_trunc('second',known))#>>'{}' placing
         CASE WHEN extract(microseconds FROM known)::bigint%1000000=0 THEN ''
             ELSE '.'||to_char(known,'US') END from 20 for 0) AS ingested_display
-FROM combined ORDER BY historical DESC
+FROM combined CROSS JOIN bounds
+WHERE $7 OR NOT EXISTS(
+    SELECT FROM measurement_revisions AS revision
+    WHERE revision.ts=combined.ts AND revision.metric=combined.metric
+      AND revision.source=combined.source AND revision.metric_definition_version_id=$1
+      AND revision.ingested_at<=bounds.cutoff
+)
+ORDER BY historical DESC
