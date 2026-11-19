@@ -113,9 +113,10 @@ impl Service<NativeServer> for Mcp {
             ClientRequest::ListToolsRequest(_) => {
                 let mut tools = self.read_tools.clone();
                 tools.extend(self.write_tools.iter().cloned());
-                Ok(Response::Protocol(Box::new(ServerResult::ListToolsResult(
-                    ListToolsResult::with_all_items(tools),
-                ))))
+                let mut result =
+                    ServerResult::ListToolsResult(ListToolsResult::with_all_items(tools));
+                result.strip_result_type_for_legacy_peer();
+                Ok(Response::Protocol(Box::new(result)))
             }
             ClientRequest::CallToolRequest(request) => Ok(Response::Tool(
                 self.call_tool(request.params, context).await,
