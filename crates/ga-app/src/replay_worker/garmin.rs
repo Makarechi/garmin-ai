@@ -57,13 +57,7 @@ impl GarminWorkerSettings {
         else {
             return Ok(None);
         };
-        let history_days = history
-            .as_deref()
-            .unwrap_or("365")
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|days| *days <= 3660)
+        let history_days = configuration::garmin_history_days(history.as_deref().unwrap_or("365"))
             .ok_or(GarminWorkerError::Configuration)?;
         Ok(Some(Self {
             source,

@@ -31,7 +31,7 @@ impl Authorization {
         Self::parse(legacy.as_deref(), scoped.as_deref()).ok_or_else(invalid_credentials)
     }
 
-    fn parse(legacy: Option<&str>, scoped: Option<&str>) -> Option<Self> {
+    pub(crate) fn parse(legacy: Option<&str>, scoped: Option<&str>) -> Option<Self> {
         let mut tokens = Vec::new();
         if let Some(key) = legacy.filter(|key| strong(key)) {
             tokens.push(Token {
@@ -123,7 +123,11 @@ fn scoped_token(value: &Value) -> Option<Token> {
 }
 
 fn strong(key: &str) -> bool {
-    key.chars().count() >= 32 && !key.starts_with("replace-with-")
+    key.chars().count() >= 32 && !is_placeholder(key)
+}
+
+pub(crate) fn is_placeholder(key: &str) -> bool {
+    key.starts_with("replace-with-")
 }
 
 fn credential(key: &str) -> [u8; 32] {

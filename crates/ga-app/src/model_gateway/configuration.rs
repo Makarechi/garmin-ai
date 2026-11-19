@@ -99,6 +99,12 @@ pub struct ConfiguredModel<'a> {
 }
 
 impl RuntimeModelSettings {
+    pub fn validate_saved_consent(raw: &str) -> Result<(), ModelEnvironmentError> {
+        let consent: Option<SavedConsent> =
+            serde_json::from_str(raw).map_err(|_| ModelEnvironmentError::Invalid)?;
+        consent.map_or(Ok(()), |consent| consent.validate())
+    }
+
     /// Resolve storage-neutral settings while reading only the selected provider's credential.
     pub fn resolve(
         mut variable: impl FnMut(&str) -> Result<Option<String>, ModelEnvironmentError>,
