@@ -1,0 +1,2933 @@
+[
+  [
+    "",
+    null
+  ],
+  [
+    "Title",
+    null
+  ],
+  [
+    "| text",
+    null
+  ],
+  [
+    "Title |",
+    null
+  ],
+  [
+    "Title | text | other",
+    null
+  ],
+  [
+    "Title | text extra",
+    null
+  ],
+  [
+    "Title | boolean extra",
+    null
+  ],
+  [
+    "Title | choice",
+    null
+  ],
+  [
+    "Title | choice A, A",
+    null
+  ],
+  [
+    "Title | choice A, ,B",
+    null
+  ],
+  [
+    "Title | number mg",
+    null
+  ],
+  [
+    "Title | count 0-9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+    null
+  ],
+  [
+    "Title | count 0-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    null
+  ],
+  [
+    "Title | count 0-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+    {
+      "key": "field",
+      "label": "Title",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | text",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "text",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | ТЕКСТ",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "text",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | yes/no",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | BOOLEAN",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | да/нет",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | choice A, B",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "A",
+        "B"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic rating | выбор 🧪, Ещё",
+    {
+      "key": "field",
+      "label": "Synthetic rating",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "🧪",
+        "Ещё"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | text",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "text",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | ТЕКСТ",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "text",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | yes/no",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | BOOLEAN",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | да/нет",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | choice A, B",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "A",
+        "B"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "Синтетическая оценка | выбор 🧪, Ещё",
+    {
+      "key": "field",
+      "label": "Синтетическая оценка",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "🧪",
+        "Ещё"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "[]_*<>!| | text",
+    null
+  ],
+  [
+    "[]_*<>!| | ТЕКСТ",
+    null
+  ],
+  [
+    "[]_*<>!| | yes/no",
+    null
+  ],
+  [
+    "[]_*<>!| | BOOLEAN",
+    null
+  ],
+  [
+    "[]_*<>!| | да/нет",
+    null
+  ],
+  [
+    "[]_*<>!| | choice A, B",
+    null
+  ],
+  [
+    "[]_*<>!| | выбор 🧪, Ещё",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | text",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "text",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | ТЕКСТ",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "text",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | yes/no",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | BOOLEAN",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | да/нет",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "boolean",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | choice A, B",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "A",
+        "B"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | выбор 🧪, Ещё",
+    {
+      "key": "field",
+      "label": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "🧪",
+        "Ещё"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | text",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | ТЕКСТ",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | yes/no",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | BOOLEAN",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | да/нет",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | choice A, B",
+    null
+  ],
+  [
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | выбор 🧪, Ещё",
+    null
+  ],
+  [
+    "Synthetic bound | scale 1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tscale\t1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | scale -2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tscale\t-2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c-2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | scale 0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tscale\t0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | scale 0-21",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t0-21",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c0-21",
+    null
+  ],
+  [
+    "Synthetic bound | scale 2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c2-1",
+    null
+  ],
+  [
+    "Synthetic bound | scale 0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound | scale 0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound | scale -9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound | scale ١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tscale\t١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | scale ０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tscale\t０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | scale +1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t+1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c+1-5",
+    null
+  ],
+  [
+    "Synthetic bound | scale 1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound | scale 1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound | scale 1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tscale\t1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | scale 1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\tscale\t1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cscale\u001c1---5",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tшкала\t1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | шкала -2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tшкала\t-2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c-2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | шкала 0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tшкала\t0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | шкала 0-21",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t0-21",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c0-21",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c2-1",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound | шкала -9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound | шкала ١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tшкала\t١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | шкала ０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tшкала\t０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | шкала +1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t+1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c+1-5",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound | шкала 1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tшкала\t1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | шкала 1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\tшкала\t1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cшкала\u001c1---5",
+    null
+  ],
+  [
+    "Synthetic bound | count 1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count -2--1",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t-2--1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c-2--1",
+    null
+  ],
+  [
+    "Synthetic bound | count 0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count 0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count 2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c2-1",
+    null
+  ],
+  [
+    "Synthetic bound | count 0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count 0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound | count -9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound | count ١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count ０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count +1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t+1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c+1-5",
+    null
+  ],
+  [
+    "Synthetic bound | count 1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound | count 1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound | count 1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tcount\t1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | count 1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\tcount\t1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001ccount\u001c1---5",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик 1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик -2--1",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t-2--1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c-2--1",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик 0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик 0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик 2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c2-1",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик 0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик 0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик -9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик ١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик ０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик +1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t+1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c+1-5",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик 1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик 1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound | счётчик 1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счётчик 1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчётчик\t1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчётчик\u001c1---5",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик 1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик -2--1",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t-2--1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c-2--1",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик 0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик 0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c0-21",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 21,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик 2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c2-1",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик 0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c0-9007199254740992",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9007199254740992,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик 0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик -9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик ١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик ０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик +1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t+1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c+1-5",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик 1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик 1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound | счетчик 1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "integer",
+      "metric_semantics": "event_count",
+      "required": true,
+      "unit": "count",
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | счетчик 1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\tсчетчик\t1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cсчетчик\u001c1---5",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tſcale\t1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c1-5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | ſcale -2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tſcale\t-2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c-2--1",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": -2,
+      "maximum": -1,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | ſcale 0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tſcale\t0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c0–20",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 20,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | ſcale 0-21",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t0-21",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c0-21",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t2-1",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c2-1",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c0-9007199254740992",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c0-9007199254740993",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale -9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c-9007199254740992--9007199254740991",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale ١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tſcale\t١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c١–٥",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | ſcale ０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tſcale\t０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c０-９",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 0,
+      "maximum": 9,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | ſcale +1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t+1-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c+1-5",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c1.0-5",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c1e0-5",
+    null
+  ],
+  [
+    "Synthetic bound | ſcale 1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\tſcale\t1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c1 - 5",
+    {
+      "key": "field",
+      "label": "Synthetic bound",
+      "kind": "scale",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": 1,
+      "maximum": 5,
+      "options": [],
+      "max_length": 500
+    }
+  ],
+  [
+    "Synthetic bound | ſcale 1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\tſcale\t1---5",
+    null
+  ],
+  [
+    "Synthetic bound |\u001cſcale\u001c1---5",
+    null
+  ],
+  [
+    "Choice | choice 0",
+    {
+      "key": "field",
+      "label": "Choice",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "0"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "Choice | choice 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49",
+    {
+      "key": "field",
+      "label": "Choice",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48",
+        "49"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "Choice | choice 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50",
+    null
+  ],
+  [
+    "Choice | choice AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    {
+      "key": "field",
+      "label": "Choice",
+      "kind": "choice",
+      "metric_semantics": null,
+      "required": true,
+      "unit": null,
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "max_length": 500
+    }
+  ],
+  [
+    "Choice | choice AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    null
+  ]
+]

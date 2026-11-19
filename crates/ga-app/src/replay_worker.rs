@@ -345,6 +345,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_acknowledgements(&database, settings) => result,
                 result = transport.run_owner_controls(&database, settings, u16::from(reminders.daily_budget), &config.timezone) => result,
                 result = transport.run_local_diary(&database, settings, &config.timezone) => result,
+                result = transport.run_tracker_setup(&database, settings, &config.timezone, &config.locale) => result,
                 result = transport.run_local_text(&database, settings, &config.locale, reminders_available) => result,
                 result = transport.run_replies_with_garmin_notices(&database, settings, garmin_notice.as_ref()) => result,
                 result = async {

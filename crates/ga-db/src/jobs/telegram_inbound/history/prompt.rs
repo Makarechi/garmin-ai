@@ -131,12 +131,12 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
                 .as_i64()
                 .or_else(|| draft["started_ordering_epoch"].as_i64())
                 .unwrap_or(0);
-            let russian = draft["locale"].as_str().is_some_and(|locale| {
-                locale
-                    .split('-')
-                    .next()
-                    .is_some_and(|code| code.eq_ignore_ascii_case("ru"))
-            });
+            let russian = draft["locale"]
+                .as_str()
+                .unwrap_or("ru")
+                .split('-')
+                .next()
+                .is_some_and(|code| code.eq_ignore_ascii_case("ru"));
             setup = Some(SetupDraft {
                 key,
                 russian,
@@ -168,8 +168,16 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
         });
     }
     Ok(PromptState {
-        notice: (setup.is_some() && envelope.kind() == InboundKind::Action)
-            .then_some("Сначала завершите настройку трекера или отправьте /cancel."),
+        notice: setup
+            .as_ref()
+            .filter(|_| envelope.kind() == InboundKind::Action)
+            .map(|draft| {
+                if draft.russian {
+                    "Сначала завершите настройку трекера или отправьте /cancel."
+                } else {
+                    "Finish tracker setup or use /cancel before opening another form."
+                }
+            }),
         draft: setup,
         pending: pending.is_some(),
         guided_form,

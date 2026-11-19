@@ -89,6 +89,19 @@ impl Database {
                 .await?;
             let now =
                 StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
+            if let Some(reply) = super::tracker_setup::reply_in(
+                &mut txn,
+                lease,
+                &envelope,
+                configured_timezone,
+                configured_locale,
+            )
+            .await?
+            {
+                write_reply(&mut txn, lease, &envelope, at, &reply).await?;
+                txn.commit().await?;
+                return Ok(TelegramModelAdmission::Replied);
+            }
             let prompt = prompt::inspect(&mut txn, binding, lease, &envelope, now).await?;
             if let Some(notice) = prompt.notice {
                 write_reply(&mut txn, lease, &envelope, at, notice).await?;
@@ -150,6 +163,15 @@ impl Database {
             let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn).await?;
             let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
+            if matches!(work, LocalTelegramText::ProviderUnavailable)
+                && let Some(reply) = super::tracker_setup::reply_in(
+                    &mut txn, lease, &envelope, "UTC", configured_locale,
+                ).await?
+            {
+                write_reply(&mut txn, lease, &envelope, at, &reply).await?;
+                txn.commit().await?;
+                return Ok(());
+            }
             let reply = match work {
                 LocalTelegramText::Safety(TelegramSafetyDecision::Clear) => None,
                 LocalTelegramText::Safety(TelegramSafetyDecision::Urgent { russian, english, setup_metadata }) => {
@@ -200,7 +222,7 @@ impl Database {
     }
 }
 
-async fn preferred_locale(
+pub(super) async fn preferred_locale(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     binding: ConversationBinding,
     configured: &str,
@@ -215,7 +237,7 @@ async fn preferred_locale(
     Ok(stored.unwrap_or_else(|| configured.to_owned()))
 }
 
-async fn verify_order(
+pub(super) async fn verify_order(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
 ) -> Result<(), TelegramDiaryCommitError> {
@@ -234,7 +256,7 @@ async fn verify_order(
     Ok(())
 }
 
-async fn write_reply(
+pub(super) async fn write_reply(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,

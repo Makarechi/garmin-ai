@@ -386,6 +386,7 @@ pub(crate) fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
     Some(Cow::Owned(text.replace('_', "")))
 }
 
-pub(crate) fn python_whitespace(character: char) -> bool {
+/// Match the whitespace recognized by the pinned Python string operations.
+pub fn python_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{001c}'..='\u{001f}')
 }
