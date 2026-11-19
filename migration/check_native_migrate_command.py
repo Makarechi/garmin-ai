@@ -3,20 +3,47 @@
 import argparse
 import json
 import os
+import select
+import signal
 import subprocess
 import sys
+import time
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.request import ProxyHandler, Request, build_opener
 from uuid import UUID
 
-from check_native_schema import BEFORE_REVISIONS, CURRENT, engine_for, upgrade
+from check_legacy_telegram_schema import BEFORE_REPAIR as BEFORE_TELEGRAM_BACKFILL
+from check_legacy_telegram_schema import seed as seed_telegram_backfill
+from check_native_schema import (
+    BEFORE_FENCE,
+    BEFORE_INGESTION,
+    BEFORE_REVISIONS,
+    CURRENT,
+    compare_catalog,
+    engine_for,
+    upgrade,
+)
+from check_telegram_schema import BEFORE_REPAIR as BEFORE_TELEGRAM_REPAIR
+from check_telegram_schema import seed as seed_telegram_repair
+from check_telegram_schema import transported_rows
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from garmin_ai.models import Event
+
+CASES = (
+    ("fresh", None),
+    ("telegram_backfill", BEFORE_TELEGRAM_BACKFILL),
+    ("telegram_repair", BEFORE_TELEGRAM_REPAIR),
+    ("ingestion", BEFORE_INGESTION),
+    ("revisions", BEFORE_REVISIONS),
+    ("delivery_fence", BEFORE_FENCE),
+    ("current", CURRENT),
+)
 
 REGISTRY = (
     """
@@ -53,13 +80,17 @@ REGISTRY = (
 )
 
 
+def migration_env(engine, root):
+    return {
+        "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
+        "GA_LOCK_DIR": str(root / "locks"),
+    }
+
+
 def command(binary, engine, root, *args, succeeds=True):
     result = subprocess.run(
         (binary, "migrate", *args),
-        env={
-            "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
-            "GA_LOCK_DIR": str(root / "locks"),
-        },
+        env=migration_env(engine, root),
         cwd=root,
         capture_output=True,
         text=True,
@@ -78,8 +109,13 @@ def bootstrap_snapshot(engine):
         return tuple(connection.execute(text(statement)).all() for statement in REGISTRY)
 
 
-def seed(engine, *, invalid=False):
-    upgrade(engine, BEFORE_REVISIONS)
+def seed(engine, revision=BEFORE_REVISIONS, *, invalid=False):
+    if revision == BEFORE_TELEGRAM_BACKFILL:
+        seed_telegram_backfill(engine, "binding")
+    elif revision == BEFORE_TELEGRAM_REPAIR:
+        seed_telegram_repair(engine)
+    else:
+        upgrade(engine, revision)
     at = datetime(2026, 11, 1, tzinfo=UTC)
     with Session(engine) as session, session.begin():
         session.add(
@@ -98,23 +134,64 @@ def seed(engine, *, invalid=False):
                 else {"type": "symptom_observation", "impact": ""},
             )
         )
+        source = UUID(int=201)
         session.execute(
             text("""
-            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details,ingested_at)
-            VALUES (:at,'heart_rate_bpm','synthetic',CAST(:at AS date),64,'bpm','observed','{}',:at)
+            INSERT INTO source_payloads(id,source,endpoint,source_key,payload_hash,archive_key,
+                                       fetched_at,parser_version,status)
+            VALUES (:source,'synthetic','migration','source','fixture-digest','fixture-object',
+                    :at,1,'ok')
             """),
-            {"at": at},
+            {"at": at, "source": source},
+        )
+        ingested = revision in (BEFORE_REVISIONS, BEFORE_FENCE, CURRENT)
+        columns = ",ingested_at" if ingested else ""
+        values = ",:at" if ingested else ""
+        session.execute(
+            text(f"""
+            INSERT INTO measurements(ts,metric,source,local_date,value,unit,quality,details,source_ref{columns})
+            VALUES (:at,'heart_rate_bpm','synthetic',CAST(:at AS date),64,'bpm','observed','{{}}',:source{values})
+            """),
+            {"at": at, "source": source},
         )
 
 
-def compare(binary, reference, native, root, *, historical):
-    if historical:
-        seed(reference)
-        seed(native)
-    expected_revision = BEFORE_REVISIONS if historical else None
+def verify_ready(binary, engine, root):
+    key = "synthetic-readiness-only-token-at-least-32"
+    with subprocess.Popen(
+        (binary, "serve", "--port", "0"),
+        env=migration_env(engine, root) | {"GA_API_KEY": key},
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as server:
+        try:
+            assert select.select([server.stdout], [], [], 5)[0]
+            address = server.stdout.readline().strip().removeprefix("Listening on ")
+            assert address.startswith("http://127.0.0.1:")
+            request = Request(f"{address}/health/ready", headers={"Authorization": f"Bearer {key}"})
+            with build_opener(ProxyHandler({})).open(request, timeout=4) as response:
+                assert response.status == 200
+        finally:
+            if server.poll() is None:
+                server.terminate()
+            try:
+                _, error = server.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.communicate(timeout=3)
+                raise
+            assert server.returncode == 0, error
+
+
+def compare(binary, reference, native, root, revision):
+    if revision:
+        seed(reference, revision)
+        seed(native, revision)
     assert json.loads(command(binary, native, root, "--status")) == {
-        "current": False,
-        "revision": expected_revision,
+        "current": revision == CURRENT,
+        "revision": revision,
     }
     assert not (root / "locks").exists()
     legacy = Path(sys.executable).with_name("garmin-ai")
@@ -128,14 +205,60 @@ def compare(binary, reference, native, root, *, historical):
     actual = bootstrap_snapshot(native)
     for index, (left, right) in enumerate(zip(expected, actual, strict=True)):
         assert left == right, (index, len(left), len(right))
-    assert tuple(map(len, actual[:3])) == (20 if historical else 19, 11, 6)
-    if historical:
+    compare_catalog(reference, native, semantic_metric_versions=True)
+    assert transported_rows(reference) == transported_rows(native)
+    assert tuple(map(len, actual[:3])) == (20 if revision else 19, 11, 6)
+    if revision:
         event = actual[4][0]
         assert event[2] == "system.symptom_observation" and event[3] != 1
         assert actual[5][0][1] == "system.heart_rate_bpm"
     command(binary, native, root)
     assert bootstrap_snapshot(native) == actual
-    print(f"Matched the pinned CLI from {'historical data' if historical else 'an empty database'}")
+    verify_ready(binary, native, root)
+    print(f"Matched the pinned CLI and verified readiness from {revision or 'an empty database'}")
+
+
+def interrupt_upgrade(binary, engine, root):
+    waiting = text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_locks
+            WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database())
+              AND relation='public.outbox_messages'::regclass
+              AND mode='AccessExclusiveLock' AND NOT granted
+        )
+        """)
+    with engine.begin() as blocker:
+        blocker.execute(text("LOCK TABLE public.outbox_messages IN ACCESS SHARE MODE"))
+        with subprocess.Popen(
+            (binary, "migrate"),
+            env=migration_env(engine, root),
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as process:
+            try:
+                deadline = time.monotonic() + 1.8
+                while not blocker.scalar(waiting):
+                    assert process.poll() is None and time.monotonic() < deadline
+                    time.sleep(0.01)
+                process.kill()
+                output, error = process.communicate(timeout=4)
+                assert process.returncode == -signal.SIGKILL and not output, (output, error)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=4)
+    assert json.loads(command(binary, engine, root, "--status")) == {
+        "current": False,
+        "revision": BEFORE_REVISIONS,
+    }
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT to_regclass('measurement_revisions') IS NULL"))
+        assert connection.scalar(text("SELECT value FROM measurements")) == 64
+    command(binary, engine, root)
+    assert json.loads(command(binary, engine, root, "--status"))["revision"] == CURRENT
+    verify_ready(binary, engine, root)
+    print("Killed a migration before the final schema change, verified rollback, then retried")
 
 
 def main():
@@ -147,7 +270,7 @@ def main():
     opening = make_url(os.environ["GA_TEST_DATABASE_URL"])
     assert opening.database and opening.database.endswith("_test")
     with ExitStack() as stack:
-        for label in ("fresh", "historical"):
+        for label, revision in CASES:
             reference, native = [
                 engine_for(stack, opening.set(database=f"{args.name_prefix}_{label}_{kind}_test"))
                 for kind in ("py", "rs")
@@ -158,7 +281,7 @@ def main():
                     reference,
                     native,
                     Path(root).resolve(),
-                    historical=label == "historical",
+                    revision,
                 )
         erased = engine_for(stack, opening.set(database=f"{args.name_prefix}_erased_test"))
         upgrade(erased, BEFORE_REVISIONS)
@@ -183,6 +306,12 @@ def main():
             )
             assert connection.scalar(text("SELECT to_regclass('measurement_revisions') IS NULL"))
             assert connection.scalar(text("SELECT count(*) FROM event_definitions")) == 0
+        interrupted = engine_for(
+            stack, opening.set(database=f"{args.name_prefix}_interrupted_test")
+        )
+        seed(interrupted)
+        with TemporaryDirectory() as root:
+            interrupt_upgrade(binary, interrupted, Path(root).resolve())
     print("Erased storage stayed fenced and invalid history rolled back")
 
 
