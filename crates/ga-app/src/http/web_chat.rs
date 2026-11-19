@@ -6,12 +6,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::stream;
-use ga_app::urgent_screen::{obvious_urgent_symptoms, urgent_notice};
+use ga_app::{
+    model_gateway::RuntimeModelSettings,
+    urgent_screen::{obvious_urgent_symptoms, urgent_notice},
+};
 use ga_db::{
     Database,
-    web_chat::{WebChatError, WebChatSnapshot, WebChatSubmission},
+    web_chat::{WebChatError, WebChatModelPreparation, WebChatSnapshot, WebChatSubmission},
 };
-use ga_domain::access::Scope;
+use ga_domain::{access::Scope, model_consent::ModelCategories};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -61,15 +64,47 @@ async fn submit(
     }
     let urgent =
         obvious_urgent_symptoms(message.text.trim()).map_err(|_| WebChatError::Database)?;
-    database
-        .send_web_chat(WebChatSubmission {
-            client_message_id,
-            text: &message.text,
-            configured_timezone: &state.configured_timezone,
-            configured_locale: &state.configured_locale,
-            urgent_messages: urgent.then(|| (urgent_notice("ru"), urgent_notice("en"))),
-        })
+    let request = WebChatSubmission {
+        client_message_id,
+        text: &message.text,
+        configured_timezone: &state.configured_timezone,
+        configured_locale: &state.configured_locale,
+        urgent_messages: urgent.then(|| (urgent_notice("ru"), urgent_notice("en"))),
+    };
+    let text = message.text.trim();
+    if urgent
+        || matches!(
+            text,
+            "/help" | "/history" | "/pause" | "/resume" | "/cancel"
+        )
+        || text.starts_with("/note ")
+    {
+        return database.send_web_chat(request).await;
+    }
+    let settings = crate::replay_worker::model_settings();
+    let configured = settings.as_ref().map(RuntimeModelSettings::configured);
+    let Some(configured) = configured else {
+        return database.send_web_chat(request).await;
+    };
+    if !database
+        .model_onboarding_allows(ModelCategories::DIARY)
         .await
+        .unwrap_or(false)
+    {
+        return database.send_web_chat(request).await;
+    }
+    match database.prepare_web_chat_model(&request).await? {
+        WebChatModelPreparation::Replied(snapshot) => Ok(snapshot),
+        WebChatModelPreparation::Ready(session) => {
+            if let Ok(gateway) = configured.gateway(database.clone(), false, session.at) {
+                gateway
+                    .process_web_chat(*session, request, || configured.current())
+                    .await
+            } else {
+                database.send_web_chat(request).await
+            }
+        }
+    }
 }
 
 fn stream_snapshot(snapshot: WebChatSnapshot) -> Response {

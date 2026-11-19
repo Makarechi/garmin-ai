@@ -104,3 +104,24 @@ pub(crate) async fn current_conversation_channel(
     }
     Ok(Some((channel, instance)))
 }
+
+pub(crate) async fn current_web_conversation(
+    txn: &mut Transaction<'_, Postgres>,
+    binding: ConversationBinding,
+    memory: &MemoryFence,
+) -> Result<bool, MemoryError> {
+    let row: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT c.memory_epoch,c.share_owner_memory
+         FROM conversations c JOIN people p ON p.id=c.owner_id AND p.singleton
+         WHERE c.id=$1 AND c.owner_id=$2 AND c.channel='web' AND c.channel_instance_id='local'",
+    )
+    .bind(binding.conversation_id)
+    .bind(binding.owner_id)
+    .fetch_optional(&mut **txn)
+    .await?;
+    let Some((epoch, shared)) = row else {
+        return Ok(false);
+    };
+    Ok(epoch == memory.target_epoch
+        && shared_memory_epochs(txn, binding, shared).await? == memory.source_epochs)
+}

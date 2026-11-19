@@ -6,8 +6,8 @@ mod telegram_forget;
 pub use confirmed::ConfirmedAnalysis;
 pub(crate) use confirmed::remember_delivered_in;
 pub(crate) use read_context::channel_in as analysis_channel_in;
-pub(crate) use read_context::current_conversation_channel;
 pub use read_context::{AnalysisReadContext, ConversationReadContext};
+pub(crate) use read_context::{current_conversation_channel, current_web_conversation};
 pub(crate) use telegram_forget::forget_in as forget_telegram_in;
 
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};

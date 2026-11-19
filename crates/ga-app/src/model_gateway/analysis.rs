@@ -211,7 +211,9 @@ impl ModelGateway<'_> {
                 let channel = destination.map(|destination| ModelChannelSharing {
                     destination: destination.channel,
                     requirements: &channel_requirements,
-                    conversation: Some(destination.conversation),
+                    conversation: Some(ga_db::share_policy::ModelConversation::Inbound(
+                        destination.conversation,
+                    )),
                 });
                 let returned = self
                     .execute_with_context(
