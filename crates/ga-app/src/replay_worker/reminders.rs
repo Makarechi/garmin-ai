@@ -71,3 +71,16 @@ pub(super) async fn run_web(database: &Database, settings: &DiaryReminderSetting
         tokio::time::sleep(Duration::from_secs(delay)).await;
     }
 }
+
+pub(super) async fn run_trend_generation(database: &Database, timezone: &str) -> ! {
+    loop {
+        let completed = match clock() {
+            Ok(at) => database
+                .generate_trend_insights(at, timezone)
+                .await
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        tokio::time::sleep(Duration::from_secs(if completed { 60 } else { 10 })).await;
+    }
+}
