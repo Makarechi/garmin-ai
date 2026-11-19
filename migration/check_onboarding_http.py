@@ -3,6 +3,7 @@
 import argparse
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -227,6 +228,86 @@ def exercise(engine, python, native):
     )
 
 
+@contextmanager
+def native_client(binary, engine, directory, integrations, **settings):
+    with subprocess.Popen(
+        [binary.resolve(strict=True), "serve", "--port", "0"],
+        cwd=directory,
+        env={
+            "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
+            "GA_API_TOKENS": json.dumps(TOKENS),
+            "GA_INTEGRATIONS": json.dumps(integrations),
+            **settings,
+        },
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as server:
+        try:
+            url = server.stdout.readline().strip().removeprefix("Listening on ")
+            assert url.startswith("http://127.0.0.1:")
+            with httpx.Client(base_url=url, timeout=8, trust_env=False) as native:
+                yield native
+        finally:
+            server.terminate()
+            server.wait(timeout=5)
+
+
+def verify_extensions(binary, engine, directory):
+    extension = directory / "fixture-extension"
+    marker = directory / "launched"
+    extension.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    extension.chmod(0o700)
+    kinds = {
+        "source": ("GA_SOURCE_PLUGIN_EXECUTABLES", ["observations"]),
+        "channel": ("GA_CHANNEL_PLUGIN_EXECUTABLES", ["initiatives", "text"]),
+        "model": ("GA_NATIVE_MODEL_PLUGINS", ["structured_output"]),
+    }
+    instances = {}
+    registries = {}
+    for kind, (variable, capabilities) in kinds.items():
+        registry = {}
+        unregistered = "integration provider is not registered"
+        for name, reason in (
+            ("registered", None),
+            ("disabled", "integration is disabled"),
+            ("relative", unregistered),
+            ("missing", unregistered),
+        ):
+            identity = f"{kind}:fixture:{name}"
+            instances[identity] = (
+                {
+                    "id": identity,
+                    "kind": kind,
+                    "provider": "fixture",
+                    "enabled": name != "disabled",
+                },
+                capabilities if reason is None else [],
+                reason,
+            )
+            if name != "missing":
+                registry[identity] = str(extension) if name != "relative" else extension.name
+        registries[variable] = json.dumps(registry)
+    for declaration, _capabilities, _reason in instances.values():
+        declaration["secret_refs"] = {"api_key": "GA_PLUGIN_SYNTHETIC_ONBOARDING_SECRET"}
+        declaration["config"] = {"model": "synthetic-configuration-value"}
+    with native_client(
+        binary, engine, directory, [entry[0] for entry in instances.values()], **registries
+    ) as client:
+        found = status(client)["integrations"]
+        assert [item["instance_id"] for item in found] == list(instances)
+        for item in found:
+            _spec, capabilities, reason = instances[item["instance_id"]]
+            assert item["available"] == bool(capabilities)
+            assert item["capabilities"] == capabilities and item["reason"] == reason
+            assert item["verification_level"] == ("declared" if capabilities else "unavailable")
+            assert item["contract_version"] == (1 if capabilities else None)
+        assert str(extension) not in client.get("/onboarding", headers=SETTINGS).text
+    assert not marker.exists()
+    print(
+        "Matched registered native extension declarations without reading secrets or launching them"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -237,26 +318,11 @@ def main():
         with (
             TestClient(create_app(settings, engine)) as python,
             TemporaryDirectory(prefix="synthetic-onboarding-") as directory,
-            subprocess.Popen(
-                [args.binary.resolve(strict=True), "serve", "--port", "0"],
-                cwd=directory,
-                env={
-                    "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
-                    "GA_API_TOKENS": json.dumps(TOKENS),
-                    "GA_INTEGRATIONS": json.dumps(INTEGRATIONS),
-                },
-                stdout=subprocess.PIPE,
-                text=True,
-            ) as server,
         ):
-            try:
-                url = server.stdout.readline().strip().removeprefix("Listening on ")
-                assert url.startswith("http://127.0.0.1:")
-                with httpx.Client(base_url=url, timeout=8, trust_env=False) as native:
-                    exercise(engine, python, native)
-            finally:
-                server.terminate()
-                server.wait(timeout=5)
+            directory = Path(directory)
+            with native_client(args.binary, engine, directory, INTEGRATIONS) as native:
+                exercise(engine, python, native)
+            verify_extensions(args.binary, engine, directory)
     finally:
         engine.dispose()
 

@@ -1,10 +1,54 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
+use ga_app::extension_process::ExtensionProcess;
 use ga_domain::event_payload::legacy_boolean;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::configuration;
+
+type Executables = BTreeMap<String, PathBuf>;
+
+struct RegisteredExtensions {
+    source: Executables,
+    channel: Executables,
+    model: Executables,
+}
+
+impl RegisteredExtensions {
+    fn capabilities(&self, instance: &Instance) -> &'static [&'static str] {
+        let provider = instance.provider.as_bytes();
+        if provider.len() > 100
+            || !provider.first().is_some_and(u8::is_ascii_lowercase)
+            || !provider.iter().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(byte)
+            })
+        {
+            return &[];
+        }
+        let (registry, capabilities): (&_, &[_]) = match instance.kind.as_str() {
+            "source" => (&self.source, &["observations"]),
+            "channel" if instance.provider != "web" => (&self.channel, &["initiatives", "text"]),
+            "model" => (&self.model, &["structured_output"]),
+            _ => return &[],
+        };
+        if registry
+            .get(&instance.id)
+            .is_some_and(|path| ExtensionProcess::new(path, &instance.id).is_ok())
+        {
+            capabilities
+        } else {
+            &[]
+        }
+    }
+}
+
+fn executables(raw: Option<String>, bytes: usize, entries: usize) -> Executables {
+    raw.filter(|raw| raw.len() <= bytes)
+        .and_then(|raw| serde_json::from_str::<Executables>(&raw).ok())
+        .filter(|registry| registry.len() <= entries)
+        .unwrap_or_default()
+}
 
 #[derive(Deserialize)]
 struct Instance {
@@ -25,7 +69,7 @@ impl Instance {
         }
     }
 
-    fn declared(self) -> Option<Value> {
+    fn declared(self, extensions: &RegisteredExtensions) -> Option<Value> {
         let enabled = self.enabled.as_ref().map_or(Some(true), legacy_boolean)?;
         let (capabilities, implementation): (&[&str], &str) =
             match (self.kind.as_str(), self.provider.as_str()) {
@@ -37,7 +81,7 @@ impl Instance {
                 ("model", "gemini") => (&["structured_output", "transcription"], "unversioned"),
                 ("model", "openai") => (&["structured_output"], "openai-responses-v1"),
                 ("model", "anthropic") => (&["structured_output"], "anthropic-messages-v1"),
-                _ => (&[], ""),
+                _ => (extensions.capabilities(&self), "unversioned"),
             };
         let reason = if !enabled {
             Some("integration is disabled")
@@ -65,6 +109,9 @@ pub(super) fn declared() -> Option<Vec<Value>> {
         telegram_owner,
         llm,
         gemini_key,
+        source_extensions,
+        channel_extensions,
+        model_extensions,
     ] = configuration::read([
         "GA_INTEGRATIONS",
         "GA_TOKEN_DIR",
@@ -72,6 +119,9 @@ pub(super) fn declared() -> Option<Vec<Value>> {
         "GA_TELEGRAM_USER_ID",
         "GA_LLM_ENABLED",
         "GA_GEMINI_API_KEY",
+        "GA_SOURCE_PLUGIN_EXECUTABLES",
+        "GA_CHANNEL_PLUGIN_EXECUTABLES",
+        "GA_NATIVE_MODEL_PLUGINS",
     ])
     .ok()?;
     let instances = if let Some(explicit) = explicit {
@@ -110,5 +160,13 @@ pub(super) fn declared() -> Option<Vec<Value>> {
         }
         legacy
     };
-    instances.into_iter().map(Instance::declared).collect()
+    let extensions = RegisteredExtensions {
+        source: executables(source_extensions, super::MAX_REQUEST_BYTES, 32),
+        channel: executables(channel_extensions, super::MAX_REQUEST_BYTES, 32),
+        model: executables(model_extensions, 64 * 1024, usize::MAX),
+    };
+    instances
+        .into_iter()
+        .map(|instance| instance.declared(&extensions))
+        .collect()
 }
