@@ -4,6 +4,7 @@ pub(crate) mod demo;
 mod diary;
 mod exports;
 mod garmin_auth;
+mod hypotheses;
 mod personal_goals;
 mod source_mappings;
 pub(crate) mod tools;
@@ -75,6 +76,10 @@ fn router(state: AppState) -> Router {
         .route("/entries/{event_id}", any(diary::edit_custom))
         .route("/tools", any(tools::list))
         .route("/tools/{name}", any(tools::execute))
+        .route("/hypotheses", any(hypotheses::collection))
+        .route("/hypotheses/{identity}", any(hypotheses::item))
+        .route("/hypotheses/{identity}/recheck", any(hypotheses::recheck))
+        .route("/hypotheses/{identity}/stop", any(hypotheses::stop))
         .route("/preferences/goals", any(personal_goals::preferences))
         .route("/wearable/marks", any(wearable::marks))
         .route("/web-chat/messages", any(web_chat::messages))
