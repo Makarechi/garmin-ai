@@ -1,6 +1,9 @@
-use std::time::Instant;
+mod answer;
+
+use std::{collections::BTreeSet, time::Instant};
 
 use ga_db::{
+    conversation_memory::MemoryFence,
     diary::{InterpretationContext, InterpretationContextQuery},
     share_policy::{
         DestinationKind, ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination,
@@ -29,6 +32,8 @@ struct WebInterpretation {
     command: AgentInterpretation,
     digest: String,
     mentioned: Vec<Uuid>,
+    memory: MemoryFence,
+    channel_versions: BTreeSet<Uuid>,
 }
 
 impl ModelGateway<'_> {
@@ -41,10 +46,12 @@ impl ModelGateway<'_> {
     ) -> Result<WebChatSnapshot, WebChatError> {
         let model = ShareDestination::new(DestinationKind::Model, self.binding().instance_id)
             .map_err(|_| WebChatError::Database)?;
+        let mut budget = AnalysisBudget::new(Instant::now());
         let interpreted = self
-            .interpret_web_chat(&session, request.text.trim(), model, &policy)
+            .interpret_web_chat(&session, request.text.trim(), model, &mut budget, &policy)
             .await;
         let mut language = session.locale.clone();
+        let answer;
         let reply = if let Ok(interpretation) = &interpreted {
             let command = &interpretation.command;
             if let Some(selected) = command.response_language() {
@@ -69,7 +76,24 @@ impl ModelGateway<'_> {
                     language: &language,
                     expected,
                 },
-                AgentIntent::Safety => WebChatModelReply::SafetyNotice(urgent_notice(&language)),
+                AgentIntent::Safety => WebChatModelReply::FixedNotice(urgent_notice(&language)),
+                AgentIntent::Question => {
+                    answer = self
+                        .answer_web_chat(
+                            &session,
+                            request.text.trim(),
+                            &language,
+                            interpretation,
+                            &mut budget,
+                            &policy,
+                        )
+                        .await;
+                    answer
+                        .as_ref()
+                        .map_or(WebChatModelReply::Unverified, |answer| {
+                            answer.reply(expected)
+                        })
+                }
                 AgentIntent::Clarify => WebChatModelReply::Clarify {
                     question: command
                         .clarification()
@@ -95,6 +119,7 @@ impl ModelGateway<'_> {
         session: &WebChatModelSession,
         text: &str,
         model: ShareDestination<'_>,
+        budget: &mut AnalysisBudget,
         policy: &(impl Fn() -> CurrentModelPolicy<'policy> + Sync),
     ) -> Result<WebInterpretation, DiaryInterpretationError> {
         let binding = session.binding();
@@ -138,7 +163,6 @@ impl ModelGateway<'_> {
             .collect();
         let destination = ShareDestination::new(DestinationKind::Channel, &channel)
             .map_err(|_| DiaryInterpretationError::InvalidContext)?;
-        let mut budget = AnalysisBudget::new(Instant::now());
         let command = self
             .interpret_with(
                 DiaryInterpretationRequest {
@@ -154,7 +178,7 @@ impl ModelGateway<'_> {
                         recent_questions,
                     },
                 },
-                &mut budget,
+                budget,
                 policy,
                 ModelRequestScope {
                     requirements: &model_requirements,
@@ -176,6 +200,8 @@ impl ModelGateway<'_> {
             command,
             digest,
             mentioned,
+            memory: memory_fence,
+            channel_versions: events.channel_versions,
         })
     }
 }

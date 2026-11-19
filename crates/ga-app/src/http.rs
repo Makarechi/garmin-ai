@@ -1,5 +1,6 @@
 mod browser;
 mod community_packs;
+mod definitions;
 pub(crate) mod demo;
 mod diary;
 mod exports;
@@ -7,6 +8,7 @@ mod garmin_auth;
 mod hypotheses;
 mod natural_language;
 mod onboarding;
+mod operations;
 mod personal_goals;
 mod scenario_packs;
 mod source_mappings;
@@ -47,6 +49,8 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
+        .route("/metrics", any(operations::metrics))
+        .route("/operations", any(operations::snapshot))
         .route("/capabilities", any(capabilities))
         .route("/scenario-packs", any(scenario_packs::collection))
         .route("/scenario-packs/{key}", any(scenario_packs::selection))
@@ -79,6 +83,7 @@ fn router(state: AppState) -> Router {
         .route("/events", any(diary::create))
         .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))
+        .route("/definitions", any(definitions::list))
         .route("/exports/diary", any(exports::diary))
         .route("/entries", any(diary::create_custom))
         .route("/entries/{event_id}", any(diary::edit_custom))

@@ -9,6 +9,7 @@ pub(crate) use clarification::{
 
 mod agent_batch;
 pub(crate) mod agent_correction;
+pub(crate) mod analysis_evidence;
 pub use agent_batch::CreateAgentLogBatch;
 
 pub mod custom_entries;

@@ -11,7 +11,7 @@ use ga_db::{
     },
     model_gate::ModelGateError,
     outbox_enqueue::QueueIntentError,
-    share_policy::{DestinationKind, ShareDestination},
+    share_policy::{DestinationKind, ModelConversation, ShareDestination},
 };
 use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError},
@@ -20,7 +20,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use ga_model::fallback::FallbackError;
-use serde_json::{Value, json};
+use serde_json::json;
 use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 
@@ -32,7 +32,8 @@ use crate::{
     model_gateway::{
         ActiveModelJob, AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisResult,
         ConfiguredModel, DiaryAnalysisTools, DiaryInterpretationError, GatewayError, ModelGateway,
-        ReplySafetyIntent, Sender, TelegramDiaryInterpretation,
+        ReplySafetyIntent, Sender, TelegramDiaryInterpretation, analysis_conversation,
+        format_diary_answer,
     },
     telegram_settings::TelegramIngressSettings,
     urgent_screen::urgent_notice,
@@ -294,7 +295,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
         let tools =
             DiaryAnalysisTools::new(self.database, context, self.gateway.binding().instance_id)
                 .map_err(|_| Disposition::Text("agent.data_changed"))?;
-        let conversation = analysis_turns(memory.turns);
+        let conversation = analysis_conversation(memory.turns);
         let (id, lease_token) = lease.job_identity();
         let analysis = self
             .gateway
@@ -316,14 +317,14 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 AnalysisDestination {
                     channel: ShareDestination::new(DestinationKind::Channel, &channel)
                         .map_err(|_| Disposition::Gone)?,
-                    conversation: ConversationReadContext {
+                    conversation: ModelConversation::Inbound(ConversationReadContext {
                         binding,
                         inbound_id: lease.message_id(),
                         operation_id: lease.operation_id(),
                         memory: &memory.fence,
-                    },
+                    }),
                     tracker_versions: &interpretation.channel_versions,
-                    job: ActiveModelJob { id, lease_token },
+                    job: Some(ActiveModelJob { id, lease_token }),
                     uses_voice_text: lease.has_voice_text(),
                 },
                 self.sender,
@@ -353,22 +354,14 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 if include_current_state_freshness {
                     return Err(Disposition::Text("agent.answer_unverified"));
                 }
-                let body = [
-                    narrative.unwrap_or_default(),
-                    numbers.join("\n"),
-                    timestamps.join("\n"),
-                ]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-                let attribution = if used_evidence.is_empty() {
-                    template(&language, "agent.saved_data").to_owned()
-                } else {
-                    template(&language, "agent.saved_sources")
-                        .replace("{sources}", template(&language, "agent.source.diary"))
-                };
-                let intent = text_reply(&envelope, &(body + &attribution))
+                let body = format_diary_answer(
+                    &language,
+                    narrative,
+                    numbers,
+                    timestamps,
+                    !used_evidence.is_empty(),
+                );
+                let intent = text_reply(&envelope, &body)
                     .ok_or(Disposition::Text("agent.answer_unverified"))?;
                 self.database
                     .queue_telegram_diary_analysis(
@@ -421,12 +414,6 @@ fn analysis_clock(message: time::OffsetDateTime, timezone: &str) -> Result<Strin
         .and_then(|at| at.format(&Rfc3339).ok())
         .ok_or(Disposition::Text("agent.data_changed"))?;
     Ok(now.replace('Z', "+00:00"))
-}
-
-fn analysis_turns(turns: Vec<Value>) -> Value {
-    Value::Array(turns.into_iter().filter(|turn| turn["question"].is_string()).map(|turn| {
-        json!({"question":turn["question"],"asked_at":turn["asked_at"],"answer":turn["answer"]})
-    }).collect())
 }
 
 enum Disposition {

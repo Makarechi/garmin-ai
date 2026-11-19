@@ -1,3 +1,4 @@
+mod analysis;
 mod initiative;
 mod model;
 mod send;
@@ -7,6 +8,7 @@ pub use model::{
 };
 pub use send::WebChatSubmission;
 
+use analysis::{ANALYSIS_REFERENCE, current_web_analysis};
 use std::{collections::VecDeque, error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
@@ -299,8 +301,18 @@ async fn can_show(
         .flatten()
         .filter_map(Value::as_str)
         .any(|value| {
-            value.starts_with("sleep-timing:") || value.starts_with("analysis-sleep-timing:")
+            value != ANALYSIS_REFERENCE
+                && (value.starts_with("sleep-timing:")
+                    || value.starts_with("analysis-sleep-timing:"))
         })
+    {
+        return Ok(false);
+    }
+    if state == "queued"
+        && document["evidence_refs"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().any(|entry| entry == ANALYSIS_REFERENCE))
+        && !current_web_analysis(txn, conversation, outbox).await?
     {
         return Ok(false);
     }
