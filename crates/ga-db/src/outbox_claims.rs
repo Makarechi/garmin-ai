@@ -160,6 +160,20 @@ impl Database {
             .await
     }
 
+    /// Claim a generated reminder for an explicitly configured external channel.
+    pub async fn claim_channel_tracker_checkin(
+        &self,
+        destination: ReplyDestination<'_>,
+        now: StoredInstant,
+        lease_seconds: u32,
+    ) -> Result<Option<ReplyClaim>, ReplyClaimError> {
+        if destination.channel == "telegram" {
+            return Err(ReplyClaimError::InvalidRequest);
+        }
+        self.claim_reply(destination, now, lease_seconds, true)
+            .await
+    }
+
     async fn claim_reply(
         &self,
         destination: ReplyDestination<'_>,

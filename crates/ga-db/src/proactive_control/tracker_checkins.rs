@@ -22,6 +22,7 @@ use super::{
 };
 use crate::{
     Database,
+    outbox_claims::ReplyDestination,
     outbox_enqueue::{QueueIntent, QueueIntentError, queue_outbox_intent},
     share_policy::{DestinationKind, ShareCategory, ShareDestination, ShareRequirement, allows},
     telegram_binding::{TelegramBindingError, confirmed_pairing},
@@ -83,6 +84,11 @@ pub struct TrackerReminderRoute<'a> {
     pub telegram_chat: i64,
 }
 
+enum ReminderDestination<'a> {
+    Telegram(TrackerReminderRoute<'a>),
+    External(ReplyDestination<'a>),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TrackerRulePage {
     pub next: Option<Uuid>,
@@ -94,6 +100,32 @@ impl Database {
     pub async fn queue_tracker_checkins(
         &self,
         route: TrackerReminderRoute<'_>,
+        settings: &NotificationPolicy<'_>,
+        now: StoredInstant,
+        after: Option<Uuid>,
+    ) -> Result<TrackerRulePage, ProactiveControlError> {
+        self.queue_reminders(ReminderDestination::Telegram(route), settings, now, after)
+            .await
+    }
+
+    /// Reserve due reminders for an explicitly configured channel with a current owner conversation.
+    pub async fn queue_channel_tracker_checkins(
+        &self,
+        route: ReplyDestination<'_>,
+        settings: &NotificationPolicy<'_>,
+        now: StoredInstant,
+        after: Option<Uuid>,
+    ) -> Result<TrackerRulePage, ProactiveControlError> {
+        if route.channel == "telegram" {
+            return Err(ProactiveControlError::InvalidCommand);
+        }
+        self.queue_reminders(ReminderDestination::External(route), settings, now, after)
+            .await
+    }
+
+    async fn queue_reminders(
+        &self,
+        route: ReminderDestination<'_>,
         settings: &NotificationPolicy<'_>,
         now: StoredInstant,
         after: Option<Uuid>,
@@ -117,24 +149,38 @@ impl Database {
 
 async fn sync_page(
     txn: &mut Transaction<'_, Postgres>,
-    route: TrackerReminderRoute<'_>,
+    route: ReminderDestination<'_>,
     settings: &NotificationPolicy<'_>,
     limit: u8,
     now: StoredInstant,
     after: Option<Uuid>,
 ) -> Result<TrackerRulePage, ProactiveControlError> {
-    let owner = confirmed_pairing(txn, route.telegram_instance, route.telegram_chat)
-        .await
-        .map_err(|error| match error {
-            TelegramBindingError::Missing | TelegramBindingError::Mismatch => {
-                ProactiveControlError::UnknownOwner
+    let (owner, channel, instance) = match &route {
+        ReminderDestination::Telegram(route) => {
+            let owner = confirmed_pairing(txn, route.telegram_instance, route.telegram_chat)
+                .await
+                .map_err(|error| match error {
+                    TelegramBindingError::Missing | TelegramBindingError::Mismatch => {
+                        ProactiveControlError::UnknownOwner
+                    }
+                    TelegramBindingError::Busy => ProactiveControlError::Busy,
+                    _ => ProactiveControlError::Database,
+                })?;
+            if owner != route.owner {
+                return Err(ProactiveControlError::UnknownOwner);
             }
-            TelegramBindingError::Busy => ProactiveControlError::Busy,
-            _ => ProactiveControlError::Database,
-        })?;
-    if owner != route.owner {
-        return Err(ProactiveControlError::UnknownOwner);
-    }
+            (owner, "telegram", route.telegram_instance)
+        }
+        ReminderDestination::External(route) => {
+            let owner: Option<Uuid> = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+                .fetch_optional(&mut **txn)
+                .await?;
+            if owner != Some(route.owner_id) {
+                return Err(ProactiveControlError::UnknownOwner);
+            }
+            (route.owner_id, route.channel, route.instance_id)
+        }
+    };
     let trackers: Vec<Tracker> = sqlx::query(
         "SELECT t.id,t.revision,t.shortcut,t.reminder_enabled,t.reminder_time,t.reminder_timezone,
                 d.key,d.status,d.id AS definition_id,v.id AS version_id,
@@ -184,7 +230,9 @@ async fn sync_page(
         .map(serde_json::from_str)
         .transpose()
         .map_err(|_| ProactiveControlError::InvalidStoredState)?;
-    ensure_telegram_conversation(txn, &route).await?;
+    if let ReminderDestination::Telegram(route) = &route {
+        ensure_telegram_conversation(txn, route).await?;
+    }
     let mut queued = 0;
     for tracker in trackers {
         if let Some(rule) = project(
@@ -197,8 +245,8 @@ async fn sync_page(
             &tracker,
         )
         .await?
-            && rule["primary_channel"]["channel"] == "telegram"
-            && rule["primary_channel"]["instance_id"] == route.telegram_instance
+            && rule["primary_channel"]["channel"] == channel
+            && rule["primary_channel"]["instance_id"] == instance
         {
             queued += usize::from(queue(txn, owner, settings, &tracker, &rule, now).await?);
         }

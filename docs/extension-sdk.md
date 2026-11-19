@@ -129,6 +129,25 @@ No external developer reproduction or published-package compatibility is
 claimed until an independent contributor runs the guide against a published
 release.
 
+## Native tracker reminders
+
+The Rust worker can use a native channel as the owner's primary route for
+tracker reminders. Add the enabled channel instance to `GA_INTEGRATIONS`
+and map its exact instance ID to an absolute executable path in
+`GA_CHANNEL_PLUGIN_EXECUTABLES`. A fictional configuration looks like this.
+
+```json
+{"channel:synthetic:diary":"/opt/garmin-ai/extensions/garmin-ai-synthetic-channel"}
+```
+
+Select the route in onboarding. The application requires an existing owner
+conversation on that instance and checks the owner's sharing permissions and
+reminder policy before sending. The worker passes the configured settings and
+named secret values in the local process request. A receipt records the
+reported delivery state; a missing or malformed result leaves delivery
+uncertain, and a restart does not resend it. The independent example uses
+fictional delivery evidence and is suitable for a disposable test environment.
+
 ## Native channel probe
 
 The native version 1 channel protocol uses one JSON request and one JSON reply

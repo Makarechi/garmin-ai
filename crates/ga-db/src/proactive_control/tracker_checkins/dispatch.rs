@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{Occurrence, RULE_PREFIX, has_entry, rule_revision, tracker_rule_id};
 use crate::{
-    channel_ingress::telegram_poll::telegram_primary,
+    channel_ingress::telegram_poll::channel_primary,
     outbox_claims::ReplyDestination,
     proactive_control::{
         NotificationDecision, NotificationExclusions, NotificationPolicy, ProactiveControlError,
@@ -65,7 +65,7 @@ pub(crate) async fn revalidate_tracker_checkin(
         || rule["rule"]["kind"] != "missing_entry"
         || rule["conversation_id"] != intent["conversation_id"]
         || rule["primary_channel"] != intent["channel_instance"]
-        || !telegram_primary(txn, destination.instance_id).await?
+        || !channel_primary(txn, destination.channel, destination.instance_id).await?
     {
         return Ok(Cancel);
     }

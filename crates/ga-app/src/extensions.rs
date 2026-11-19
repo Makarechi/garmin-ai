@@ -1,3 +1,5 @@
+pub(crate) use channel::delivery::ScheduledChannelPlugins;
+
 mod channel;
 mod source_poll;
 
@@ -29,6 +31,19 @@ const MAX_SOURCE_REPLY: usize = 8 * 1024 * 1024;
 const MAX_PAGES: usize = 1000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn valid_secret_reference(slot: &str, reference: &str) -> bool {
+    fn valid(value: &str, max: usize, case: fn(&u8) -> bool) -> bool {
+        let mut bytes = value.bytes();
+        value.len() <= max
+            && bytes.next().is_some_and(|byte| case(&byte))
+            && bytes.all(|byte| case(&byte) || byte.is_ascii_digit() || byte == b'_')
+    }
+    valid(slot, 64, u8::is_ascii_lowercase)
+        && reference
+            .strip_prefix("GA_PLUGIN_")
+            .is_some_and(|name| valid(name, 128, u8::is_ascii_uppercase))
+}
 
 #[derive(Clone, Copy, Debug)]
 enum ExtensionError {

@@ -240,6 +240,20 @@ impl Database {
         destination: &crate::outbox_claims::ReplyDestination<'_>,
         now: StoredInstant,
     ) -> Result<u64, DeliveryError> {
+        let telegram = crate::outbox_claims::ReplyDestination {
+            owner_id: destination.owner_id,
+            channel: "telegram",
+            instance_id: destination.instance_id,
+        };
+        self.recover_expired_replies(Some(&telegram), now).await
+    }
+
+    /// Recover only sends addressed to the active configured channel.
+    pub async fn recover_expired_channel_outbox(
+        &self,
+        destination: &crate::outbox_claims::ReplyDestination<'_>,
+        now: StoredInstant,
+    ) -> Result<u64, DeliveryError> {
         self.recover_expired_replies(Some(destination), now).await
     }
 
@@ -256,7 +270,7 @@ impl Database {
                     SELECT id FROM outbox_messages o WHERE state='sending' AND lease_until<$1
                       AND ($3::uuid IS NULL OR (owner_id=$3 AND legacy_key IS NULL
                         AND EXISTS(SELECT FROM conversations c WHERE c.id=o.conversation_id
-                              AND c.owner_id=$3 AND c.channel='telegram' AND c.channel_instance_id=$4)))
+                              AND c.owner_id=$3 AND c.channel=$5 AND c.channel_instance_id=$4)))
                     ORDER BY lease_until,id LIMIT $2 FOR UPDATE SKIP LOCKED
                  )
                  UPDATE outbox_messages SET state='uncertain',lease_until=NULL,lease_token=NULL,
@@ -266,6 +280,7 @@ impl Database {
             .bind(RECOVERY_BATCH)
             .bind(destination.map(|target| target.owner_id))
             .bind(destination.map(|target| target.instance_id))
+            .bind(destination.map(|target| target.channel))
             .execute(&mut *txn)
             .await?;
             txn.commit().await?;

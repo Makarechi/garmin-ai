@@ -132,18 +132,9 @@ impl SourceSettings {
     }
 
     fn valid_secret_references(&self) -> bool {
-        let valid = |text: &str, max: usize, allowed: fn(&u8) -> bool| {
-            let mut bytes = text.bytes();
-            text.len() <= max
-                && bytes.next().is_some_and(|first| allowed(&first))
-                && bytes.all(|byte| allowed(&byte) || byte.is_ascii_digit() || byte == b'_')
-        };
-        self.secret_refs.iter().all(|(name, reference)| {
-            valid(name, 64, u8::is_ascii_lowercase)
-                && reference
-                    .strip_prefix("GA_PLUGIN_")
-                    .is_some_and(|suffix| valid(suffix, 128, u8::is_ascii_uppercase))
-        })
+        self.secret_refs
+            .iter()
+            .all(|(name, reference)| super::valid_secret_reference(name, reference))
     }
 }
 
