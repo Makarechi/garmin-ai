@@ -19,6 +19,31 @@ pub struct AnalysisReadContext<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub enum AnalysisSubject<'a> {
+    Inbound(AnalysisReadContext<'a>),
+    Web {
+        binding: ConversationBinding,
+        memory: &'a MemoryFence,
+        goals_revision: u64,
+    },
+}
+
+impl AnalysisSubject<'_> {
+    pub(crate) fn binding(self) -> ConversationBinding {
+        match self {
+            Self::Inbound(context) => context.binding,
+            Self::Web { binding, .. } => binding,
+        }
+    }
+}
+
+impl<'a> From<AnalysisReadContext<'a>> for AnalysisSubject<'a> {
+    fn from(context: AnalysisReadContext<'a>) -> Self {
+        Self::Inbound(context)
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct ConversationReadContext<'a> {
     pub binding: ConversationBinding,
     pub inbound_id: Uuid,
@@ -26,27 +51,44 @@ pub struct ConversationReadContext<'a> {
     pub memory: &'a MemoryFence,
 }
 
-pub(crate) async fn channel_in(
+pub(crate) async fn channel_in<'a>(
     txn: &mut Transaction<'_, Postgres>,
-    context: AnalysisReadContext<'_>,
+    context: impl Into<AnalysisSubject<'a>>,
 ) -> Result<Option<String>, MemoryError> {
-    let channel = current_conversation_channel(
-        txn,
-        ConversationReadContext {
-            binding: context.binding,
-            inbound_id: context.inbound_id,
-            operation_id: context.operation_id,
-            memory: context.memory,
-        },
-    )
-    .await?;
-    let Some((_, instance)) = channel else {
+    let context = context.into();
+    let (channel, goals_revision) = match context {
+        AnalysisSubject::Inbound(inbound) => (
+            current_conversation_channel(
+                txn,
+                ConversationReadContext {
+                    binding: inbound.binding,
+                    inbound_id: inbound.inbound_id,
+                    operation_id: inbound.operation_id,
+                    memory: inbound.memory,
+                },
+            )
+            .await?
+            .map(|(_, instance)| instance),
+            inbound.goals_revision,
+        ),
+        AnalysisSubject::Web {
+            binding,
+            memory,
+            goals_revision,
+        } => (
+            current_web_conversation(txn, binding, memory)
+                .await?
+                .then(|| "web:local".to_owned()),
+            goals_revision,
+        ),
+    };
+    let Some(channel) = channel else {
         return Ok(None);
     };
-    let (goals, _) = personal_goals::load(txn, context.binding.owner_id)
+    let (goals, _) = personal_goals::load(txn, context.binding().owner_id)
         .await
         .map_err(|_| MemoryError::InvalidState)?;
-    Ok((goals.revision == context.goals_revision).then_some(instance))
+    Ok((goals.revision == goals_revision).then_some(channel))
 }
 
 pub(crate) async fn current_conversation_channel(

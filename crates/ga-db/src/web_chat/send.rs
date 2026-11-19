@@ -147,7 +147,7 @@ pub(super) async fn finish_web_chat_message(
     reply: &str,
     facts: &[String],
     at: StoredInstant,
-) -> Result<(), WebChatError> {
+) -> Result<Uuid, WebChatError> {
     let intent = OutboundIntent::normalize(json!({
         "owner_id":envelope.owner_id().to_string(),
         "conversation_id":envelope.conversation_id().to_string(),
@@ -155,7 +155,7 @@ pub(super) async fn finish_web_chat_message(
         "blocks":[{"text":reply}],"evidence_refs":facts,
     }))
     .map_err(|_| WebChatError::Database)?;
-    queue_outbox_intent(
+    let queued = queue_outbox_intent(
         txn,
         QueueIntent {
             intent,
@@ -172,7 +172,7 @@ pub(super) async fn finish_web_chat_message(
         .bind(receipt.message_id)
         .execute(&mut **txn)
         .await?;
-    Ok(())
+    Ok(queued.outbox_id)
 }
 
 async fn local_reply(

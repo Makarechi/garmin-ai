@@ -18,6 +18,7 @@ mod health_projection;
 pub mod history_windows;
 pub mod jobs;
 pub mod model_gate;
+pub mod observability;
 pub mod outbox_claims;
 pub mod outbox_enqueue;
 pub mod personal_goals;

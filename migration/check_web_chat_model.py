@@ -24,10 +24,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text, update
 from sqlalchemy.orm import Session
 
-from garmin_ai.agent import Interpretation
+from garmin_ai.agent import AgentStep, Interpretation
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
-from garmin_ai.events import EventInput, create_event
+from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Person
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
@@ -56,13 +56,41 @@ NOTE = "Synthetic note for 20 September 2026 at 20:00 UTC"
 QUESTION = "What detail should the synthetic note contain?"
 DETAIL = "Synthetic model-generated note"
 CORRECTED = "Corrected synthetic web note"
+DIARY_QUESTION = "Which detail is in the synthetic diary for 19 September?"
+DIARY_ANSWER = "The diary lists the synthetic detail."
+DIARY_START = datetime(2026, 9, 19, 20, tzinfo=UTC)
+DIARY_DETAIL = "Synthetic detail from the saved diary"
 
 
 def output(prompt):
+    if "question" in prompt:
+        assert prompt["question"].startswith(DIARY_QUESTION)
+        if prompt["evidence"]:
+            evidence = prompt["evidence"][0]
+            assert evidence["id"] == 1 and evidence["tool"] == "events"
+            assert DIARY_DETAIL in json.dumps(evidence["result"])
+            return AgentStep(answer=DIARY_ANSWER, evidence_ids=[1], response_language="en")
+        assert any(tool["name"] == "events" for tool in prompt["tools"])
+        return AgentStep(
+            calls=[
+                {
+                    "name": "events",
+                    "arguments_json": json.dumps(
+                        {
+                            "start": (DIARY_START - timedelta(minutes=1)).isoformat(),
+                            "end": (DIARY_START + timedelta(minutes=1)).isoformat(),
+                            "kind": "note",
+                        }
+                    ),
+                }
+            ]
+        )
     sentence = prompt["text"]
     if sentence.startswith("Undo"):
         confidence = 0.84 if "synthetic low confidence" in sentence else 1
         return Interpretation(intent="undo", confidence=confidence, response_language="en")
+    if sentence.startswith(DIARY_QUESTION):
+        return Interpretation(intent="question", confidence=1, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
         return Interpretation(
@@ -123,10 +151,11 @@ class SyntheticProvider:
         self.calls = calls
 
     def structured(self, _instruction, prompt, schema, **_options):
-        assert schema is Interpretation
         document = json.loads(prompt)
         self.calls.append(document)
-        return output(document)
+        result = output(document)
+        assert type(result) is schema
+        return result
 
     def close(self):
         pass
@@ -168,10 +197,11 @@ def synthetic_https(directory, calls, engine):
             assert request["text"]["format"]["strict"] is True
             prompt = json.loads(request["input"][1]["content"])
             calls.append(prompt)
-            if "concurrent" in prompt["text"]:
+            message = prompt.get("text", "")
+            if "concurrent" in message:
                 active.set()
                 assert release.wait(4), "The local request did not complete during model work"
-            if "withdraw during response" in prompt["text"]:
+            if "withdraw during response" in message:
                 set_model_categories(engine, ["health"])
             try:
                 parsed = output(prompt)
@@ -312,6 +342,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
 
     exercise_corrections(engine, python, native, native_calls)
     exercise_undo(engine, python, native, native_calls, active, release)
+    exercise_analysis(engine, python, native, native_calls)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -497,6 +528,93 @@ def exercise_undo(engine, python, native, native_calls, active, release):
     print(
         "Matched Python undo and low-confidence clarification; preserved separate API entries, "
         "duplicate requests and newer web changes"
+    )
+
+
+def exercise_analysis(engine, python, native, native_calls):
+    with Session(engine) as session:
+        event_id = create_event(
+            session,
+            EventInput(
+                start=DIARY_START,
+                timezone="UTC",
+                payload={"type": "note", "description": DIARY_DETAIL},
+            ),
+            actor="synthetic-fixture",
+        ).id
+        session.commit()
+
+    reference = submit(python, DIARY_QUESTION)
+    before = len(native_calls)
+    identity = str(uuid4())
+    answer = submit(native, DIARY_QUESTION, identity)
+    assert answer["reply"]["text"] == reference["reply"]["text"], (answer, reference)
+    assert answer["reply"]["text"] == f"{DIARY_ANSWER}\n\nBased on saved diary data.", answer
+    assert len(native_calls) == before + 3
+    assert submit(native, DIARY_QUESTION, identity) == {**answer, "duplicate": True}
+    assert len(native_calls) == before + 3
+    reply_id = answer["reply"]["id"]
+    with engine.connect() as connection:
+        turns = text(
+            "SELECT state->'analysis_turns' FROM conversations "
+            "WHERE channel='web' AND channel_instance_id='local'"
+        )
+        assert connection.scalar(turns) is None
+    read = native.post(f"/web-chat/messages/{reply_id}/read", headers=HEADERS)
+    assert read.status_code == 200 and read.json() == {"status": "read"}
+    assert native.post(f"/web-chat/messages/{reply_id}/read", headers=HEADERS).status_code == 200
+    with engine.connect() as connection:
+        retained = connection.scalar(turns)
+        assert len(retained) == 1 and retained[0]["question"] == DIARY_QUESTION
+        assert len(retained[0]["specs"]) == 1 and retained[0]["specs"][0]["tool"] == "events"
+
+    followup = DIARY_QUESTION + " Check again."
+    retry_id = str(uuid4())
+    before = len(native_calls)
+    stale = submit(native, followup, retry_id)
+    assert stale["reply"]["text"] == answer["reply"]["text"]
+    context = native_calls[before + 1]["conversation"]["turns"]
+    assert len(context) == 1 and context[0]["question"] == DIARY_QUESTION
+    assert "answer" not in context[0] and not native_calls[before + 1]["evidence"]
+    assert retained[0]["specs"] == context[0]["specs"]
+    stale_id = stale["reply"]["id"]
+    with Session(engine) as session:
+        update_event(
+            session,
+            event_id,
+            EventInput(
+                start=DIARY_START,
+                timezone="UTC",
+                payload={"type": "note", "description": "Synthetic correction to the saved diary"},
+            ),
+            revision=1,
+            actor="synthetic-fixture",
+        )
+        session.commit()
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200, history.text
+    history_ids = {reply["id"] for reply in history.json()["replies"]}
+    assert reply_id in history_ids and stale_id not in history_ids
+    rejected = native.post(f"/web-chat/messages/{stale_id}/read", headers=HEADERS)
+    assert rejected.status_code == 409, rejected.text
+    assert submit(native, followup, retry_id)["reply"] is None
+    assert submit(python, followup, retry_id)["reply"] is None
+    assert python.post(f"/web-chat/messages/{stale_id}/read", headers=HEADERS).status_code == 409
+    old_history = python.get("/web-chat/messages", headers=HEADERS)
+    assert old_history.status_code == 200, old_history.text
+    assert stale_id not in {reply["id"] for reply in old_history.json()["replies"]}
+    with engine.connect() as connection:
+        receipts = connection.execute(
+            text(
+                "SELECT outbox_message_id::text,state FROM message_delivery_receipts "
+                "WHERE outbox_message_id IN (CAST(:fresh AS uuid), CAST(:stale AS uuid))"
+            ),
+            {"fresh": reply_id, "stale": stale_id},
+        ).all()
+        assert receipts == [(reply_id, "read")], receipts
+    print(
+        "Matched grounded web diary answer, retained context after one receipt, "
+        "and rejected stale evidence in Rust and the rollback reader"
     )
 
 

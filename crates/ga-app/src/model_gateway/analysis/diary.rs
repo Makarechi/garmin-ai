@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use ga_db::{
     Database,
-    conversation_memory::AnalysisReadContext,
+    conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
@@ -34,19 +34,19 @@ static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| {
 /// A diary-only model tool bound to an authenticated question and its configured model.
 pub struct DiaryAnalysisTools<'a> {
     database: &'a Database,
-    context: AnalysisReadContext<'a>,
+    context: AnalysisSubject<'a>,
     model: ShareDestination<'a>,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
     pub fn new(
         database: &'a Database,
-        context: AnalysisReadContext<'a>,
+        context: impl Into<AnalysisSubject<'a>>,
         model_instance: &'a str,
     ) -> Result<Self, SharePolicyError> {
         Ok(Self {
             database,
-            context,
+            context: context.into(),
             model: ShareDestination::new(DestinationKind::Model, model_instance)?,
         })
     }

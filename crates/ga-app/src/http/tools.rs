@@ -819,7 +819,7 @@ pub(crate) use generic_reads::{generic_error_class, generic_input, read_generic}
 
 pub(crate) use garmin_reads::{GarminReadError, read_garmin};
 
-fn document_response(document: JsonDocument) -> Response {
+pub(super) fn document_response(document: JsonDocument) -> Response {
     let bytes = document.byte_len();
     let chunks = futures_util::stream::try_unfold(document.reader(), |mut reader| async move {
         let (reader, chunk) = tokio::task::spawn_blocking(move || {

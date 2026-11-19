@@ -3,15 +3,15 @@ pub use diary::DiaryAnalysisTools;
 
 use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::Instant};
 
-use ga_db::{
-    conversation_memory::ConversationReadContext,
-    share_policy::{ModelChannelSharing, ShareCategory, ShareDestination, ShareRequirement},
+use ga_db::share_policy::{
+    ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
 };
 use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError, AnalysisStage},
     analysis_claims::AnswerEvidence,
     analysis_step::{AnalysisStep, AnalysisStepAction, AnalysisStepError},
     legacy_json::{JsonError, Utf8Layout, encode},
+    localization::catalog_text,
     model_consent::ModelCategories,
     model_request::ApprovedModelSchema,
 };
@@ -49,9 +49,9 @@ pub struct AnalysisQuestion<'a> {
 #[derive(Clone, Copy)]
 pub struct AnalysisDestination<'a> {
     pub channel: ShareDestination<'a>,
-    pub conversation: ConversationReadContext<'a>,
+    pub conversation: ModelConversation<'a>,
     pub tracker_versions: &'a BTreeSet<Uuid>,
-    pub job: ActiveModelJob,
+    pub job: Option<ActiveModelJob>,
     pub uses_voice_text: bool,
 }
 
@@ -165,7 +165,7 @@ impl ModelGateway<'_> {
             policy,
             AnalysisScope {
                 requirements: &[],
-                job: Some(destination.job),
+                job: destination.job,
                 destination: Some(destination),
             },
             sender,
@@ -212,9 +212,7 @@ impl ModelGateway<'_> {
                 let channel = destination.map(|destination| ModelChannelSharing {
                     destination: destination.channel,
                     requirements: &channel_requirements,
-                    conversation: Some(ga_db::share_policy::ModelConversation::Inbound(
-                        destination.conversation,
-                    )),
+                    conversation: Some(destination.conversation),
                 });
                 let returned = self
                     .execute_with_context(
@@ -439,3 +437,47 @@ impl io::Write for PromptBytes {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn analysis_conversation(turns: Vec<Value>) -> Value {
+    let turns: Vec<_> = turns
+        .into_iter()
+        .filter(|turn| turn["question"].is_string())
+        .map(|turn| {
+            let mut context = json!({"question":turn["question"],"asked_at":turn["asked_at"]});
+            if let Some(specs) = turn.get("specs") {
+                context["specs"] = specs.clone();
+            }
+            context
+        })
+        .collect();
+    json!({
+        "turns": turns,
+        "explicit_reply": false,
+        "selection_missing": false,
+        "authority":"Conversation only; re-query tools for evidence. Prior answers are not facts.",
+    })
+}
+
+pub(crate) fn format_diary_answer(
+    language: &str,
+    narrative: Option<String>,
+    numbers: Vec<String>,
+    timestamps: Vec<String>,
+    cited: bool,
+) -> String {
+    let body = [
+        narrative.unwrap_or_default(),
+        numbers.join("\n"),
+        timestamps.join("\n"),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    let message = |key| catalog_text(language, key).unwrap_or_default();
+    if cited {
+        body + &message("agent.saved_sources").replace("{sources}", message("agent.source.diary"))
+    } else {
+        body + message("agent.saved_data")
+    }
+}

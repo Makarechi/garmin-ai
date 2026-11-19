@@ -70,7 +70,7 @@ pub(crate) fn pack_keys() -> Result<impl Iterator<Item = &'static str>, Scenario
 
 #[derive(Clone)]
 pub struct PackSelection {
-    pub revision: i32,
+    pub revision: i64,
     pub tracking_enabled: bool,
     pub collection_enabled: bool,
     pub reminders_enabled: bool,
@@ -180,7 +180,7 @@ impl Database {
         .fetch_optional(&mut *txn)
         .await?
         .ok_or(ScenarioPackError::IncompleteCatalog)?;
-        if old.0 != selection.revision {
+        if i64::from(old.0) != selection.revision {
             return Err(ScenarioPackError::RevisionChanged);
         }
         if old.1 && !selection.llm_enabled {
