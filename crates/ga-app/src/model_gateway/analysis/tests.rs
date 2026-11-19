@@ -27,7 +27,7 @@ impl AnalysisReadTools for Reader {
 
     async fn read(&self, name: &str, arguments: &Map<String, Value>) -> Option<AnalysisToolRead> {
         assert_eq!(name, "personal_baseline");
-        assert!(arguments.is_empty());
+        assert_eq!(arguments["metric"], "sleep_score");
         self.reads.fetch_add(1, Ordering::SeqCst);
         if self.revoke_after_read {
             self.current.store(false, Ordering::SeqCst);
@@ -75,7 +75,7 @@ async fn shares_the_interpretation_budget_and_executes_only_offered_reads()
         json!({"calls":[
             {"name":"delete_entry","arguments_json":"{}"},
             {"name":"personal_baseline","arguments_json":"[]"},
-            {"name":"personal_baseline","arguments_json":"{}"},
+            {"name":"personal_baseline","arguments_json":r#"{"metric":"sleep_score","start":"2026-11-15","end":"2026-11-16"}"#},
         ]}),
         json!({"evidence_ids":[3],"numeric_claims":[{"evidence_id":3,"path":["mean"],"value":78.5}]}),
     ].into_iter();
@@ -91,7 +91,7 @@ async fn shares_the_interpretation_budget_and_executes_only_offered_reads()
         request(&menu, &empty),
         &mut budget,
         &reader,
-        |prompt, versions| {
+        |prompt, versions, _daily| {
             prompts.push(prompt);
             sent_requirements.push(versions);
             ready(replies.next().ok_or(AnalysisError::InvalidDocument))
@@ -153,10 +153,10 @@ async fn stops_before_a_second_model_call_after_context_revocation_or_oversized_
             request(&menu, &empty),
             &mut AnalysisBudget::new(Instant::now()),
             &reader,
-            |_, _| {
+            |_, _, _| {
                 calls += 1;
                 ready(Ok(
-                    json!({"calls":[{"name":"personal_baseline","arguments_json":"{}"}]}),
+                    json!({"calls":[{"name":"personal_baseline","arguments_json":r#"{"metric":"sleep_score","start":"2026-11-15","end":"2026-11-16"}"#}]}),
                 ))
             },
         )

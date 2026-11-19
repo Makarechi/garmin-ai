@@ -2,16 +2,14 @@ use std::time::{Duration, Instant};
 
 use ga_db::{
     Database,
-    conversation_memory::{
-        AnalysisReadContext, ConversationBinding, ConversationReadContext, MemoryError,
-    },
+    conversation_memory::{AnalysisReadContext, ConversationBinding, MemoryError},
     jobs::telegram_inbound::{
         TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundTarget,
         TelegramModelAdmission,
     },
     model_gate::ModelGateError,
     outbox_enqueue::QueueIntentError,
-    share_policy::{DestinationKind, ModelConversation, ShareDestination},
+    share_policy::{DestinationKind, ShareDestination},
 };
 use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError},
@@ -33,7 +31,7 @@ use crate::{
         ActiveModelJob, AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisResult,
         ConfiguredModel, DiaryAnalysisTools, DiaryInterpretationError, GatewayError, ModelGateway,
         ReplySafetyIntent, Sender, TelegramDiaryInterpretation, analysis_conversation,
-        format_diary_answer,
+        format_analysis_answer,
     },
     telegram_settings::TelegramIngressSettings,
     urgent_screen::urgent_notice,
@@ -294,7 +292,14 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
         let channel = format!("telegram:{}", envelope.channel().instance_id());
         let tools =
             DiaryAnalysisTools::new(self.database, context, self.gateway.binding().instance_id)
-                .map_err(|_| Disposition::Text("agent.data_changed"))?;
+                .map_err(|_| Disposition::Text("agent.data_changed"))?
+                .with_daily_access(
+                    self.gateway.binding(),
+                    self.configured.current(),
+                    started,
+                    lease.has_voice_text(),
+                )
+                .await;
         let conversation = analysis_conversation(memory.turns);
         let (id, lease_token) = lease.job_identity();
         let analysis = self
@@ -309,7 +314,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     quality_context: &json!({}),
                     personal_goals: &goals_document,
                     replay_notice: None,
-                    tools: &[tools.offered_tool()],
+                    tools: &tools.offered_tools(),
                 },
                 budget,
                 &tools,
@@ -317,12 +322,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 AnalysisDestination {
                     channel: ShareDestination::new(DestinationKind::Channel, &channel)
                         .map_err(|_| Disposition::Gone)?,
-                    conversation: ModelConversation::Inbound(ConversationReadContext {
-                        binding,
-                        inbound_id: lease.message_id(),
-                        operation_id: lease.operation_id(),
-                        memory: &memory.fence,
-                    }),
+                    subject: context.into(),
                     tracker_versions: &interpretation.channel_versions,
                     job: Some(ActiveModelJob { id, lease_token }),
                     uses_voice_text: lease.has_voice_text(),
@@ -354,12 +354,12 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 if include_current_state_freshness {
                     return Err(Disposition::Text("agent.answer_unverified"));
                 }
-                let body = format_diary_answer(
+                let body = format_analysis_answer(
                     &language,
                     narrative,
                     numbers,
                     timestamps,
-                    !used_evidence.is_empty(),
+                    &used_evidence,
                 );
                 let intent = text_reply(&envelope, &body)
                     .ok_or(Disposition::Text("agent.answer_unverified"))?;

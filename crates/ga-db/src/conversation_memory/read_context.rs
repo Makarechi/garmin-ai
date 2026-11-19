@@ -68,7 +68,7 @@ pub(crate) async fn channel_in<'a>(
                 },
             )
             .await?
-            .map(|(_, instance)| instance),
+            .map(|(provider, instance)| format!("{provider}:{instance}")),
             inbound.goals_revision,
         ),
         AnalysisSubject::Web {

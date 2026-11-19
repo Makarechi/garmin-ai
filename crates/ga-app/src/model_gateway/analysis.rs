@@ -3,8 +3,12 @@ pub use diary::DiaryAnalysisTools;
 
 use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::Instant};
 
-use ga_db::share_policy::{
-    ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
+use ga_db::{
+    conversation_memory::AnalysisSubject,
+    health_analysis::DailyAnalysisEvidence,
+    share_policy::{
+        ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
+    },
 };
 use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError, AnalysisStage},
@@ -49,7 +53,7 @@ pub struct AnalysisQuestion<'a> {
 #[derive(Clone, Copy)]
 pub struct AnalysisDestination<'a> {
     pub channel: ShareDestination<'a>,
-    pub conversation: ModelConversation<'a>,
+    pub subject: AnalysisSubject<'a>,
     pub tracker_versions: &'a BTreeSet<Uuid>,
     pub job: Option<ActiveModelJob>,
     pub uses_voice_text: bool,
@@ -188,7 +192,7 @@ impl ModelGateway<'_> {
             job,
             destination,
         } = scope;
-        answer_with(question, budget, tools, |prompt, versions| {
+        answer_with(question, budget, tools, |prompt, versions, daily| {
             let policy = &policy;
             async move {
                 let mut current_requirements = requirements.to_vec();
@@ -212,7 +216,10 @@ impl ModelGateway<'_> {
                 let channel = destination.map(|destination| ModelChannelSharing {
                     destination: destination.channel,
                     requirements: &channel_requirements,
-                    conversation: Some(destination.conversation),
+                    conversation: Some(ModelConversation::Analysis {
+                        subject: destination.subject,
+                        daily: &daily,
+                    }),
                 });
                 let returned = self
                     .execute_with_context(
@@ -248,7 +255,7 @@ async fn answer_with<T, F, Response>(
 ) -> Result<AnalysisResult, AnalysisError>
 where
     T: AnalysisReadTools,
-    F: FnMut(String, BTreeSet<Uuid>) -> Response,
+    F: FnMut(String, BTreeSet<Uuid>, Vec<DailyAnalysisEvidence>) -> Response,
     Response: Future<Output = Result<Value, AnalysisError>>,
 {
     let mut evidence: Vec<Value> = Vec::new();
@@ -283,9 +290,24 @@ where
             &prompt,
             Instant::now(),
         )?;
-        let output = tokio::time::timeout(remaining, call_model(prompt, tracker_versions.clone()))
-            .await
-            .map_err(|_| AnalysisBudgetError::Timeout)??;
+        let daily = evidence
+            .iter()
+            .filter(|item| {
+                item["tool"]
+                    .as_str()
+                    .is_some_and(DailyAnalysisEvidence::is_daily_tool)
+                    && item["result"].get("error").is_none()
+            })
+            .map(|item| {
+                DailyAnalysisEvidence::from_read(item).ok_or(AnalysisError::InvalidDocument)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = tokio::time::timeout(
+            remaining,
+            call_model(prompt, tracker_versions.clone(), daily),
+        )
+        .await
+        .map_err(|_| AnalysisBudgetError::Timeout)??;
         let step = AnalysisStep::from_value(&output).map_err(AnalysisError::Step)?;
         let response_language = step.language(&language).to_owned();
         let selected = evidence
@@ -458,12 +480,12 @@ pub(crate) fn analysis_conversation(turns: Vec<Value>) -> Value {
     })
 }
 
-pub(crate) fn format_diary_answer(
+pub(crate) fn format_analysis_answer(
     language: &str,
     narrative: Option<String>,
     numbers: Vec<String>,
     timestamps: Vec<String>,
-    cited: bool,
+    evidence: &[Value],
 ) -> String {
     let body = [
         narrative.unwrap_or_default(),
@@ -475,8 +497,28 @@ pub(crate) fn format_diary_answer(
     .collect::<Vec<_>>()
     .join("\n\n");
     let message = |key| catalog_text(language, key).unwrap_or_default();
-    if cited {
-        body + &message("agent.saved_sources").replace("{sources}", message("agent.source.diary"))
+    let mut sources = Vec::new();
+    if evidence.iter().any(|item| {
+        item["tool"]
+            .as_str()
+            .is_some_and(DailyAnalysisEvidence::is_daily_tool)
+    }) {
+        sources.push("Garmin");
+    }
+    if evidence.iter().any(|item| item["tool"] == "events") {
+        sources.push(message("agent.source.diary"));
+    }
+    if !sources.is_empty() {
+        let connector = if language
+            .split('-')
+            .next()
+            .is_some_and(|part| part.eq_ignore_ascii_case("ru"))
+        {
+            " и "
+        } else {
+            " and "
+        };
+        body + &message("agent.saved_sources").replace("{sources}", &sources.join(connector))
     } else {
         body + message("agent.saved_data")
     }

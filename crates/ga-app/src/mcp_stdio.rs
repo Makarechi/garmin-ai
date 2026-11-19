@@ -1,3 +1,5 @@
+use ga_app::read_tool_catalog::ReadTool;
+
 use std::sync::Arc;
 
 use ga_db::{
@@ -27,8 +29,8 @@ use uuid::Uuid;
 use crate::{
     configuration,
     http::tools::{
-        GarminReadError, ReadTool, generic_error_class, generic_input, range_with_kind,
-        read_garmin, read_generic,
+        GarminReadError, generic_error_class, generic_input, range_with_kind, read_garmin,
+        read_generic,
     },
 };
 

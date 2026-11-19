@@ -16,9 +16,11 @@ use uuid::Uuid;
 use crate::{
     Database, ReadinessError, check_readiness,
     conversation_memory::{
-        CONTEXT_DELIVERY_LOCK, ConversationBinding, ConversationReadContext, MemoryError,
-        MemoryFence, current_conversation_channel, current_web_conversation,
+        AnalysisSubject, CONTEXT_DELIVERY_LOCK, ConversationBinding, ConversationReadContext,
+        MemoryError, MemoryFence, analysis_channel_in, current_conversation_channel,
+        current_web_conversation,
     },
+    health_analysis::{DailyAnalysisEvidence, HealthAnalysisError},
     model_gate::onboarding::onboarding_allows_model,
     replay::REPLAY_MUTATION_LOCK,
 };
@@ -117,6 +119,10 @@ pub enum ModelConversation<'a> {
     Web {
         binding: ConversationBinding,
         memory: &'a MemoryFence,
+    },
+    Analysis {
+        subject: AnalysisSubject<'a>,
+        daily: &'a [DailyAnalysisEvidence],
     },
 }
 
@@ -295,6 +301,31 @@ impl Database {
                             return Ok(None);
                         }
                         current_web_conversation(&mut txn, binding, memory).await
+                    }
+                    ModelConversation::Analysis { subject, daily } => {
+                        let current =
+                            analysis_channel_in(&mut txn, subject)
+                                .await
+                                .map_err(|error| match error {
+                                    MemoryError::Busy => SharePolicyError::Busy,
+                                    _ => SharePolicyError::Database,
+                                })?;
+                        if current.as_deref() != Some(channel.destination.instance()) {
+                            return Ok(None);
+                        }
+                        for read in daily {
+                            match read.current(&mut txn, subject).await {
+                                Ok(true) => {}
+                                Err(HealthAnalysisError::Storage(ReadinessError::Unavailable)) => {
+                                    return Err(SharePolicyError::Busy);
+                                }
+                                Err(HealthAnalysisError::Database) => {
+                                    return Err(SharePolicyError::Database);
+                                }
+                                _ => return Ok(None),
+                            }
+                        }
+                        Ok(true)
                     }
                 }
                 .map_err(|error| match error {

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::{DiaryEventRange, DiaryReadError, analysis_events_in};
 use crate::{
     conversation_memory::{AnalysisReadContext, AnalysisSubject, ConversationBinding, MemoryFence},
-    health_analysis::owner_timezone,
+    health_analysis::{DailyAnalysisEvidence, HealthAnalysisError, owner_timezone},
     model_gate::onboarding::onboarding_allows_model,
     share_policy::{DestinationKind, ShareDestination},
 };
@@ -24,7 +24,14 @@ pub(crate) struct DiaryAnalysisFence {
     timezone: String,
     configured_timezone: String,
     goals_revision: u64,
-    reads: Vec<DiaryReadFence>,
+    reads: Vec<AnalysisReadFence>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum AnalysisReadFence {
+    Daily(DailyAnalysisEvidence),
+    Diary(DiaryReadFence),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -52,7 +59,16 @@ impl DiaryAnalysisFence {
             goals_revision,
             reads: evidence
                 .iter()
-                .map(DiaryReadFence::from_evidence)
+                .map(|read| {
+                    if read["tool"]
+                        .as_str()
+                        .is_some_and(DailyAnalysisEvidence::is_daily_tool)
+                    {
+                        DailyAnalysisEvidence::from_read(read).map(AnalysisReadFence::Daily)
+                    } else {
+                        DiaryReadFence::from_evidence(read).map(AnalysisReadFence::Diary)
+                    }
+                })
                 .collect::<Option<_>>()?,
         })
     }
@@ -82,16 +98,9 @@ impl DiaryAnalysisFence {
     pub(crate) fn model_specs(&self) -> Vec<Value> {
         self.reads
             .iter()
-            .map(|read| {
-                let mut arguments = json!({"start":read.start,"end":read.end});
-                if let Some(kind) = &read.kind {
-                    arguments["kind"] = json!(kind);
-                }
-                json!({
-                    "tool":"events",
-                    "arguments":arguments,
-                    "result_hash":read.result_hash.as_deref().unwrap_or(&read.digest),
-                })
+            .map(|read| match read {
+                AnalysisReadFence::Diary(read) => read.specification(),
+                AnalysisReadFence::Daily(read) => read.specification(),
             })
             .collect()
     }
@@ -136,6 +145,18 @@ impl DiaryAnalysisFence {
         }
         let mut versions = BTreeSet::new();
         for read in &self.reads {
+            let read = match read {
+                AnalysisReadFence::Diary(read) => read,
+                AnalysisReadFence::Daily(read) => match read.current(txn, context).await {
+                    Ok(true) => continue,
+                    Err(HealthAnalysisError::Database) => {
+                        return Err(sqlx::Error::Protocol(
+                            "Could not validate daily analysis evidence".into(),
+                        ));
+                    }
+                    _ => return Ok(None),
+                },
+            };
             let Some(range) = read.range() else {
                 return Ok(None);
             };
@@ -169,6 +190,18 @@ impl DiaryReadFence {
             kind: range.kind.map(str::to_owned),
             digest: evidence_digest(&evidence["result"])?,
             result_hash: legacy_result_hash(&evidence["result"]),
+        })
+    }
+
+    fn specification(&self) -> Value {
+        let mut arguments = json!({"start":self.start,"end":self.end});
+        if let Some(kind) = &self.kind {
+            arguments["kind"] = json!(kind);
+        }
+        json!({
+            "tool":"events",
+            "arguments":arguments,
+            "result_hash":self.result_hash.as_deref().unwrap_or(&self.digest),
         })
     }
 
