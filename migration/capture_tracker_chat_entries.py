@@ -250,7 +250,7 @@ def snapshot(session):
     for event in session.scalars(
         select(Event)
         .where(Event.kind.startswith("user.synthetic_chat_"))
-        .order_by(Event.start, Event.id)
+        .order_by(Event.start, Event.kind, Event.id)
     ):
         events.append(
             {
@@ -280,7 +280,8 @@ def snapshot(session):
     }
 
 
-def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases):
+def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases, provider=None,
+            capture_state=snapshot):
     seed_data(engine)
     outputs = []
     for index, case in enumerate(conversation_cases()):
@@ -300,6 +301,32 @@ def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases):
                     )
                 )
                 definition.status = status
+            if "legacy_tracker" in case:
+                version = session.scalar(
+                    select(EventDefinitionVersion)
+                    .join(EventDefinition)
+                    .where(
+                        EventDefinition.key == f"user.synthetic_chat_{case['legacy_tracker']}"
+                    )
+                )
+                pending = session.get(AppState, PENDING)
+                if pending:
+                    session.delete(pending)
+                    session.flush()
+                session.add(
+                    AppState(
+                        key=PENDING,
+                        value={
+                            "definition_version_id": str(version.id),
+                            "button": "tracker_form",
+                            "action": "log",
+                            "event_ids": [],
+                            "question": "Synthetic legacy tracker prompt",
+                            "channel_instance_id": "telegram:primary",
+                            "created_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                )
             if "grant" in case or case.get("revoke"):
                 definition = session.scalar(
                     select(EventDefinition).where(
@@ -385,13 +412,14 @@ def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases):
             session.commit()
         reply = process_message(
             engine,
-            None,
+            provider,
             Settings(_env_file=None, telegram_user_id=42, locale=locale, timezone="UTC"),
             update_id,
             transcript="" if case.get("message", {}).get("voice") else None,
         )
         with Session(engine) as session:
-            outputs.append({**case, "reply": reply, "snapshot": snapshot(session)})
+            outputs.append({**case, "reply": reply, "snapshot": capture_state(session),
+                            **({"source_message_date": now} if "legacy_tracker" in case else {})})
     return outputs
 
 

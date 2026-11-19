@@ -1,0 +1,6019 @@
+[
+  {
+    "message": {
+      "text": "Synthetic old pending entry"
+    },
+    "legacy_tracker": "text",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_text",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "fa4d9893ae6b9c93830bc718b074dc8e99524e11e937a8b311f1501534201ba9",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71001
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [],
+      "audit": [],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": []
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 01:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\! (пустое: =/empty; буквальное /empty: ==/empty; другие команды — с =) (до 50 символов)? Для значения «=» ответьте «==».\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T01:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_text",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "fa4d9893ae6b9c93830bc718b074dc8e99524e11e937a8b311f1501534201ba9",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71002
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [],
+      "audit": [],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": []
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic legacy value"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic old pending entry"
+    },
+    "legacy_tracker": "integer",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_integer",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "61cce7370e2186b3f6d96d8998cd1164172802a40517fcbab5fd508ecc2f0e73",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71004
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_integer"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 01:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\! (≥ -2, ≤ 5)?\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T01:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_integer",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "61cce7370e2186b3f6d96d8998cd1164172802a40517fcbab5fd508ecc2f0e73",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71005
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_integer"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "3"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic old pending entry"
+    },
+    "legacy_tracker": "number",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_number",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "2b05b9bb9e6159b5aece67aaee845b67de194160aceecfaeacd75c782fddda20",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71007
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_number"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 01:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\! (≥ -2, ≤ 5)?\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T01:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_number",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "2b05b9bb9e6159b5aece67aaee845b67de194160aceecfaeacd75c782fddda20",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71008
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_number"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "0.5"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic old pending entry"
+    },
+    "legacy_tracker": "boolean",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_boolean",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "a1f29a99b56f78e8e1d597ef31f05ea684674f07edebf6d4cb23a9fff3b2175b",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71010
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_boolean"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 01:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\!?\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T01:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_boolean",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "a1f29a99b56f78e8e1d597ef31f05ea684674f07edebf6d4cb23a9fff3b2175b",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71011
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_boolean"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "yes"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic old pending entry"
+    },
+    "legacy_tracker": "choice",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_choice",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "eb163a628351294785d4fd0cdf27e1e16c573a50b253400b606913629b7d0ff1",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71013
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_choice"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 01:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\!: =/empty, 2: \" \", =/skip, ==, Straße, A, B? Для значения «=» ответьте «==».\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T01:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_choice",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "eb163a628351294785d4fd0cdf27e1e16c573a50b253400b606913629b7d0ff1",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71014
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_choice"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "A"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic old pending entry"
+    },
+    "legacy_tracker": "json",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_json",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "ee356d163dafec25ea03756e62427b1dc0bb42b43e12bf180085e437c17c1201",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71016
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_json"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 01:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\! (отправьте JSON, например [\"a\", \"b\"] или {\"key\": \"value\"})?\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T01:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_json",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "ee356d163dafec25ea03756e62427b1dc0bb42b43e12bf180085e437c17c1201",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71017
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_json"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "[\"legacy\"]"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic old sensitive entry"
+    },
+    "legacy_tracker": "sensitive",
+    "grant": [
+      "schema"
+    ],
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_sensitive",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "7e77df16da3fc5d568e11db2d9de66f09be1a77b7ba493425a4de7783e766178",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71019
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_sensitive"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105517
+  },
+  {
+    "message": {
+      "text": "2026-11-18 02:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\! (пустое: =/empty; буквальное /empty: ==/empty; другие команды — с =) (до 50 символов)? Для значения «=» ответьте «==».\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T02:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_sensitive",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "7e77df16da3fc5d568e11db2d9de66f09be1a77b7ba493425a4de7783e766178",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71020
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_sensitive"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic legacy sensitive"
+    },
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic denied entry"
+    },
+    "legacy_tracker": "sensitive",
+    "revoke": true,
+    "reply": "Доступ к трекеру изменился. Откройте актуальное меню.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105518
+  },
+  {
+    "message": {
+      "text": "Synthetic unavailable entry"
+    },
+    "legacy_tracker": "text",
+    "tracker_status": {
+      "text": "retired"
+    },
+    "reply": "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "event_ids": [],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105518
+  },
+  {
+    "message": {
+      "text": "/cancel"
+    },
+    "reply": "Уточнение отменено. Можно добавить новую запись.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "/unrecognized"
+    },
+    "legacy_tracker": "text",
+    "tracker_status": {
+      "text": "active"
+    },
+    "reply": "Неизвестная команда. Доступные команды: /help.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "event_ids": [],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105518
+  },
+  {
+    "message": {
+      "text": "/cancel"
+    },
+    "reply": "Уточнение отменено. Можно добавить новую запись.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": ""
+    },
+    "legacy_tracker": "text",
+    "reply": "Пришлите текст или голосовое сообщение.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "event_ids": [],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105518
+  },
+  {
+    "message": {
+      "text": "/cancel"
+    },
+    "reply": "Уточнение отменено. Можно добавить новую запись.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "voice": {
+        "file_id": "synthetic-form-voice",
+        "file_unique_id": "synthetic-form-unique",
+        "duration": 1,
+        "file_size": 128,
+        "mime_type": "audio/ogg"
+      },
+      "caption": "Synthetic old caption"
+    },
+    "legacy_tracker": "text",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_text",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "fa4d9893ae6b9c93830bc718b074dc8e99524e11e937a8b311f1501534201ba9",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71029
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71029": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105518
+  },
+  {
+    "message": {
+      "text": "/cancel"
+    },
+    "reply": "Уточнение отменено. Можно добавить новую запись.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71029": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic recovered old pending"
+    },
+    "legacy_tracker": "text",
+    "reply": "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 0,
+          "start": null,
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_text",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "fa4d9893ae6b9c93830bc718b074dc8e99524e11e937a8b311f1501534201ba9",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71031
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71029": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        },
+        "nl-context:telegram:71031": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    },
+    "source_message_date": 1795105518
+  },
+  {
+    "message": {
+      "text": "2026-11-18 04:00Z"
+    },
+    "reply": "Синтетическое \\[поле\\]\\! (пустое: =/empty; буквальное /empty: ==/empty; другие команды — с =) (до 50 символов)? Для значения «=» ответьте «==».\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": {
+        "action": "log",
+        "button": "tracker_form",
+        "question": "Synthetic legacy tracker prompt",
+        "chat_form": {
+          "end": null,
+          "step": 1,
+          "start": "2026-11-18T04:00:00+00:00",
+          "units": {},
+          "locale": "ru",
+          "values": {},
+          "end_kept": false,
+          "timezone": "UTC",
+          "action_id": "create:user.synthetic_chat_text",
+          "field_order": [
+            "value"
+          ],
+          "schema_hash": "fa4d9893ae6b9c93830bc718b074dc8e99524e11e937a8b311f1501534201ba9",
+          "submission_id": "synthetic-submission",
+          "event_topology": null
+        },
+        "event_ids": [],
+        "prompt_order": [
+          0,
+          71032
+        ],
+        "channel_instance_id": "telegram:primary",
+        "definition_version_id": "user.synthetic_chat_text"
+      },
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71029": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        },
+        "nl-context:telegram:71031": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  },
+  {
+    "message": {
+      "text": "Synthetic recovered legacy entry"
+    },
+    "recover": true,
+    "reply": "Запись сохранена.\n\nФорма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",
+    "snapshot": {
+      "pending": null,
+      "events": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_boolean",
+            "value": true
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_choice",
+            "value": "A"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_integer",
+            "value": 3
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_json",
+            "value": [
+              "legacy"
+            ]
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_number",
+            "value": 0.5
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic legacy value"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_sensitive",
+            "value": "Synthetic legacy sensitive"
+          }
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T04:00:00+00:00",
+          "end": null,
+          "timezone": "UTC",
+          "topology": "point",
+          "revision": 1,
+          "deleted": false,
+          "source": "telegram_text",
+          "payload": {
+            "type": "user.synthetic_chat_text",
+            "value": "Synthetic recovered legacy entry"
+          }
+        }
+      ],
+      "audit": [
+        [
+          "user.synthetic_chat_boolean",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_choice",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_integer",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_json",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_number",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_sensitive",
+          "2026-11-18T02:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T01:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ],
+        [
+          "user.synthetic_chat_text",
+          "2026-11-18T04:00:00+00:00",
+          "create",
+          "telegram:42",
+          1
+        ]
+      ],
+      "nl_state": {
+        "nl-context:telegram:71001": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71004": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71007": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71010": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71013": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71016": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71019": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:17+00:00"
+        },
+        "nl-context:telegram:71029": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        },
+        "nl-context:telegram:71031": {
+          "timezone": "UTC",
+          "message_at": "2026-11-19T16:25:18+00:00"
+        }
+      },
+      "provenance": [
+        {
+          "kind": "user.synthetic_chat_boolean",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_choice",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_integer",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_json",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_number",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T01:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_sensitive",
+          "start": "2026-11-18T02:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        },
+        {
+          "kind": "user.synthetic_chat_text",
+          "start": "2026-11-18T04:00:00+00:00",
+          "original_text": null,
+          "evidence_refs": []
+        }
+      ]
+    }
+  }
+]

@@ -20,7 +20,7 @@ pub enum TrackerTextPreparation {
 }
 
 pub struct TrackerTextSession {
-    txn: Transaction<'static, Postgres>,
+    pub(crate) txn: Transaction<'static, Postgres>,
     request: TrackerTextRequest,
     owner: Uuid,
     scopes: Scopes,
@@ -31,7 +31,8 @@ pub struct TrackerTextSession {
     destination: String,
     candidates: Vec<Value>,
     selected: Option<Value>,
-    fallback: Value,
+    pub(crate) fallback: Value,
+    pub(crate) source: &'static str,
 }
 
 impl TrackerTextSession {
@@ -209,6 +210,7 @@ pub(super) async fn prepare(
             candidates: shareable,
             selected,
             fallback,
+            source: "manual",
         },
     )))
 }

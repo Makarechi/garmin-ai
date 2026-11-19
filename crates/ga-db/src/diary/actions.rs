@@ -1,3 +1,4 @@
+pub(crate) use natural_language::TrackerTextOperation;
 mod community;
 mod forms;
 mod natural_language;

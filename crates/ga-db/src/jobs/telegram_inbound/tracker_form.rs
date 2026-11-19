@@ -116,11 +116,19 @@ pub(super) async fn apply_in(
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;
     }
+    if envelope.kind() != InboundKind::Action
+        && super::analysis_reply::is_analytic_reply(txn, envelope).await?
+    {
+        return Ok(false);
+    }
     let action = action_id(envelope);
     let active_form = pending.as_ref().is_some_and(|pending| {
         pending["chat_form"].is_object() || pending["chat_close"].is_object()
     });
     if action.is_none() && !active_form {
+        if super::tracker_text::control_in(txn, lease, envelope, timezone, &locale).await? {
+            return Ok(true);
+        }
         return selection::apply_in(txn, lease, envelope, timezone, &locale, now, pending).await;
     }
     let inspected = prompt::inspect(txn, binding, lease, envelope, now).await?;
@@ -476,7 +484,7 @@ fn version(form: &Value) -> Result<Uuid, TelegramDiaryCommitError> {
         .ok_or(TelegramDiaryCommitError::Database)
 }
 
-async fn allowed(
+pub(super) async fn allowed(
     txn: &mut Transaction<'_, Postgres>,
     envelope: &InboundEnvelope,
     version: Uuid,
@@ -502,7 +510,7 @@ async fn allowed(
     .map_err(|_| TelegramDiaryCommitError::Database)
 }
 
-async fn order(
+pub(super) async fn order(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,
@@ -520,7 +528,7 @@ async fn order(
     Ok(json!([epoch, update]))
 }
 
-async fn write_reply(
+pub(super) async fn write_reply(
     txn: &mut Transaction<'_, Postgres>,
     lease: &TelegramInboundLease,
     envelope: &InboundEnvelope,
@@ -710,7 +718,7 @@ fn advance_close(
     })
 }
 
-fn with_safety(reply: &str, locale: &str) -> String {
+pub(super) fn with_safety(reply: &str, locale: &str) -> String {
     let safety = say(
         locale,
         "Форма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу.",

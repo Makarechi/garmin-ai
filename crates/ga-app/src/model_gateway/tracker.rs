@@ -17,6 +17,116 @@ use super::{CurrentModelPolicy, ModelGateway, ModelInput, Sender};
 const INSTRUCTION: &str = include_str!("../../../../src/garmin_ai/prompts/tracker_extract.txt");
 
 impl ModelGateway<'_> {
+    pub(crate) async fn process_telegram_tracker_text<'policy, S: Sender>(
+        &self,
+        lease: &ga_db::jobs::telegram_inbound::TelegramInboundLease,
+        timezone: &str,
+        locale: &str,
+        policy: &(impl Fn() -> CurrentModelPolicy<'policy> + Sync),
+        sender: &S,
+    ) -> Result<(), ga_db::jobs::telegram_inbound::TelegramDiaryCommitError> {
+        use super::{ActiveModelJob, runtime::ModelRequestScope};
+        use ga_db::{
+            jobs::telegram_inbound::{TelegramDiaryCommitError, TelegramTrackerTextPreparation},
+            share_policy::ModelChannelSharing,
+        };
+        use ga_domain::channel::InboundEnvelope;
+
+        let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
+            .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
+        let channel = format!("telegram:{}", envelope.channel().instance_id());
+        let channel = ShareDestination::new(DestinationKind::Channel, &channel)
+            .map_err(|_| TelegramDiaryCommitError::Database)?;
+        let (id, lease_token) = lease.job_identity();
+        let job = Some(ActiveModelJob { id, lease_token });
+        let safety_requirements = [self
+            .database
+            .telegram_tracker_model_requirement(lease)
+            .await?];
+        let screen = self
+            .execute_with_context(
+                ModelInput::Structured {
+                    contract: ApprovedModelSchema::SafetyScreen,
+                    instruction: include_str!("../../../../src/garmin_ai/prompts/form_safety.txt")
+                        .trim(),
+                    prompt: envelope
+                        .text()
+                        .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?,
+                    categories: ModelCategories::HEALTH_AND_DIARY,
+                },
+                policy,
+                ModelRequestScope {
+                    requirements: &safety_requirements,
+                    channel: Some(ModelChannelSharing {
+                        destination: channel,
+                        requirements: &[],
+                        conversation: None,
+                    }),
+                    job,
+                },
+                sender,
+            )
+            .await;
+        if screen
+            .as_ref()
+            .is_ok_and(|screen| screen.value["urgent"] == true)
+        {
+            return self
+                .database
+                .finish_telegram_model_notice(lease, crate::urgent_screen::urgent_notice(locale))
+                .await;
+        }
+        let safety_unavailable = screen
+            .as_ref()
+            .ok()
+            .and_then(|screen| screen.value["urgent"].as_bool())
+            .is_none();
+        let destination = ShareDestination::new(DestinationKind::Model, self.selected.instance_id)
+            .map_err(|_| TelegramDiaryCommitError::Database)?;
+        let session = match self
+            .database
+            .prepare_telegram_tracker_text(lease, timezone, locale, destination, safety_unavailable)
+            .await?
+        {
+            TelegramTrackerTextPreparation::Complete => return Ok(()),
+            TelegramTrackerTextPreparation::Model(session) => session,
+        };
+        let prompt = session
+            .prompt()
+            .map_err(|_| TelegramDiaryCommitError::Database)?;
+        let requirements = session
+            .sharing_requirements()
+            .map_err(|_| TelegramDiaryCommitError::Database)?;
+        let channel_requirements = [session.channel_requirement()];
+        let response = self
+            .execute_with_context(
+                ModelInput::Structured {
+                    contract: ApprovedModelSchema::TrackerExtraction,
+                    instruction: INSTRUCTION.trim(),
+                    prompt: &prompt,
+                    categories: ModelCategories::DIARY,
+                },
+                policy,
+                ModelRequestScope {
+                    requirements: &requirements,
+                    channel: Some(ModelChannelSharing {
+                        destination: channel,
+                        requirements: &channel_requirements,
+                        conversation: None,
+                    }),
+                    job,
+                },
+                sender,
+            )
+            .await;
+        let extraction = response
+            .ok()
+            .and_then(|response| TrackerExtraction::from_value(&response.value).ok());
+        session
+            .finish(&self.database, lease, extraction, safety_unavailable)
+            .await
+    }
+
     pub async fn process_tracker_text<'policy>(
         &self,
         request: &TrackerTextRequest,

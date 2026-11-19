@@ -98,12 +98,13 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
             .database
             .admit_telegram_model_text(lease, self.timezone, self.locale)
             .await;
-        let (timezone, locale, undo_anchor) = match admission {
+        let (timezone, locale, undo_anchor, legacy_tracker) = match admission {
             Ok(TelegramModelAdmission::Ready {
                 timezone,
                 locale,
                 undo_anchor,
-            }) => (timezone, locale, undo_anchor),
+                legacy_tracker,
+            }) => (timezone, locale, undo_anchor, legacy_tracker),
             Ok(TelegramModelAdmission::Replied) => return,
             Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy)) => {
                 self.finish(lease, self.locale, Disposition::Retry(IDLE))
@@ -116,6 +117,22 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 return;
             }
         };
+        if legacy_tracker {
+            if let Err(error) = self
+                .gateway
+                .process_telegram_tracker_text(
+                    lease,
+                    &timezone,
+                    &locale,
+                    &|| self.configured.current(),
+                    self.sender,
+                )
+                .await
+            {
+                self.finish(lease, &locale, commit_disposition(error)).await;
+            }
+            return;
+        }
         let envelope = match InboundEnvelope::parse(lease.envelope_json().as_bytes()) {
             Ok(envelope) => envelope,
             Err(_) => {

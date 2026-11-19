@@ -43,6 +43,7 @@ pub enum TelegramModelAdmission {
         timezone: String,
         locale: String,
         undo_anchor: Option<i64>,
+        legacy_tracker: bool,
     },
     Replied,
 }
@@ -120,7 +121,7 @@ impl Database {
                 txn.commit().await?;
                 return Ok(TelegramModelAdmission::Replied);
             }
-            if prompt.draft.is_some() || prompt.guided_form {
+            if prompt.draft.is_some() || (prompt.guided_form && !prompt.legacy_tracker) {
                 return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
             }
             let timezone = owner_timezone(&mut txn, configured_timezone)
@@ -134,6 +135,7 @@ impl Database {
                 timezone,
                 locale,
                 undo_anchor,
+                legacy_tracker: prompt.legacy_tracker,
             })
         })
         .await
@@ -177,6 +179,11 @@ impl Database {
             let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
             if matches!(work, LocalTelegramText::ProviderUnavailable)
                 && super::tracker_form::apply_in(&mut txn,lease,&envelope,"UTC",configured_locale).await? {
+                txn.commit().await?;
+                return Ok(());
+            }
+            if matches!(work, LocalTelegramText::ProviderUnavailable)
+                && super::tracker_text::fallback_in(&mut txn, lease, &envelope, "UTC", configured_locale).await? {
                 txn.commit().await?;
                 return Ok(());
             }

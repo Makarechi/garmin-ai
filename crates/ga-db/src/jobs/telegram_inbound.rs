@@ -8,6 +8,9 @@ mod model_publication;
 mod model_reply;
 mod tracker_form;
 mod tracker_setup;
+mod tracker_text;
+
+pub use tracker_text::{TelegramTrackerTextPreparation, TelegramTrackerTextSession};
 
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
@@ -341,9 +344,13 @@ impl Database {
                           OR (i.kind='voice' AND coalesce(command.input,'')<>'' AND command.input NOT LIKE '/%'
                             AND j.payload->>'local_safety_checked'='true'
                             AND j.payload->>'tracker_caption_checked' IS DISTINCT FROM 'true')
-                          OR (i.kind IN ('text','edit','voice') AND EXISTS(SELECT 1 FROM app_state p
+                          OR (i.kind IN ('text','edit','voice','system') AND EXISTS(SELECT 1 FROM app_state p
                               WHERE p.key=CASE WHEN $3='primary' THEN 'conversation:pending' ELSE concat('conversation:pending:telegram:',$3) END
+                                AND (i.kind<>'system' OR (jsonb_typeof(p.value->'definition_version_id')='string'
+                                  AND jsonb_typeof(p.value->'chat_form') IS DISTINCT FROM 'object'
+                                  AND jsonb_typeof(p.value->'chat_close') IS DISTINCT FROM 'object'))
                                 AND (jsonb_typeof(p.value->'chat_form')='object' OR jsonb_typeof(p.value->'chat_close')='object'
+                                  OR jsonb_typeof(p.value->'definition_version_id')='string'
                                   OR (p.value->>'button'='tracker_select' AND (i.kind<>'voice'
                                     OR j.payload->>'tracker_caption_checked' IS DISTINCT FROM 'true')))
                                 AND CASE WHEN pg_input_is_valid(coalesce(p.value->>'preset_selected_at',p.value->>'created_at'),'timestamptz')

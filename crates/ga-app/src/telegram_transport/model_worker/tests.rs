@@ -16,6 +16,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::*;
+mod tracker;
 use crate::{
     model_gateway::{PreparedRequest, RuntimeModelSettings},
     telegram_input::TelegramBinding,
@@ -282,9 +283,19 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
     }
     sqlx::query("UPDATE conversations SET state=jsonb_set(state,'{analysis_turns}','[]'::jsonb) WHERE id=$1")
         .bind(conversation_id).execute(&pool).await?;
-    let pending = json!({"button":"tracker_select","question":"Synthetic local-only tracker schema",
+    let kind = env::var("GA_TEST_ANALYSIS_TRACKER_KIND").unwrap_or_else(|_| "selection".into());
+    assert!(matches!(kind.as_str(), "selection" | "legacy" | "guided"));
+    let mut pending = json!({"button":"tracker_select","question":"Synthetic local-only tracker schema",
         "options":[{"id":format!("create:{}",Uuid::nil()),"label":"Synthetic local-only tracker schema","definition_version_id":Uuid::nil().to_string()}],
         "created_at":started.to_string(),"prompt_order":[0,999999],"channel_instance_id":"telegram:primary"});
+    if kind != "selection" {
+        pending["button"] = json!("tracker_form");
+        pending["definition_version_id"] = json!(Uuid::nil().to_string());
+        if kind == "guided" {
+            pending["chat_form"] =
+                json!({"action_id":format!("create:{}",Uuid::nil()),"locale":"en"});
+        }
+    }
     sqlx::query("INSERT INTO app_state(key,value) VALUES('conversation:pending',$1::jsonb)")
         .bind(pending.to_string())
         .execute(&pool)
@@ -305,15 +316,17 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
             .fetch_one(&pool)
             .await?;
     assert_eq!(serde_json::from_str::<Value>(&retained)?, pending);
-    sqlx::query("UPDATE app_state SET value=value||'{\"prompt_order\":[0,0]}'::jsonb WHERE key='conversation:pending'").execute(&pool).await?;
-    process(&mut runtime, 4, "1").await?;
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 7);
-    let still_pending: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM app_state WHERE key='conversation:pending')",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(!still_pending);
+    if kind == "selection" {
+        sqlx::query("UPDATE app_state SET value=value||'{\"prompt_order\":[0,0]}'::jsonb WHERE key='conversation:pending'").execute(&pool).await?;
+        process(&mut runtime, 4, "1").await?;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 7);
+        let still_pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM app_state WHERE key='conversation:pending')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(!still_pending);
+    }
     assert_eq!(
         database
             .conversation_memory(conversation, observed)
@@ -329,6 +342,9 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
             .await?
             .turns
             .is_empty()
+    );
+    println!(
+        "Analysis replies bypassed the {kind} tracker prompt without exposing its schema in seven SDK calls"
     );
     Ok(())
 }

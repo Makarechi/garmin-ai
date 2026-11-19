@@ -1,3 +1,5 @@
+mod context;
+pub(crate) use context::TrackerTextOperation;
 mod model;
 pub use model::{TrackerTextPreparation, TrackerTextSession};
 
@@ -7,7 +9,7 @@ use futures_util::TryStreamExt;
 use ga_domain::{
     access::{Scope, Scopes},
     event_input::known_timezone,
-    timestamp::{OffsetTimestamp, StoredInstant},
+    timestamp::StoredInstant,
     tracker_nl::{TrackerRelevance, TrackerTextRequest},
     tracker_selection::is_tracker_proposal,
 };
@@ -114,7 +116,7 @@ impl Database {
                 }
                 let locale =
                     read_locale(&mut txn, context.owner, None, context.configured_locale).await?;
-                let mut timezone = owner_timezone(&mut txn, context.configured_timezone)
+                let timezone = owner_timezone(&mut txn, context.configured_timezone)
                     .await
                     .map_err(|_| TrackerTextError::Database)?;
                 if !known_timezone(&timezone) {
@@ -125,47 +127,24 @@ impl Database {
                 if (!read && !manage) || (request.selected_event_id.is_some() && !read) {
                     return Err(TrackerTextError::Forbidden);
                 }
-                let operation = request.operation_key(context.actor);
-                let locked: bool =
-                    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(72104623,hashtext($1))")
-                        .bind(&operation)
-                        .fetch_one(&mut *txn)
-                        .await?;
-                if !locked {
-                    txn.rollback().await?;
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    continue;
-                }
-                let hashes = request
-                    .request_hashes()
-                    .map_err(|_| TrackerTextError::Invalid)?;
-                let receipt: Option<String> =
-                    sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1")
-                        .bind(&operation)
-                        .fetch_optional(&mut *txn)
-                        .await?;
-                if let Some(receipt) = receipt {
-                    let receipt: Value =
-                        serde_json::from_str(&receipt).map_err(|_| TrackerTextError::Database)?;
-                    if !receipt["request_hash"]
-                        .as_str()
-                        .is_some_and(|hash| hashes.iter().any(|wanted| wanted == hash))
-                    {
-                        return Err(TrackerTextError::Invalid);
+                match Self::tracker_text_operation_in(
+                    &mut txn,
+                    request,
+                    context.actor,
+                    context.scopes,
+                )
+                .await?
+                {
+                    TrackerTextOperation::Busy => {
+                        txn.rollback().await?;
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        continue;
                     }
-                    let result = receipt
-                        .get("result")
-                        .cloned()
-                        .ok_or(TrackerTextError::Database)?;
-                    if result["written"] == true
-                        && !context
-                            .scopes
-                            .permits(&[Scope::ReadDiary, Scope::WriteDiary])
-                    {
-                        return Err(TrackerTextError::Forbidden);
+                    TrackerTextOperation::Receipt(result) => {
+                        txn.commit().await?;
+                        return Ok(TrackerTextPreparation::Complete(result));
                     }
-                    txn.commit().await?;
-                    return Ok(TrackerTextPreparation::Complete(result));
+                    TrackerTextOperation::Pending => {}
                 }
                 let (mut candidates, has_more, best) =
                     ranked(&mut txn, context.owner, &request.text).await?;
@@ -201,36 +180,14 @@ impl Database {
                 } else {
                     None
                 };
-                let context_key = operation.replacen("nl-operation:", "nl-context:", 1);
-                let pinned: Option<String> =
-                    sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1")
-                        .bind(&context_key)
-                        .fetch_optional(&mut *txn)
-                        .await?;
-                let mut message_at = context.message_at;
-                if let Some(pinned) = pinned {
-                    let pinned: Value =
-                        serde_json::from_str(&pinned).map_err(|_| TrackerTextError::Database)?;
-                    if !pinned["request_hash"]
-                        .as_str()
-                        .is_some_and(|hash| hashes.iter().any(|wanted| wanted == hash))
-                    {
-                        return Err(TrackerTextError::Invalid);
-                    }
-                    message_at = StoredInstant::from_legacy_input(&pinned["message_at"])
-                        .ok_or(TrackerTextError::Database)?;
-                    timezone = pinned["timezone"]
-                        .as_str()
-                        .ok_or(TrackerTextError::Database)?
-                        .to_owned();
-                } else {
-                    let value = json!({"request_hash":hashes[0],"message_at":OffsetTimestamp(context.message_at.into()).to_string(),"timezone":timezone});
-                    sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
-                        .bind(&context_key)
-                        .bind(value.to_string())
-                        .execute(&mut *txn)
-                        .await?;
-                }
+                let (message_at, timezone) = Self::tracker_text_clock_in(
+                    &mut txn,
+                    request,
+                    context.actor,
+                    context.message_at,
+                    &timezone,
+                )
+                .await?;
                 let unselected = request.selected_event_id.is_none()
                     && request.selected_definition_version_id.is_none();
                 let selection_required = has_more
