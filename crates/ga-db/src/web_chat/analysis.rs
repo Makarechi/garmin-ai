@@ -6,14 +6,16 @@ use uuid::Uuid;
 
 use super::{Conversation, WebChatError};
 use crate::{
-    conversation_memory::{ConversationBinding, MemoryFence},
+    conversation_memory::{CONTEXT_DELIVERY_LOCK, ConversationBinding, MemoryFence},
     diary::analysis_evidence::DiaryAnalysisFence,
-    share_policy::{MODEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK, try_shared_lock},
+    personal_goals::GOAL_POLICY_LOCK,
+    share_policy::{MODEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK, SharePolicyError, try_shared_lock},
 };
 
 // The Python rollback reader already rejects dependent-analysis references
 // without a matching legacy record. Only Rust can validate this evidence.
 pub(super) const ANALYSIS_REFERENCE: &str = "analysis-sleep-timing:native-web-diary-v1";
+pub(super) const NATIVE_TIMING_REFERENCE: &str = "sleep-timing:native-web-analysis-v1";
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct WebAnalysisProof {
@@ -32,6 +34,14 @@ impl WebAnalysisProof {
                 .map(|(source, epoch)| (source.to_string(), epoch.to_string()))
                 .collect(),
             web_diary_analysis: analysis,
+        }
+    }
+
+    pub(super) fn reference(&self) -> &'static str {
+        if self.web_diary_analysis.single_sleep_timing() {
+            NATIVE_TIMING_REFERENCE
+        } else {
+            ANALYSIS_REFERENCE
         }
     }
 
@@ -65,11 +75,20 @@ pub(super) async fn current_web_analysis(
     txn: &mut Transaction<'_, Postgres>,
     conversation: Conversation,
     id: Uuid,
+    reference: &str,
 ) -> Result<bool, WebChatError> {
-    for lock in [MODEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK] {
-        try_shared_lock(txn, lock)
-            .await
-            .map_err(|_| WebChatError::Database)?;
+    let point = reference == NATIVE_TIMING_REFERENCE;
+    let policy = [MODEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK];
+    let timing_context = [CONTEXT_DELIVERY_LOCK, GOAL_POLICY_LOCK];
+    for lock in policy
+        .into_iter()
+        .chain(timing_context.into_iter().filter(|_| point))
+    {
+        match try_shared_lock(txn, lock).await {
+            Ok(()) => {}
+            Err(SharePolicyError::Busy) if point => return Ok(false),
+            Err(_) => return Err(WebChatError::Database),
+        }
     }
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT memory_fence::text FROM outbox_messages WHERE id=$1 AND owner_id=$2 AND conversation_id=$3",
@@ -84,6 +103,9 @@ pub(super) async fn current_web_analysis(
     else {
         return Ok(false);
     };
+    if proof.reference() != reference {
+        return Ok(false);
+    }
     let Some(memory) = proof.memory() else {
         return Ok(false);
     };

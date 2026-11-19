@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 
 use ga_db::{
     conversation_memory::AnalysisSubject,
-    health_analysis::DailyAnalysisEvidence,
+    health_analysis::{DailyAnalysisEvidence, SLEEP_ANALYSIS},
     share_policy::{
         ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
     },
@@ -505,7 +505,11 @@ pub(crate) fn format_analysis_answer(
     }) {
         sources.push("Garmin");
     }
-    if evidence.iter().any(|item| item["tool"] == "events") {
+    if evidence.iter().any(|item| {
+        item["tool"] == "events"
+            || (item["tool"] == SLEEP_ANALYSIS
+                && item["result"]["algorithm_version"] == "sleep-analysis-v1")
+    }) {
         sources.push(message("agent.source.diary"));
     }
     if !sources.is_empty() {

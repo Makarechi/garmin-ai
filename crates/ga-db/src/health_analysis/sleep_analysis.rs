@@ -30,8 +30,10 @@ const LIMITATIONS: [&str; 5] = [
     "Nap intervals longer than 24 hours are excluded as invalid input, not interpreted as complete sleep.",
 ];
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NapPolicy {
+    #[default]
     Separate,
     IncludeConfirmed,
 }
@@ -115,80 +117,91 @@ impl DailyHealthReader {
         timezone: &str,
         policy: NapPolicy,
     ) -> Result<Value, HealthAnalysisError> {
-        let period = HealthPeriod::new(start, end)?;
-        if period.days() > 31 {
-            return Err(HealthAnalysisError::SleepRange);
-        }
-        if !known_timezone(timezone) {
-            return Err(HealthAnalysisError::InvalidTimezone);
-        }
-        let dates: Vec<Date> = (0..period.days())
-            .map(|offset| start + time::Duration::days(offset))
-            .collect();
-        let summaries = summaries(&mut self.0, start, end).await?;
-        let nights = nights(&mut self.0, &dates, timezone).await?;
-        let naps = naps(&mut self.0, start, end).await?;
-        let overlapping = overlapping_nights(&mut self.0, &naps).await?;
+        let result = sleep_analysis_in(&mut self.0, start, end, timezone, policy).await?;
         self.0.commit().await?;
-
-        let mut rows = Vec::with_capacity(dates.len());
-        let mut durations = Vec::new();
-        for day in dates {
-            let row = sleep_day(
-                day,
-                summaries.get(&day),
-                nights.get(&format!("sleep:{day}")),
-                naps.get(&day).map_or(&[], Vec::as_slice),
-                &overlapping,
-                policy,
-            )?;
-            if let Some(duration) = row["documented_sleep_seconds"].as_f64() {
-                durations.push(duration);
-            }
-            rows.push(row);
-        }
-        let total = rows.len();
-        let mut budget = 20_000;
-        let mut visible = Vec::new();
-        let mut next_day = None;
-        for row in rows {
-            let input = serde_json::to_vec(&row).map_err(|_| HealthAnalysisError::Database)?;
-            let output = legacy_json::encode(&input, Utf8Layout::Archive, 640_000)
-                .map_err(|_| HealthAnalysisError::Database)?;
-            let size = str::from_utf8(&output)
-                .map_err(|_| HealthAnalysisError::Database)?
-                .chars()
-                .count()
-                + 2;
-            if size > budget {
-                next_day = Some(row["day"].clone());
-                break;
-            }
-            budget -= size;
-            visible.push(row);
-        }
-        let units: Map<String, Value> = FIELDS
-            .into_iter()
-            .map(|name| {
-                (
-                    name.into(),
-                    json!(if name == "sleep_score" { "score" } else { "s" }),
-                )
-            })
-            .collect();
-        Ok(json!({
-            "algorithm_version":"sleep-analysis-v1", "nap_policy":policy.label(),
-            "timezone":timezone, "units":units,
-            "rows":visible, "rows_truncated":next_day.is_some(), "next_day":next_day,
-            "summary":{
-                "days":total, "available_sleep_days":durations.len(),
-                "mean_documented_sleep_seconds":mean(&durations),
-                "bedtime_circular_sd_minutes":regularity(nights.values().map(|night|night.bedtime)),
-                "wake_time_circular_sd_minutes":regularity(nights.values().map(|night|night.wake_time)),
-                "timed_main_sessions":nights.len(),
-            }, "limitations":LIMITATIONS,
-        }))
+        Ok(result)
     }
+}
+
+pub(super) async fn sleep_analysis_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: Date,
+    end: Date,
+    timezone: &str,
+    policy: NapPolicy,
+) -> Result<Value, HealthAnalysisError> {
+    let period = HealthPeriod::new(start, end)?;
+    if period.days() > 31 {
+        return Err(HealthAnalysisError::SleepRange);
+    }
+    if !known_timezone(timezone) {
+        return Err(HealthAnalysisError::InvalidTimezone);
+    }
+    let dates: Vec<Date> = (0..period.days())
+        .map(|offset| start + time::Duration::days(offset))
+        .collect();
+    let summaries = summaries(txn, start, end).await?;
+    let nights = nights(txn, &dates, timezone).await?;
+    let naps = naps(txn, start, end).await?;
+    let overlapping = overlapping_nights(txn, &naps).await?;
+
+    let mut rows = Vec::with_capacity(dates.len());
+    let mut durations = Vec::new();
+    for day in dates {
+        let row = sleep_day(
+            day,
+            summaries.get(&day),
+            nights.get(&format!("sleep:{day}")),
+            naps.get(&day).map_or(&[], Vec::as_slice),
+            &overlapping,
+            policy,
+        )?;
+        if let Some(duration) = row["documented_sleep_seconds"].as_f64() {
+            durations.push(duration);
+        }
+        rows.push(row);
+    }
+    let total = rows.len();
+    let mut budget = 20_000;
+    let mut visible = Vec::new();
+    let mut next_day = None;
+    for row in rows {
+        let input = serde_json::to_vec(&row).map_err(|_| HealthAnalysisError::Database)?;
+        let output = legacy_json::encode(&input, Utf8Layout::Archive, 640_000)
+            .map_err(|_| HealthAnalysisError::Database)?;
+        let size = str::from_utf8(&output)
+            .map_err(|_| HealthAnalysisError::Database)?
+            .chars()
+            .count()
+            + 2;
+        if size > budget {
+            next_day = Some(row["day"].clone());
+            break;
+        }
+        budget -= size;
+        visible.push(row);
+    }
+    let units: Map<String, Value> = FIELDS
+        .into_iter()
+        .map(|name| {
+            (
+                name.into(),
+                json!(if name == "sleep_score" { "score" } else { "s" }),
+            )
+        })
+        .collect();
+    Ok(json!({
+        "algorithm_version":"sleep-analysis-v1", "nap_policy":policy.label(),
+        "timezone":timezone, "units":units,
+        "rows":visible, "rows_truncated":next_day.is_some(), "next_day":next_day,
+        "summary":{
+            "days":total, "available_sleep_days":durations.len(),
+            "mean_documented_sleep_seconds":mean(&durations),
+            "bedtime_circular_sd_minutes":regularity(nights.values().map(|night|night.bedtime)),
+            "wake_time_circular_sd_minutes":regularity(nights.values().map(|night|night.wake_time)),
+            "timed_main_sessions":nights.len(),
+        }, "limitations":LIMITATIONS,
+    }))
 }
 
 async fn summaries(

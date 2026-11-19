@@ -298,6 +298,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     self.configured.current(),
                     started,
                     lease.has_voice_text(),
+                    self.timezone,
                 )
                 .await;
         let conversation = analysis_conversation(memory.turns);

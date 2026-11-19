@@ -45,6 +45,10 @@ struct DiaryReadFence {
 }
 
 impl DiaryAnalysisFence {
+    pub(crate) fn single_sleep_timing(&self) -> bool {
+        matches!(self.reads.as_slice(), [AnalysisReadFence::Daily(read)] if read.single_sleep_timing())
+    }
+
     pub(crate) fn from_evidence(
         model: &str,
         timezone: &str,

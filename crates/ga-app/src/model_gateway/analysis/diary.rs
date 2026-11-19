@@ -6,6 +6,7 @@ use ga_db::{
     diary::DiaryEventRange,
     health_analysis::{
         DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON, PERSONAL_BASELINE,
+        SLEEP_ANALYSIS,
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
@@ -23,6 +24,7 @@ const EVENTS: &str = "events";
 static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Events));
 static BASELINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Baseline));
 static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ComparePeriods));
+static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sleep));
 
 fn model_description(tool: ReadTool) -> Value {
     let entry = tool.catalog_entry();
@@ -34,7 +36,7 @@ pub struct DiaryAnalysisTools<'a> {
     database: &'a Database,
     context: AnalysisSubject<'a>,
     model: ShareDestination<'a>,
-    daily: bool,
+    daily_timezone: Option<&'a str>,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
@@ -47,7 +49,7 @@ impl<'a> DiaryAnalysisTools<'a> {
             database,
             context: context.into(),
             model: ShareDestination::new(DestinationKind::Model, model_instance)?,
-            daily: false,
+            daily_timezone: None,
         })
     }
 
@@ -57,6 +59,7 @@ impl<'a> DiaryAnalysisTools<'a> {
         policy: CurrentModelPolicy<'_>,
         at: StoredInstant,
         uses_voice: bool,
+        configured_timezone: &'a str,
     ) -> Self {
         let categories = ModelCategories::HEALTH_AND_DIARY;
         let operation = if uses_voice {
@@ -64,9 +67,11 @@ impl<'a> DiaryAnalysisTools<'a> {
         } else {
             ModelOperation::Structured(categories)
         };
-        self.daily =
-            authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
-                && self.database.analysis_health_allowed(self.context).await;
+        if authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
+            && self.database.analysis_health_allowed(self.context).await
+        {
+            self.daily_timezone = Some(configured_timezone);
+        }
         self
     }
 
@@ -75,7 +80,7 @@ impl<'a> DiaryAnalysisTools<'a> {
             name: EVENTS,
             description: &DESCRIPTION,
         }];
-        if self.daily {
+        if self.daily_timezone.is_some() {
             offered.extend([
                 OfferedReadTool {
                     name: PERSONAL_BASELINE,
@@ -85,6 +90,10 @@ impl<'a> DiaryAnalysisTools<'a> {
                     name: PERIOD_COMPARISON,
                     description: &COMPARISON,
                 },
+                OfferedReadTool {
+                    name: SLEEP_ANALYSIS,
+                    description: &SLEEP,
+                },
             ]);
         }
         offered
@@ -93,7 +102,7 @@ impl<'a> DiaryAnalysisTools<'a> {
 
 impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     fn categories(&self) -> ModelCategories {
-        if self.daily {
+        if self.daily_timezone.is_some() {
             ModelCategories::HEALTH_AND_DIARY
         } else {
             ModelCategories::DIARY
@@ -107,12 +116,14 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     }
 
     async fn read(&self, name: &str, args: &Map<String, Value>) -> Option<AnalysisToolRead> {
-        if self.daily && DailyAnalysisEvidence::is_daily_tool(name) {
+        if let Some(timezone) = self.daily_timezone
+            && DailyAnalysisEvidence::is_daily_tool(name)
+        {
             let query = DailyAnalysisQuery::from_arguments(name, args)?;
             return Some(AnalysisToolRead {
                 value: self
                     .database
-                    .read_analysis_daily(self.context, &query)
+                    .read_analysis_daily(self.context, &query, timezone)
                     .await
                     .ok()??,
                 tracker_versions: Default::default(),

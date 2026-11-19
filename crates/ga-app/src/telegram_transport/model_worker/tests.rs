@@ -26,6 +26,10 @@ use crate::{
 };
 
 const HEALTH_QUESTION: &str = "What is the synthetic Garmin sleep baseline?";
+const SLEEP_QUESTION: &str = "When did the synthetic sleep interval start?";
+const SLEEP_DAY: &str = "2024-02-18";
+const SLEEP_START: &str = "2024-02-17T22:15:02.119000+00:00";
+const SLEEP_END: &str = "2024-02-18T06:23:08+00:00";
 
 struct SyntheticProvider {
     calls: AtomicUsize,
@@ -121,6 +125,28 @@ impl Sender for SyntheticProvider {
                 json!({"answer":"Here is the synthetic Garmin baseline.","evidence_ids":[1],
                        "numeric_claims":[{"evidence_id":1,"path":["mean"],"value":70}],
                        "response_language":"en"})
+            }
+            10 => {
+                assert_eq!(prompt["text"], SLEEP_QUESTION);
+                json!({"intent":"question","confidence":1.0,"response_language":"en"})
+            }
+            11 => {
+                assert_eq!(prompt["question"], SLEEP_QUESTION);
+                assert!(prompt["tools"].as_array().is_some_and(|tools| {
+                    tools.iter().any(|tool| tool["name"] == "analysis_sleep")
+                }));
+                json!({"calls":[{"name":"analysis_sleep","arguments_json":json!({
+                    "start":SLEEP_DAY,"end":SLEEP_DAY,"timing_only":true
+                }).to_string()}]})
+            }
+            12 => {
+                let evidence = &prompt["evidence"][0]["result"];
+                assert_eq!(evidence["status"], "available");
+                let start = &evidence["rows"][0]["main_interval"]["start"];
+                assert_eq!(*start, SLEEP_START);
+                json!({"evidence_ids":[1],"timestamp_claims":[{
+                    "evidence_id":1,"path":["rows",0,"main_interval","start"],"value":start
+                }],"response_language":"en"})
             }
             _ => panic!("Unexpected provider retry"),
         };
@@ -434,5 +460,71 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
             .await?,
         ReplyDispatchResult::Cancelled
     );
+
+    sqlx::query(allow_sleep)
+        .bind(owner_id)
+        .bind(true)
+        .execute(&pool)
+        .await?;
+    seed_sleep_timing(&pool).await?;
+    process(&mut runtime, 6, SLEEP_QUESTION).await?;
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 13);
+    let (reply_id, body): (Uuid, String) = sqlx::query_as(
+        "SELECT o.id,o.intent#>>'{blocks,0,text}' FROM outbox_messages o
+         JOIN inbound_messages i ON i.id=o.inbound_message_id WHERE i.normalized_text=$1",
+    )
+    .bind(SLEEP_QUESTION)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        body.contains("22:15") && body.contains("saved Garmin data"),
+        "{body}"
+    );
+    let claim = database
+        .claim_outbox_reply(destination(), started, LEASE)
+        .await?
+        .ok_or("Expected claimed sleep reply")?;
+    assert_eq!(claim.outbox_id, reply_id);
+    sqlx::query("UPDATE timeline_intervals SET confirmed=false WHERE id=$1")
+        .bind(format!("sleep:{SLEEP_DAY}"))
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        database
+            .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
+                panic!("Invalid sleep evidence escaped to Telegram")
+            })
+            .await?,
+        ReplyDispatchResult::Cancelled
+    );
+    Ok(())
+}
+
+async fn seed_sleep_timing(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let start = OffsetDateTime::from(SLEEP_START.parse::<StoredInstant>()?);
+    let end = OffsetDateTime::from(SLEEP_END.parse::<StoredInstant>()?);
+    let milliseconds = |at: OffsetDateTime| i64::try_from(at.unix_timestamp_nanos() / 1_000_000);
+    let payload = json!({"dailySleepDTO":{"calendarDate":SLEEP_DAY,
+        "sleepStartTimestampGMT":milliseconds(start)?, "sleepEndTimestampGMT":milliseconds(end)?}});
+    let source = Uuid::from_u128(760);
+    let hash = "a".repeat(64);
+    let mut txn = pool.begin().await?;
+    sqlx::query("INSERT INTO source_payloads(id,source,endpoint,source_key,payload_hash,archive_key,payload,fetched_at,parser_version,status)
+        VALUES($1,'garmin_connect','sleep',$2,$3,'synthetic/sleep.json',$4::jsonb,$5,$6,'normalized')")
+        .bind(source).bind(SLEEP_DAY).bind(&hash).bind(payload.to_string()).bind(end)
+        .bind(ga_db::replay::GARMIN_PARSER_VERSION)
+        .execute(&mut *txn).await?;
+    sqlx::query("INSERT INTO app_state(key,value) VALUES($1,$2::jsonb)")
+        .bind(format!("ingest:garmin_connect:sleep:{SLEEP_DAY}"))
+        .bind(
+            json!({"source_ref":source.to_string(),"hash":hash,"status":"normalized"}).to_string(),
+        )
+        .execute(&mut *txn)
+        .await?;
+    sqlx::query("INSERT INTO timeline_intervals(id,start,\"end\",label,source,confidence,confirmed,evidence)
+                 VALUES($1,$2,$3,'sleep','garmin_connect',1,true,$4::jsonb)")
+        .bind(format!("sleep:{SLEEP_DAY}")).bind(start).bind(end)
+        .bind(json!({"source_ref":source.to_string()}).to_string()).execute(&mut *txn).await?;
+    txn.commit().await?;
     Ok(())
 }
