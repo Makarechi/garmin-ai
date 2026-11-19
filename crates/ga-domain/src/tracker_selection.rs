@@ -82,7 +82,7 @@ fn compile(source: &str) -> Result<Regex, SelectionError> {
     Ok(RegexBuilder::new(&pattern).case_insensitive(true).build()?)
 }
 
-fn alnum(ch: char) -> bool {
+pub(crate) fn alnum(ch: char) -> bool {
     let point = u32::from(ch);
     let index = unicode::ALNUM_RANGES.partition_point(|&(_, end)| end < point);
     unicode::ALNUM_RANGES
