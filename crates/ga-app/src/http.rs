@@ -8,6 +8,7 @@ mod exports;
 mod garmin_auth;
 mod hypotheses;
 mod natural_language;
+mod onboarding;
 mod operations;
 mod personal_goals;
 mod scenario_packs;
@@ -56,6 +57,8 @@ fn router(state: AppState) -> Router {
         .route("/context/calendar/import", any(calendar_context::import))
         .route("/scenario-packs", any(scenario_packs::collection))
         .route("/scenario-packs/{key}", any(scenario_packs::selection))
+        .route("/onboarding", any(onboarding::preferences))
+        .route("/tracker-profile", any(onboarding::tracker_profile))
         .route("/actions", any(tracker_actions::available))
         .route("/natural-language/trackers", any(natural_language::tracker))
         .route(

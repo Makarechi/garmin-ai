@@ -171,7 +171,7 @@ impl Database {
         Ok(created)
     }
 
-    pub(super) async fn create_tracker_in(
+    pub(crate) async fn create_tracker_in(
         txn: &mut Transaction<'_, Postgres>,
         request: ManageCustomDefinition<'_>,
         draft: &TrackerSetupDraft,
