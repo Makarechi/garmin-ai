@@ -7,8 +7,10 @@ authorized context. This reservation uses the dedicated model pool. The model
 request runs between short storage operations.
 
 The server checks the current model and channel permissions and the context
-used by the model before publishing a reply. Model-assisted diary entries,
-clarifications and replies use the same transaction as the inbound message.
+used by the model before publishing a diary entry or clarification. A fixed
+safety notice uses only the current owner conversation and carries no diary
+references. Diary entries, clarifications and replies use the same transaction
+as the inbound message.
 A failed save rolls back its attempted changes before producing the owner reply.
 Retries use the original reply, and reusing an ID for different text returns 409.
 
@@ -20,6 +22,9 @@ reply across the runtime boundary. The native test confirmed a read receipt
 after fetching the message. During a held model request, an unrelated local
 command completed and a duplicate shared the original reply. Revoking diary
 consent while a synthetic response was in flight prevented the proposed write.
+A separate run cancelled a pending clarification from another tab during a
+safety classification. The safety notice reached the owner and was reused
+after reconnecting through the Python server with the same message ID.
 
 The tested model flows are new entries, clarifications and safety replies.
 Corrections, analysis and combined browser flows remain release work.

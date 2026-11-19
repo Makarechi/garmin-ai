@@ -213,6 +213,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     received = submit(native, "Synthetic safety classification")
     assert received["reply"]["text"] == reference["reply"]["text"]
     assert "112" in received["reply"]["text"]
+    safety_notice = reference["reply"]["text"]
 
     reference = submit(python, "Give a synthetic clarification")
     received = submit(native, "Give a synthetic clarification through Rust")
@@ -225,6 +226,31 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
             )
         ).one()
         assert stored == (QUESTION, "Give a synthetic clarification through Rust")
+
+    identity = str(uuid4())
+    sentence = "Synthetic safety classification concurrent with cancellation"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(submit, native, sentence, identity)
+        try:
+            assert active.wait(3)
+            pool.submit(submit, native, "/cancel").result(timeout=2)
+            assert not pending.done(), "The provider must still be waiting"
+            with engine.connect() as connection:
+                assert (
+                    connection.scalar(
+                        text(
+                            "SELECT value FROM app_state WHERE key='conversation:pending:web:local'"
+                        )
+                    )
+                    is None
+                )
+        finally:
+            release.set()
+        raced = pending.result(timeout=8)
+    assert raced["reply"]["text"] == safety_notice, raced["reply"]["text"]
+    assert submit(python, sentence, identity) == {**raced, "duplicate": True}
+    active.clear()
+    release.clear()
 
     identity = str(uuid4())
     before = len(native_calls)
