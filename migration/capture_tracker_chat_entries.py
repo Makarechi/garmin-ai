@@ -280,8 +280,15 @@ def snapshot(session):
     }
 
 
-def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases, provider=None,
-            capture_state=snapshot):
+def capture(
+    engine,
+    locale="en",
+    *,
+    seed_data=seed,
+    conversation_cases=cases,
+    provider=None,
+    capture_state=snapshot,
+):
     seed_data(engine)
     outputs = []
     for index, case in enumerate(conversation_cases()):
@@ -305,9 +312,7 @@ def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases, pr
                 version = session.scalar(
                     select(EventDefinitionVersion)
                     .join(EventDefinition)
-                    .where(
-                        EventDefinition.key == f"user.synthetic_chat_{case['legacy_tracker']}"
-                    )
+                    .where(EventDefinition.key == f"user.synthetic_chat_{case['legacy_tracker']}")
                 )
                 pending = session.get(AppState, PENDING)
                 if pending:
@@ -418,8 +423,14 @@ def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases, pr
             transcript="" if case.get("message", {}).get("voice") else None,
         )
         with Session(engine) as session:
-            outputs.append({**case, "reply": reply, "snapshot": capture_state(session),
-                            **({"source_message_date": now} if "legacy_tracker" in case else {})})
+            outputs.append(
+                {
+                    **case,
+                    "reply": reply,
+                    "snapshot": capture_state(session),
+                    **({"source_message_date": now} if "legacy_tracker" in case else {}),
+                }
+            )
     return outputs
 
 

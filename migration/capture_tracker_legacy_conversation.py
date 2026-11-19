@@ -34,8 +34,16 @@ def cases():
     for name in ["text", "integer", "number", "boolean", "choice", "json"]:
         answer("Synthetic old pending entry", legacy_tracker=name)
         answer("2026-11-18 01:00Z")
-        answer({"text": "Synthetic legacy value", "integer": "3", "number": "0.5",
-                "boolean": "yes", "choice": "A", "json": '["legacy"]'}[name])
+        answer(
+            {
+                "text": "Synthetic legacy value",
+                "integer": "3",
+                "number": "0.5",
+                "boolean": "yes",
+                "choice": "A",
+                "json": '["legacy"]',
+            }[name]
+        )
     answer("Synthetic old sensitive entry", legacy_tracker="sensitive", grant=["schema"])
     answer("2026-11-18 02:00Z")
     answer("Synthetic legacy sensitive")
@@ -46,8 +54,12 @@ def cases():
     answer("/cancel")
     answer("", legacy_tracker="text")
     answer("/cancel")
-    rows.append({"message": {"voice": entries.VOICE, "caption": "Synthetic old caption"},
-                 "legacy_tracker": "text"})
+    rows.append(
+        {
+            "message": {"voice": entries.VOICE, "caption": "Synthetic old caption"},
+            "legacy_tracker": "text",
+        }
+    )
     answer("/cancel")
     answer("Synthetic recovered old pending", legacy_tracker="text")
     answer("2026-11-18 04:00Z")
@@ -71,8 +83,9 @@ def model_cases():
         ("sensitive", "model-consent-denied blue"),
         ("text", "provider-unavailable blue"),
     ]:
-        rows.append({"message": {"text": f"Synthetic at 2026-11-18 03:00Z {tail}"},
-                     "legacy_tracker": name})
+        rows.append(
+            {"message": {"text": f"Synthetic at 2026-11-18 03:00Z {tail}"}, "legacy_tracker": name}
+        )
         if name == "sensitive":
             rows[-1]["grant"] = ["schema"]
     rows[0]["recover"] = True
@@ -105,12 +118,22 @@ class SyntheticProvider:
         elif field["schema"].get("type") == "boolean":
             value = True
         result = {
-            "schema_version": "tracker.nl.v1", "intent": "create_entry",
+            "schema_version": "tracker.nl.v1",
+            "intent": "create_entry",
             "definition_version_id": candidate["definition_version_id"],
             "start": "2026-11-18T03:00:00+00:00",
             "start_evidence": {"start": 0, "end": len(text), "quote": text},
-            "fields": [{"field_id": field["field_id"], "value": value,
-                        "evidence": {"start": text.rindex(quote), "end": text.rindex(quote) + len(quote), "quote": quote}}],
+            "fields": [
+                {
+                    "field_id": field["field_id"],
+                    "value": value,
+                    "evidence": {
+                        "start": text.rindex(quote),
+                        "end": text.rindex(quote) + len(quote),
+                        "quote": quote,
+                    },
+                }
+            ],
             "confidence": 0.99,
         }
         if "low-confidence" in text:
@@ -127,17 +150,27 @@ class SyntheticProvider:
 def nl_snapshot(session, conversation_cases):
     result = entries.snapshot(session)
     identities = entries.versions(session)
-    for event in session.scalars(select(Event).where(Event.kind.startswith("user.synthetic_chat_"))):
+    for event in session.scalars(
+        select(Event).where(Event.kind.startswith("user.synthetic_chat_"))
+    ):
         identities[str(event.id)] = f"entry:{event.kind}:{event.start.isoformat()}"
     states = {}
     for index, case in enumerate(conversation_cases()):
-        if "legacy_tracker" not in case or not (case["message"].get("text") or case["message"].get("caption")):
+        if "legacy_tracker" not in case or not (
+            case["message"].get("text") or case["message"].get("caption")
+        ):
             continue
-        version = session.scalar(select(EventDefinitionVersion).join(EventDefinition).where(
-            EventDefinition.key == f"user.synthetic_chat_{case['legacy_tracker']}"))
+        version = session.scalar(
+            select(EventDefinitionVersion)
+            .join(EventDefinition)
+            .where(EventDefinition.key == f"user.synthetic_chat_{case['legacy_tracker']}")
+        )
         operation_id = f"telegram:{71001 + index}"
-        request = NaturalLanguageRequest(text=case["message"].get("text") or case["message"].get("caption") or "", operation_id=operation_id,
-                                        selected_definition_version_id=version.id)
+        request = NaturalLanguageRequest(
+            text=case["message"].get("text") or case["message"].get("caption") or "",
+            operation_id=operation_id,
+            selected_definition_version_id=version.id,
+        )
         request_hash = sha256(request.model_dump_json(exclude_none=False).encode()).hexdigest()
         identity = sha256(f"telegram:42\0{operation_id}".encode()).hexdigest()
         for prefix in ["nl-context", "nl-operation"]:
@@ -150,10 +183,17 @@ def nl_snapshot(session, conversation_cases):
                 )
     result["nl_state"] = states
     result["provenance"] = [
-        {"kind": event.kind, "start": event.start.isoformat(),
-         "original_text": event.original_text, "evidence_refs": entries.normalized(event.evidence_refs,identities)}
-        for event in session.scalars(select(Event).where(Event.kind.startswith("user.synthetic_chat_"))
-                                     .order_by(Event.start,Event.kind,Event.id))
+        {
+            "kind": event.kind,
+            "start": event.start.isoformat(),
+            "original_text": event.original_text,
+            "evidence_refs": entries.normalized(event.evidence_refs, identities),
+        }
+        for event in session.scalars(
+            select(Event)
+            .where(Event.kind.startswith("user.synthetic_chat_"))
+            .order_by(Event.start, Event.kind, Event.id)
+        )
     ]
     return result
 
@@ -175,10 +215,14 @@ if __name__ == "__main__":
     engine = isolated_engine()
     try:
         provider = SyntheticProvider() if args.model else None
-        results = entries.capture(engine, args.locale, seed_data=seed,
-                                  conversation_cases=model_cases if args.model else cases,
-                                  provider=provider,
-                                  capture_state=model_snapshot if args.model else legacy_snapshot)
+        results = entries.capture(
+            engine,
+            args.locale,
+            seed_data=seed,
+            conversation_cases=model_cases if args.model else cases,
+            provider=provider,
+            capture_state=model_snapshot if args.model else legacy_snapshot,
+        )
         args.output.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
         print(f"Captured {len(results)} legacy tracker steps in {args.locale}")
         if provider:
