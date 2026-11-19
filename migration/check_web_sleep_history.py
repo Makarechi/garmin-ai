@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -181,6 +182,30 @@ def compare(engine, python, native, message, identity):
     verify_receipts(engine, (identity,))
 
 
+@contextmanager
+def native_server(binary):
+    env = {
+        "GA_DATABASE_URL": os.environ["GA_TEST_DATABASE_URL"],
+        "GA_API_TOKENS": json.dumps(API_TOKENS),
+    }
+    with subprocess.Popen(
+        [binary.resolve(strict=True), "serve", "--port", "0"],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=env,
+    ) as process:
+        try:
+            line = process.stdout.readline().strip()
+            assert line.startswith("Listening on http://127.0.0.1:"), line
+            with httpx.Client(
+                base_url=line.removeprefix("Listening on "), timeout=5, trust_env=False
+            ) as native:
+                yield native
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -199,26 +224,8 @@ def main():
             TestClient(create_app(settings, engine=engine)) as python,
         ):
             message, identity = provision(engine, python)
-            env = {
-                "GA_DATABASE_URL": os.environ["GA_TEST_DATABASE_URL"],
-                "GA_API_TOKENS": json.dumps(API_TOKENS),
-            }
-            with subprocess.Popen(
-                [args.binary.resolve(strict=True), "serve", "--port", "0"],
-                stdout=subprocess.PIPE,
-                text=True,
-                env=env,
-            ) as process:
-                try:
-                    line = process.stdout.readline().strip()
-                    assert line.startswith("Listening on http://127.0.0.1:"), line
-                    with httpx.Client(
-                        base_url=line.removeprefix("Listening on "), timeout=5, trust_env=False
-                    ) as native:
-                        compare(engine, python, native, message, identity)
-                finally:
-                    process.terminate()
-                    process.wait(timeout=5)
+            with native_server(args.binary) as native:
+                compare(engine, python, native, message, identity)
     finally:
         engine.dispose()
     print("Matched Python sleep reply visibility, replay-safe receipt, and delivery fences")
