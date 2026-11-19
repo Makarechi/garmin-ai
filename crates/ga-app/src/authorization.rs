@@ -31,7 +31,7 @@ impl Authorization {
         Self::parse(legacy.as_deref(), scoped.as_deref()).ok_or_else(invalid_credentials)
     }
 
-    fn parse(legacy: Option<&str>, scoped: Option<&str>) -> Option<Self> {
+    pub(crate) fn parse(legacy: Option<&str>, scoped: Option<&str>) -> Option<Self> {
         let mut tokens = Vec::new();
         if let Some(key) = legacy.filter(|key| strong(key)) {
             tokens.push(Token {

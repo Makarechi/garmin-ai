@@ -6,6 +6,16 @@ The runtime uses UID and GID 1000, with certificate and timezone data. It receiv
 
 Both image architectures passed the core-only probe on a read-only filesystem with Linux capabilities dropped and networking disabled. A separate run installed an empty TimescaleDB, upgraded a database at `f103aa712b44`, confirmed `c54f8a72d130`, repeated migration, and checked HTTP readiness. The local ARM64 Docker VM ran AMD64 through emulation.
 
+## Local configuration
+
+Run `garmin-ai-rust configure` from the installation directory to prepare
+`.env` and private data, token, backup and lock directories. Use
+`--instance`, `--db-port` and `--api-port` when creating an additional
+installation. The command keeps existing secrets and initialized instance
+identity. It checks the configured paths and database endpoints before
+replacing the settings file. It also accepts `--locale`, `--timezone` and
+`--units`.
+
 ## Native Compose preview
 
 `compose.rust.yml` runs PostgreSQL, the native migrator, the HTTP service, and the native worker.

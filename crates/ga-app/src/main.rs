@@ -12,6 +12,7 @@ mod mcp_stdio;
 mod migrate;
 mod replay_worker;
 mod retention;
+mod setup;
 
 use std::{env, ffi::OsStr, path::PathBuf, process::ExitCode};
 
@@ -44,6 +45,8 @@ enum Command {
         #[arg(long, default_value_t = 8765)]
         port: u16,
     },
+    /// Prepare local installation settings and private storage directories
+    Configure(setup::Options),
     /// Sign in to Garmin from a local terminal and save the verified session
     Login {
         #[arg(long)]
@@ -178,6 +181,12 @@ fn main() -> ExitCode {
         Some(Command::Demo { host, port }) => {
             if http::demo::serve(&host, port).is_err() {
                 eprintln!("Could not run the demo server.");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Configure(options)) => {
+            if let Err(error) = setup::run(options) {
+                eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
         }
