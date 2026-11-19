@@ -206,8 +206,10 @@ The runtime includes `model` in the `structured` request and supplies the
 selected configuration and resolved secret references in `context`. The host
 checks the versioned descriptor before sending the prompt. It uses the same
 deadline and sharing checks as the built-in gateway and validates each returned
-value against the approved application schema before saving it. The native
-extension runtime supports structured output.
+value against the approved application schema before saving it. The model
+request line is limited to 1 MiB, including escaped prompt, schema and context.
+A reply with `"error":"unavailable"` applies the gateway's upstream cooldown.
+The native extension runtime supports structured output.
 
 Declarative scenario packs have a separate data-only format documented in
 [scenario packs](scenario-packs.md). The

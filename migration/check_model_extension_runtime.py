@@ -104,6 +104,20 @@ def verify(binary, adapter, root, engine):
         assert "Модель недоступна" in withdrawn["reply"]["text"]
         assert log.read_text().splitlines() == invoked * 3
 
+        set_model_categories(engine, ["health", "diary"])
+        unavailable = NOTE + " unavailable extension upstream"
+        first = submit(client, unavailable)
+        assert "Ничего не сохранено" in first["reply"]["text"]
+        assert log.read_text().splitlines() == invoked * 4
+        during_cooldown = submit(client, NOTE + " while the extension recovers")
+        assert "Ничего не сохранено" in during_cooldown["reply"]["text"]
+        assert log.read_text().splitlines() == invoked * 4
+
+    with native_server(binary, root, engine, adapter, log) as client:
+        during_cooldown = submit(client, NOTE + " after restarting the gateway")
+        assert "Ничего не сохранено" in during_cooldown["reply"]["text"]
+        assert log.read_text().splitlines() == invoked * 4
+
     with engine.connect() as connection:
         count = connection.scalar(
             text(
@@ -121,7 +135,8 @@ def verify(binary, adapter, root, engine):
         )
         assert audit == 1
     print(
-        "Verified model selection, scoped secrets, a durable web log, one retry, invalid output and in-flight revocation"
+        "Verified model selection, scoped secrets, a durable web log, one retry, invalid output, "
+        "in-flight revocation, and upstream cooldown across restart"
     )
 
 

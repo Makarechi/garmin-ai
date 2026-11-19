@@ -10,10 +10,14 @@ use std::{
 
 use serde_json::{Value, json};
 
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut input = Vec::new();
-    stdin().take(65537).read_to_end(&mut input)?;
-    if input.len() > 65536 {
+    stdin()
+        .take(MAX_REQUEST_BYTES as u64 + 1)
+        .read_to_end(&mut input)?;
+    if input.len() > MAX_REQUEST_BYTES {
         return Err("request exceeds the extension limit".into());
     }
     let request: Value = serde_json::from_slice(&input)?;
@@ -61,7 +65,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return Err("fixture release deadline expired".into());
                 }
             }
-            if prompt.contains("invalid extension output") {
+            if prompt.contains("unavailable extension upstream") {
+                Err("unavailable")
+            } else if prompt.contains("invalid extension output") {
                 Ok(json!({"value":{"intent":"log","confidence":"synthetic-invalid"}}))
             } else {
                 Ok(json!({"value":{

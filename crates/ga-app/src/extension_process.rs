@@ -13,6 +13,9 @@ use tokio::{
 
 const VERSION: u8 = 1;
 const MAX_REQUEST: usize = 64 * 1024;
+// The structured model envelope carries an escaped application prompt,
+// its approved schema and the selected extension context.
+const MAX_MODEL_REQUEST: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ExtensionProcessError {
@@ -23,6 +26,7 @@ pub enum ExtensionProcessError {
     Transport,
     Protocol,
     Rejected,
+    Unavailable,
     Descriptor,
 }
 
@@ -36,6 +40,7 @@ impl fmt::Display for ExtensionProcessError {
             Self::Transport => "The extension process failed.",
             Self::Protocol => "The extension returned an invalid response envelope.",
             Self::Rejected => "The extension refused the request.",
+            Self::Unavailable => "The extension is temporarily unavailable.",
             Self::Descriptor => "The extension returned an invalid descriptor.",
         })
     }
@@ -84,6 +89,7 @@ pub struct ExtensionProcess<'a> {
     directory: &'a Path,
     instance_id: &'a str,
     context: Option<Value>,
+    request_limit: usize,
 }
 
 impl<'a> ExtensionProcess<'a> {
@@ -103,7 +109,17 @@ impl<'a> ExtensionProcess<'a> {
             directory: directory.ok_or(ExtensionProcessError::Configuration)?,
             instance_id,
             context: None,
+            request_limit: MAX_REQUEST,
         })
+    }
+
+    pub(crate) fn for_model(
+        executable: &'a Path,
+        instance_id: &'a str,
+    ) -> Result<Self, ExtensionProcessError> {
+        let mut process = Self::new(executable, instance_id)?;
+        process.request_limit = MAX_MODEL_REQUEST;
+        Ok(process)
     }
 
     /// Set the context explicitly supplied to the extension instead of inheriting environment variables.
@@ -154,7 +170,7 @@ impl<'a> ExtensionProcess<'a> {
         }
         let mut wire =
             serde_json::to_vec(&envelope).map_err(|_| ExtensionProcessError::Protocol)?;
-        if wire.len() >= MAX_REQUEST {
+        if wire.len() >= self.request_limit {
             return Err(ExtensionProcessError::Protocol);
         }
         wire.push(b'\n');
@@ -171,7 +187,10 @@ impl<'a> ExtensionProcess<'a> {
         }
         match (reply.result, reply.error) {
             (Some(result), None) => Ok(result.to_owned()),
-            (None, Some(_)) => Err(ExtensionProcessError::Rejected),
+            (None, Some(WireError::Unavailable)) => Err(ExtensionProcessError::Unavailable),
+            (None, Some(WireError::Unsupported | WireError::InvalidRequest)) => {
+                Err(ExtensionProcessError::Rejected)
+            }
             _ => Err(ExtensionProcessError::Protocol),
         }
     }
