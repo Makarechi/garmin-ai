@@ -8,20 +8,23 @@ use ga_domain::{
     model_consent::ModelCategories,
     timestamp::StoredInstant,
 };
+use serde_json::Value;
 use sqlx::{Acquire, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::analysis::{ANALYSIS_REFERENCE, WebAnalysisProof};
 use super::send::{finish_web_chat_message, web_chat_envelope};
 use super::{WebChatError, WebChatSnapshot, WebChatSubmission, prepare, timestamp};
 use crate::{
     Database,
     channel_ingress::{InboundReceipt, ensure_conversation, ingest},
-    conversation_memory::ConversationBinding,
+    conversation_memory::{ConversationBinding, MemoryFence},
     diary::{
         ClarificationClock, ClarificationReply, CreateAgentLogBatch, InterpretationContext,
         InterpretationContextQuery, StoredSystemEvent, UndoDiaryOperation,
         agent_correction::{AgentCorrection, AgentCorrectionContext},
+        analysis_evidence::DiaryAnalysisFence,
         cancel_in, interpretation_context_in, save_clarification_in,
         undo::{latest_undo_audit, try_undo_and_reconcile},
     },
@@ -45,7 +48,7 @@ pub struct WebChatInterpretationContext<'a> {
 
 pub enum WebChatModelReply<'a> {
     Unverified,
-    SafetyNotice(&'static str),
+    FixedNotice(&'static str),
     Clarify {
         question: &'a str,
         expected: WebChatInterpretationContext<'a>,
@@ -57,6 +60,13 @@ pub enum WebChatModelReply<'a> {
     Undo {
         command: &'a AgentInterpretation,
         language: &'a str,
+        expected: WebChatInterpretationContext<'a>,
+    },
+    Analysis {
+        answer: &'a str,
+        memory: &'a MemoryFence,
+        goals_revision: u64,
+        evidence: &'a [Value],
         expected: WebChatInterpretationContext<'a>,
     },
 }
@@ -184,6 +194,7 @@ impl Database {
             let receipt = ingest(&mut txn, &session.envelope)
                 .await
                 .map_err(|_| WebChatError::Database)?;
+            let mut analysis_proof = None;
             let (message, facts) = render_model_reply(
                 &mut txn,
                 &session,
@@ -191,9 +202,10 @@ impl Database {
                 configured_timezone,
                 reply,
                 saved_message,
+                &mut analysis_proof,
             )
             .await?;
-            finish_web_chat_message(
+            let reply = finish_web_chat_message(
                 &mut txn,
                 &session.envelope,
                 &receipt,
@@ -202,6 +214,9 @@ impl Database {
                 session.at,
             )
             .await?;
+            if let Some(proof) = analysis_proof {
+                proof.store(&mut txn, reply).await?;
+            }
             txn.commit().await?;
             Ok(receipt)
         })
@@ -220,23 +235,26 @@ async fn render_model_reply(
     configured_timezone: &str,
     reply: WebChatModelReply<'_>,
     saved_message: impl FnOnce(&[StoredSystemEvent]) -> Option<String>,
+    analysis_proof: &mut Option<WebAnalysisProof>,
 ) -> Result<(String, Vec<String>), WebChatError> {
     let expected = match &reply {
         WebChatModelReply::Unverified => return Ok((MODEL_FAILED.to_owned(), Vec::new())),
         // The fixed safety notice uses no diary context or tracker references.
-        WebChatModelReply::SafetyNotice(message) => return Ok(((*message).to_owned(), Vec::new())),
+        WebChatModelReply::FixedNotice(message) => return Ok(((*message).to_owned(), Vec::new())),
         WebChatModelReply::Clarify { expected, .. }
         | WebChatModelReply::Mutation { expected, .. }
-        | WebChatModelReply::Undo { expected, .. } => *expected,
+        | WebChatModelReply::Undo { expected, .. }
+        | WebChatModelReply::Analysis { expected, .. } => *expected,
     };
     let Some(context) = current_interpretation(txn, session, configured_timezone, expected).await?
     else {
         return Ok((MODEL_FAILED.to_owned(), Vec::new()));
     };
 
+    let mut versions = context.events.channel_versions;
     let message = match reply {
         WebChatModelReply::Unverified => MODEL_FAILED.to_owned(),
-        WebChatModelReply::SafetyNotice(message) => message.to_owned(),
+        WebChatModelReply::FixedNotice(message) => message.to_owned(),
         WebChatModelReply::Clarify { question, .. } => {
             save_clarification_in(
                 txn,
@@ -322,8 +340,34 @@ async fn render_model_reply(
                     .to_owned()
             }
         }
+        WebChatModelReply::Analysis {
+            answer,
+            memory,
+            goals_revision,
+            evidence,
+            ..
+        } => {
+            let Some(fence) = DiaryAnalysisFence::from_evidence(
+                expected.model.instance(),
+                &session.timezone,
+                configured_timezone,
+                goals_revision,
+                evidence,
+            ) else {
+                return Ok((MODEL_FAILED.to_owned(), Vec::new()));
+            };
+            let Some(cited) = fence.check_web(txn, session.binding(), memory).await? else {
+                return Ok((MODEL_FAILED.to_owned(), Vec::new()));
+            };
+            versions.extend(cited);
+            *analysis_proof = Some(WebAnalysisProof::new(memory, fence));
+            cancel_in(txn, session.binding())
+                .await
+                .map_err(|_| WebChatError::Database)?;
+            answer.to_owned()
+        }
     };
-    let ids: Vec<_> = context.events.channel_versions.into_iter().collect();
+    let ids: Vec<_> = versions.into_iter().collect();
     let definitions: Vec<(Uuid, Uuid)> =
         sqlx::query_as("SELECT id,definition_id FROM event_definition_versions WHERE id=ANY($1)")
             .bind(&ids)
@@ -332,7 +376,7 @@ async fn render_model_reply(
     if definitions.len() != ids.len() {
         return Err(WebChatError::Database);
     }
-    let facts = definitions
+    let mut facts: Vec<_> = definitions
         .into_iter()
         .flat_map(|(version, definition)| {
             [
@@ -341,6 +385,9 @@ async fn render_model_reply(
             ]
         })
         .collect();
+    if analysis_proof.is_some() {
+        facts.push(ANALYSIS_REFERENCE.to_owned());
+    }
     Ok((message, facts))
 }
 

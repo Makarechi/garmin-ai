@@ -17,7 +17,7 @@ use crate::{
     channel_ingress::telegram_poll::telegram_primary,
     check_readiness,
     conversation_memory::{ConversationBinding, MemoryFence as ConversationFence},
-    jobs::telegram_inbound::analysis_reply::DiaryAnalysisFence,
+    diary::analysis_evidence::DiaryAnalysisFence,
     jobs::telegram_notices::TelegramNoticeFence,
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{MODEL_CONSENT_LOCK, try_shared_lock},

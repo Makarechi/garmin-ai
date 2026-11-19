@@ -11,6 +11,7 @@ use ga_db::{
 };
 use ga_domain::model_response::StructuredModelOutput;
 use ga_model::ModelTransportError;
+use serde_json::Value;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
 use uuid::Uuid;
