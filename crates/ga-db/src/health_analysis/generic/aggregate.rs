@@ -1,3 +1,4 @@
+mod composition;
 mod measurements;
 mod rows;
 
@@ -8,13 +9,12 @@ use std::{
 
 use ga_archive::json_spool::{JsonDocument, JsonSpool};
 use ga_domain::{
-    analysis_spec::AnalysisSpec,
+    analysis_spec::{AnalysisSpec, DerivedAnalysisSpec},
     metric_aggregate::{MetricSample, aggregate_samples},
     timestamp::StoredInstant,
 };
 use serde_json::{Map, Value, json};
 use sqlx_postgres::types::PgInterval;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{GenericAnalysisError, GenericAnalysisReader, source::SourceSelection};
@@ -33,8 +33,6 @@ struct AggregateContract {
 struct AggregateWindow {
     start: i64,
     end: i64,
-    start_at: OffsetDateTime,
-    end_at: OffsetDateTime,
     cutoff: i64,
     predecessor_start: i64,
     measurement_start: i64,
@@ -49,7 +47,11 @@ fn interval(microseconds: i64) -> PgInterval {
 }
 
 impl AggregateContract {
-    fn new(id: Uuid, document: Value, spec: &AnalysisSpec) -> Result<Self, GenericAnalysisError> {
+    fn new(
+        id: Uuid,
+        document: Value,
+        spec: &DerivedAnalysisSpec,
+    ) -> Result<Self, GenericAnalysisError> {
         let time_semantics = document["time_semantics"]
             .as_str()
             .ok_or(GenericAnalysisError::Database)?
@@ -98,31 +100,27 @@ impl AggregateContract {
 
 impl AggregateWindow {
     fn new(
-        spec: &AnalysisSpec,
+        spec: &DerivedAnalysisSpec,
         contract: &AggregateContract,
     ) -> Result<Self, GenericAnalysisError> {
-        let start = i64::try_from(spec.start().unix_timestamp_nanos() / 1000)
-            .map_err(|_| GenericAnalysisError::Calendar)?;
-        let end = i64::try_from(spec.end().unix_timestamp_nanos() / 1000)
-            .map_err(|_| GenericAnalysisError::Calendar)?;
+        let start = spec.start_microseconds();
+        let end = spec.end_microseconds();
         let predecessor_start = match contract.gap {
-            Some(gap) => {
-                let local = StoredInstant::legacy_input_with_offset(&spec.document()["start"])
-                    .ok_or(GenericAnalysisError::Calendar)?;
-                let shifted = local
-                    .checked_sub(time::Duration::seconds(gap))
-                    .filter(|at| (1..=9999).contains(&at.year()))
-                    .ok_or(GenericAnalysisError::Calendar)?;
-                i64::try_from(shifted.unix_timestamp_nanos() / 1000)
-                    .map_err(|_| GenericAnalysisError::Calendar)?
-            }
+            Some(gap) => spec
+                .start_before_seconds(gap)
+                .map_err(|error| match error {
+                    ga_domain::analysis_spec::InvalidAnalysisSpec::CalendarOverflow => {
+                        GenericAnalysisError::Calendar
+                    }
+                    ga_domain::analysis_spec::InvalidAnalysisSpec::Validation => {
+                        GenericAnalysisError::Database
+                    }
+                })?,
             None => start,
         };
         Ok(Self {
             start,
             end,
-            start_at: spec.start(),
-            end_at: spec.end(),
             cutoff: spec.knowledge_cutoff_microseconds(),
             predecessor_start,
             measurement_start: if contract.time_semantics == "interval" {
@@ -227,9 +225,9 @@ impl GenericAnalysisReader {
 
     async fn aggregate_payload(
         &mut self,
-        spec: &AnalysisSpec,
+        spec: &DerivedAnalysisSpec,
     ) -> Result<Value, GenericAnalysisError> {
-        let id = self.metric_contract(spec).await?;
+        let id = self.metric_contract(spec.document()).await?;
         let contract_json:String=sqlx::query_scalar(
             "SELECT json_build_object('version',version,'value_kind',value_kind,'unit',unit,'scale_id',scale_id,
              'scale_version',scale_version,'aggregation',aggregation,'allowed_methods',allowed_methods,
@@ -242,7 +240,7 @@ impl GenericAnalysisReader {
             spec,
         )?;
         let window = AggregateWindow::new(spec, &contract)?;
-        let source = SourceSelection::from_spec(spec)?;
+        let source = SourceSelection::from_source(spec.document()["source"].as_str())?;
         self.restore_display_timezone().await?;
         let mut rows = self
             .aggregate_observations(&contract, &window, &source, false)
@@ -425,18 +423,28 @@ impl GenericAnalysisReader {
         Ok(payload)
     }
 
+    async fn finish_aggregate_document(
+        self,
+        payload: Value,
+    ) -> Result<JsonDocument, GenericAnalysisError> {
+        let mut output = JsonSpool::default();
+        serde_json::to_writer(&mut output, &payload).map_err(|_| GenericAnalysisError::Database)?;
+        drop(payload);
+        self.txn.commit().await?;
+        output.finish().map_err(|_| GenericAnalysisError::Database)
+    }
+
     pub async fn aggregate_metric(
         mut self,
         spec: &AnalysisSpec,
     ) -> Result<JsonDocument, GenericAnalysisError> {
         let work = async {
             self.prepare(spec).await?;
-            let payload = self.aggregate_payload(spec).await?;
-            let mut output = JsonSpool::default();
-            serde_json::to_writer(&mut output, &payload)
+            let derived = spec
+                .derive_aggregate()
                 .map_err(|_| GenericAnalysisError::Database)?;
-            self.txn.commit().await?;
-            output.finish().map_err(|_| GenericAnalysisError::Database)
+            let payload = self.aggregate_payload(&derived).await?;
+            self.finish_aggregate_document(payload).await
         };
         tokio::time::timeout(Duration::from_secs(120), work)
             .await

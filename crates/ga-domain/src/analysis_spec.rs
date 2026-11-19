@@ -1,4 +1,7 @@
+mod derived;
 mod source;
+
+pub use derived::DerivedAnalysisSpec;
 
 use std::{error::Error, fmt};
 
@@ -268,20 +271,10 @@ impl AnalysisSpec {
             "knowledge_cutoff":cutoff_json,"time_relation":relation,"threshold":threshold,
             "threshold_operator":operator,"timezone":timezone,
         });
-        let mut hash_document = document.clone();
-        let hash_fields = hash_document
-            .as_object_mut()
-            .ok_or(InvalidAnalysisSpec::Validation)?;
-        for key in ["threshold", "threshold_operator", "timezone"] {
-            if hash_fields.get(key) == Some(&Value::Null) {
-                hash_fields.remove(key);
-            }
-        }
-        let encoded =
-            python_ascii_json(&hash_document).map_err(|_| InvalidAnalysisSpec::Validation)?;
+        let hash = document_hash(&document)?;
         Ok(Self {
             document,
-            hash: sha256_hex(encoded.as_bytes()),
+            hash,
             operation,
             start,
             end,
@@ -311,6 +304,46 @@ impl AnalysisSpec {
     pub fn comparison_microseconds(&self) -> Option<(i64, i64)> {
         self.comparison
     }
+
+    /// Keep the normalized fields used by Python's aggregate model copy.
+    pub fn derive_aggregate(&self) -> Result<DerivedAnalysisSpec, InvalidAnalysisSpec> {
+        let mut document = self.document.clone();
+        document["operation"] = Value::from("aggregate_metric");
+        DerivedAnalysisSpec::new(
+            document,
+            i64::try_from(self.start.unix_timestamp_nanos() / 1000)
+                .map_err(|_| InvalidAnalysisSpec::CalendarOverflow)?,
+            i64::try_from(self.end.unix_timestamp_nanos() / 1000)
+                .map_err(|_| InvalidAnalysisSpec::CalendarOverflow)?,
+            self.cutoff,
+        )
+    }
+
+    /// Preserve comparison dates whose UTC position crosses the storage calendar.
+    pub fn derive_comparison_aggregate(&self) -> Result<DerivedAnalysisSpec, InvalidAnalysisSpec> {
+        let (start, end) = self.comparison.ok_or(InvalidAnalysisSpec::Validation)?;
+        let mut document = self.document.clone();
+        document["operation"] = Value::from("aggregate_metric");
+        document["start"] = document["comparison_start"].clone();
+        document["end"] = document["comparison_end"].clone();
+        document["comparison_start"] = Value::Null;
+        document["comparison_end"] = Value::Null;
+        DerivedAnalysisSpec::new(document, start, end, self.cutoff)
+    }
+}
+
+fn document_hash(document: &Value) -> Result<String, InvalidAnalysisSpec> {
+    let mut hash_document = document.clone();
+    let hash_fields = hash_document
+        .as_object_mut()
+        .ok_or(InvalidAnalysisSpec::Validation)?;
+    for key in ["threshold", "threshold_operator", "timezone"] {
+        if hash_fields.get(key) == Some(&Value::Null) {
+            hash_fields.remove(key);
+        }
+    }
+    let encoded = python_ascii_json(&hash_document).map_err(|_| InvalidAnalysisSpec::Validation)?;
+    Ok(sha256_hex(encoded.as_bytes()))
 }
 
 fn text<'a>(
