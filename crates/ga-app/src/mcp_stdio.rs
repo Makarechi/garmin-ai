@@ -73,12 +73,16 @@ pub(crate) async fn run() -> Result<(), &'static str> {
         database,
         owner,
         timezone: timezone.unwrap_or_else(|| "Europe/Bratislava".to_owned()),
-        read_tools: [ReadTool::Events, ReadTool::WellbeingObservations]
-            .into_iter()
-            .chain(ReadTool::GARMIN_READS)
-            .chain(std::iter::once(ReadTool::Freshness))
-            .map(read_tool)
-            .collect::<Result<_, _>>()?,
+        read_tools: [
+            ReadTool::Events,
+            ReadTool::WellbeingObservations,
+            ReadTool::EventDefinitions,
+        ]
+        .into_iter()
+        .chain(ReadTool::GARMIN_READS)
+        .chain(std::iter::once(ReadTool::Freshness))
+        .map(read_tool)
+        .collect::<Result<_, _>>()?,
         write_tools: WRITE_TOOLS
             .iter()
             .take(if writes { WRITE_TOOLS.len() } else { 0 })
@@ -129,6 +133,7 @@ impl Mcp {
         let enable_writes = !self.write_tools.is_empty();
         let result = match call.name.as_ref() {
             "events" => self.events(args).await,
+            "event_definitions" => self.definitions(args).await,
             "wellbeing_observations" => self.wellbeing(args).await,
             "data_freshness" => self.garmin(ReadTool::Freshness, args).await,
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
@@ -153,6 +158,22 @@ impl Mcp {
 }
 
 impl Mcp {
+    async fn definitions(&self, args: Map<String, Value>) -> Result<ToolResult, &'static str> {
+        let page = crate::http::tools::definition_input(&args)?;
+        let permit = self
+            .active_reads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "RuntimeError")?;
+        let document = self
+            .database
+            .event_definitions(page, Some(self.owner))
+            .await
+            .map_err(diary_error)?;
+        Ok(ToolResult::data(document, Some(permit)))
+    }
+
     async fn wellbeing(
         &self,
         args: serde_json::Map<String, Value>,

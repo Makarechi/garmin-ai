@@ -12,9 +12,11 @@ pub use agent_batch::CreateAgentLogBatch;
 
 pub mod custom_entries;
 pub mod custom_registry;
+mod definition_discovery;
 pub use custom_registry::{
     ActivatedCustomDefinition, CustomRegistryError, ManageCustomDefinition, StoredCustomDefinition,
 };
+pub use definition_discovery::DefinitionPage;
 
 mod metrics;
 mod proactive_answers;

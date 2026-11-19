@@ -32,6 +32,7 @@ pub(crate) enum ReadTool {
     Activities,
     ActivityDetails,
     Events,
+    EventDefinitions,
     Timeline,
     DeviceHistory,
     Freshness,
@@ -67,12 +68,13 @@ impl ReadTool {
         Self::CoffeeSleep,
         Self::Insights,
     ];
-    const IMPLEMENTED: [Self; 20] = [
+    const IMPLEMENTED: [Self; 21] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
         Self::ActivityDetails,
         Self::Events,
+        Self::EventDefinitions,
         Self::Timeline,
         Self::Freshness,
         Self::Baseline,
@@ -97,6 +99,7 @@ impl ReadTool {
             Self::Activities => "activities",
             Self::ActivityDetails => "activity_details",
             Self::Events => "events",
+            Self::EventDefinitions => "event_definitions",
             Self::Timeline => "timeline",
             Self::DeviceHistory => "device_history",
             Self::Freshness => "data_freshness",
@@ -268,6 +271,17 @@ impl ReadTool {
                     "cursor":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Cursor"}}),
                 &[][..],
             ),
+            Self::EventDefinitions => (
+                "Page through system, custom and retired definitions and immutable version contracts.",
+                "event_definitionsArgs",
+                json!({
+                    "after_key":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"After Key"},
+                    "definition_key":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Definition Key"},
+                    "before_version":{"anyOf":[{"type":"integer"},{"type":"null"}],"default":null,"title":"Before Version"},
+                    "limit":{"default":10,"title":"Limit","type":"integer"}
+                }),
+                &[][..],
+            ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
                 "data_freshnessArgs",
@@ -359,6 +373,15 @@ async fn execute_read_tool(
         Ok(arguments) => arguments,
         Err(error) => return error.into_response(),
     };
+    if matches!(tool, ReadTool::EventDefinitions) {
+        let Ok(page) = definition_input(&arguments) else {
+            return invalid_arguments();
+        };
+        return match database.event_definitions(page, None).await {
+            Ok(document) => document_response(document),
+            Err(error) => diary_failure(error),
+        };
+    }
     if matches!(tool, ReadTool::Events) {
         let Some((start, end, kind)) = range_with_kind(&arguments) else {
             return invalid_arguments();
@@ -763,4 +786,43 @@ fn document_response(document: JsonDocument) -> Response {
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes));
     response
+}
+
+pub(crate) fn definition_input(
+    arguments: &Map<String, Value>,
+) -> Result<ga_db::diary::DefinitionPage<'_>, &'static str> {
+    if arguments.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "after_key" | "definition_key" | "before_version" | "limit"
+        )
+    }) {
+        return Err("ValidationError");
+    }
+    let text = |key| match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        _ => Err("ValidationError"),
+    };
+    let before_version = match arguments.get("before_version") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            ga_domain::legacy_json::integer_argument(value)
+                .ok_or("ValidationError")?
+                .to_string(),
+        ),
+    };
+    let limit = match arguments.get("limit") {
+        None => 10,
+        Some(value) => ga_domain::legacy_json::integer_argument(value)
+            .ok_or("ValidationError")?
+            .try_into()
+            .unwrap_or(0),
+    };
+    Ok(ga_db::diary::DefinitionPage {
+        after_key: text("after_key")?,
+        definition_key: text("definition_key")?,
+        before_version,
+        limit,
+    })
 }
