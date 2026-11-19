@@ -168,7 +168,7 @@ fn interval_ends(
     Ok(ends)
 }
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     async fn aggregate_predecessor(
         &mut self,
         contract: &AggregateContract,

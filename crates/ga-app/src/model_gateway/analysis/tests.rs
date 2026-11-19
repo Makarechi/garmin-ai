@@ -90,7 +90,7 @@ async fn shares_the_interpretation_budget_and_executes_only_offered_reads()
         request(&menu, &empty),
         &mut budget,
         &reader,
-        |prompt, versions, _daily| {
+        |prompt, versions, _daily, _generic| {
             prompts.push(prompt);
             sent_requirements.push(versions);
             ready(replies.next().ok_or(AnalysisError::InvalidDocument))
@@ -152,7 +152,7 @@ async fn stops_before_a_second_model_call_after_context_revocation_or_oversized_
             request(&menu, &empty),
             &mut AnalysisBudget::new(Instant::now()),
             &reader,
-            |_, _, _| {
+            |_, _, _, _| {
                 calls += 1;
                 ready(Ok(
                     json!({"calls":[{"name":"personal_baseline","arguments_json":r#"{"metric":"sleep_score","start":"2026-11-15","end":"2026-11-16"}"#}]}),

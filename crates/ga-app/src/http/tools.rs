@@ -115,7 +115,7 @@ async fn execute_read_tool(
                     read_health: scopes.permits(&[ga_domain::access::Scope::ReadHealth]),
                 })
                 .await?;
-            read_generic(reader, &spec).await
+            reader.read(&spec).await
         }
         .await;
         return match result {
@@ -506,7 +506,7 @@ fn generic_failure(error: ga_db::health_analysis::generic::GenericAnalysisError)
 }
 mod garmin_reads;
 mod generic_reads;
-pub(crate) use generic_reads::{generic_error_class, generic_input, read_generic};
+pub(crate) use generic_reads::{generic_error_class, generic_input};
 
 pub(crate) use garmin_reads::{GarminReadError, read_garmin};
 

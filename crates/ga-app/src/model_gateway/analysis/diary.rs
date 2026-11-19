@@ -7,6 +7,7 @@ use ga_db::{
     health_analysis::{
         DATA_FRESHNESS, DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON,
         PERSONAL_BASELINE, SLEEP_ANALYSIS,
+        generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
@@ -26,6 +27,7 @@ static BASELINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::
 static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ComparePeriods));
 static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sleep));
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
+static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 
 fn model_description(tool: ReadTool) -> Value {
     let entry = tool.catalog_entry();
@@ -78,10 +80,16 @@ impl<'a> DiaryAnalysisTools<'a> {
     }
 
     pub fn offered_tools(&self) -> Vec<OfferedReadTool<'static>> {
-        let mut offered = vec![OfferedReadTool {
-            name: EVENTS,
-            description: &DESCRIPTION,
-        }];
+        let mut offered = vec![
+            OfferedReadTool {
+                name: EVENTS,
+                description: &DESCRIPTION,
+            },
+            OfferedReadTool {
+                name: GENERIC_ANALYSIS,
+                description: &GENERIC,
+            },
+        ];
         if self.daily_read.is_some() {
             offered.extend([
                 OfferedReadTool {
@@ -130,6 +138,27 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     }
 
     async fn read(&self, name: &str, args: &Map<String, Value>) -> Option<AnalysisToolRead> {
+        if name == GENERIC_ANALYSIS {
+            let spec = GenericAnalysisEvidence::input(args)?;
+            let read = self
+                .database
+                .read_model_generic(self.context, self.model, self.categories(), &spec)
+                .await;
+            return match read {
+                Ok(read) => Some(AnalysisToolRead {
+                    value: read.value,
+                    tracker_versions: read.tracker_versions,
+                }),
+                Err(GenericAnalysisError::ResultTooLarge) => Some(AnalysisToolRead {
+                    value: json!({
+                        "error": "result_too_large",
+                        "instruction": "Narrow the date range or use an analysis tool. Do not treat this as empty data.",
+                    }),
+                    tracker_versions: Default::default(),
+                }),
+                Err(_) => None,
+            };
+        }
         if let Some((timezone, at)) = self.daily_read
             && DailyAnalysisEvidence::is_daily_tool(name)
         {

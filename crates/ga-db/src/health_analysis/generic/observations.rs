@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{GenericAnalysisError, GenericAnalysisReader, source::SourceSelection};
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     pub(super) async fn metric_contract(
         &mut self,
         document: &serde_json::Value,

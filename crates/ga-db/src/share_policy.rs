@@ -20,7 +20,10 @@ use crate::{
         MemoryError, MemoryFence, analysis_channel_in, current_conversation_channel,
         current_web_conversation,
     },
-    health_analysis::{DailyAnalysisEvidence, HealthAnalysisError},
+    health_analysis::{
+        DailyAnalysisEvidence, HealthAnalysisError,
+        generic::{GenericAnalysisError, GenericAnalysisEvidence},
+    },
     model_gate::onboarding::onboarding_allows_model,
     replay::REPLAY_MUTATION_LOCK,
 };
@@ -123,6 +126,7 @@ pub enum ModelConversation<'a> {
     Analysis {
         subject: AnalysisSubject<'a>,
         daily: &'a [DailyAnalysisEvidence],
+        generic: &'a [GenericAnalysisEvidence],
     },
 }
 
@@ -302,7 +306,11 @@ impl Database {
                         }
                         current_web_conversation(&mut txn, binding, memory).await
                     }
-                    ModelConversation::Analysis { subject, daily } => {
+                    ModelConversation::Analysis {
+                        subject,
+                        daily,
+                        generic,
+                    } => {
                         let current =
                             analysis_channel_in(&mut txn, subject)
                                 .await
@@ -320,6 +328,27 @@ impl Database {
                                     return Err(SharePolicyError::Busy);
                                 }
                                 Err(HealthAnalysisError::Database) => {
+                                    return Err(SharePolicyError::Database);
+                                }
+                                _ => return Ok(None),
+                            }
+                        }
+                        for read in generic {
+                            match read
+                                .current(
+                                    &mut txn,
+                                    subject.binding().owner_id,
+                                    destination,
+                                    channel.destination,
+                                    model.unwrap_or_default(),
+                                )
+                                .await
+                            {
+                                Ok(Some(_)) => {}
+                                Err(GenericAnalysisError::Health(
+                                    HealthAnalysisError::Storage(ReadinessError::Unavailable),
+                                )) => return Err(SharePolicyError::Busy),
+                                Err(GenericAnalysisError::Database) => {
                                     return Err(SharePolicyError::Database);
                                 }
                                 _ => return Ok(None),

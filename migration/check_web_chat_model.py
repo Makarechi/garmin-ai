@@ -62,6 +62,9 @@ DIARY_START = datetime(2026, 9, 19, 20, tzinfo=UTC)
 DIARY_DETAIL = "Synthetic detail from the saved diary"
 HEALTH_QUESTION = "Compare synthetic daily Garmin values."
 FRESHNESS_QUESTION = "How recent are the synthetic Garmin measurements?"
+GENERIC_QUESTION = "Read the synthetic note through generic analysis."
+GENERIC_START = datetime(2026, 10, 9, 16, tzinfo=UTC)
+GENERIC_DETAIL = "Synthetic historical analysis entry"
 HEALTH_READS = {
     "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
     "analysis_compare_periods": {
@@ -80,6 +83,8 @@ def output(prompt):
             return health_output(prompt)
         if prompt["question"].startswith(FRESHNESS_QUESTION):
             return freshness_output(prompt)
+        if prompt["question"].startswith(GENERIC_QUESTION):
+            return generic_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -105,7 +110,7 @@ def output(prompt):
     if sentence.startswith("Undo"):
         confidence = 0.84 if "synthetic low confidence" in sentence else 1
         return Interpretation(intent="undo", confidence=confidence, response_language="en")
-    if sentence.startswith((DIARY_QUESTION, HEALTH_QUESTION, FRESHNESS_QUESTION)):
+    if sentence.startswith((DIARY_QUESTION, HEALTH_QUESTION, FRESHNESS_QUESTION, GENERIC_QUESTION)):
         return Interpretation(intent="question", confidence=1, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
@@ -207,6 +212,37 @@ def freshness_output(prompt):
         answer="The stored report provides the age of the available observations.",
         evidence_ids=[1],
         include_current_state_freshness=True,
+        response_language="en",
+    )
+
+
+def generic_output(prompt):
+    if prompt["evidence"]:
+        evidence = prompt["evidence"][0]
+        assert evidence["tool"] == "generic_analysis"
+        if prompt["question"].endswith(" without pack permission"):
+            assert set(evidence["result"]) == {"error"}, evidence["result"]
+            return AgentStep(response_language="en")
+        assert "error" not in evidence["result"], evidence["result"]
+        rows = evidence["result"]["rows"]
+        assert len(rows) == 1 and rows[0]["payload"]["description"] == GENERIC_DETAIL, rows
+        return AgentStep(
+            answer="The stored synthetic note is present.",
+            evidence_ids=[1],
+            response_language="en",
+        )
+    tools = {tool["name"]: tool["schema"] for tool in prompt["tools"]}
+    assert "spec" in tools["generic_analysis"]["required"]
+    spec = {
+        "operation": "query_entries",
+        "definition_key": "system.note",
+        "start": (GENERIC_START - timedelta(seconds=1)).isoformat(),
+        "end": (GENERIC_START + timedelta(seconds=1)).isoformat(),
+        "limit": 10,
+        "knowledge_cutoff": prompt["now"],
+    }
+    return AgentStep(
+        calls=[{"name": "generic_analysis", "arguments_json": json.dumps({"spec": spec})}],
         response_language="en",
     )
 
@@ -411,6 +447,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_undo(engine, python, native, native_calls, active, release)
     exercise_analysis(engine, python, native, native_calls)
     exercise_health_analysis(engine, python, native)
+    exercise_generic_analysis(engine, python, native)
     exercise_current_freshness(engine, python, native)
 
     calls_before = len(native_calls)
@@ -769,6 +806,61 @@ def exercise_current_freshness(engine, python, native):
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM source_payloads WHERE id=:id"), {"id": source_id})
     print("Matched stored freshness while withholding denied channels and pending replay evidence")
+
+
+def exercise_generic_analysis(engine, python, native):
+    def synthetic_entry(description):
+        return EventInput(
+            start=GENERIC_START,
+            timezone="UTC",
+            payload={"type": "note", "description": description},
+        )
+
+    # The shared interpretation step currently requires both provider categories.
+    set_model_categories(engine, ["health", "diary"])
+    try:
+        with Session(engine) as session, session.begin():
+            ensure_scenario_packs(session)["general_diary"].llm_enabled = True
+            entry = create_event(
+                session, synthetic_entry(GENERIC_DETAIL), actor="synthetic-fixture"
+            )
+            identity = entry.id
+
+        expected = submit(python, GENERIC_QUESTION)["reply"]
+        request_id = str(uuid4())
+        fresh = submit(native, GENERIC_QUESTION, request_id)["reply"]
+        assert fresh["text"] == expected["text"], (fresh, expected)
+        assert (
+            fresh["text"]
+            == "The stored synthetic note is present.\n\nBased on saved Garmin and diary data."
+        ), fresh
+
+        with Session(engine) as session, session.begin():
+            update_event(
+                session,
+                identity,
+                synthetic_entry("Synthetic correction after the generic answer"),
+                revision=1,
+                actor="synthetic-fixture",
+            )
+        history = native.get("/web-chat/messages", headers=HEADERS)
+        assert history.status_code == 200 and fresh["id"] not in {
+            row["id"] for row in history.json()["replies"]
+        }
+        assert (
+            native.post(f"/web-chat/messages/{fresh['id']}/read", headers=HEADERS).status_code
+            == 409
+        )
+        assert submit(native, GENERIC_QUESTION, request_id)["reply"] is None
+        with Session(engine) as session, session.begin():
+            ensure_scenario_packs(session)["general_diary"].llm_enabled = False
+        denied = GENERIC_QUESTION + " without pack permission"
+        expected = submit(python, denied)["reply"]["text"]
+        assert submit(native, denied)["reply"]["text"] == expected
+        assert "The analysis could not be completed" in expected, expected
+    finally:
+        set_model_categories(engine, ["health", "diary"])
+    print("Matched generic diary reads and withheld stale or disallowed generic evidence")
 
 
 def main():
