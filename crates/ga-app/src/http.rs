@@ -6,6 +6,7 @@ mod exports;
 mod garmin_auth;
 mod hypotheses;
 mod natural_language;
+mod operations;
 mod personal_goals;
 mod scenario_packs;
 mod source_mappings;
@@ -46,6 +47,8 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
+        .route("/metrics", any(operations::metrics))
+        .route("/operations", any(operations::snapshot))
         .route("/capabilities", any(capabilities))
         .route("/scenario-packs", any(scenario_packs::collection))
         .route("/scenario-packs/{key}", any(scenario_packs::selection))
