@@ -59,7 +59,13 @@ impl ModelGateway<'_> {
                 AgentIntent::Log | AgentIntent::Update | AgentIntent::Close => {
                     WebChatModelReply::Mutation { command, expected }
                 }
+                AgentIntent::Undo if command.confidence() < 0.85 => WebChatModelReply::Clarify {
+                    question: catalog_text(&language, "agent.record_details")
+                        .ok_or(WebChatError::Database)?,
+                    expected,
+                },
                 AgentIntent::Undo => WebChatModelReply::Undo {
+                    command,
                     language: &language,
                     expected,
                 },

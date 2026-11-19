@@ -61,7 +61,8 @@ CORRECTED = "Corrected synthetic web note"
 def output(prompt):
     sentence = prompt["text"]
     if sentence.startswith("Undo"):
-        return Interpretation(intent="undo", confidence=1, response_language="en")
+        confidence = 0.84 if "synthetic low confidence" in sentence else 1
+        return Interpretation(intent="undo", confidence=confidence, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
         return Interpretation(
@@ -446,8 +447,14 @@ def exercise_undo(engine, python, native, native_calls, active, release):
     origin = "Synthetic reference undo entry"
     target = "Synthetic native undo entry"
     submit(python, f"/note {origin}")
+    low_confidence = "Undo with synthetic low confidence"
+    clarification = submit(python, low_confidence)["reply"]["text"]
+    assert state(origin) == (1, False, ["create"])
     expected = submit(python, sentence)
     submit(native, f"/note {target}")
+    response = submit(native, low_confidence)
+    assert response["reply"]["text"] == clarification, response
+    assert state(target) == (1, False, ["create"])
     foreign = "Synthetic separate API entry"
     with Session(engine) as session, session.begin():
         create_event(
@@ -488,7 +495,8 @@ def exercise_undo(engine, python, native, native_calls, active, release):
     assert "Ничего не сохранено" in result["reply"]["text"]
     assert state(previous) == state(newer) == (1, False, ["create"])
     print(
-        "Matched Python undo and preserved separate API entries, duplicate requests and newer web changes"
+        "Matched Python undo and low-confidence clarification; preserved separate API entries, "
+        "duplicate requests and newer web changes"
     )
 
 

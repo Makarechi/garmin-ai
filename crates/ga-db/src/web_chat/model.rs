@@ -55,6 +55,7 @@ pub enum WebChatModelReply<'a> {
         expected: WebChatInterpretationContext<'a>,
     },
     Undo {
+        command: &'a AgentInterpretation,
         language: &'a str,
         expected: WebChatInterpretationContext<'a>,
     },
@@ -285,8 +286,12 @@ async fn render_model_reply(
                 }
             }
         }
-        WebChatModelReply::Undo { language, .. } => {
-            if session.undo_anchor.is_none()
+        WebChatModelReply::Undo {
+            command, language, ..
+        } => {
+            if command.intent() != AgentIntent::Undo
+                || command.confidence() < 0.85
+                || session.undo_anchor.is_none()
                 || latest_undo_audit(txn, super::DESTINATION).await? != session.undo_anchor
             {
                 return Ok((SAVE_FAILED.to_owned(), Vec::new()));
