@@ -26,7 +26,8 @@ WITH bounds AS (SELECT 'epoch'::timestamptz+$2::interval AS start,
 ), combined AS (
     SELECT * FROM revisions UNION ALL SELECT * FROM legacy
 )
-SELECT id,(extract(epoch FROM ts)*1000000)::bigint AS observed,metric,source,value,unit,
+SELECT id,(extract(epoch FROM ts)*1000000)::bigint AS observed,
+    (extract(epoch FROM ts::timestamp)*1000000)::bigint AS observed_local,metric,source,value,unit,
     metric_definition_version_id,source_ref,quality,
     (CASE WHEN id IS NULL AND $9 THEN details ELSE '{}'::jsonb END)::text AS details,
     (extract(epoch FROM ingested_at)*1000000)::bigint AS ingested,

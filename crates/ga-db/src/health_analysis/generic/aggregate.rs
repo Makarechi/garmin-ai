@@ -1,6 +1,7 @@
 mod composition;
 mod measurements;
 mod rows;
+mod thresholds;
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -196,7 +197,8 @@ impl GenericAnalysisReader {
                 })
                 .await?
                 .into_iter()
-                .map(|row| (row.observed, row.ingested, row.value)),
+                .map(|row| Ok((row.observed, row.ingested, rows::floating(row.value)?)))
+                .collect::<Result<Vec<_>, GenericAnalysisError>>()?,
             );
         }
         let supplemental = self
@@ -278,7 +280,8 @@ impl GenericAnalysisReader {
             snapshots
                 .into_iter()
                 .filter(|row| !row.deleted && row.quality == "observed" && row.contract == Some(id))
-                .map(|row| row.into_aggregate()),
+                .map(|row| row.into_aggregate())
+                .collect::<Result<Vec<_>, _>>()?,
         );
         let fallback = self
             .aggregate_measurement_fallback(id, &window, &source, false)
