@@ -31,6 +31,7 @@ mod freshness;
 mod temporal;
 mod timeline;
 mod trend_insights;
+pub(crate) use trend_insights::stored_trend_current;
 
 pub(crate) use temporal::PRE_EVENT_FEATURE_VERSION;
 pub use temporal::{TemporalFeatures, TemporalOffsetFeatures, TemporalPurpose};

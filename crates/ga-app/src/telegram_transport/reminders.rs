@@ -35,6 +35,52 @@ pub struct DiaryReminderSettings {
 }
 
 impl TelegramTransport {
+    pub async fn run_trend_notifications(
+        &self,
+        database: &Database,
+        settings: &TelegramIngressSettings,
+        configured: &DiaryReminderSettings,
+        mut ready: watch::Receiver<bool>,
+    ) -> ! {
+        let policy = configured.policy();
+        loop {
+            if ready.wait_for(|ready| *ready).await.is_err() {
+                future::pending::<()>().await;
+            }
+            let wait = if let (Ok(binding), Ok(now)) =
+                (settings.confirmed_binding(database).await, wall_clock())
+            {
+                let destination = ReplyDestination {
+                    owner_id: binding.owner_id,
+                    channel: "telegram",
+                    instance_id: binding.instance_id,
+                };
+                match database
+                    .dispatch_trend_notification(
+                        destination,
+                        binding.external_owner_id,
+                        &policy,
+                        now,
+                        |text| async {
+                            if !*ready.borrow() {
+                                return retry_outcome(now, RETRY_INTERVAL);
+                            }
+                            self.send_diary_reminder(binding, now, text).await
+                        },
+                    )
+                    .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) => CHECK_INTERVAL,
+                    Err(_) => RETRY_INTERVAL,
+                }
+            } else {
+                RETRY_INTERVAL
+            };
+            sleep(wait).await;
+        }
+    }
+
     /// Process scheduled tracker check-ins independently of model-assisted reminders.
     pub async fn run_tracker_checkins(
         &self,

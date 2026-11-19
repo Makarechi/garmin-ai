@@ -28,8 +28,8 @@ use crate::{
     telegram_binding::{CHANNEL_BINDING_LOCK, TelegramBindingError, confirmed_pairing},
 };
 
-const STORAGE_DEADLINE: Duration = Duration::from_millis(1500);
-const PROVIDER_DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const STORAGE_DEADLINE: Duration = Duration::from_millis(1500);
+pub(super) const PROVIDER_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiaryQuestionOutcome {
@@ -103,24 +103,7 @@ impl Database {
             return Ok(QuestionDispatchResult::Unavailable);
         }
         let (mut connection, ready) = tokio::time::timeout(STORAGE_DEADLINE, async {
-            let mut connection =
-                PgConnection::connect_with(self.work.connect_options().as_ref()).await?;
-            for lock in [
-                STORAGE_LIFECYCLE_LOCK,
-                OWNER_ENROLLMENT_LOCK,
-                REPLAY_MUTATION_LOCK,
-                CHANNEL_CONSENT_LOCK,
-                OWNER_ONBOARDING_LOCK,
-                CHANNEL_BINDING_LOCK,
-            ] {
-                let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
-                    .bind(lock)
-                    .fetch_one(&mut connection)
-                    .await?;
-                if !held {
-                    return Err(ProactiveControlError::Busy);
-                }
-            }
+            let mut connection = telegram_notification_connection(self, false).await?;
             let exclusive: bool = sqlx::query_scalar(
                 "SELECT pg_try_advisory_lock(hashtextextended('outbox:question:' || $1::text, 0))",
             )
@@ -212,7 +195,39 @@ impl RuntimeLease {
     }
 }
 
-async fn prepare_storage(txn: &mut Transaction<'_, Postgres>) -> Result<(), ProactiveControlError> {
+pub(super) async fn telegram_notification_connection(
+    database: &Database,
+    exclusive_replay: bool,
+) -> Result<PgConnection, ProactiveControlError> {
+    let mut connection =
+        PgConnection::connect_with(database.work.connect_options().as_ref()).await?;
+    for lock in [
+        STORAGE_LIFECYCLE_LOCK,
+        OWNER_ENROLLMENT_LOCK,
+        REPLAY_MUTATION_LOCK,
+        CHANNEL_CONSENT_LOCK,
+        OWNER_ONBOARDING_LOCK,
+        CHANNEL_BINDING_LOCK,
+    ] {
+        let action = if exclusive_replay && lock == REPLAY_MUTATION_LOCK {
+            "SELECT pg_try_advisory_lock($1)"
+        } else {
+            "SELECT pg_try_advisory_lock_shared($1)"
+        };
+        let held: bool = sqlx::query_scalar(action)
+            .bind(lock)
+            .fetch_one(&mut connection)
+            .await?;
+        if !held {
+            return Err(ProactiveControlError::Busy);
+        }
+    }
+    Ok(connection)
+}
+
+pub(super) async fn prepare_storage(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), ProactiveControlError> {
     sqlx::query("SET LOCAL statement_timeout='750ms'")
         .execute(&mut **txn)
         .await?;
@@ -454,7 +469,7 @@ async fn finish(
     Ok(result)
 }
 
-async fn write_marker(
+pub(super) async fn write_marker(
     txn: &mut Transaction<'_, Postgres>,
     key: &str,
     value: Value,
