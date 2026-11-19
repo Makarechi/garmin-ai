@@ -168,7 +168,7 @@ fn continued_message(reply: ModelContinuationReply, language: &str) -> Option<St
     catalog_text(language, key).map(str::to_owned)
 }
 
-fn saved_message(saved: &[StoredSystemEvent], language: &str) -> Option<String> {
+pub(crate) fn saved_message(saved: &[StoredSystemEvent], language: &str) -> Option<String> {
     let labels = saved
         .iter()
         .map(|event| {

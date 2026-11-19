@@ -1,5 +1,9 @@
+mod model;
 mod send;
 
+pub use model::{
+    WebChatInterpretationContext, WebChatModelPreparation, WebChatModelReply, WebChatModelSession,
+};
 pub use send::WebChatSubmission;
 
 use std::{collections::VecDeque, error::Error, fmt, time::Duration};
@@ -223,19 +227,21 @@ async fn prepare(
         .await?;
     check_readiness(txn).await.map_err(WebChatError::Storage)?;
     let action = if writing {
-        "SELECT pg_try_advisory_xact_lock($1)"
+        "SELECT pg_advisory_xact_lock($1)"
     } else {
-        "SELECT pg_try_advisory_xact_lock_shared($1)"
+        "SELECT pg_advisory_xact_lock_shared($1)"
     };
-    let replay: bool = sqlx::query_scalar(action)
+    // Brief local work can overlap a duplicate's final read. The statement
+    // timeout bounds the wait, and model calls hold neither of these locks.
+    sqlx::query(action)
         .bind(REPLAY_MUTATION_LOCK)
-        .fetch_one(&mut **txn)
+        .execute(&mut **txn)
         .await?;
     let consent: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
         .bind(CHANNEL_CONSENT_LOCK)
         .fetch_one(&mut **txn)
         .await?;
-    if !replay || !consent {
+    if !consent {
         return Err(WebChatError::Database);
     }
     let owner: Uuid = sqlx::query_scalar("SELECT id FROM people WHERE singleton")

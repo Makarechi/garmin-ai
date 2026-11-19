@@ -196,7 +196,9 @@ impl ModelGateway<'_> {
                     channel: Some(ModelChannelSharing {
                         destination,
                         requirements: &channel_requirements,
-                        conversation: Some(context),
+                        conversation: Some(ga_db::share_policy::ModelConversation::Inbound(
+                            context,
+                        )),
                     }),
                     job: Some(ActiveModelJob { id, lease_token }),
                 },
@@ -295,7 +297,7 @@ fn pending_selection(entries: &[Value], pending: &Value, now: StoredInstant) -> 
     }
 }
 
-fn mentions(text: &str) -> Vec<Uuid> {
+pub(super) fn mentions(text: &str) -> Vec<Uuid> {
     let bytes = text.as_bytes();
     let mut ids = Vec::new();
     let mut seen = BTreeSet::new();

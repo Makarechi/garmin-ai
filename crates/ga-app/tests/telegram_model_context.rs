@@ -116,7 +116,9 @@ async fn sends_only_while_the_authenticated_conversation_context_is_current()
             Some(ModelChannelSharing {
                 destination,
                 requirements: &[],
-                conversation: Some(conversation),
+                conversation: Some(ga_db::share_policy::ModelConversation::Inbound(
+                    conversation,
+                )),
             }),
             send,
         )

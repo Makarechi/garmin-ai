@@ -16,7 +16,8 @@ use uuid::Uuid;
 use crate::{
     Database, ReadinessError, check_readiness,
     conversation_memory::{
-        CONTEXT_DELIVERY_LOCK, ConversationReadContext, MemoryError, current_conversation_channel,
+        CONTEXT_DELIVERY_LOCK, ConversationBinding, ConversationReadContext, MemoryError,
+        MemoryFence, current_conversation_channel, current_web_conversation,
     },
     model_gate::onboarding::onboarding_allows_model,
     replay::REPLAY_MUTATION_LOCK,
@@ -107,7 +108,16 @@ pub struct ShareRequirement<'a> {
 pub struct ModelChannelSharing<'a> {
     pub destination: ShareDestination<'a>,
     pub requirements: &'a [ShareRequirement<'a>],
-    pub conversation: Option<ConversationReadContext<'a>>,
+    pub conversation: Option<ModelConversation<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub enum ModelConversation<'a> {
+    Inbound(ConversationReadContext<'a>),
+    Web {
+        binding: ConversationBinding,
+        memory: &'a MemoryFence,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -269,15 +279,29 @@ impl Database {
         if let Some(channel) = channel {
             if let Some(context) = channel.conversation {
                 try_shared_lock(&mut txn, CONTEXT_DELIVERY_LOCK).await?;
-                let current = current_conversation_channel(&mut txn, context)
-                    .await
-                    .map_err(|error| match error {
-                        MemoryError::Busy => SharePolicyError::Busy,
-                        _ => SharePolicyError::Database,
-                    })?;
-                if current.is_none_or(|(provider, instance)| {
-                    format!("{provider}:{instance}") != channel.destination.instance()
-                }) {
+                let valid = match context {
+                    ModelConversation::Inbound(context) => {
+                        current_conversation_channel(&mut txn, context)
+                            .await
+                            .map(|current| {
+                                current.is_some_and(|(provider, instance)| {
+                                    format!("{provider}:{instance}")
+                                        == channel.destination.instance()
+                                })
+                            })
+                    }
+                    ModelConversation::Web { binding, memory } => {
+                        if channel.destination.instance() != "web:local" {
+                            return Ok(None);
+                        }
+                        current_web_conversation(&mut txn, binding, memory).await
+                    }
+                }
+                .map_err(|error| match error {
+                    MemoryError::Busy => SharePolicyError::Busy,
+                    _ => SharePolicyError::Database,
+                })?;
+                if !valid {
                     return Ok(None);
                 }
             }

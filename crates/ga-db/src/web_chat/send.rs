@@ -42,47 +42,36 @@ impl Database {
             let mut txn = self.work.begin().await?;
             let conversation = prepare(&mut txn, true).await?;
             let received: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-                .fetch_one(&mut *txn).await?;
+                .fetch_one(&mut *txn)
+                .await?;
             let at = timestamp(received)?;
-            let external = request.client_message_id.to_string();
-            let envelope = json!({
-                "owner_id":conversation.owner.to_string(),
-                "conversation_id":conversation.id.to_string(),
-                "channel_instance":{"channel":"web","instance_id":"local"},
-                "external_event_id":external,"external_message_id":external,
-                "sender_ref":"owner","received_at":at.to_string(),"kind":"text","text":request.text,
-            });
-            let raw = serde_json::to_vec(&envelope).map_err(|_| WebChatError::Invalid)?;
-            let envelope = InboundEnvelope::parse(&raw).map_err(|_| WebChatError::Invalid)?;
-            let receipt = ingest(&mut txn, &envelope).await.map_err(|_| WebChatError::Database)?;
+            let envelope = web_chat_envelope(conversation, &request, at)?;
+            let receipt = ingest(&mut txn, &envelope)
+                .await
+                .map_err(|_| WebChatError::Database)?;
             if receipt.created {
-                let (reply, facts) = local_reply(&mut txn, conversation, &request, &receipt, at).await?;
-                let intent = OutboundIntent::normalize(json!({
-                    "owner_id":conversation.owner.to_string(),"conversation_id":conversation.id.to_string(),
-                    "channel_instance":{"channel":"web","instance_id":"local"},
-                    "blocks":[{"text":reply}],"evidence_refs":facts,
-                })).map_err(|_| WebChatError::Database)?;
-                queue_outbox_intent(&mut txn, QueueIntent {
-                    intent,operation_id:receipt.operation_id,inbound_id:Some(receipt.message_id),
-                    dedup_key:None,requirements:&[],now:at,
-                }).await.map_err(|_| WebChatError::Database)?;
-                sqlx::query("UPDATE inbound_messages SET status='processed' WHERE id=$1")
-                    .bind(receipt.message_id).execute(&mut *txn).await?;
+                let (reply, facts) =
+                    local_reply(&mut txn, conversation, &request, &receipt, at).await?;
+                finish_web_chat_message(&mut txn, &envelope, &receipt, &reply, &facts, at).await?;
             } else {
-                let normalized: Option<String> = sqlx::query_scalar(
-                    "SELECT normalized_text FROM inbound_messages WHERE id=$1",
-                ).bind(receipt.message_id).fetch_one(&mut *txn).await?;
+                let normalized: Option<String> =
+                    sqlx::query_scalar("SELECT normalized_text FROM inbound_messages WHERE id=$1")
+                        .bind(receipt.message_id)
+                        .fetch_one(&mut *txn)
+                        .await?;
                 if normalized.as_deref() != Some(request.text) {
                     return Err(WebChatError::ReusedMessage);
                 }
             }
             txn.commit().await?;
             Ok(receipt)
-        }).await.map_err(|_| WebChatError::Database)??;
+        })
+        .await
+        .map_err(|_| WebChatError::Database)??;
         self.web_chat_submission_reply(receipt).await
     }
 
-    async fn web_chat_submission_reply(
+    pub(super) async fn web_chat_submission_reply(
         &self,
         receipt: InboundReceipt,
     ) -> Result<WebChatSnapshot, WebChatError> {
@@ -132,6 +121,58 @@ impl Database {
             permissions: txn,
         })
     }
+}
+
+pub(super) fn web_chat_envelope(
+    conversation: Conversation,
+    request: &WebChatSubmission<'_>,
+    at: StoredInstant,
+) -> Result<InboundEnvelope, WebChatError> {
+    let external = request.client_message_id.to_string();
+    let envelope = json!({
+        "owner_id":conversation.owner.to_string(),
+        "conversation_id":conversation.id.to_string(),
+        "channel_instance":{"channel":"web","instance_id":"local"},
+        "external_event_id":external,"external_message_id":external,
+        "sender_ref":"owner","received_at":at.to_string(),"kind":"text","text":request.text,
+    });
+    let raw = serde_json::to_vec(&envelope).map_err(|_| WebChatError::Invalid)?;
+    InboundEnvelope::parse(&raw).map_err(|_| WebChatError::Invalid)
+}
+
+pub(super) async fn finish_web_chat_message(
+    txn: &mut Transaction<'_, Postgres>,
+    envelope: &InboundEnvelope,
+    receipt: &InboundReceipt,
+    reply: &str,
+    facts: &[String],
+    at: StoredInstant,
+) -> Result<(), WebChatError> {
+    let intent = OutboundIntent::normalize(json!({
+        "owner_id":envelope.owner_id().to_string(),
+        "conversation_id":envelope.conversation_id().to_string(),
+        "channel_instance":{"channel":"web","instance_id":"local"},
+        "blocks":[{"text":reply}],"evidence_refs":facts,
+    }))
+    .map_err(|_| WebChatError::Database)?;
+    queue_outbox_intent(
+        txn,
+        QueueIntent {
+            intent,
+            operation_id: receipt.operation_id,
+            inbound_id: Some(receipt.message_id),
+            dedup_key: None,
+            requirements: &[],
+            now: at,
+        },
+    )
+    .await
+    .map_err(|_| WebChatError::Database)?;
+    sqlx::query("UPDATE inbound_messages SET status='processed' WHERE id=$1")
+        .bind(receipt.message_id)
+        .execute(&mut **txn)
+        .await?;
+    Ok(())
 }
 
 async fn local_reply(

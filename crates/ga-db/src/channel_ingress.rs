@@ -99,23 +99,7 @@ pub(crate) async fn ingest(
 ) -> Result<InboundReceipt, IngressError> {
     let channel = envelope.channel();
     let namespace = (channel.channel(), channel.instance_id());
-    sqlx::query(
-        "INSERT INTO conversations(id,owner_id,channel,channel_instance_id,memory_epoch,state,share_owner_memory)
-         VALUES($1,$2,$3,$4,gen_random_uuid(),'{}',false) ON CONFLICT(id) DO NOTHING",
-    )
-    .bind(envelope.conversation_id()).bind(envelope.owner_id()).bind(namespace.0).bind(namespace.1)
-    .execute(&mut **txn).await?;
-    let binding: (Uuid, String, String) = sqlx::query_as(
-        "SELECT owner_id,channel,channel_instance_id FROM conversations WHERE id=$1",
-    )
-    .bind(envelope.conversation_id())
-    .fetch_one(&mut **txn)
-    .await?;
-    if (binding.0, binding.1.as_str(), binding.2.as_str())
-        != (envelope.owner_id(), namespace.0, namespace.1)
-    {
-        return Err(IngressError::ForeignConversation);
-    }
+    ensure_conversation(txn, envelope).await?;
     if let Some(stored) = existing(txn, envelope).await? {
         return check_duplicate(stored, envelope);
     }
@@ -166,6 +150,32 @@ pub(crate) async fn ingest(
             .ok_or(IngressError::Database)?,
         envelope,
     )
+}
+
+pub(crate) async fn ensure_conversation(
+    txn: &mut Transaction<'_, Postgres>,
+    envelope: &InboundEnvelope,
+) -> Result<(), IngressError> {
+    let channel = envelope.channel();
+    let namespace = (channel.channel(), channel.instance_id());
+    sqlx::query(
+        "INSERT INTO conversations(id,owner_id,channel,channel_instance_id,memory_epoch,state,share_owner_memory)
+         VALUES($1,$2,$3,$4,gen_random_uuid(),'{}',false) ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(envelope.conversation_id()).bind(envelope.owner_id()).bind(namespace.0).bind(namespace.1)
+    .execute(&mut **txn).await?;
+    let binding: (Uuid, String, String) = sqlx::query_as(
+        "SELECT owner_id,channel,channel_instance_id FROM conversations WHERE id=$1",
+    )
+    .bind(envelope.conversation_id())
+    .fetch_one(&mut **txn)
+    .await?;
+    if (binding.0, binding.1.as_str(), binding.2.as_str())
+        != (envelope.owner_id(), namespace.0, namespace.1)
+    {
+        return Err(IngressError::ForeignConversation);
+    }
+    Ok(())
 }
 
 async fn existing(

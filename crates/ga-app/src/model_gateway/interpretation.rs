@@ -22,6 +22,7 @@ use super::{
 };
 
 mod telegram;
+mod web;
 pub use telegram::TelegramDiaryInterpretation;
 
 const EXTRACT: &str = include_str!("../../../../src/garmin_ai/prompts/diary_extract.txt");
