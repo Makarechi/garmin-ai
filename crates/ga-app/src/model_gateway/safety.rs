@@ -87,6 +87,7 @@ impl ModelGateway<'_> {
         lease: &TelegramInboundLease,
         locale: &str,
         policy: &(impl Fn() -> CurrentModelPolicy<'policy> + Sync),
+        deadline: tokio::time::Instant,
         sender: &S,
     ) -> Result<ReplySafety, TelegramDiaryCommitError> {
         let envelope = lease
@@ -128,8 +129,17 @@ impl ModelGateway<'_> {
                 sender,
             );
             async move {
-                request
+                let timed_out = || {
+                    SafetyScreenError::Model(GatewayError::Attempt(
+                        ga_model::fallback::FallbackError::Deadline,
+                    ))
+                };
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(timed_out());
+                }
+                tokio::time::timeout_at(deadline, request)
                     .await
+                    .map_err(|_| timed_out())?
                     .map(|output| output.value)
                     .map_err(SafetyScreenError::Model)
             }

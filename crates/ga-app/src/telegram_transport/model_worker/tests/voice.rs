@@ -11,6 +11,7 @@ struct VoiceProvider<'a> {
     transcriptions: AtomicUsize,
     interpretations: AtomicUsize,
     safety_screens: AtomicUsize,
+    fragment_delay: Duration,
     at: String,
     speech: &'a str,
 }
@@ -40,6 +41,9 @@ impl Sender for VoiceProvider<'_> {
             if self.speech.len() > 16_000 {
                 self.safety_screens.fetch_add(1, Ordering::SeqCst);
                 assert!(input.chars().count() <= 12_256);
+                if !self.fragment_delay.is_zero() {
+                    tokio::time::sleep(self.fragment_delay).await;
+                }
                 json!({"urgent":input.contains(SAFETY_MARKER),"response_language":"en"})
             } else {
                 self.interpretations.fetch_add(1, Ordering::SeqCst);
@@ -163,6 +167,7 @@ async fn runs_voice_ingress_transcription_and_cached_diary_processing() -> Resul
         transcriptions: AtomicUsize::new(0),
         interpretations: AtomicUsize::new(0),
         safety_screens: AtomicUsize::new(0),
+        fragment_delay: Duration::ZERO,
         at: created.to_string(),
         speech: SPEECH,
     };
@@ -363,6 +368,7 @@ async fn runs_voice_ingress_transcription_and_cached_diary_processing() -> Resul
         transcriptions: AtomicUsize::new(0),
         interpretations: AtomicUsize::new(0),
         safety_screens: AtomicUsize::new(0),
+        fragment_delay: Duration::ZERO,
         at: created.to_string(),
         speech: &speech,
     };
@@ -451,7 +457,9 @@ async fn runs_voice_ingress_transcription_and_cached_diary_processing() -> Resul
 
     recorded_commands(&worker, &transport, binding, &mut runtime, &pool, at).await?;
 
-    let limited_wire = update(78010, at, 10, "");
+    screen_with_short_voice_lease(&worker, &transport, binding, &mut runtime, &pool, at).await?;
+
+    let limited_wire = update(78011, at, 10, "");
     let limited_id = accept(binding, &mut runtime, &limited_wire, at).await?;
     let transport = TelegramTransport::connect("100:synthetic-rate-limit", &origin, false)?;
     let limited = database
@@ -497,6 +505,7 @@ async fn recorded_commands(
             transcriptions: AtomicUsize::new(0),
             interpretations: AtomicUsize::new(0),
             safety_screens: AtomicUsize::new(0),
+            fragment_delay: Duration::ZERO,
             at: worker.sender.at.clone(),
             speech: command,
         };
@@ -592,5 +601,86 @@ async fn recorded_commands(
         assert_eq!(receipt, ("processed".into(), 1));
     }
     println!("Recorded pause, revoked resume, history and unknown command used local handlers");
+    Ok(())
+}
+
+async fn screen_with_short_voice_lease(
+    worker: &ModelDiaryWorker<'_, '_, VoiceProvider<'_>>,
+    transport: &TelegramTransport,
+    binding: TelegramBinding<'_>,
+    runtime: &mut RuntimeLease,
+    pool: &PgPool,
+    at: StoredInstant,
+) -> Result<(), Box<dyn Error>> {
+    let database = worker.database;
+    let target = TelegramInboundTarget {
+        owner_id: binding.owner_id,
+        instance_id: binding.instance_id,
+    };
+    let text = ["x", "y", "z", "w"]
+        .map(|value| value.repeat(12_000))
+        .concat();
+    let sender = VoiceProvider {
+        transcriptions: AtomicUsize::new(0),
+        interpretations: AtomicUsize::new(0),
+        safety_screens: AtomicUsize::new(0),
+        fragment_delay: Duration::from_secs(2),
+        at: worker.sender.at.clone(),
+        speech: &text,
+    };
+    let worker = ModelDiaryWorker {
+        sender: &sender,
+        ..*worker
+    };
+    let wire = update(78010, at, 10, "");
+    let message_id = accept(binding, runtime, &wire, at).await?;
+    let voice = database
+        .claim_telegram_voice(target, clock(pool).await?, LEASE)
+        .await?
+        .ok_or("Expected voice note for bounded screening")?;
+    worker
+        .process_voice(transport, &voice, clock(pool).await?)
+        .await;
+    let screen = database
+        .claim_telegram_local_screen(target, clock(pool).await?, LEASE)
+        .await?
+        .ok_or("Expected initial local screen")?;
+    database
+        .apply_local_telegram_text(
+            &screen,
+            LocalTelegramText::Safety(TelegramSafetyDecision::Clear),
+            "en",
+        )
+        .await?;
+    let now = clock(pool).await?;
+    let ready = database
+        .claim_telegram_model_text(target, now, 7)
+        .await?
+        .ok_or("Expected long voice text with a short lease")?;
+    worker.process(&ready, now).await;
+    let screens = sender.safety_screens.load(Ordering::SeqCst);
+    assert!(
+        (1..4).contains(&screens),
+        "Expected partial screening within the lease, got {screens}"
+    );
+    assert_eq!(sender.interpretations.load(Ordering::SeqCst), 0);
+    let (state, text): (String, String) = sqlx::query_as(
+        "SELECT i.status, o.intent#>>'{blocks,0,text}'
+         FROM inbound_messages i JOIN outbox_messages o ON o.inbound_message_id=i.id WHERE i.id=$1",
+    )
+    .bind(message_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(state, "processed");
+    assert_eq!(text, template("en", "agent.oversized"));
+    assert!(
+        database
+            .claim_telegram_model_text(target, clock(pool).await?, LEASE)
+            .await?
+            .is_none()
+    );
+    println!(
+        "Several slow safety fragments shared the inbox deadline and produced one bounded reply"
+    );
     Ok(())
 }

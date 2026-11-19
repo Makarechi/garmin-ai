@@ -53,12 +53,21 @@ pub struct TelegramInboundLease {
     message_id: Uuid,
     operation_id: Uuid,
     token: Uuid,
+    expires_at: OffsetDateTime,
     envelope: String,
     voice_text: Option<String>,
     voice_duration_seconds: Option<u64>,
 }
 
-type ClaimedTelegramInbound = (Uuid, Uuid, Uuid, String, Option<String>, Option<String>);
+type ClaimedTelegramInbound = (
+    Uuid,
+    Uuid,
+    Uuid,
+    OffsetDateTime,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 impl TelegramInboundLease {
     pub fn message_id(&self) -> Uuid {
@@ -71,6 +80,10 @@ impl TelegramInboundLease {
 
     pub fn job_identity(&self) -> (Uuid, Uuid) {
         (self.job_id, self.token)
+    }
+
+    pub fn expires_at(&self) -> OffsetDateTime {
+        self.expires_at
     }
 
     pub fn envelope_json(&self) -> &str {
@@ -464,7 +477,7 @@ impl Database {
                  FROM oldest WHERE j.id=oldest.id AND j.attempts<$7
                    AND ((j.status='pending' AND j.run_at<=$4)
                          OR (j.status='running' AND j.lease_until<$4))
-                 RETURNING j.id AS job_id,oldest.message_id,oldest.operation_id,
+                 RETURNING j.id AS job_id,oldest.message_id,oldest.operation_id,j.lease_until,
                            oldest.envelope::text AS envelope,oldest.voice_text,
                            j.payload->>'voice_duration_seconds' AS voice_duration"),
             )
@@ -484,12 +497,13 @@ impl Database {
             .fetch_optional(&mut *txn)
             .await?;
             let mut result = found.map(
-                |(job_id, message_id, operation_id, envelope, voice_text, duration)| {
+                |(job_id, message_id, operation_id, expires_at, envelope, voice_text, duration)| {
                     TelegramInboundLease {
                         job_id,
                         message_id,
                         operation_id,
                         token,
+                        expires_at,
                         envelope,
                         voice_text,
                         voice_duration_seconds: duration.and_then(|seconds| seconds.parse().ok()),

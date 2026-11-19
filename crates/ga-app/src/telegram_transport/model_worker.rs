@@ -44,6 +44,7 @@ mod voice;
 
 const LEASE: u32 = 150;
 const IDLE: Duration = Duration::from_millis(250);
+const VOICE_REPLY_RESERVE: Duration = Duration::from_secs(4);
 
 impl TelegramTransport {
     /// Run ordered model work separately from polling, local safety screening and reply delivery.
@@ -184,7 +185,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
         {
             Ok(request) => request,
             Err(DiaryInterpretationError::RequiresSafetyScreen) if lease.has_voice_text() => {
-                let result = self.handle_long_voice_text(lease, &locale).await;
+                let result = self.handle_long_voice_text(lease, &locale, &budget).await;
                 if let Err(error) = result {
                     self.finish(lease, &locale, commit_disposition(error)).await;
                 }
@@ -224,13 +225,21 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
         &self,
         lease: &TelegramInboundLease,
         locale: &str,
+        budget: &AnalysisBudget,
     ) -> Result<(), TelegramDiaryCommitError> {
+        let lease_remaining =
+            Duration::try_from(lease.expires_at() - time::OffsetDateTime::now_utc())
+                .unwrap_or_default()
+                .saturating_sub(VOICE_REPLY_RESERVE);
+        let deadline = tokio::time::Instant::now()
+            + lease_remaining.min(budget.remaining(Instant::now()).unwrap_or_default());
         let safety = self
             .gateway
             .screen_voice_reply_safety_with(
                 lease,
                 locale,
                 &|| self.configured.current(),
+                deadline,
                 self.sender,
             )
             .await?;
