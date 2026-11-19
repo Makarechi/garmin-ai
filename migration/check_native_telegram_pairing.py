@@ -142,6 +142,38 @@ def verify(binary, root, engine):
         def run():
             return subprocess.run(args, env=runtime, capture_output=True, text=True, timeout=12)
 
+        primary = {"id": "channel:telegram:primary", "kind": "channel", "provider": "telegram"}
+        alternate = {**primary, "id": "channel:telegram:alternate"}
+        selections = (
+            "[]",
+            "",
+            json.dumps([{**primary, "enabled": False}]),
+            json.dumps([alternate, primary]),
+        )
+        disabled = (f"GA_INTEGRATIONS='{selection}'\n" for selection in selections)
+        for setting in disabled:
+            blocked = original + setting
+            file.write_text(blocked)
+            result = run()
+            assert result.returncode == 1 and "GA_INTEGRATIONS" in result.stderr
+            assert file.read_text() == blocked and not details["calls"] and not bindings(engine)
+
+        # Different casing still follows assignment order, including a replacement database.
+        overridden = (
+            original
+            + "GA_DATABASE_URL='postgresql://garmin@127.0.0.1:1/unreachable_test'\n"
+            + f"ga_database_url='{runtime['GA_DATABASE_URL']}'\n"
+        )
+        file.write_text(overridden)
+        with engine.begin() as lock:
+            lock.execute(text("SELECT pg_advisory_xact_lock(72104620)"))
+            occupied = subprocess.run(
+                args[:-1], env=runtime, capture_output=True, text=True, timeout=12
+            )
+        assert occupied.returncode == 1 and "already running" in occupied.stderr
+        assert file.read_text() == overridden and not details["calls"] and not bindings(engine)
+        file.write_text(original)
+
         with engine.begin() as lock:
             lock.execute(text("SELECT pg_advisory_xact_lock(72104620)"))
             occupied = run()
@@ -205,7 +237,7 @@ def verify(binary, root, engine):
         assert run().returncode == 0 and not details["calls"]
         assert [tuple(row[1:]) for row in bindings(engine)] == [(str(OWNER), "local_pairing_code")]
     print(
-        "Verified private pairing, exact acknowledgement, concurrent edit rollback and idempotent recovery"
+        "Verified runtime settings, private pairing, exact acknowledgement, concurrent edit rollback and idempotent recovery"
     )
 
 

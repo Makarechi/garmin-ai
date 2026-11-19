@@ -8,15 +8,14 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ga_app::telegram_transport::TelegramTransport;
+use ga_app::{telegram_settings::TelegramIngressSettings, telegram_transport::TelegramTransport};
 use ga_archive::storage_files::{StorageAccess, StorageFilesGuard};
 use ga_db::Database;
-use ga_domain::event_payload::legacy_boolean;
 use rustix::fs::{FlockOperation, flock};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 
-use super::{SetupFile, ValueMap, publish_settings, random};
+use super::{SetupFile, publish_settings, random};
 use crate::configuration;
 
 const ENV_FILE: &str = "Pairing requires an existing regular environment file";
@@ -40,7 +39,7 @@ pub(crate) async fn pair_telegram(
     let path = env::current_dir()?.join(path);
     let original = read_env_file(&path)?;
     let file = SetupFile::parse(&original)?;
-    let settings = Settings::read(&file.values, &path, container_runtime)?;
+    let settings = Settings::read(&original, &path, container_runtime)?;
     let _files = StorageFilesGuard::acquire(&settings.locks, StorageAccess::Active)?;
     let database =
         Database::connect_lazy(&settings.url).map_err(|_| "Pairing database is invalid")?;
@@ -68,33 +67,47 @@ pub(crate) async fn pair_telegram(
 }
 
 impl Settings {
-    fn read(values: &ValueMap, path: &Path, container: bool) -> Result<Self, &'static str> {
-        let get = |name| file_value(values, name);
-        let owner = get(OWNER_SETTING)
+    fn read(contents: &str, path: &Path, container: bool) -> Result<Self, &'static str> {
+        let [
+            owner,
+            token,
+            integrations,
+            database,
+            data,
+            tokens,
+            backups,
+            locks,
+        ] = configuration::file_values(
+            dotenvy::from_read_iter(contents.as_bytes()),
+            [
+                OWNER_SETTING,
+                "GA_TELEGRAM_BOT_TOKEN",
+                "GA_INTEGRATIONS",
+                "GA_DATABASE_URL",
+                "GA_DATA_DIR",
+                "GA_TOKEN_DIR",
+                "GA_BACKUP_DIR",
+                "GA_LOCK_DIR",
+            ],
+        );
+        let owner = owner
+            .as_deref()
             .unwrap_or("0")
+            .trim()
             .parse::<i64>()
             .ok()
             .filter(|owner| (0..(1_i64 << 52)).contains(owner))
             .ok_or(OWNER_ERROR)?;
-        let token = get("GA_TELEGRAM_BOT_TOKEN")
-            .filter(|token| !token.starts_with("replace-with-"))
+        let token = token
+            .filter(|token| !token.is_empty() && !token.starts_with("replace-with-"))
             .ok_or("Configure the Telegram bot token locally before pairing")?;
-        if let Some(raw) = get("GA_INTEGRATIONS") {
-            let integrations: Vec<Value> = serde_json::from_str(raw)
-                .map_err(|_| "GA_INTEGRATIONS must be valid JSON before pairing")?;
-            if !integrations.is_empty()
-                && !integrations.iter().any(|integration| {
-                    integration["id"] == "channel:telegram:primary"
-                        && integration["kind"] == "channel"
-                        && integration["provider"] == "telegram"
-                        && integration
-                            .get("enabled")
-                            .map_or(Some(true), legacy_boolean)
-                            == Some(true)
-                })
-            {
-                return Err("GA_INTEGRATIONS must enable channel:telegram:primary before pairing");
-            }
+        // Ask the worker's selector which instance will be active after pairing.
+        let selected = TelegramIngressSettings::selected(Some("1"), integrations.as_deref())
+            .map_err(
+                |_| "GA_INTEGRATIONS must contain a valid Telegram configuration before pairing",
+            )?;
+        if selected.is_none_or(|settings| settings.instance_id() != "primary") {
+            return Err("GA_INTEGRATIONS must enable channel:telegram:primary before pairing");
         }
         let parent = path.parent().ok_or(ENV_FILE)?;
         let external = |name| {
@@ -119,26 +132,36 @@ impl Settings {
                 .map_err(|_| "Worker storage directories are invalid")?;
             (url, locks)
         } else {
-            let data = parent.join(get("GA_DATA_DIR").unwrap_or("data"));
-            let tokens = parent.join(get("GA_TOKEN_DIR").unwrap_or("tokens/garmin"));
-            let backups = parent.join(get("GA_BACKUP_DIR").unwrap_or("backups"));
+            let storage = |value: Option<String>, default: &str| {
+                parent.join(
+                    value
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(default),
+                )
+            };
+            let data = storage(data, "data");
+            let tokens = storage(tokens, "tokens/garmin");
+            let backups = storage(backups, "backups");
             let locks = configuration::lock_directory(
                 &data,
                 &tokens,
-                get("GA_LOCK_DIR").map(|value| parent.join(value)),
+                locks
+                    .filter(|value| !value.is_empty())
+                    .map(|value| parent.join(value)),
             )?;
             ga_archive::storage_files::validate_backup_layout(&data, &tokens, &locks, &backups)
                 .map_err(|_| "Pairing storage directories are invalid")?;
             (
-                get("GA_DATABASE_URL")
-                    .ok_or("Pairing requires a configured database")?
-                    .to_owned(),
+                database
+                    .filter(|value| !value.is_empty())
+                    .ok_or("Pairing requires a configured database")?,
                 locks,
             )
         };
         Ok(Self {
             owner,
-            token: token.to_owned(),
+            token,
             url,
             locks,
         })
@@ -187,12 +210,6 @@ fn private_owner(message: &Value, command: &str) -> Option<i64> {
         && message["forward_date"].is_null()
         && bool::from(candidate.as_bytes().ct_eq(command.as_bytes())))
     .then_some(owner)
-}
-
-fn file_value<'a>(values: &'a ValueMap, name: &str) -> Option<&'a str> {
-    values.iter().find_map(|(key, value)| {
-        (key.eq_ignore_ascii_case(name) && !value.is_empty()).then_some(value.as_str())
-    })
 }
 
 fn read_env_file(path: &Path) -> Result<String, &'static str> {
