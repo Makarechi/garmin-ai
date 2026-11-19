@@ -1,4 +1,5 @@
 mod entries;
+mod observations;
 
 use std::{error::Error, fmt};
 
@@ -33,6 +34,9 @@ pub struct GenericAnalysisReader {
 pub enum GenericAnalysisError {
     Lookup(&'static str),
     Value(&'static str),
+    Data,
+    Encoding,
+    InvalidSnapshot,
     Permission,
     Health(HealthAnalysisError),
     Database,
@@ -43,6 +47,9 @@ impl fmt::Display for GenericAnalysisError {
         formatter.write_str(match self {
             Self::Lookup(message) | Self::Value(message) => message,
             Self::Permission => "Insufficient scope",
+            Self::Data => "Generic analysis data is incompatible with its database type",
+            Self::Encoding => "Metric source cannot be encoded as UTF-8",
+            Self::InvalidSnapshot => "Historical event snapshot could not be read",
             Self::Health(_) => "Generic analysis storage is unavailable",
             Self::Database => "Generic analysis could not be read",
         })
@@ -50,8 +57,16 @@ impl fmt::Display for GenericAnalysisError {
 }
 impl Error for GenericAnalysisError {}
 impl From<sqlx::Error> for GenericAnalysisError {
-    fn from(_: sqlx::Error) -> Self {
-        Self::Database
+    fn from(error: sqlx::Error) -> Self {
+        if error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .is_some_and(|code| code.starts_with("22"))
+        {
+            Self::Data
+        } else {
+            Self::Database
+        }
     }
 }
 impl From<HealthAnalysisError> for GenericAnalysisError {
@@ -88,6 +103,23 @@ impl Database {
 }
 
 impl GenericAnalysisReader {
+    async fn restore_display_timezone(&mut self) -> Result<(), GenericAnalysisError> {
+        // SQLx starts its connections in UTC. Restore the configured database/role
+        // display zone before rendering stored timestamps, as the Python driver does.
+        sqlx::query(
+            "SELECT set_config('TimeZone', substring(setting FROM 10), true)
+             FROM pg_db_role_setting AS defaults
+             CROSS JOIN LATERAL unnest(defaults.setconfig) AS config(setting)
+             WHERE defaults.setdatabase IN (0,(SELECT oid FROM pg_database WHERE datname=current_database()))
+               AND defaults.setrole IN (0,(SELECT oid FROM pg_roles WHERE rolname=session_user))
+               AND lower(setting) LIKE 'timezone=%'
+             ORDER BY (defaults.setrole<>0) DESC,(defaults.setdatabase<>0) DESC LIMIT 1",
+        )
+        .execute(&mut *self.txn)
+        .await?;
+        Ok(())
+    }
+
     async fn check_replay(&mut self) -> Result<(), GenericAnalysisError> {
         if projection_pending(&mut self.txn, GARMIN_PARSER_VERSION).await? {
             return Err(GenericAnalysisError::Health(
