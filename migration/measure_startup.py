@@ -1,6 +1,7 @@
-"""Measure cold-start and idle costs in an isolated synthetic Docker deployment."""
+"""Measure startup, idle and workload costs in isolated synthetic Docker deployments."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -108,6 +109,94 @@ def local_image(reference, revision):
     return image, platform
 
 
+def collect_web_chat_workload(args, observer, db, api, worker, elapsed):
+    script = Path(__file__).with_name("web_chat_workload.py").read_text(encoding="utf-8")
+    command = [
+        "docker",
+        "exec",
+        observer,
+        "python",
+        "-c",
+        script,
+        f"http://{api}:8080",
+        str(args.web_chat_messages),
+    ]
+
+    def capture():
+        return {
+            "elapsed_seconds": elapsed(),
+            "database": sample(db, user="postgres"),
+            "api": sample(api),
+            "worker": sample(worker),
+        }
+
+    samples = []
+    deadline = time.monotonic() + 900
+    with subprocess.Popen(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    ) as process:
+        try:
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Synthetic web workload exceeded the measurement deadline")
+                samples.append(capture())
+                time.sleep(args.interval)
+            stdout, _stderr = process.communicate(timeout=5)
+            if process.returncode:
+                raise RuntimeError(
+                    f"Synthetic web workload failed with status {process.returncode}"
+                )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+    return {**json.loads(stdout), "samples": samples, "after_workload": capture()}
+
+
+def verify_web_chat_storage(db, result):
+    psql = ["docker", "exec", db, "psql", "-X", "-U", "garmin", "-d", DATABASE, "-Atc"]
+    counters = (
+        subprocess.check_output(
+            [
+                *psql,
+                "SELECT (SELECT count(*) FROM events), "
+                "(SELECT count(*) FROM audit_log WHERE action='create'), "
+                "(SELECT count(*) FROM inbound_messages WHERE channel='web'), "
+                "(SELECT count(*) FROM outbox_messages), "
+                "(SELECT count(*) FROM inbound_messages WHERE channel='web' "
+                "AND normalized_text=repeat('x', 16000))",
+            ],
+            text=True,
+            timeout=10,
+        )
+        .strip()
+        .split("|")
+    )
+    observed = list(map(int, counters))
+    if observed != [
+        result["notes"],
+        result["notes"],
+        result["message_count"],
+        result["message_count"],
+        result["maximum_length_messages"],
+    ]:
+        raise RuntimeError(
+            "The synthetic conversation did not retain exactly one write per message"
+        )
+    digest = hashlib.sha256()
+    with subprocess.Popen(
+        [*psql, "SELECT payload->>'description' FROM events ORDER BY payload->>'description'"],
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as process:
+        for note in process.stdout:
+            digest.update(note.rstrip("\n").encode())
+        if process.wait(timeout=10) or digest.hexdigest() != result["note_digest"]:
+            raise RuntimeError(
+                "The stored synthetic note content did not match the submitted corpus"
+            )
+
+
 def report_run(args, image, platform, *, native=False, observer_image=None):
     started = time.monotonic()
     executable = "garmin-ai-rust" if native else "garmin-ai"
@@ -138,6 +227,9 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
         app_env["GA_TIMEZONE"] = "UTC"
     api_env = dict(app_env)
     control_env = {}
+    if args.web_chat_messages:
+        control_env["GA_API_KEY"] = secrets.token_urlsafe(32)
+        api_env.update(control_env)
     if args.controls_during_fit:
         control_env = {
             "GA_API_KEY": secrets.token_urlsafe(32),
@@ -324,6 +416,10 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             time.sleep(args.interval)
 
         workload_result = {}
+        if args.web_chat_messages:
+            result = collect_web_chat_workload(args, observer, db, api, worker, elapsed)
+            verify_web_chat_storage(db, result)
+            workload_result["web_chat_workload"] = result
         workload_modes = (
             ("fit", args.fit_records),
             ("fitlimit", args.fit_limit_mib),
@@ -484,6 +580,7 @@ def main():
     workload.add_argument("--mcp-idle-seconds", type=int, choices=(5, 10))
     workload.add_argument("--voice-rounds", type=int, choices=(1, 2))
     workload.add_argument("--replay-days", type=int, choices=(7, 30))
+    workload.add_argument("--web-chat-messages", type=int, choices=(80, 800))
     parser.add_argument("--preload-history", action="store_true")
     parser.add_argument("--fit-developer", action="store_true")
     parser.add_argument("--controls-during-fit", action="store_true")
@@ -510,7 +607,7 @@ def main():
             "replay_days",
         )
     ):
-        parser.error("The paired comparison measures startup and idle only")
+        parser.error("The paired comparison supports startup, idle and --web-chat-messages")
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
@@ -526,6 +623,18 @@ def main():
             or revision != candidate["migration_revision"]
         ):
             raise RuntimeError("Benchmark versions migrated to different database schemas")
+        if args.web_chat_messages:
+            fields = (
+                "notes",
+                "message_count",
+                "note_digest",
+                "visible_messages",
+                "maximum_length_messages",
+            )
+            before = baseline["web_chat_workload"]
+            after = candidate["web_chat_workload"]
+            if any(before[field] != after[field] for field in fields):
+                raise RuntimeError("The paired web chat workloads produced different results")
         print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
         return 0
     report = report_run(args, baseline_image, platform)
