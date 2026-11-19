@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 mod dispatch;
+mod fallback;
 pub(crate) use dispatch::{TrackerCheckinDecision, revalidate_tracker_checkin};
+pub(crate) use fallback::remember_tracker_fallback;
 
 use ga_domain::{
     channel::{OutboundIntent, telegram_conversation_id},
@@ -214,6 +216,11 @@ async fn sync_page(
         .last()
         .filter(|_| trackers.len() == PAGE_SIZE as usize)
         .map(|tracker| tracker.id);
+    let onboarding = onboarding_routes(txn).await?;
+    if let ReminderDestination::Telegram(route) = &route {
+        ensure_telegram_conversation(txn, route).await?;
+    }
+    fallback::settle_pending(txn, owner, onboarding.as_ref(), now).await?;
     if trackers.is_empty() {
         return Ok(TrackerRulePage { next, queued: 0 });
     }
@@ -221,18 +228,6 @@ async fn sync_page(
         .bind(owner)
         .fetch_one(&mut **txn)
         .await?;
-    let onboarding: Option<String> =
-        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='preferences:onboarding'")
-            .fetch_optional(&mut **txn)
-            .await?;
-    let onboarding: Option<Routes> = onboarding
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(|_| ProactiveControlError::InvalidStoredState)?;
-    if let ReminderDestination::Telegram(route) = &route {
-        ensure_telegram_conversation(txn, route).await?;
-    }
     let mut queued = 0;
     for tracker in trackers {
         if let Some(rule) = project(
@@ -252,6 +247,20 @@ async fn sync_page(
         }
     }
     Ok(TrackerRulePage { next, queued })
+}
+
+async fn onboarding_routes(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<Option<Routes>, ProactiveControlError> {
+    let onboarding: Option<String> =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='preferences:onboarding'")
+            .fetch_optional(&mut **txn)
+            .await?;
+    onboarding
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| ProactiveControlError::InvalidStoredState)
 }
 
 async fn ensure_telegram_conversation(
@@ -424,15 +433,27 @@ async fn unique_route(
     owner: Uuid,
     channel: &ChannelRef,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT count(*)=1 FROM (SELECT 1 FROM conversations WHERE owner_id=$1
-           AND channel=$2 AND channel_instance_id=$3 LIMIT 2) AS route",
+    Ok(unique_conversation(txn, owner, channel).await?.is_some())
+}
+
+async fn unique_conversation(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    channel: &ChannelRef,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let candidates = sqlx::query_scalar(
+        "SELECT id FROM conversations WHERE owner_id=$1
+           AND channel=$2 AND channel_instance_id=$3 LIMIT 2",
     )
     .bind(owner)
     .bind(&channel.channel)
     .bind(&channel.instance_id)
-    .fetch_one(&mut **txn)
-    .await
+    .fetch_all(&mut **txn)
+    .await?;
+    Ok(match candidates.as_slice() {
+        [id] => Some(*id),
+        _ => None,
+    })
 }
 
 async fn cancel_queued(txn: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<(), sqlx::Error> {

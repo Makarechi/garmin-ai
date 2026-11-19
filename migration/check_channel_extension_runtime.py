@@ -43,7 +43,7 @@ def make_due(engine):
 
 
 @contextmanager
-def worker(binary, adapter, root, engine, *, registered=True):
+def worker(binary, adapter, root, engine, *, registered=True, profile=None):
     integration = {
         "id": INSTANCE,
         "kind": "channel",
@@ -51,6 +51,7 @@ def worker(binary, adapter, root, engine, *, registered=True):
         "config": {"invocation_log": str(root / "invocations")},
         "secret_refs": {"key": SECRET},
     }
+    integrations = [integration] if profile is None else profile
     env = {
         "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
         "GA_DATA_DIR": str(root / "data"),
@@ -58,11 +59,13 @@ def worker(binary, adapter, root, engine, *, registered=True):
         "GA_QUIET_START_HOUR": "0",
         "GA_QUIET_END_HOUR": "0",
         "GA_QUESTION_BUDGET": "4",
-        "GA_INTEGRATIONS": json.dumps([integration]),
+        "GA_INTEGRATIONS": json.dumps(integrations),
         SECRET: "synthetic-native-channel-secret",
     }
     if registered:
-        env["GA_CHANNEL_PLUGIN_EXECUTABLES"] = json.dumps({INSTANCE: str(adapter)})
+        env["GA_CHANNEL_PLUGIN_EXECUTABLES"] = json.dumps(
+            {integration["id"]: str(adapter) for integration in integrations}
+        )
     with subprocess.Popen(
         [binary, "worker"], cwd=root, env=env, stdout=subprocess.PIPE, text=True
     ) as process:
