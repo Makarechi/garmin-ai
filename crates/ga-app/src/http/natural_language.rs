@@ -41,24 +41,27 @@ pub(super) async fn tracker(State(state): State<AppState>, request: Request) -> 
                         i64::try_from(micros).map_err(|_| TrackerTextError::Database)?,
                     )
                     .map_err(|_| TrackerTextError::Database)?;
-                    database
-                        .tracker_text_fallback(
-                            &request,
-                            TrackerTextContext {
-                                owner,
-                                scopes,
-                                actor: "api",
-                                message_at,
-                                configured_timezone: &state.configured_timezone,
-                                configured_locale: &state.configured_locale,
-                            },
-                        )
-                        .await
+                    run_tracker(
+                        database,
+                        &request,
+                        TrackerTextContext {
+                            owner,
+                            scopes,
+                            actor: "api",
+                            message_at,
+                            configured_timezone: &state.configured_timezone,
+                            configured_locale: &state.configured_locale,
+                        },
+                    )
+                    .await
                 }
                 .await;
                 match result {
                     Ok(result) => Json(result).into_response(),
                     Err(TrackerTextError::Invalid) => invalid_arguments(),
+                    Err(TrackerTextError::Form(error)) => {
+                        super::tracker_actions::submit_failure(error)
+                    }
                     Err(error) => (
                         match error {
                             TrackerTextError::Forbidden => StatusCode::FORBIDDEN,
@@ -76,4 +79,27 @@ pub(super) async fn tracker(State(state): State<AppState>, request: Request) -> 
         unauthorized()
     };
     private_cache(response, &parts.headers)
+}
+
+async fn run_tracker(
+    database: &ga_db::Database,
+    request: &TrackerTextRequest,
+    context: TrackerTextContext<'_>,
+) -> Result<serde_json::Value, TrackerTextError> {
+    let settings = crate::replay_worker::model_settings();
+    let configured = settings
+        .as_ref()
+        .map(ga_app::model_gateway::RuntimeModelSettings::configured);
+    if let Some(configured) = configured
+        && database
+            .model_onboarding_allows(ga_domain::model_consent::ModelCategories::DIARY)
+            .await
+            .unwrap_or(false)
+        && let Ok(gateway) = configured.gateway(database.clone(), false, context.message_at)
+    {
+        return gateway
+            .process_tracker_text(request, context, || configured.current())
+            .await;
+    }
+    database.tracker_text_fallback(request, context).await
 }

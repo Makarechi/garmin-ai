@@ -1,5 +1,8 @@
 //! Request identity and local relevance for generated tracker text commands.
 
+mod extraction;
+pub use extraction::{ExtractionError, TrackerExtraction, ValidatedTrackerSubmission};
+
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
@@ -17,6 +20,7 @@ impl std::fmt::Display for InvalidTrackerTextRequest {
 }
 impl std::error::Error for InvalidTrackerTextRequest {}
 
+#[derive(Clone)]
 pub struct TrackerTextRequest {
     pub text: String,
     pub operation_id: String,

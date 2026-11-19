@@ -189,6 +189,8 @@ impl Database {
                     actor: "api",
                     source: None,
                     idempotency_key: None,
+                    original_text: None,
+                    evidence_refs: None,
                 },
             )
             .await?;
@@ -268,6 +270,12 @@ impl Database {
                 ));
             }
         }
+        if let Some(original_text) = context.original_text {
+            raw["original_text"] = json!(original_text);
+        }
+        if let Some(references) = context.evidence_refs {
+            evidence = references.to_vec();
+        }
         let bytes = serde_json::to_vec(&raw).map_err(|_| FormSubmitError::Invalid)?;
         let entry =
             CustomEntry::from_json(&bytes, 512_000).map_err(DiaryWriteError::CustomInput)?;
@@ -313,4 +321,6 @@ pub(crate) struct TrackerFormWrite<'a> {
     pub actor: &'a str,
     pub source: Option<&'a str>,
     pub idempotency_key: Option<&'a str>,
+    pub original_text: Option<&'a str>,
+    pub evidence_refs: Option<&'a [Value]>,
 }

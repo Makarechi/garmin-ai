@@ -10,7 +10,9 @@ pub use community::{CommunityPackError, community_pack_catalog, parse_community_
 pub(crate) use forms::TrackerFormWrite;
 pub use forms::{FileImportOutcome, FileImportStoreError};
 pub use forms::{FormSubmission, FormSubmitError};
-pub use natural_language::{TrackerTextContext, TrackerTextError};
+pub use natural_language::{
+    TrackerTextContext, TrackerTextError, TrackerTextPreparation, TrackerTextSession,
+};
 pub use setup::TrackerSetupStoreError;
 
 use std::{error::Error, fmt, time::Duration};

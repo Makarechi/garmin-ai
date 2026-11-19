@@ -182,7 +182,7 @@ fn parse_time(
     Ok(result)
 }
 
-fn timezone_offset(
+pub(crate) fn timezone_offset(
     zone: &jiff::tz::TimeZone,
     instant: StoredInstant,
 ) -> Result<UtcOffset, ChatFormError> {
