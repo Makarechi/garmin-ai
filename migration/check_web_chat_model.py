@@ -11,7 +11,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -29,7 +29,7 @@ from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Person
+from garmin_ai.models import HealthDay, Person
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
@@ -60,10 +60,23 @@ DIARY_QUESTION = "Which detail is in the synthetic diary for 19 September?"
 DIARY_ANSWER = "The diary lists the synthetic detail."
 DIARY_START = datetime(2026, 9, 19, 20, tzinfo=UTC)
 DIARY_DETAIL = "Synthetic detail from the saved diary"
+HEALTH_QUESTION = "Compare synthetic daily Garmin values."
+HEALTH_READS = {
+    "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
+    "analysis_compare_periods": {
+        "metric": "sleep_score",
+        "a_start": "2026-09-19",
+        "a_end": "2026-09-20",
+        "b_start": "2026-09-21",
+        "b_end": "2026-09-22",
+    },
+}
 
 
 def output(prompt):
     if "question" in prompt:
+        if prompt["question"].startswith(HEALTH_QUESTION):
+            return health_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -89,7 +102,7 @@ def output(prompt):
     if sentence.startswith("Undo"):
         confidence = 0.84 if "synthetic low confidence" in sentence else 1
         return Interpretation(intent="undo", confidence=confidence, response_language="en")
-    if sentence.startswith(DIARY_QUESTION):
+    if sentence.startswith((DIARY_QUESTION, HEALTH_QUESTION)):
         return Interpretation(intent="question", confidence=1, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
@@ -140,6 +153,35 @@ def output(prompt):
                 "timezone": "UTC",
                 "payload": {"type": "note", "description": DETAIL},
             }
+        ],
+    )
+
+
+def health_output(prompt):
+    evidence = prompt["evidence"]
+    if not evidence:
+        tools = {tool["name"]: tool["schema"] for tool in prompt["tools"]}
+        assert all("metric" in tools[tool]["required"] for tool in HEALTH_READS)
+        return AgentStep(
+            calls=[
+                {"name": tool, "arguments_json": json.dumps(arguments)}
+                for tool, arguments in HEALTH_READS.items()
+            ],
+            response_language="en",
+        )
+    assert [row["tool"] for row in evidence] == list(HEALTH_READS)
+    if prompt["question"].endswith("without pack permission"):
+        assert all(set(row["result"]) == {"error"} for row in evidence)
+        return AgentStep(response_language="en")
+    assert evidence[0]["result"]["mean"] == 70
+    assert evidence[1]["result"]["difference"] == 20
+    return AgentStep(
+        answer="These are the two requested synthetic aggregates.",
+        response_language="en",
+        evidence_ids=[1, 2],
+        numeric_claims=[
+            {"evidence_id": 1, "path": ["mean"], "value": 70},
+            {"evidence_id": 2, "path": ["difference"], "value": 20},
         ],
     )
 
@@ -343,6 +385,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_corrections(engine, python, native, native_calls)
     exercise_undo(engine, python, native, native_calls, active, release)
     exercise_analysis(engine, python, native, native_calls)
+    exercise_health_analysis(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -616,6 +659,37 @@ def exercise_analysis(engine, python, native, native_calls):
         "Matched grounded web diary answer, retained context after one receipt, "
         "and rejected stale evidence in Rust and the rollback reader"
     )
+
+
+def exercise_health_analysis(engine, python, native):
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["sleep"].llm_enabled = True
+        for day, value in zip(range(19, 23), [60, 80, 40, 60], strict=True):
+            session.add(HealthDay(day=date(2026, 9, day), sleep_score=value))
+
+    reference = submit(python, HEALTH_QUESTION)
+    identity = str(uuid4())
+    reply = submit(native, HEALTH_QUESTION, identity)["reply"]
+    assert reply["text"] == reference["reply"]["text"], (reply, reference)
+    assert "Garmin" in reply["text"] and "/difference: 20" in reply["text"]
+    reply_id = reply["id"]
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE health_days SET sleep_score=65 WHERE day='2026-09-19'"))
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200 and reply_id not in {
+        row["id"] for row in history.json()["replies"]
+    }
+    assert native.post(f"/web-chat/messages/{reply_id}/read", headers=HEADERS).status_code == 409
+    assert submit(native, HEALTH_QUESTION, identity)["reply"] is None
+
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["sleep"].llm_enabled = False
+    denied_question = HEALTH_QUESTION + " without pack permission"
+    withheld = submit(native, denied_question)["reply"]
+    reference = submit(python, denied_question)["reply"]
+    assert withheld["text"] == reference["text"], (withheld, reference)
+    assert "The analysis could not be completed" in withheld["text"], withheld
+    print("Matched cited daily Garmin aggregates and withheld stale or disallowed evidence")
 
 
 def main():

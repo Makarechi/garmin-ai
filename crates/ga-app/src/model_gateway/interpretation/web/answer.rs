@@ -1,6 +1,6 @@
 use ga_db::{
     conversation_memory::AnalysisSubject,
-    share_policy::{DestinationKind, ModelConversation, ShareDestination},
+    share_policy::{DestinationKind, ShareDestination},
     web_chat::{WebChatInterpretationContext, WebChatModelReply, WebChatModelSession},
 };
 use ga_domain::{
@@ -13,7 +13,7 @@ use time::format_description::well_known::Rfc3339;
 use super::{CurrentModelPolicy, ModelGateway, WebInterpretation, urgent_notice};
 use crate::model_gateway::{
     AnalysisDestination, AnalysisQuestion, AnalysisResult, DiaryAnalysisTools,
-    analysis_conversation, format_diary_answer,
+    analysis_conversation, format_analysis_answer,
 };
 
 pub(super) enum WebAnswer<'a> {
@@ -74,16 +74,15 @@ impl ModelGateway<'_> {
             .ok()?
             .replace('Z', "+00:00");
         let channel = ShareDestination::new(DestinationKind::Channel, "web:local").ok()?;
-        let tools = DiaryAnalysisTools::new(
-            &self.database,
-            AnalysisSubject::Web {
-                binding,
-                memory: &memory.fence,
-                goals_revision: goals.revision,
-            },
-            self.binding().instance_id,
-        )
-        .ok()?;
+        let subject = AnalysisSubject::Web {
+            binding,
+            memory: &memory.fence,
+            goals_revision: goals.revision,
+        };
+        let tools = DiaryAnalysisTools::new(&self.database, subject, self.binding().instance_id)
+            .ok()?
+            .with_daily_access(self.binding(), policy(), session.at, false)
+            .await;
         let answer = self
             .answer_for_channel(
                 AnalysisQuestion {
@@ -95,17 +94,14 @@ impl ModelGateway<'_> {
                     quality_context: &json!({}),
                     personal_goals: &serde_json::to_value(&goals).ok()?,
                     replay_notice: None,
-                    tools: &[tools.offered_tool()],
+                    tools: &tools.offered_tools(),
                 },
                 budget,
                 &tools,
                 policy,
                 AnalysisDestination {
                     channel,
-                    conversation: ModelConversation::Web {
-                        binding,
-                        memory: &memory.fence,
-                    },
+                    subject,
                     tracker_versions: &interpretation.channel_versions,
                     job: None,
                     uses_voice_text: false,
@@ -131,12 +127,12 @@ impl ModelGateway<'_> {
                 used_evidence,
                 ..
             } => Some(WebAnswer::Grounded {
-                text: format_diary_answer(
+                text: format_analysis_answer(
                     &language,
                     narrative,
                     numbers,
                     timestamps,
-                    !used_evidence.is_empty(),
+                    &used_evidence,
                 ),
                 evidence: used_evidence,
                 goals_revision: goals.revision,

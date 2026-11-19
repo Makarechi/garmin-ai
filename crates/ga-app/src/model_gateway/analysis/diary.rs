@@ -4,38 +4,37 @@ use ga_db::{
     Database,
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
+    health_analysis::{
+        DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON, PERSONAL_BASELINE,
+    },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
-use ga_domain::model_consent::ModelCategories;
+use ga_domain::{
+    model_consent::{ModelBinding, ModelCategories, ModelOperation, authorized_models},
+    timestamp::StoredInstant,
+};
 use serde_json::{Map, Value, json};
 
 use super::{AnalysisReadTools, AnalysisToolRead, OfferedReadTool};
+use crate::{model_gateway::CurrentModelPolicy, read_tool_catalog::ReadTool};
 
 const EVENTS: &str = "events";
 
-static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-        "name": EVENTS,
-        "description": "Read confirmed, inferred, or pending diary events with their status; excludes deleted records.",
-        "schema": {
-            "additionalProperties": false,
-            "properties": {
-                "start": {"format": "date-time", "title": "Start", "type": "string"},
-                "end": {"format": "date-time", "title": "End", "type": "string"},
-                "kind": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Kind"}
-            },
-            "required": ["start", "end"],
-            "title": "eventsArgs",
-            "type": "object"
-        }
-    })
-});
+static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Events));
+static BASELINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Baseline));
+static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ComparePeriods));
 
-/// A diary-only model tool bound to an authenticated question and its configured model.
+fn model_description(tool: ReadTool) -> Value {
+    let entry = tool.catalog_entry();
+    json!({"name":entry["name"],"description":entry["description"],"schema":entry["input_schema"]})
+}
+
+/// Agent reads bound to an authenticated question and its configured model.
 pub struct DiaryAnalysisTools<'a> {
     database: &'a Database,
     context: AnalysisSubject<'a>,
     model: ShareDestination<'a>,
+    daily: bool,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
@@ -48,20 +47,57 @@ impl<'a> DiaryAnalysisTools<'a> {
             database,
             context: context.into(),
             model: ShareDestination::new(DestinationKind::Model, model_instance)?,
+            daily: false,
         })
     }
 
-    pub fn offered_tool(&self) -> OfferedReadTool<'static> {
-        OfferedReadTool {
+    pub async fn with_daily_access(
+        mut self,
+        binding: ModelBinding<'_>,
+        policy: CurrentModelPolicy<'_>,
+        at: StoredInstant,
+        uses_voice: bool,
+    ) -> Self {
+        let categories = ModelCategories::HEALTH_AND_DIARY;
+        let operation = if uses_voice {
+            ModelOperation::StructuredFromVoice(categories)
+        } else {
+            ModelOperation::Structured(categories)
+        };
+        self.daily =
+            authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
+                && self.database.analysis_health_allowed(self.context).await;
+        self
+    }
+
+    pub fn offered_tools(&self) -> Vec<OfferedReadTool<'static>> {
+        let mut offered = vec![OfferedReadTool {
             name: EVENTS,
             description: &DESCRIPTION,
+        }];
+        if self.daily {
+            offered.extend([
+                OfferedReadTool {
+                    name: PERSONAL_BASELINE,
+                    description: &BASELINE,
+                },
+                OfferedReadTool {
+                    name: PERIOD_COMPARISON,
+                    description: &COMPARISON,
+                },
+            ]);
         }
+        offered
     }
 }
 
 impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     fn categories(&self) -> ModelCategories {
-        ModelCategories::DIARY
+        if self.daily {
+            ModelCategories::HEALTH_AND_DIARY
+        } else {
+            ModelCategories::DIARY
+        }
     }
 
     async fn context_current(&self) -> bool {
@@ -71,6 +107,17 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     }
 
     async fn read(&self, name: &str, args: &Map<String, Value>) -> Option<AnalysisToolRead> {
+        if self.daily && DailyAnalysisEvidence::is_daily_tool(name) {
+            let query = DailyAnalysisQuery::from_arguments(name, args)?;
+            return Some(AnalysisToolRead {
+                value: self
+                    .database
+                    .read_analysis_daily(self.context, &query)
+                    .await
+                    .ok()??,
+                tracker_versions: Default::default(),
+            });
+        }
         if name != EVENTS {
             return None;
         }

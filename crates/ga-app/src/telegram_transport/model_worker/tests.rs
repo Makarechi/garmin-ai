@@ -8,6 +8,7 @@ use std::{
 use ga_db::{
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
     jobs::telegram_inbound::{LocalTelegramText, TelegramSafetyDecision},
+    outbox_claims::{ReplyDestination, ReplyDispatchResult},
 };
 use ga_domain::model_response::StructuredModelOutput;
 use ga_model::ModelTransportError;
@@ -23,6 +24,8 @@ use crate::{
     model_gateway::{PreparedRequest, RuntimeModelSettings},
     telegram_input::TelegramBinding,
 };
+
+const HEALTH_QUESTION: &str = "What is the synthetic Garmin sleep baseline?";
 
 struct SyntheticProvider {
     calls: AtomicUsize,
@@ -96,6 +99,28 @@ impl Sender for SyntheticProvider {
                     "What is in the synthetic diary?"
                 );
                 json!({"intent":"question","confidence":1.0,"response_language":"en"})
+            }
+            7 => {
+                assert_eq!(prompt["text"], HEALTH_QUESTION);
+                json!({"intent":"question","confidence":1.0,"response_language":"en"})
+            }
+            8 => {
+                assert_eq!(prompt["question"], HEALTH_QUESTION);
+                assert!(prompt["tools"].as_array().is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        tool["name"] == "personal_baseline"
+                            && tool["schema"]["required"] == json!(["metric", "start", "end"])
+                    })
+                }));
+                json!({"calls":[{"name":"personal_baseline","arguments_json":json!({
+                    "metric":"sleep_score","start":"2024-01-01","end":"2024-01-02"
+                }).to_string()}]})
+            }
+            9 => {
+                assert_eq!(prompt["evidence"][0]["result"]["mean"], 70.0);
+                json!({"answer":"Here is the synthetic Garmin baseline.","evidence_ids":[1],
+                       "numeric_claims":[{"evidence_id":1,"path":["mean"],"value":70}],
+                       "response_language":"en"})
             }
             _ => panic!("Unexpected provider retry"),
         };
@@ -347,6 +372,67 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
     );
     println!(
         "Analysis replies bypassed the {kind} tracker prompt without exposing its schema in seven SDK calls"
+    );
+    sqlx::query(
+        "INSERT INTO health_days(day,sleep_score,sources)
+         VALUES ('2024-01-01',60,'{}'),('2024-01-02',80,'{}')",
+    )
+    .execute(&pool)
+    .await?;
+    database.scenario_packs(owner_id, true).await?;
+    let allow_sleep =
+        "UPDATE module_configs SET llm_enabled=$2 WHERE owner_id=$1 AND pack_key='sleep'";
+    assert_eq!(
+        sqlx::query(allow_sleep)
+            .bind(owner_id)
+            .bind(true)
+            .execute(&pool)
+            .await?
+            .rows_affected(),
+        1
+    );
+    process(&mut runtime, 5, HEALTH_QUESTION).await?;
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 10);
+    let (reply_id, body, proof): (Uuid, String, String) = sqlx::query_as(
+        "SELECT o.id,o.intent#>>'{blocks,0,text}',(o.memory_fence->'telegram_diary_analysis')::text
+         FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+         WHERE i.normalized_text=$1",
+    )
+    .bind(HEALTH_QUESTION)
+    .fetch_one(&pool)
+    .await?;
+    let proof: Value = serde_json::from_str(&proof)?;
+    assert!(
+        body.contains("/mean: 70") && body.contains("saved Garmin data"),
+        "{body}"
+    );
+    assert_eq!(proof["reads"][0]["query"]["tool"], "personal_baseline");
+    sqlx::query("UPDATE outbox_messages SET state='cancelled' WHERE id<>$1 AND state='queued'")
+        .bind(reply_id)
+        .execute(&pool)
+        .await?;
+    let destination = || ReplyDestination {
+        owner_id,
+        channel: "telegram",
+        instance_id: "primary",
+    };
+    let claim = database
+        .claim_outbox_reply(destination(), started, LEASE)
+        .await?
+        .ok_or("Expected claimed health reply")?;
+    assert_eq!(claim.outbox_id, reply_id);
+    sqlx::query(allow_sleep)
+        .bind(owner_id)
+        .bind(false)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        database
+            .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
+                panic!("Revoked health evidence escaped to Telegram")
+            })
+            .await?,
+        ReplyDispatchResult::Cancelled
     );
     Ok(())
 }

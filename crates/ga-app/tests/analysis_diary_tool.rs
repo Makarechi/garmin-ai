@@ -63,7 +63,9 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
         let reader = DiaryAnalysisTools::new(&db, context, model)?;
         assert!(reader.context_current().await);
         assert_eq!(reader.categories(), ModelCategories::DIARY);
-        assert_eq!(*reader.offered_tool().description, fixture["menu"]);
+        let menu = reader.offered_tools();
+        assert_eq!(menu.len(), 1);
+        assert_eq!(*menu[0].description, fixture["menu"]);
         let result = reader
             .read("events", args)
             .await

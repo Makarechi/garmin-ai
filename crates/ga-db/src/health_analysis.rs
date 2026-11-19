@@ -5,6 +5,7 @@ mod event_windows;
 pub mod generic;
 mod hypotheses;
 mod insights;
+mod model_daily;
 pub use hypotheses::HypothesisError;
 mod lagged;
 mod migraine;
@@ -18,6 +19,9 @@ mod sleep_timing;
 
 pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
+pub use model_daily::{
+    DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON, PERSONAL_BASELINE,
+};
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;
 pub use sleep_timing::sleep_timing_result_hash;
@@ -292,17 +296,24 @@ async fn begin_verified_analysis(
     pool: &PgPool,
 ) -> Result<Transaction<'static, Postgres>, HealthAnalysisError> {
     let mut txn = begin_daily_analysis(pool).await?;
+    require_current_projection(&mut txn).await?;
+    Ok(txn)
+}
+
+async fn require_current_projection(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), HealthAnalysisError> {
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
         .bind(REPLAY_MUTATION_LOCK)
-        .fetch_one(&mut *txn)
+        .fetch_one(&mut **txn)
         .await?;
     if !locked {
         return Err(HealthAnalysisError::Storage(ReadinessError::Unavailable));
     }
-    if projection_pending(&mut txn, PARSER_VERSION).await? {
+    if projection_pending(txn, PARSER_VERSION).await? {
         return Err(HealthAnalysisError::ReplayPending);
     }
-    Ok(txn)
+    Ok(())
 }
 
 async fn restore_display_timezone(txn: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {

@@ -84,20 +84,7 @@ impl DailyHealthReader {
         owner: Uuid,
         packs: &[&str],
     ) -> Result<bool, HealthAnalysisError> {
-        Ok(sqlx::query_scalar(
-            "SELECT NOT EXISTS(SELECT FROM module_configs WHERE owner_id=$1)
-                OR NOT EXISTS(
-                    SELECT FROM unnest($2::text[]) AS required(key)
-                    WHERE NOT EXISTS(
-                        SELECT FROM module_configs
-                        WHERE owner_id=$1 AND pack_key=required.key AND llm_enabled
-                    )
-                )",
-        )
-        .bind(owner)
-        .bind(packs)
-        .fetch_one(&mut *self.0)
-        .await?)
+        model_packs_allowed(&mut self.0, owner, packs).await
     }
 
     /// Return recorded summaries for this inclusive calendar range.
@@ -122,7 +109,6 @@ impl DailyHealthReader {
         response["rows"] = Value::Array(rows);
         Ok(response)
     }
-
     /// Show the stored calendar day, including missing metrics and the separate hydration contract.
     pub async fn snapshot(mut self, day: Date) -> Result<Value, HealthAnalysisError> {
         if !(1..=9999).contains(&day.year()) {
@@ -157,6 +143,27 @@ impl DailyHealthReader {
             "missing_metrics": missing,
         }))
     }
+}
+
+pub(super) async fn model_packs_allowed(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    packs: &[&str],
+) -> Result<bool, HealthAnalysisError> {
+    Ok(sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT FROM module_configs WHERE owner_id=$1)
+                OR NOT EXISTS(
+                    SELECT FROM unnest($2::text[]) AS required(key)
+                    WHERE NOT EXISTS(
+                        SELECT FROM module_configs
+                        WHERE owner_id=$1 AND pack_key=required.key AND llm_enabled
+                    )
+                )",
+    )
+    .bind(owner)
+    .bind(packs)
+    .fetch_one(&mut **txn)
+    .await?)
 }
 
 fn health_day(document: &str, updated_at: OffsetDateTime) -> Result<Value, HealthAnalysisError> {
