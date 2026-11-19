@@ -2,6 +2,7 @@ pub mod access;
 pub mod activity_scan;
 pub mod agent_interpretation;
 pub mod analysis_budget;
+pub mod analysis_spec;
 pub mod channel;
 pub mod community_pack;
 pub mod event_contract;
