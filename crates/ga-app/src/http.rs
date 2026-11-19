@@ -7,6 +7,7 @@ mod garmin_auth;
 mod hypotheses;
 mod natural_language;
 mod personal_goals;
+mod scenario_packs;
 mod source_mappings;
 pub(crate) mod tools;
 mod tracker_actions;
@@ -46,6 +47,8 @@ fn router(state: AppState) -> Router {
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
+        .route("/scenario-packs", any(scenario_packs::collection))
+        .route("/scenario-packs/{key}", any(scenario_packs::selection))
         .route("/actions", any(tracker_actions::available))
         .route("/natural-language/trackers", any(natural_language::tracker))
         .route(
