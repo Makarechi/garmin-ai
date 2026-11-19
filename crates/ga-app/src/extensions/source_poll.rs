@@ -196,7 +196,7 @@ impl ScheduledSourcePlugins {
             if source.provider == "garmin" {
                 continue;
             }
-            Extension::source(&executable, &id)?;
+            Extension::new(&executable, &id)?;
             sources.insert(id, (executable, source));
         }
         Ok((!sources.is_empty()).then_some(Self { sources }))
@@ -282,7 +282,7 @@ async fn poll(
         SourcePoll::Deferred(_) => return Ok(summary("deferred", 0, 0)),
         SourcePoll::Ready(_) => {}
     }
-    let mut extension = Extension::source(executable, &source.id)?;
+    let mut extension = Extension::new(executable, &source.id)?;
     extension.context = Some(source.context()?);
     let hash = source.source_hash()?;
     let capabilities = extension.describe(cancelled).await?;

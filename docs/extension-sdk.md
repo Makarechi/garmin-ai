@@ -129,6 +129,31 @@ No external developer reproduction or published-package compatibility is
 claimed until an independent contributor runs the guide against a published
 release.
 
+## Native channel probe
+
+The native version 1 channel protocol uses one JSON request and one JSON reply
+per process. It shares the source protocol envelope. The `describe` method
+returns `kind: "channel"`, the configured instance ID, the implementation
+version and the channel capabilities. `delivery_policy` and `deliver` take a
+normalized outbound intent and the current timestamp in `params`. They return
+the corresponding delivery policy and attempt documents described above.
+
+Build and run the independent fictional channel from the repository root.
+
+```sh
+cargo build --locked --manifest-path examples/native-channel/Cargo.toml
+cargo run --locked -p ga-app --bin garmin-ai-rust -- check-channel-extension \
+  "$PWD/examples/native-channel/target/debug/garmin-ai-synthetic-channel" \
+  channel:synthetic:probe
+```
+
+The probe checks a plain-text render, the recipient namespace, the delivery
+policy and a matching receipt. It reports optional capabilities as unverified.
+The example records `provider_accepted` for the fictional probe. The probe
+is a standalone command for an explicitly supplied executable. The runner
+clears the child environment and bounds each response and call duration. The executable still
+runs with the application's operating-system permissions.
+
 Declarative scenario packs have a separate data-only format documented in
 [scenario packs](scenario-packs.md). The
 [`focus-walks.json`](../examples/declarative-pack/focus-walks.json) example can

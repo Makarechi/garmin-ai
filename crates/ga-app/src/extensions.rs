@@ -1,5 +1,7 @@
+mod channel;
 mod source_poll;
 
+pub(crate) use channel::check_channel;
 pub(crate) use source_poll::{ScheduledSourcePlugins, configured_source_fingerprint, poll_source};
 
 use std::{
@@ -28,7 +30,7 @@ const MAX_PAGES: usize = 1000;
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum ExtensionError {
     Configuration,
     Launch,
@@ -39,6 +41,9 @@ enum ExtensionError {
     Rejected,
     Capabilities,
     SourcePage,
+    ChannelConfiguration,
+    ChannelCapabilities,
+    ChannelDelivery,
 }
 
 impl fmt::Display for ExtensionError {
@@ -53,6 +58,11 @@ impl fmt::Display for ExtensionError {
             Self::Rejected => "The extension refused the request.",
             Self::Capabilities => "The extension's source capabilities are invalid.",
             Self::SourcePage => "The extension returned a page outside the source contract.",
+            Self::ChannelConfiguration => "The channel extension configuration is invalid.",
+            Self::ChannelCapabilities => "The extension's channel capabilities are invalid.",
+            Self::ChannelDelivery => {
+                "The extension returned a delivery outside the channel contract."
+            }
         })
     }
 }
@@ -88,7 +98,7 @@ enum WireError {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SourceDescriptor {
+struct ExtensionDescriptor {
     kind: String,
     instance_id: String,
     implementation_version: String,
@@ -103,7 +113,7 @@ struct Extension<'a> {
 }
 
 impl<'a> Extension<'a> {
-    fn source(executable: &'a Path, instance_id: &'a str) -> Result<Self, ExtensionError> {
+    fn new(executable: &'a Path, instance_id: &'a str) -> Result<Self, ExtensionError> {
         let mut id = instance_id.bytes();
         let directory = executable.parent().filter(|_| executable.is_absolute());
         if instance_id.len() > 200
@@ -220,22 +230,34 @@ impl<'a> Extension<'a> {
         &self,
         cancelled: &mut watch::Receiver<bool>,
     ) -> Result<SourceCapabilities, ExtensionError> {
+        let capabilities = self
+            .describe_kind("source", cancelled, ExtensionError::Capabilities)
+            .await?;
+        SourceCapabilities::from_json(&capabilities)
+            .ok()
+            .filter(|capabilities| capabilities.observations)
+            .ok_or(ExtensionError::Capabilities)
+    }
+
+    async fn describe_kind(
+        &self,
+        kind: &str,
+        cancelled: &mut watch::Receiver<bool>,
+        invalid: ExtensionError,
+    ) -> Result<Value, ExtensionError> {
         let descriptor = self
             .request(1, "describe", Value::Null, MAX_REPLY, cancelled)
             .await?;
-        let descriptor: SourceDescriptor =
-            serde_json::from_str(descriptor.get()).map_err(|_| ExtensionError::Capabilities)?;
-        if descriptor.kind != "source"
+        let descriptor: ExtensionDescriptor =
+            serde_json::from_str(descriptor.get()).map_err(|_| invalid)?;
+        if descriptor.kind != kind
             || descriptor.instance_id != self.instance_id
             || descriptor.implementation_version.is_empty()
             || descriptor.implementation_version.len() > 100
         {
-            return Err(ExtensionError::Capabilities);
+            return Err(invalid);
         }
-        SourceCapabilities::from_json(&descriptor.capabilities)
-            .ok()
-            .filter(|capabilities| capabilities.observations)
-            .ok_or(ExtensionError::Capabilities)
+        Ok(descriptor.capabilities)
     }
 
     async fn read_page(
@@ -317,7 +339,7 @@ pub(crate) async fn check_source(
     executable: &Path,
     instance_id: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let extension = Extension::source(executable, instance_id)?;
+    let extension = Extension::new(executable, instance_id)?;
     let (cancel, mut cancelled) = watch::channel(false);
     let report = run_until_shutdown(cancel, PROBE_TIMEOUT, async {
         Ok(extension.source_probe(&mut cancelled).await?)
