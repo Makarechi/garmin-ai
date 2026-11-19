@@ -82,6 +82,12 @@ impl Sender for SyntheticProvider {
             }
             4 => {
                 assert_eq!(prompt["text"], "What about the previous entry?");
+                assert!(prompt["context"]["pending_clarification"].is_null());
+                assert!(
+                    !prompt
+                        .to_string()
+                        .contains("Synthetic local-only tracker schema")
+                );
                 assert_eq!(
                     prompt["context"]["recent_analysis_question"]["question"],
                     "What is in the synthetic diary?"
@@ -172,7 +178,8 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
                 runtime,
                 &json!({"update_id":id,"message":{
                     "message_id":id,"from":{"id":42},"chat":{"id":42,"type":"private"},
-                    "text":text,"date":message_at
+                    "text":text,"date":message_at,
+                    "reply_to_message":(id==3).then(||json!({"message_id":810004}))
                 }}),
                 started,
                 false,
@@ -257,7 +264,7 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
                 intent_id: outbox_id,
                 state,
                 observed_at: observed,
-                provider_reference: Some("synthetic-confirmed-analysis"),
+                provider_reference: Some("810004"),
                 detail: None,
             },
         )
@@ -275,6 +282,13 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
     }
     sqlx::query("UPDATE conversations SET state=jsonb_set(state,'{analysis_turns}','[]'::jsonb) WHERE id=$1")
         .bind(conversation_id).execute(&pool).await?;
+    let pending = json!({"button":"tracker_select","question":"Synthetic local-only tracker schema",
+        "options":[{"id":format!("create:{}",Uuid::nil()),"label":"Synthetic local-only tracker schema","definition_version_id":Uuid::nil().to_string()}],
+        "created_at":started.to_string(),"prompt_order":[0,999999],"channel_instance_id":"telegram:primary"});
+    sqlx::query("INSERT INTO app_state(key,value) VALUES('conversation:pending',$1::jsonb)")
+        .bind(pending.to_string())
+        .execute(&pool)
+        .await?;
     process(&mut runtime, 3, "What about the previous entry?").await?;
     assert_eq!(fake.calls.load(Ordering::SeqCst), 7);
     let continued: (String, bool) = sqlx::query_as(
@@ -286,6 +300,20 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
     .fetch_one(&pool)
     .await?;
     assert_eq!(continued, (replies[1].0.clone(), true));
+    let retained: String =
+        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='conversation:pending'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(serde_json::from_str::<Value>(&retained)?, pending);
+    sqlx::query("UPDATE app_state SET value=value||'{\"prompt_order\":[0,0]}'::jsonb WHERE key='conversation:pending'").execute(&pool).await?;
+    process(&mut runtime, 4, "1").await?;
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 7);
+    let still_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM app_state WHERE key='conversation:pending')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!still_pending);
     assert_eq!(
         database
             .conversation_memory(conversation, observed)

@@ -266,6 +266,9 @@ impl Continuations<'_> {
         let Some(pending) = pending else {
             return Ok((None, false));
         };
+        if pending["button"] == "tracker_select" {
+            return Ok((None, false));
+        }
         let explicit_target = pending["explicit_selector"] == true
             && matches!(pending["action"].as_str(), Some("update" | "close"));
         let mut ids = Vec::new();
