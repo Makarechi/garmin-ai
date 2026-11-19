@@ -34,6 +34,7 @@ pub(crate) enum ReadTool {
     Events,
     EventDefinitions,
     ResourceCatalog,
+    GenericAnalysis,
     Timeline,
     DeviceHistory,
     Freshness,
@@ -71,7 +72,7 @@ impl ReadTool {
         Self::Sleep,
         Self::Timeline,
     ];
-    pub(crate) const IMPLEMENTED: [Self; 22] = [
+    pub(crate) const IMPLEMENTED: [Self; 23] = [
         Self::Snapshot,
         Self::Range,
         Self::MetricSeries,
@@ -81,6 +82,7 @@ impl ReadTool {
         Self::Events,
         Self::EventDefinitions,
         Self::ResourceCatalog,
+        Self::GenericAnalysis,
         Self::Timeline,
         Self::Freshness,
         Self::Insights,
@@ -105,6 +107,7 @@ impl ReadTool {
             Self::Events => "events",
             Self::EventDefinitions => "event_definitions",
             Self::ResourceCatalog => "resource_catalog",
+            Self::GenericAnalysis => "generic_analysis",
             Self::Timeline => "timeline",
             Self::DeviceHistory => "device_history",
             Self::Freshness => "data_freshness",
@@ -305,6 +308,10 @@ impl ReadTool {
                 json!({}),
                 &[][..],
             ),
+            Self::GenericAnalysis => {
+                return serde_json::from_str(include_str!("../../contracts/generic-analysis.json"))
+                    .unwrap_or(Value::Null);
+            }
         };
         let mut input_schema = json!({
             "title": title, "type": "object", "additionalProperties": false,
@@ -390,6 +397,41 @@ async fn execute_read_tool(
         Ok(arguments) => arguments,
         Err(error) => return error.into_response(),
     };
+    if tool == ReadTool::GenericAnalysis {
+        use ga_db::health_analysis::generic::GenericAudience;
+        let spec = match generic_input(&arguments) {
+            Ok(spec) => spec,
+            Err(ga_domain::analysis_spec::InvalidAnalysisSpec::Validation) => {
+                return invalid_arguments();
+            }
+            Err(ga_domain::analysis_spec::InvalidAnalysisSpec::CalendarOverflow) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+                    .into_response();
+            }
+        };
+        if !scopes.permits_tool(
+            tool.name(),
+            ReadToolInput::Analysis {
+                operation: spec.document()["operation"].as_str().unwrap_or_default(),
+                metric: spec.document()["metric_key"].as_str(),
+            },
+        ) {
+            return forbidden();
+        }
+        let result = async {
+            let reader = database
+                .generic_analysis_reader(GenericAudience::Owner {
+                    read_health: scopes.permits(&[ga_domain::access::Scope::ReadHealth]),
+                })
+                .await?;
+            read_generic(reader, &spec).await
+        }
+        .await;
+        return match result {
+            Ok(document) => document_response(document),
+            Err(error) => generic_failure(error),
+        };
+    }
     if matches!(tool, ReadTool::ResourceCatalog) {
         let Ok(page) = catalog_input(&arguments) else {
             return invalid_arguments();
@@ -751,7 +793,23 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         _ => storage_unavailable(),
     }
 }
+fn generic_failure(error: ga_db::health_analysis::generic::GenericAnalysisError) -> Response {
+    use ga_db::health_analysis::generic::GenericAnalysisError;
+    match error {
+        GenericAnalysisError::Lookup(_) => detail(StatusCode::NOT_FOUND, "Record not found"),
+        GenericAnalysisError::Value(_) | GenericAnalysisError::Encoding => invalid_arguments(),
+        GenericAnalysisError::Calculation(error) if error.class_name() == "ValueError" => {
+            invalid_arguments()
+        }
+        GenericAnalysisError::Permission => forbidden(),
+        GenericAnalysisError::Health(error) => health_failure(error),
+        GenericAnalysisError::Database | GenericAnalysisError::Data => storage_unavailable(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+    }
+}
 mod garmin_reads;
+mod generic_reads;
+pub(crate) use generic_reads::{generic_error_class, generic_input, read_generic};
 
 pub(crate) use garmin_reads::{GarminReadError, read_garmin};
 

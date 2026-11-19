@@ -1,0 +1,213 @@
+{
+  "name": "generic_analysis",
+  "description": "Run a bounded version-aware entry or metric plan. threshold_segments finds periods above or below a value; threshold_by_local_hour groups observed threshold time by local clock hour. Both require time-weighted measurements, separate sources, at most 31 days and 1000 samples.",
+  "input_schema": {
+    "$defs": {
+      "AnalysisSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "enum": [
+              "query_entries",
+              "query_observations",
+              "aggregate_metric",
+              "compare_periods",
+              "query_completeness",
+              "threshold_segments",
+              "threshold_by_local_hour"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "metric_key": {
+            "anyOf": [
+              {
+                "pattern": "^(?:user|system)\\.[a-z][a-z0-9_.-]{0,126}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Metric Key"
+          },
+          "definition_key": {
+            "anyOf": [
+              {
+                "pattern": "^(?:user|system)\\.[a-z][a-z0-9_.-]{0,126}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Definition Key"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          },
+          "end": {
+            "format": "date-time",
+            "title": "End",
+            "type": "string"
+          },
+          "comparison_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Comparison Start"
+          },
+          "comparison_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Comparison End"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z_]{1,32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Method"
+          },
+          "metric_version": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Metric Version"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          },
+          "limit": {
+            "default": 500,
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "knowledge_cutoff": {
+            "format": "date-time",
+            "title": "Knowledge Cutoff",
+            "type": "string"
+          },
+          "time_relation": {
+            "default": "starts_within",
+            "enum": [
+              "starts_within",
+              "overlap"
+            ],
+            "title": "Time Relation",
+            "type": "string"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Threshold in the selected metric's unit",
+            "title": "Threshold"
+          },
+          "threshold_operator": {
+            "anyOf": [
+              {
+                "enum": [
+                  "gt",
+                  "gte",
+                  "lt",
+                  "lte"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Comparison applied to the observed metric value",
+            "title": "Threshold Operator"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timezone"
+          }
+        },
+        "required": [
+          "operation",
+          "start",
+          "end",
+          "knowledge_cutoff"
+        ],
+        "title": "AnalysisSpec",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "spec": {
+        "$ref": "#/$defs/AnalysisSpec"
+      }
+    },
+    "required": [
+      "spec"
+    ],
+    "title": "generic_analysisArgs",
+    "type": "object"
+  }
+}
