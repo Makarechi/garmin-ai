@@ -280,12 +280,26 @@ def snapshot(session):
     }
 
 
-def capture(engine, locale="en"):
-    seed(engine)
+def capture(engine, locale="en", *, seed_data=seed, conversation_cases=cases):
+    seed_data(engine)
     outputs = []
-    for index, case in enumerate(cases()):
+    for index, case in enumerate(conversation_cases()):
         update_id = 71001 + index
         with Session(engine) as session:
+            for key, value in case.get("states", {}).items():
+                old = session.get(AppState, key)
+                if old:
+                    session.delete(old)
+                    session.flush()
+                if value is not None:
+                    session.add(AppState(key=key, value=value))
+            for name, status in case.get("tracker_status", {}).items():
+                definition = session.scalar(
+                    select(EventDefinition).where(
+                        EventDefinition.key == f"user.synthetic_chat_{name}"
+                    )
+                )
+                definition.status = status
             if "grant" in case or case.get("revoke"):
                 definition = session.scalar(
                     select(EventDefinition).where(

@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+mod selection;
+
 use ga_domain::{
     channel::{InboundEnvelope, InboundKind, OutboundIntent},
     event_payload::python_whitespace,
@@ -45,6 +47,23 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(2500), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             let handled = apply_in(&mut txn, lease, &envelope, timezone, locale).await?;
+            if !handled && envelope.kind() == InboundKind::Voice {
+                let (id, token) = lease.job_identity();
+                let released = sqlx::query(
+                    "UPDATE jobs SET status='pending',lease_token=NULL,lease_until=NULL,attempts=attempts-1,
+                       payload=jsonb_set(payload,'{tracker_caption_checked}','true')
+                     WHERE id=$1 AND lease_token=$2 AND status='running' AND lease_until>clock_timestamp()"
+                )
+                .bind(id)
+                .bind(token)
+                .execute(&mut *txn)
+                .await?;
+                if released.rows_affected() != 1 {
+                    return Err(crate::jobs::JobStoreError::LeaseLost.into());
+                }
+                txn.commit().await?;
+                return Ok(());
+            }
             txn.commit().await?;
             if handled {
                 Ok(())
@@ -102,7 +121,7 @@ pub(super) async fn apply_in(
         pending["chat_form"].is_object() || pending["chat_close"].is_object()
     });
     if action.is_none() && !active_form {
-        return Ok(false);
+        return selection::apply_in(txn, lease, envelope, timezone, &locale, now, pending).await;
     }
     let inspected = prompt::inspect(txn, binding, lease, envelope, now).await?;
     if let Some(notice) = inspected.notice {
@@ -506,19 +525,35 @@ async fn write_reply(
     text: &str,
     shared: Option<(Uuid, bool)>,
 ) -> Result<(), TelegramDiaryCommitError> {
+    write_shared_reply(txn, lease, envelope, text, shared.as_slice()).await
+}
+
+async fn write_shared_reply(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &TelegramInboundLease,
+    envelope: &InboundEnvelope,
+    text: &str,
+    shared: &[(Uuid, bool)],
+) -> Result<(), TelegramDiaryCommitError> {
     let mut refs = Vec::new();
-    if let Some((version, editing)) = shared {
+    for &(version, editing) in shared {
         let definition: Uuid =
             sqlx::query_scalar("SELECT definition_id FROM event_definition_versions WHERE id=$1")
                 .bind(version)
                 .fetch_one(&mut **txn)
                 .await?;
-        refs.push(format!("definition:{definition}"));
-        refs.push(if editing {
+        let definition = format!("definition:{definition}");
+        if !refs.contains(&definition) {
+            refs.push(definition);
+        }
+        let version = if editing {
             format!("definition-version:{version}")
         } else {
             format!("definition-schema-version:{version}")
-        });
+        };
+        if !refs.contains(&version) {
+            refs.push(version);
+        }
     }
     let intent=OutboundIntent::normalize(json!({"owner_id":envelope.owner_id().to_string(),"conversation_id":envelope.conversation_id().to_string(),
         "channel_instance":{"channel":"telegram","instance_id":envelope.channel().instance_id()},"blocks":[{"text":text}],"evidence_refs":refs})).map_err(|_|TelegramDiaryCommitError::Reply)?;
