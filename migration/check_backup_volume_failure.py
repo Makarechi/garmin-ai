@@ -15,7 +15,9 @@ from tempfile import TemporaryDirectory
 from capture_reference import isolated_engine
 from check_backup_commands import capture, check_recovered_files, cli_environment, run_cli, settings
 
-MIB = 1024 * 1024
+# Leave room for the 256 MiB backup reserve, database export estimate,
+# existing encrypted backup and the 24 MiB synthetic payload.
+SCRATCH_BYTES = 384 * 1024 * 1024
 
 
 def free_bytes(directory):
@@ -32,8 +34,8 @@ def safe_test_volume(path):
             fields[0].split()[4] == str(volume) and fields[1].split()[0] == "tmpfs"
             for fields in (line.split(" - ", 1) for line in mounts)
         )
-    if not tmpfs or not 128 * MIB <= free_bytes(volume) <= 384 * MIB:
-        raise ValueError("The scratch tmpfs must have between 128 and 384 MiB available")
+    if not tmpfs or free_bytes(volume) != SCRATCH_BYTES:
+        raise ValueError("Mount the scratch tmpfs with size=384m")
     return volume
 
 
