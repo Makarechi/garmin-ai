@@ -73,17 +73,10 @@ pub(crate) async fn run() -> Result<(), &'static str> {
         database,
         owner,
         timezone: timezone.unwrap_or_else(|| "Europe/Bratislava".to_owned()),
-        read_tools: [
-            ReadTool::Events,
-            ReadTool::WellbeingObservations,
-            ReadTool::EventDefinitions,
-            ReadTool::ResourceCatalog,
-        ]
-        .into_iter()
-        .chain(ReadTool::GARMIN_READS)
-        .chain(std::iter::once(ReadTool::Freshness))
-        .map(read_tool)
-        .collect::<Result<_, _>>()?,
+        read_tools: ReadTool::IMPLEMENTED
+            .into_iter()
+            .map(read_tool)
+            .collect::<Result<_, _>>()?,
         write_tools: WRITE_TOOLS
             .iter()
             .take(if writes { WRITE_TOOLS.len() } else { 0 })

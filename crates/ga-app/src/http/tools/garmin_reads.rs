@@ -3,7 +3,7 @@ use ga_db::{
     Database,
     health_analysis::{
         ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod,
-        MODEL_HEALTH_PACKS, NapPolicy, SeriesReadError, model_metric_packs,
+        MODEL_HEALTH_PACKS, NapPolicy, SeriesReadError, TimelineError, model_metric_packs,
     },
 };
 use ga_domain::timestamp::StoredInstant;
@@ -34,6 +34,22 @@ impl From<ActivityReadError> for GarminReadError {
         match error {
             ActivityReadError::Missing => Self::Missing,
             ActivityReadError::Analysis(error) => Self::Health(error),
+            _ => Self::Value,
+        }
+    }
+}
+
+impl From<TimelineError> for GarminReadError {
+    fn from(error: TimelineError) -> Self {
+        match error {
+            TimelineError::Health(error) => Self::Health(error),
+            TimelineError::Diary(
+                ga_db::diary::DiaryReadError::ModelConsent | ga_db::diary::DiaryReadError::Owner,
+            ) => Self::Permission,
+            TimelineError::Database
+            | TimelineError::Diary(
+                ga_db::diary::DiaryReadError::Database | ga_db::diary::DiaryReadError::Storage(_),
+            ) => Self::Health(HealthAnalysisError::Database),
             _ => Self::Value,
         }
     }
@@ -96,6 +112,7 @@ pub(crate) async fn read_garmin(
             Query::Migraine(..) | Query::Insights(..) => Some("migraine"),
             Query::Coffee(..) => Some("caffeine"),
             Query::Sleep(..) => Some("nap"),
+            Query::Timeline(..) => Some("note"),
             _ => None,
         };
         if let Some(kind) = kind
@@ -138,6 +155,12 @@ pub(crate) async fn read_garmin(
             .await?),
         Query::EventWindows(kind, metric, start, end) => {
             return Ok(reader.event_windows(kind, metric, start, end).await?);
+        }
+        Query::Timeline(start, end) => {
+            return match mcp_owner {
+                Some(owner) => Ok(reader.model_timeline_document(owner, start, end).await?),
+                None => Ok(reader.owner_timeline_document(start, end).await?),
+            };
         }
         Query::Insights(limit, cursor) => return Ok(reader.insights(limit, cursor).await?),
         Query::Stress(start, end, timezone) => Ok(reader
@@ -202,12 +225,13 @@ enum Query<'a> {
     Coffee(Date, Date, Option<f64>, &'a str),
     Insights(u16, Option<&'a str>),
     Sleep(Date, Date, NapPolicy, bool),
+    Timeline(OffsetDateTime, OffsetDateTime),
 }
 
 impl Query<'_> {
     fn model_packs(&self) -> &'static [&'static str] {
         match self {
-            Self::Snapshot(_) | Self::Range(..) => MODEL_HEALTH_PACKS,
+            Self::Snapshot(_) | Self::Range(..) | Self::Timeline(..) => MODEL_HEALTH_PACKS,
             Self::Activities(..) | Self::Activity(..) | Self::Devices(..) => &["training"],
             Self::Baseline(metric, ..)
             | Self::Compare(metric, ..)
@@ -228,6 +252,19 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
     let day = |name| arguments.get(name).and_then(date_input);
     let metric = || arguments.get("metric").and_then(Value::as_str);
     match tool {
+        ReadTool::Timeline if arguments.len() == 2 => {
+            let (Some(start), Some(end)) = (
+                arguments
+                    .get("start")
+                    .and_then(StoredInstant::legacy_input_with_offset),
+                arguments
+                    .get("end")
+                    .and_then(StoredInstant::legacy_input_with_offset),
+            ) else {
+                return Err(GarminReadError::Arguments);
+            };
+            Ok(Query::Timeline(start, end))
+        }
         ReadTool::Sleep => {
             let (start, end, policy, timing_only) =
                 sleep_input(arguments).ok_or(GarminReadError::Arguments)?;

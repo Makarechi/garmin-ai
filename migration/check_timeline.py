@@ -19,7 +19,6 @@ from garmin_ai.queries import timeline
 START = datetime(2026, 10, 25, 9, tzinfo=UTC)
 MIN = timedelta(minutes=1)
 HOUR = timedelta(hours=1)
-SIZE_LIMIT = "Timeline exceeds the size limit; narrow the interval"
 
 
 def add_interval(session, name, start, end, label, source, confirmed, evidence=None):
@@ -167,16 +166,16 @@ def fixtures(engine):
         ("exactly_500", START + timedelta(days=2), START + timedelta(days=2, minutes=1), None),
         ("combined_limit", START + timedelta(days=2), START + timedelta(days=2, minutes=2), None),
         (
-            "dense_size_limit",
+            "dense_overlap",
             START + timedelta(days=4),
             START + timedelta(days=4, hours=1),
-            SIZE_LIMIT,
+            None,
         ),
         (
-            "evidence_size_limit",
+            "large_evidence",
             START + timedelta(days=5),
             START + timedelta(days=5, hours=1),
-            SIZE_LIMIT,
+            None,
         ),
     ]
     results = []
@@ -224,7 +223,9 @@ def main():
                 check=True,
                 env={**os.environ, "GA_TEST_TIMELINE": str(destination)},
             )
-        print(f"Passed {len(tests) - 2} paired timelines and 2 native size-limit cases")
+        print(
+            f"Passed all {len(tests)} paired timelines, including dense overlaps and large evidence"
+        )
     finally:
         engine.dispose()
 
