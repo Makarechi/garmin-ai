@@ -86,5 +86,22 @@ replay cursors, bindings and the uncertain delivery receipt. A retry on the rest
 installation returns the same corrected record. The initial copy predates that record.
 
 The reported timings cover archive authentication, database restore and file placement for
-the fixture. Release rehearsal also needs the final image, worker handover, queue drain and
-the independent recovery environment.
+the fixture. Release rehearsal also needs the final image, queue drain and the independent
+recovery environment.
+
+## Rehearse worker ownership
+
+Run `python migration/check_worker_cutover.py /path/to/garmin-ai /path/to/garmin-ai-rust`
+in the same pinned test environment. Supply a fresh isolated `_test` database through
+`GA_TEST_DATABASE_URL`. Both workers use the same database and storage with distinct local
+lock directories. No external integrations are configured.
+
+The test starts the pinned Python worker and checks that Rust cannot take its database
+lease. It kills the Python process, starts Rust, verifies that Rust owns the lease recorded
+in its heartbeat, and checks that a competing Python worker exits. After Rust stops
+cleanly, the Python worker can resume. The test compares the saved pending replay job,
+clarification, polling and replay cursors, account bindings and uncertain delivery receipt
+throughout the handover.
+
+This checks process ownership and preservation of pending state. Draining work and testing
+delivery across an actual external provider require the release rehearsal.
