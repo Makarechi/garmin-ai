@@ -52,29 +52,35 @@ impl GenericAnalysisReader {
                 None => cutoff.to_owned(),
             };
             self.restore_display_timezone().await?;
-            let mut chunks =
-                sqlx::query_as::<_, (bool, i64, Vec<u8>)>(include_str!("entries_snapshots.sql"))
-                    .bind(candidates)
-                    .bind(PgInterval {
-                        months: 0,
-                        days: 0,
-                        microseconds: spec.knowledge_cutoff_microseconds(),
-                    })
-                    .bind(definition)
-                    .bind(spec.start())
-                    .bind(spec.end())
-                    .bind(relation)
-                    .bind(limit)
-                    .bind(spec.hash())
-                    .bind(key)
-                    .bind(cutoff)
-                    .fetch(&mut *self.txn);
+            let mut chunks = sqlx::query_as::<_, (Option<String>, i64, Vec<u8>)>(include_str!(
+                "entries_snapshots.sql"
+            ))
+            .bind(candidates)
+            .bind(PgInterval {
+                months: 0,
+                days: 0,
+                microseconds: spec.knowledge_cutoff_microseconds(),
+            })
+            .bind(definition)
+            .bind(spec.start())
+            .bind(spec.end())
+            .bind(relation)
+            .bind(limit)
+            .bind(spec.hash())
+            .bind(key)
+            .bind(cutoff)
+            .fetch(&mut *self.txn);
             let mut output = JsonSpool::default();
-            while let Some((unavailable, count, bytes)) = chunks.try_next().await? {
-                if unavailable {
-                    return Err(GenericAnalysisError::Value(
-                        "Historical entry state is unavailable at this cutoff",
-                    ));
+            while let Some((error, count, bytes)) = chunks.try_next().await? {
+                match error.as_deref() {
+                    Some("unavailable") => {
+                        return Err(GenericAnalysisError::Value(
+                            "Historical entry state is unavailable at this cutoff",
+                        ));
+                    }
+                    Some("snapshot") => return Err(GenericAnalysisError::InvalidSnapshot),
+                    Some(_) => return Err(GenericAnalysisError::Database),
+                    None => (),
                 }
                 if count > limit {
                     return Err(GenericAnalysisError::Value(

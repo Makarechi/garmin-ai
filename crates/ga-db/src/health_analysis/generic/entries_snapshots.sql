@@ -28,8 +28,13 @@ WITH cutoff AS (SELECT 'epoch'::timestamptz+$2::interval AS at), known AS (
         (snapshot IS NULL OR snapshot='null'::jsonb)
             AND ingested_at<=cutoff.at AND updated_at>cutoff.at AS unavailable
     FROM known CROSS JOIN cutoff
+), failures AS (
+    SELECT id,CASE WHEN unavailable THEN 'unavailable'
+        WHEN snapshot IS NOT NULL AND snapshot<>'null'::jsonb
+            AND jsonb_typeof(snapshot)<>'object' THEN 'snapshot' END AS error
+    FROM reconstructed
 ), flags AS (
-    SELECT COALESCE(bool_or(unavailable),false) AS unavailable FROM reconstructed
+    SELECT (SELECT error FROM failures WHERE error IS NOT NULL ORDER BY id LIMIT 1) AS error
 ), normalized AS (
     SELECT reconstructed.snapshot || jsonb_build_object('topology',
         COALESCE(NULLIF(snapshot->>'topology',''),CASE
@@ -41,7 +46,7 @@ WITH cutoff AS (SELECT 'epoch'::timestamptz+$2::interval AS at), known AS (
     ) AS snapshot
     FROM reconstructed WHERE snapshot IS NOT NULL AND snapshot<>'null'::jsonb
         AND NOT COALESCE((snapshot->>'deleted')::boolean,false)
-        AND NOT (SELECT unavailable FROM flags)
+        AND (SELECT error FROM flags) IS NULL
 ), eligible AS MATERIALIZED (
     SELECT snapshot FROM normalized JOIN event_definition_versions AS version
         ON version.id=NULLIF(snapshot->>'definition_version_id','')::uuid
@@ -67,7 +72,7 @@ WITH cutoff AS (SELECT 'epoch'::timestamptz+$2::interval AS at), known AS (
             FROM eligible WHERE (SELECT count FROM total)<=$7),'[]'::json)
     )::text,'UTF8') AS bytes
 )
-SELECT flags.unavailable,total.count,substring(bytes FROM byte_offset FOR 65536)
+SELECT flags.error,total.count,substring(bytes FROM byte_offset FOR 65536)
 FROM source CROSS JOIN flags CROSS JOIN total
 CROSS JOIN LATERAL generate_series(1,octet_length(bytes),65536) AS parts(byte_offset)
 ORDER BY byte_offset

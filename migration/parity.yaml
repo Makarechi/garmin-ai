@@ -860,9 +860,28 @@
         "tests/test_sleep_analysis.py",
         "tests/test_stress_analysis.py",
         "tests/test_hypotheses.py",
-        "tests/test_migraine_controls.py"
+        "tests/test_migraine_controls.py",
+        "tests/test_threshold_segments.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_health_analysis.py",
+        "migration/check_running_efficiency.py",
+        "migration/check_stress_hours.py",
+        "migration/check_lagged_association.py",
+        "migration/check_event_windows.py",
+        "migration/check_migraine_windows.py",
+        "migration/check_coffee_sleep.py",
+        "migration/check_sleep_analysis.py",
+        "migration/check_generic_entry_history.py",
+        "migration/check_generic_observation_history.py",
+        "migration/check_generic_aggregate_history.py",
+        "migration/check_generic_compositions.py",
+        "migration/check_generic_thresholds.py",
+        "migration/check_generic_interfaces.py",
+        "crates/ga-domain/src/analysis_spec.rs::tests",
+        "crates/ga-domain/src/metric_aggregate.rs::tests",
+        "crates/ga-domain/src/threshold_time.rs::tests::matches_frozen_local_hour_slices"
+      ],
       "data_contracts": [
         "Unit/source comparability, period and bootstrap results, migraine controls, sampling/gaps and association boundaries."
       ],
@@ -870,10 +889,14 @@
         "Read scopes for inputs; write permission for persistent hypotheses; sensitive metrics may require consent."
       ],
       "resource_scenario": "Long period/lag/migraine/bootstrap and generic custom-metric analysis",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R21",
-      "known_limits": [],
+      "known_limits": [
+        "Native read analytics and all seven generic operations have dedicated synthetic comparisons. Persistent hypothesis create/recheck/stop flows and complete R21 acceptance remain pending.",
+        "R36 still requires complete HTTP typed-validation response details, nonfinite generic values through HTTP/MCP, database/server/connection timezone configuration and DST arithmetic across all generic operations.",
+        "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."
+      ],
       "approved_deviations": []
     },
     {

@@ -26,7 +26,10 @@ use uuid::Uuid;
 
 use crate::{
     configuration,
-    http::tools::{GarminReadError, ReadTool, range_with_kind, read_garmin},
+    http::tools::{
+        GarminReadError, ReadTool, generic_error_class, generic_input, range_with_kind,
+        read_garmin, read_generic,
+    },
 };
 
 mod protocol;
@@ -129,6 +132,7 @@ impl Mcp {
             "events" => self.events(args).await,
             "event_definitions" => self.definitions(args).await,
             "resource_catalog" => self.catalog(args).await,
+            "generic_analysis" => self.generic(args).await,
             "wellbeing_observations" => self.wellbeing(args).await,
             "data_freshness" => self.garmin(ReadTool::Freshness, args).await,
             "events_create" if enable_writes => self.create(args, is_cancelled).await,
@@ -153,6 +157,27 @@ impl Mcp {
 }
 
 impl Mcp {
+    async fn generic(&self, args: Map<String, Value>) -> Result<ToolResult, &'static str> {
+        let permit = self
+            .active_reads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "RuntimeError")?;
+        let reader = self
+            .database
+            .generic_analysis_reader(ga_db::health_analysis::generic::GenericAudience::Mcp {
+                owner: self.owner,
+            })
+            .await
+            .map_err(|error| generic_error_class(&error))?;
+        let spec = generic_input(&args).map_err(|error| error.class_name())?;
+        let document = read_generic(reader, &spec)
+            .await
+            .map_err(|error| generic_error_class(&error))?;
+        Ok(ToolResult::data(document, Some(permit)))
+    }
+
     async fn catalog(&self, args: Map<String, Value>) -> Result<ToolResult, &'static str> {
         let page = crate::http::tools::catalog_input(&args)?;
         let permit = self
