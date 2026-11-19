@@ -146,6 +146,7 @@ impl ModelGateway<'_> {
                 policy,
                 ModelRequestScope {
                     requirements: &model_requirements,
+                    uses_voice_text: false,
                     channel: Some(ModelChannelSharing {
                         destination,
                         requirements: &channel_requirements,
