@@ -59,6 +59,10 @@ impl ModelGateway<'_> {
                 AgentIntent::Log | AgentIntent::Update | AgentIntent::Close => {
                     WebChatModelReply::Mutation { command, expected }
                 }
+                AgentIntent::Undo => WebChatModelReply::Undo {
+                    language: &language,
+                    expected,
+                },
                 AgentIntent::Safety => WebChatModelReply::SafetyNotice(urgent_notice(&language)),
                 AgentIntent::Clarify => WebChatModelReply::Clarify {
                     question: command

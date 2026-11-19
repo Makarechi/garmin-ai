@@ -37,6 +37,18 @@ pub struct UndoneDiaryOperation {
 
 type RecordedAudit = (Uuid, Option<Uuid>, Option<String>, Option<String>);
 
+pub(crate) async fn latest_undo_audit(
+    txn: &mut Transaction<'_, Postgres>,
+    actor: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT id FROM audit_log WHERE actor=$1 AND action!='undo' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(actor)
+    .fetch_optional(&mut **txn)
+    .await
+}
+
 impl Database {
     /// Undo the actor's latest operation as one transaction, newest audit first.
     pub async fn undo_diary_operation(

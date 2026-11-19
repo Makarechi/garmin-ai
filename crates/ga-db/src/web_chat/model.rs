@@ -4,6 +4,7 @@ use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation},
     channel::InboundEnvelope,
     event_input::EventSource,
+    localization::catalog_text,
     model_consent::ModelCategories,
     timestamp::StoredInstant,
 };
@@ -19,9 +20,10 @@ use crate::{
     conversation_memory::ConversationBinding,
     diary::{
         ClarificationClock, ClarificationReply, CreateAgentLogBatch, InterpretationContext,
-        InterpretationContextQuery, StoredSystemEvent,
+        InterpretationContextQuery, StoredSystemEvent, UndoDiaryOperation,
         agent_correction::{AgentCorrection, AgentCorrectionContext},
         cancel_in, interpretation_context_in, save_clarification_in,
+        undo::{latest_undo_audit, try_undo_and_reconcile},
     },
     health_analysis::owner_timezone,
     model_gate::onboarding::onboarding_allows_model,
@@ -52,6 +54,10 @@ pub enum WebChatModelReply<'a> {
         command: &'a AgentInterpretation,
         expected: WebChatInterpretationContext<'a>,
     },
+    Undo {
+        language: &'a str,
+        expected: WebChatInterpretationContext<'a>,
+    },
 }
 
 pub enum WebChatModelPreparation {
@@ -67,6 +73,7 @@ pub struct WebChatModelSession {
     pub at: StoredInstant,
     pub locale: String,
     pub timezone: String,
+    undo_anchor: Option<i64>,
 }
 
 impl WebChatModelSession {
@@ -137,6 +144,7 @@ impl Database {
             .fetch_optional(&mut *txn)
             .await?;
             let locale = saved.unwrap_or_else(|| request.configured_locale.to_owned());
+            let undo_anchor = latest_undo_audit(&mut txn, super::DESTINATION).await?;
             txn.commit().await?;
             Ok(WebChatModelPreparation::Ready(Box::new(
                 WebChatModelSession {
@@ -145,6 +153,7 @@ impl Database {
                     at,
                     timezone,
                     locale,
+                    undo_anchor,
                 },
             )))
         })
@@ -216,7 +225,8 @@ async fn render_model_reply(
         // The fixed safety notice uses no diary context or tracker references.
         WebChatModelReply::SafetyNotice(message) => return Ok(((*message).to_owned(), Vec::new())),
         WebChatModelReply::Clarify { expected, .. }
-        | WebChatModelReply::Mutation { expected, .. } => *expected,
+        | WebChatModelReply::Mutation { expected, .. }
+        | WebChatModelReply::Undo { expected, .. } => *expected,
     };
     let Some(context) = current_interpretation(txn, session, configured_timezone, expected).await?
     else {
@@ -273,6 +283,38 @@ async fn render_model_reply(
                     savepoint.rollback().await?;
                     return Ok((SAVE_FAILED.to_owned(), Vec::new()));
                 }
+            }
+        }
+        WebChatModelReply::Undo { language, .. } => {
+            if session.undo_anchor.is_none()
+                || latest_undo_audit(txn, super::DESTINATION).await? != session.undo_anchor
+            {
+                return Ok((SAVE_FAILED.to_owned(), Vec::new()));
+            }
+            let undone = try_undo_and_reconcile(
+                txn,
+                &UndoDiaryOperation {
+                    owner_id: session.envelope.owner_id(),
+                    authenticated_actor: super::DESTINATION,
+                },
+                configured_timezone,
+            )
+            .await
+            .map_err(|_| WebChatError::Database)?;
+            let Some(undone) = undone else {
+                return Ok((SAVE_FAILED.to_owned(), Vec::new()));
+            };
+            cancel_in(txn, session.binding())
+                .await
+                .map_err(|_| WebChatError::Database)?;
+            if undone.count > 1 {
+                catalog_text(language, "agent.undo_many")
+                    .ok_or(WebChatError::Database)?
+                    .replace("{count}", &undone.count.to_string())
+            } else {
+                catalog_text(language, "agent.undo_one")
+                    .ok_or(WebChatError::Database)?
+                    .to_owned()
             }
         }
     };
