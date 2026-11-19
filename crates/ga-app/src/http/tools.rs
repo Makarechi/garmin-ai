@@ -547,8 +547,7 @@ fn bool_input(value: &Value) -> Option<bool> {
 
 pub(super) fn integer_input(value: &Value) -> Option<u32> {
     ga_domain::legacy_json::integer_argument(value)?
-        .to_string()
-        .parse()
+        .try_into()
         .ok()
 }
 

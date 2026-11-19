@@ -263,8 +263,7 @@ fn parse(tool: ReadTool, arguments: &Map<String, Value>) -> Result<Query<'_>, Ga
                 None => 30,
                 Some(value) => ga_domain::legacy_json::integer_argument(value)
                     .ok_or(GarminReadError::Arguments)?
-                    .to_string()
-                    .parse::<u16>()
+                    .try_into()
                     .unwrap_or(0),
             };
             let cursor = match arguments.get("cursor") {
