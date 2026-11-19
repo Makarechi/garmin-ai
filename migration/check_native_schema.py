@@ -74,7 +74,7 @@ def upgrade(engine, revision):
         command.upgrade(config, revision)
 
 
-def compare_catalog(reference, native, *, check_ingestion=False):
+def compare_catalog(reference, native, *, check_ingestion=False, semantic_metric_versions=False):
     with reference.connect() as left, native.connect() as right:
         for index, query in enumerate(CATALOG):
             assert left.execute(text(query)).all() == right.execute(text(query)).all(), index
@@ -82,13 +82,26 @@ def compare_catalog(reference, native, *, check_ingestion=False):
         assert right.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT
         people = text("SELECT singleton,locale,timezone,units FROM people")
         assert left.execute(people).all() == right.execute(people).all()
-        fields = """
-        ts,metric,source,local_date,value,unit,metric_definition_version_id,
-        source_ref,quality,details,ingested_at
-        """
+        definition = (
+            "d.key,v.version,v.schema_hash"
+            if semantic_metric_versions
+            else "m.metric_definition_version_id"
+        )
+        versions = (
+            "LEFT JOIN metric_definition_versions v ON v.id=m.metric_definition_version_id "
+            "LEFT JOIN metric_definitions d ON d.id=v.definition_id"
+            if semantic_metric_versions
+            else ""
+        )
+        fields = (
+            f"m.ts,m.metric,m.source,m.local_date,m.value,m.unit,{definition},"
+            "m.source_ref,m.quality,m.details,m.ingested_at"
+        )
         for table in ("measurements", "measurement_revisions"):
-            where = "WHERE source_ref IS NOT NULL" if check_ingestion else ""
-            statement = text(f"SELECT {fields} FROM {table} {where} ORDER BY ts, metric, source")
+            where = "WHERE m.source_ref IS NOT NULL" if check_ingestion else ""
+            statement = text(
+                f"SELECT {fields} FROM {table} m {versions} {where} ORDER BY m.ts,m.metric,m.source"
+            )
             assert left.execute(statement).all() == right.execute(statement).all()
             if check_ingestion:
                 for connection in (left, right):
