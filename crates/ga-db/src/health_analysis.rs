@@ -1,4 +1,5 @@
 mod activity_reads;
+mod coffee;
 mod device_history;
 mod event_windows;
 mod lagged;
@@ -85,6 +86,8 @@ pub enum HealthAnalysisError {
     SleepNapLimit,
     SleepSessionLimit,
     MigraineEpisodeLimit,
+    CoffeeInputLimit,
+    CoffeeEvidenceLimit,
 }
 
 impl fmt::Display for HealthAnalysisError {
@@ -100,6 +103,8 @@ impl fmt::Display for HealthAnalysisError {
             Self::InvalidTimezone => "The analysis timezone is invalid",
             Self::InvalidKnowledgeCutoff => "As-known cutoff cannot follow the event",
             Self::SleepRange => "Sleep analysis requires at most 31 calendar days",
+            Self::CoffeeInputLimit => "More than 1000 diary inputs; narrow the range",
+            Self::CoffeeEvidenceLimit => "Coffee/sleep evidence exceeds budget; narrow the range",
             Self::MigraineEpisodeLimit => "Limit migraine comparison to at most 200 observed episode days; narrow the date range",
             Self::SleepNapLimit => "Sleep analysis exceeds 200 naps; narrow the interval",
             Self::SleepSessionLimit => {

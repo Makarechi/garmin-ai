@@ -577,24 +577,23 @@ pub fn event_document(mut event: Value) -> Result<Value, DiaryReadError> {
 
 pub(crate) fn caffeine_total(payload: &Value) -> Result<Value, DiaryReadError> {
     let unknown = json!("unknown");
+    let one = json!(1);
     let basis = payload.get("dose_basis").unwrap_or(&unknown);
-    let dose = |field: &str| -> Result<Option<f64>, DiaryReadError> {
+    let dose = |field: &str| -> Result<Option<Value>, DiaryReadError> {
         let Some(value) = payload.get(field).filter(|value| !value.is_null()) else {
             return Ok(None);
         };
         if !matches!(basis.as_str(), Some("total" | "per_serving")) {
             return Ok(None);
         }
-        let value = value.as_f64().ok_or(DiaryReadError::InvalidEvent)?;
         let servings = if basis == "per_serving" {
-            payload
-                .get("servings")
-                .map_or(Some(1.0), Value::as_f64)
-                .ok_or(DiaryReadError::InvalidEvent)?
+            payload.get("servings").unwrap_or(&one)
         } else {
-            1.0
+            &one
         };
-        Ok(Some(value * servings))
+        ga_domain::legacy_json::multiply_numbers(value, servings)
+            .map(Some)
+            .map_err(|_| DiaryReadError::InvalidEvent)
     };
     let min = dose("caffeine_mg_min")?;
     let estimate = dose("caffeine_mg_estimate")?;
@@ -607,6 +606,6 @@ pub(crate) fn caffeine_total(payload: &Value) -> Result<Value, DiaryReadError> {
         "basis": "total",
         "source_basis": basis,
         "provenance": payload.get("dose_provenance").unwrap_or(&unknown),
-        "status": if min.or(estimate).or(max).is_some() { "available" } else { "unknown" },
+        "status": if min.is_some() || estimate.is_some() || max.is_some() { "available" } else { "unknown" },
     }))
 }

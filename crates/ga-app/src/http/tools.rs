@@ -44,11 +44,12 @@ pub(crate) enum ReadTool {
     EventWindows,
     MigraineWindows,
     WellbeingObservations,
+    CoffeeSleep,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 13] = [
+    pub(crate) const GARMIN_READS: [Self; 14] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -62,8 +63,9 @@ impl ReadTool {
         Self::LaggedAssociation,
         Self::EventWindows,
         Self::MigraineWindows,
+        Self::CoffeeSleep,
     ];
-    const IMPLEMENTED: [Self; 18] = [
+    const IMPLEMENTED: [Self; 19] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -80,6 +82,7 @@ impl ReadTool {
         Self::EventWindows,
         Self::MigraineWindows,
         Self::WellbeingObservations,
+        Self::CoffeeSleep,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -103,6 +106,7 @@ impl ReadTool {
             Self::EventWindows => "analysis_event_windows",
             Self::MigraineWindows => "analysis_migraine_windows",
             Self::WellbeingObservations => "wellbeing_observations",
+            Self::CoffeeSleep => "analysis_coffee_sleep",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -243,6 +247,14 @@ impl ReadTool {
                 "wellbeing_observationsArgs",
                 json!({"start":datetime("Start"),"end":datetime("End"),
                     "cursor":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Cursor"}}),
+                &["start", "end"][..],
+            ),
+            Self::CoffeeSleep => (
+                "Compare caffeine timing and main sleep over at most 31 inclusive calendar dates using explicit diary coverage, exclusions and versioned evidence; missing diary is never zero intake.",
+                "analysis_coffee_sleepArgs",
+                json!({"start":date("Start"),"end":date("End"),
+                    "late_hours":{"default":6,"title":"Late Hours","type":"number"},
+                    "outcome":{"default":"sleep_score","enum":["sleep_score","sleep_seconds"],"title":"Outcome","type":"string"}}),
                 &["start", "end"][..],
             ),
             Self::Freshness => (
@@ -734,6 +746,8 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         | HealthAnalysisError::SleepRange
         | HealthAnalysisError::SleepNapLimit
         | HealthAnalysisError::MigraineEpisodeLimit
+        | HealthAnalysisError::CoffeeInputLimit
+        | HealthAnalysisError::CoffeeEvidenceLimit
         | HealthAnalysisError::SleepSessionLimit => invalid_arguments(),
         _ => storage_unavailable(),
     }
