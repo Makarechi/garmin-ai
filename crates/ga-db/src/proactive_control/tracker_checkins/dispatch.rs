@@ -4,7 +4,11 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, Time, format_description::well_known::Iso8601};
 use uuid::Uuid;
 
-use super::{Occurrence, RULE_PREFIX, has_entry, rule_revision, tracker_rule_id};
+use super::{
+    Occurrence, RULE_PREFIX,
+    fallback::{current_channels, plain_text, route_key},
+    has_entry, onboarding_routes, rule_revision, tracker_rule_id, unique_conversation,
+};
 use crate::{
     channel_ingress::telegram_poll::channel_primary,
     outbox_claims::ReplyDestination,
@@ -32,11 +36,7 @@ pub(crate) async fn revalidate_tracker_checkin(
 ) -> Result<TrackerCheckinDecision, ProactiveControlError> {
     use TrackerCheckinDecision::{Cancel, Defer, Expire, Ready};
     lock_policy(txn).await?;
-    let Some(id) = key
-        .strip_prefix("rule:")
-        .and_then(|key| key.split(':').next())
-        .and_then(|id| id.parse::<Uuid>().ok())
-    else {
+    let Some(((logical_key, route_index), id)) = route_key(key) else {
         return Ok(Cancel);
     };
     let raw: Option<String> = sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1")
@@ -63,14 +63,26 @@ pub(crate) async fn revalidate_tracker_checkin(
         || rule["enabled"] != true
         || rule["consented"] != true
         || rule["rule"]["kind"] != "missing_entry"
-        || rule["conversation_id"] != intent["conversation_id"]
-        || rule["primary_channel"] != intent["channel_instance"]
-        || !channel_primary(txn, destination.channel, destination.instance_id).await?
     {
         return Ok(Cancel);
     }
     let revision = rule_revision(rule.clone())?;
     if !intent["policy_revision"].is_null() && intent["policy_revision"] != revision {
+        return Ok(Cancel);
+    }
+    if route_index == 0 {
+        if rule["conversation_id"] != intent["conversation_id"]
+            || rule["primary_channel"] != intent["channel_instance"]
+            || !channel_primary(txn, destination.channel, destination.instance_id).await?
+        {
+            return Ok(Cancel);
+        }
+    } else if intent["policy_revision"] != revision
+        || intent["logical_notification_id"] != logical_key
+        || !plain_text(intent)
+        || !fallback_selected(txn, destination, &rule, intent, route_index).await?
+        || !known_failed_chain(txn, outbox, logical_key, key).await?
+    {
         return Ok(Cancel);
     }
     let invalid = || ProactiveControlError::InvalidStoredState;
@@ -102,7 +114,6 @@ pub(crate) async fn revalidate_tracker_checkin(
         return Ok(Cancel);
     }
 
-    let logical_key = key.split(":fallback:").next().unwrap_or(key);
     let Some(day) = intent["scheduled_day"]
         .as_str()
         .or_else(|| logical_key.rsplit(':').next())
@@ -168,6 +179,51 @@ pub(crate) async fn revalidate_tracker_checkin(
         return Ok(Expire);
     }
     Ok(retry_at.map_or(Ready, Defer))
+}
+
+async fn fallback_selected(
+    txn: &mut Transaction<'_, Postgres>,
+    destination: &ReplyDestination<'_>,
+    rule: &Value,
+    intent: &Value,
+    index: usize,
+) -> Result<bool, ProactiveControlError> {
+    let Some(routes) = onboarding_routes(txn).await? else {
+        return Ok(false);
+    };
+    let Some(channels) = current_channels(rule, &routes) else {
+        return Ok(false);
+    };
+    let Some(channel) = channels.get(index).filter(|channel| {
+        channel.channel == destination.channel
+            && channel.instance_id == destination.instance_id
+            && routes.fallback_channels.contains(channel)
+    }) else {
+        return Ok(false);
+    };
+    let conversation = unique_conversation(txn, destination.owner_id, channel).await?;
+    Ok(conversation.is_some_and(|id| intent["conversation_id"] == id.to_string()))
+}
+
+async fn known_failed_chain(
+    txn: &mut Transaction<'_, Postgres>,
+    reference: Uuid,
+    root: &str,
+    key: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT coalesce(bool_and(o.state='failed'),false)
+         FROM outbox_messages selected JOIN outbox_messages o
+            ON o.owner_id=selected.owner_id AND o.operation_id=selected.operation_id
+         WHERE selected.id=$1 AND (o.dedup_key=$2 OR starts_with(o.dedup_key,$3))
+            AND o.dedup_key<>$4",
+    )
+    .bind(reference)
+    .bind(root)
+    .bind(format!("{root}:fallback:"))
+    .bind(key)
+    .fetch_one(&mut **txn)
+    .await
 }
 
 fn parse_clock(value: &Value) -> Option<Time> {

@@ -148,6 +148,11 @@ reported delivery state; a missing or malformed result leaves delivery
 uncertain, and a restart does not resend it. The independent example uses
 fictional delivery evidence and is suitable for a disposable test environment.
 
+The worker can also use an owner-selected fallback route for the same reminder
+after the current provider returns a confirmed failure. The fallback needs a
+unique owner conversation and current sharing permission. The failure and the
+pending fallback decision survive a restart.
+
 ## Native channel probe
 
 The native version 1 channel protocol uses one JSON request and one JSON reply

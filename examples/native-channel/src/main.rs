@@ -60,6 +60,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             return Ok(());
         }
+        if method == "deliver"
+            && let Some(marker) = request["context"]["config"]["reject_text"].as_str()
+            && params["intent"]["blocks"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(marker))
+        {
+            let intent = &params["intent"]["intent_id"];
+            println!(
+                "{}",
+                json!({
+                    "version":1,"request_id":id,
+                    "result":{"intent_id":intent,"state":"failed",
+                        "receipt":{"intent_id":intent,"receipt_id":intent,"state":"failed",
+                            "observed_at":params["now"]}},
+                })
+            );
+            return Ok(());
+        }
     }
     let result = match (request["version"].as_u64(), request["method"].as_str()) {
         (Some(1), Some("describe")) => Ok(json!({

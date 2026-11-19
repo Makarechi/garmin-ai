@@ -15,7 +15,8 @@ use crate::{
     delivery::{DeliveryReceipt, DeliveryState, DeliveryTarget, record_delivery_receipt},
     jobs::{STORAGE_QUEUE_LOCK, telegram_notices::TelegramNoticeFence},
     proactive_control::{
-        ProactiveControlError, TrackerCheckinDecision, revalidate_tracker_checkin,
+        ProactiveControlError, TrackerCheckinDecision, remember_tracker_fallback,
+        revalidate_tracker_checkin,
     },
     replay::REPLAY_MUTATION_LOCK,
     share_policy::{
@@ -340,12 +341,15 @@ impl Database {
             DATABASE_DEADLINE,
             persist(
                 &mut connection,
-                destination.owner_id,
-                claim.outbox_id,
-                token,
+                DeliveryTarget {
+                    owner_id: destination.owner_id,
+                    outbox_id: claim.outbox_id,
+                    lease_token: Some(token),
+                },
                 receipt_id,
                 &observation,
                 notice,
+                tracker,
             ),
         )
         .await;
@@ -653,24 +657,19 @@ async fn defer(
 
 async fn persist(
     connection: &mut PgConnection,
-    owner_id: Uuid,
-    outbox_id: Uuid,
-    lease_token: Uuid,
+    target: DeliveryTarget,
     receipt_id: Uuid,
     observation: &ReplyObservation,
     notice: Option<(&TelegramNoticeFence, &str)>,
+    tracker: bool,
 ) -> Result<Uuid, ReplyDispatchError> {
     let mut txn = connection.begin().await?;
     let result = record_delivery_receipt(
         &mut txn,
-        DeliveryTarget {
-            owner_id,
-            outbox_id,
-            lease_token: Some(lease_token),
-        },
+        target,
         DeliveryReceipt {
             id: receipt_id,
-            intent_id: outbox_id,
+            intent_id: target.outbox_id,
             state: observation.state,
             observed_at: observation.observed_at,
             provider_reference: observation.provider_reference.as_deref(),
@@ -680,6 +679,9 @@ async fn persist(
     .await;
     match result {
         Ok(id) => {
+            if tracker && observation.state == DeliveryState::Failed {
+                remember_tracker_fallback(&mut txn, target.owner_id, target.outbox_id).await?;
+            }
             if let Some((notice, instance)) = notice {
                 notice
                     .complete(
