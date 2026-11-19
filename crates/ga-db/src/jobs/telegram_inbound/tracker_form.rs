@@ -47,6 +47,23 @@ impl Database {
         tokio::time::timeout(Duration::from_millis(2500), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             let handled = apply_in(&mut txn, lease, &envelope, timezone, locale).await?;
+            if !handled && envelope.kind() == InboundKind::Voice {
+                let (id, token) = lease.job_identity();
+                let released = sqlx::query(
+                    "UPDATE jobs SET status='pending',lease_token=NULL,lease_until=NULL,attempts=attempts-1,
+                       payload=jsonb_set(payload,'{tracker_caption_checked}','true')
+                     WHERE id=$1 AND lease_token=$2 AND status='running' AND lease_until>clock_timestamp()"
+                )
+                .bind(id)
+                .bind(token)
+                .execute(&mut *txn)
+                .await?;
+                if released.rows_affected() != 1 {
+                    return Err(crate::jobs::JobStoreError::LeaseLost.into());
+                }
+                txn.commit().await?;
+                return Ok(());
+            }
             txn.commit().await?;
             if handled {
                 Ok(())

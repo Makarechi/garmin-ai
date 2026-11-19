@@ -37,6 +37,9 @@ def cases(locale):
         answer(request)
         answer("2026-11-18 01:00Z")
         answer("Synthetic locally selected")
+    rows.append({"message": {"voice": entries.VOICE, "caption": "log Focus"}})
+    answer("2026-11-18 01:30Z")
+    answer("Synthetic single caption")
     label = "Синтетический" if locale == "ru" else "Synthetic"
     answer(f"log {label}")
     answer("/unrecognized")
@@ -84,8 +87,33 @@ def cases(locale):
             }
         },
     )
+    rows.append(
+        {
+            "message": {
+                "text": "Continue the earlier analysis",
+                "reply_to_message": {"message_id": 810001},
+            },
+            "analytic_reply": True,
+        }
+    )
+    rows.append(
+        {
+            "message": {
+                "text": "Continue the earlier analysis",
+                "reply_to_message": {"message_id": 810001},
+            },
+            "analytic_reply": True,
+            "patch": {"prompt_order": [0, 999999]},
+        }
+    )
+    answer("2", patch={"prompt_order": [0, 0]})
     answer("/cancel")
-    rows.append({"message": {"text": "log Focus", "reply_to_message": {"message_id": 810001}}})
+    rows.append(
+        {
+            "message": {"text": "log Focus", "reply_to_message": {"message_id": 810001}},
+            "analytic_reply": True,
+        }
+    )
     answer("log Focus", states={analytic_key: None})
     answer("/cancel")
     for message_id, analysis in [(810002, True), (810003, False)]:
@@ -97,13 +125,17 @@ def cases(locale):
         }
         if analysis:
             reply["kind"] = "analysis"
+            answer("log Focus")
         rows.append(
             {
                 "message": {"text": "log Focus", "reply_to_message": {"message_id": message_id}},
                 "states": {key: reply},
                 "native_reply": {"message_id": message_id, "analysis": analysis, "legacy_key": key},
+                "analytic_reply": analysis,
             }
         )
+        if analysis:
+            answer("2")
         answer("/cancel", states={key: None})
     forms = original_cases()
     forms[-1].pop("recover")

@@ -1,4 +1,12 @@
-use std::{collections::BTreeMap, env, error::Error, fs, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    error::Error,
+    fs,
+    str::FromStr,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use ga_app::{
     telegram_input::TelegramBinding, telegram_settings::TelegramIngressSettings,
@@ -29,6 +37,8 @@ use sqlx::{
 use time::OffsetDateTime;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
+
+const PROVIDER_UNAVAILABLE_REPLY: &str = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today.";
 
 async fn clock(pool: &PgPool) -> Result<StoredInstant, Box<dyn Error>> {
     Ok(StoredInstant::try_from(
@@ -344,6 +354,124 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
     let transport = TelegramTransport::new("100:synthetic-tracker-forms")?;
     let cases: Vec<Value> =
         serde_json::from_slice(&fs::read(env::var("GA_TEST_TRACKER_CHAT_ENTRIES")?)?)?;
+    let probe_target = TelegramInboundTarget {
+        owner_id: owner,
+        instance_id: "primary",
+    };
+    let at = clock(&pool).await?;
+    let probe=wire(&pool,&database,&json!({"message":{"caption":"Explain the unrelated synthetic topic","voice":{"file_id":"synthetic-probe","file_unique_id":"synthetic-probe","duration":1,"file_size":128,"mime_type":"audio/ogg"}}}),70000,at).await?;
+    let probe = receive(&mut runtime, binding, &probe, at)
+        .await?
+        .inbound
+        .ok_or("Expected caption probe")?;
+    let screen = database
+        .claim_telegram_local_screen(probe_target, clock(&pool).await?, 10)
+        .await?
+        .ok_or("Expected caption screening")?;
+    database
+        .apply_local_telegram_text(
+            &screen,
+            LocalTelegramText::Safety(TelegramSafetyDecision::Clear),
+            &locale,
+        )
+        .await?;
+    let caption = database
+        .claim_telegram_tracker_form(probe_target, clock(&pool).await?, 10)
+        .await?
+        .ok_or("Expected fresh caption claim")?;
+    database
+        .apply_telegram_tracker_form(&caption, "UTC", &locale)
+        .await?;
+    assert!(
+        database
+            .claim_telegram_tracker_form(probe_target, clock(&pool).await?, 10)
+            .await?
+            .is_none()
+    );
+    let probe_state:(String,String,i32,bool)=sqlx::query_as(
+        "SELECT i.status,j.status,j.attempts,j.payload->>'tracker_caption_checked'='true'
+         FROM inbound_messages i JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id) WHERE i.id=$1"
+    ).bind(probe.message_id).fetch_one(&pool).await?;
+    assert_eq!(probe_state, ("pending".into(), "pending".into(), 0, true));
+    let at = clock(&pool).await?;
+    let urgent = wire(
+        &pool,
+        &database,
+        &json!({"message":{"text":"I can't breathe"}}),
+        70001,
+        at,
+    )
+    .await?;
+    let urgent = receive(&mut runtime, binding, &urgent, at)
+        .await?
+        .inbound
+        .ok_or("Expected urgent receipt")?;
+    let urgent_reply = async {
+        loop {
+            let reply:Option<String>=sqlx::query_scalar("SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE inbound_message_id=$1").bind(urgent.message_id).fetch_optional(&pool).await?;
+            if let Some(reply) = reply {
+                assert!(reply.contains("112"));
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result=timeout(Duration::from_secs(5),urgent_reply)=>result??,
+        worker=transport.run_local_text(&database,&settings,&locale,true)=>worker,
+    }
+    let voice = database
+        .claim_telegram_no_model_text(probe_target, clock(&pool).await?, 10)
+        .await?
+        .ok_or("Expected untouched voice fallback")?;
+    database
+        .apply_local_telegram_text(&voice, LocalTelegramText::ProviderUnavailable, &locale)
+        .await?;
+    println!(
+        "Fresh unmatched caption was released once without spending attempts, and a later urgent message completed before voice fallback"
+    );
+    let provider_available = env::var("GA_TEST_TRACKER_MODEL_AVAILABLE").as_deref() == Ok("true");
+    let expected_model_updates: BTreeSet<_> = cases
+        .iter()
+        .enumerate()
+        .filter(|(_, case)| case["reply"] == PROVIDER_UNAVAILABLE_REPLY)
+        .map(|(index, _)| (71001 + index).to_string())
+        .collect();
+    let admitted = AtomicUsize::new(0);
+    let model_admission = async {
+        if !provider_available {
+            return std::future::pending::<Result<(), Box<dyn Error>>>().await;
+        }
+        let target = TelegramInboundTarget {
+            owner_id: owner,
+            instance_id: "primary",
+        };
+        loop {
+            if let Some(lease) = database
+                .claim_telegram_model_text(target, clock(&pool).await?, 10)
+                .await?
+            {
+                match admission(&database, &lease, &locale).await? {
+                    TelegramModelAdmission::Replied => {}
+                    TelegramModelAdmission::Ready { .. } => {
+                        let envelope = ga_domain::channel::InboundEnvelope::parse(
+                            lease.envelope_json().as_bytes(),
+                        )?;
+                        assert!(
+                            expected_model_updates.contains(envelope.external_event_id()),
+                            "Unexpected model admission for update {}",
+                            envelope.external_event_id()
+                        );
+                        admitted.fetch_add(1, Ordering::SeqCst);
+                        database
+                            .finish_telegram_model_notice(&lease, PROVIDER_UNAVAILABLE_REPLY)
+                            .await?;
+                    }
+                }
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    };
     let proof = async {
         for (index, case) in cases
             .iter()
@@ -389,9 +517,18 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         result=proof=>result?,
         worker=transport.run_tracker_forms(&database,&settings,"UTC",&locale)=>worker,
         worker=transport.run_tracker_setup(&database,&settings,"UTC",&locale)=>worker,
-        worker=transport.run_local_text(&database,&settings,&locale,false)=>worker,
+        worker=transport.run_local_text(&database,&settings,&locale,provider_available)=>worker,
         worker=transport.run_local_diary(&database,&settings,"UTC")=>worker,
+        result=model_admission=>result?,
     }
+    assert_eq!(
+        admitted.load(Ordering::SeqCst),
+        if provider_available {
+            expected_model_updates.len()
+        } else {
+            0
+        }
+    );
     let final_case = cases
         .last()
         .filter(|case| case["recover"] == true)

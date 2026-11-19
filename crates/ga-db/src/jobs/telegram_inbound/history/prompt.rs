@@ -86,6 +86,13 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;
     }
+    if pending
+        .as_ref()
+        .is_some_and(|form| form["button"] == "tracker_select")
+        && super::super::analysis_reply::is_analytic_reply(txn, envelope).await?
+    {
+        pending = None;
+    }
     let guided_form = pending.as_ref().is_some_and(|form| {
         form["definition_version_id"].is_string()
             || form["chat_form"].is_object()
