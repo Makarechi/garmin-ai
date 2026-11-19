@@ -51,19 +51,7 @@ impl GenericAnalysisReader {
                 Some(value) => format!("{value}+00:00"),
                 None => cutoff.to_owned(),
             };
-            // SQLx starts its connections in UTC. Restore the configured database/role
-            // display zone before rendering unaudited rows, as the Python driver does.
-            sqlx::query(
-                "SELECT set_config('TimeZone', substring(setting FROM 10), true)
-                 FROM pg_db_role_setting AS defaults
-                 CROSS JOIN LATERAL unnest(defaults.setconfig) AS config(setting)
-                 WHERE defaults.setdatabase IN (0,(SELECT oid FROM pg_database WHERE datname=current_database()))
-                   AND defaults.setrole IN (0,(SELECT oid FROM pg_roles WHERE rolname=session_user))
-                   AND lower(setting) LIKE 'timezone=%'
-                 ORDER BY (defaults.setrole<>0) DESC,(defaults.setdatabase<>0) DESC LIMIT 1",
-            )
-            .execute(&mut *self.txn)
-            .await?;
+            self.restore_display_timezone().await?;
             let mut chunks =
                 sqlx::query_as::<_, (bool, i64, Vec<u8>)>(include_str!("entries_snapshots.sql"))
                     .bind(candidates)
