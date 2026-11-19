@@ -57,6 +57,13 @@ enum Command {
         #[arg(long, required = true)]
         confirm_existing_owner: bool,
     },
+    /// Pair the first Telegram owner using a one-time code
+    PairTelegram {
+        #[arg(long, default_value = ".env")]
+        env_file: PathBuf,
+        #[arg(long, hide = true)]
+        container_runtime: bool,
+    },
     /// Preview or apply a bounded local CSV/JSON tracker import
     ImportFile {
         #[arg(value_enum)]
@@ -205,6 +212,15 @@ fn main() -> ExitCode {
         }
         Some(Command::EnrollAccount { .. }) => {
             if let Err(error) = garmin_setup::enroll() {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::PairTelegram {
+            env_file,
+            container_runtime,
+        }) => {
+            if let Err(error) = setup::pair_telegram(&env_file, container_runtime) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }

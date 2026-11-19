@@ -74,6 +74,27 @@ impl<'a> SetupFile<'a> {
         }
         output
     }
+
+    pub(super) fn replace_binding(&self, name: &str, value: &str) -> String {
+        let assignment = binding(name, value);
+        let mut output = String::new();
+        let mut found = false;
+        for (key, original) in &self.records {
+            if key.is_some_and(|key| key.eq_ignore_ascii_case(name)) {
+                output.push_str(&assignment);
+                found = true;
+            } else {
+                output.push_str(original);
+            }
+        }
+        if !found {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&assignment);
+        }
+        output
+    }
 }
 
 fn binding(name: &str, value: &str) -> String {

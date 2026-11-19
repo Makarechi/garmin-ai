@@ -150,18 +150,67 @@ impl TelegramTransport {
         &self,
         offset: Option<i64>,
     ) -> Result<Vec<TelegramUpdate>, TelegramTransportError> {
+        self.read_updates(
+            &self.polling,
+            offset,
+            POLL_SECONDS,
+            &["message", "edited_message", "callback_query"],
+        )
+        .await
+    }
+
+    pub async fn pairing_bot(&self) -> Result<Option<String>, TelegramTransportError> {
+        if self.webhook_backlog().await?.is_some() {
+            return Ok(None);
+        }
+        let identity = self
+            .call(&self.acknowledgements, "getMe", &json!({}), MAX_ACK_BYTES)
+            .await?;
+        let name = identity["username"]
+            .as_str()
+            .filter(|name| {
+                (1..=32).contains(&name.len())
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+            .ok_or(TelegramTransportError::InvalidResponse)?;
+        Ok(Some(name.to_owned()))
+    }
+
+    pub async fn pairing_updates(
+        &self,
+        offset: Option<i64>,
+        wait: bool,
+    ) -> Result<Vec<TelegramUpdate>, TelegramTransportError> {
+        let (client, seconds) = if wait {
+            (&self.polling, 10)
+        } else {
+            (&self.acknowledgements, 0)
+        };
+        self.read_updates(client, offset, seconds, &["message"])
+            .await
+    }
+
+    async fn read_updates(
+        &self,
+        client: &Client,
+        offset: Option<i64>,
+        seconds: u64,
+        updates: &[&str],
+    ) -> Result<Vec<TelegramUpdate>, TelegramTransportError> {
         if offset.is_some_and(|offset| offset <= 0) {
             return Err(TelegramTransportError::InvalidInput);
         }
         let mut request = json!({
-            "timeout": POLL_SECONDS,
-            "allowed_updates": ["message", "edited_message", "callback_query"],
+            "timeout": seconds,
+            "allowed_updates": updates,
         });
         if let Some(offset) = offset {
             request["offset"] = json!(offset);
         }
         let body = self
-            .call(&self.polling, "getUpdates", &request, MAX_UPDATE_BYTES)
+            .call(client, "getUpdates", &request, MAX_UPDATE_BYTES)
             .await?;
         let Value::Array(updates) = body else {
             return Err(TelegramTransportError::InvalidResponse);
