@@ -1630,6 +1630,7 @@
       ],
       "rust_tests": [
         "migration/check_backup_commands.py",
+        "migration/check_backup_volume_failure.py",
         "migration/check_native_schema.py",
         "migration/check_backup_space.py",
         "migration/check_postgres_readiness.py"
@@ -1645,7 +1646,7 @@
       "verification": "operational",
       "owner_task": "R32",
       "known_limits": [
-        "Native backup and recovery matched Python across 30 synthetic database tables and preserved interrupted backups. Historical migrations and readiness have disposable database evidence. Packaging, erasure, retention, and cutover acceptance remain pending."
+        "Native backup and recovery matched Python across 30 synthetic database tables and preserved interrupted backups. Linux arm64 exercised a full destination before and during encryption, retained the prior authenticated archive, rejected a damaged tag, and recovered after freeing space. Historical migrations and readiness have disposable database evidence. Packaging, erasure, retention, and cutover acceptance remain pending."
       ],
       "approved_deviations": []
     }
