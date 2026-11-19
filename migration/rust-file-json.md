@@ -14,8 +14,26 @@ out-of-memory events. Cases include a whole file at the byte ceiling,
 500 object rows, a dense array, conflicting Unicode escapes, negative
 zero, exact decimals and 4,300-digit integers.
 
-The native reader stops at 1,000 nested containers, including when the
-512,000-byte bound would admit a deeper document. Python's C decoder can
-accept deeper inputs. The bound keeps recursive serialization or disposal
-of the decoded values within the application stack budget. Import planning
-and confirmation consume this reader in separate migration work.
+The file reader now parses, serializes and disposes of nested objects and
+arrays iteratively. It retains the 512,000-byte and 500-row limits. Its
+container budget is below the measured Linux ARM64 reference limits for
+the tested array, object and mixed shapes. Values very close to the
+reference runtime's stack limit can still differ by shape and platform.
+The chat JSON parser keeps its existing separate depth limit.
+
+The extended fixture has 270 matching outcomes on macOS and Linux ARM64
+with the pinned Python reference. It covers accepted 42,000-level array
+chains, 28,000-level object chains and mixed container chains, including
+matching canonical row digests, and rejected excessive or malformed
+documents. The Linux fixture ran in a network-isolated 48 MiB container with
+a 46,362,624-byte peak, zero swap and zero OOM events.
+
+The normal import command now matches the frozen preview and confirmation
+of a 1,200-level JSON row. Rust applied the confirmed file, and Python
+replayed it as an existing row. The stored payload contains the terminal
+value at depth 1,200. The same fixture verifies CSV import and replay,
+redacted preview errors, mismatch rejection and whole-file rollback.
+
+The normal CLI preview, apply and retry of 500 synthetic rows used a
+505,414-byte file. The Linux ARM64 run peaked at 27,684,864 bytes within a
+32 MiB limit, with zero swap and zero OOM events.

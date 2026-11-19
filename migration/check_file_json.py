@@ -5,7 +5,11 @@ import json
 from pathlib import Path
 from random import Random
 
-from garmin_ai.file_source import MAX_FILE_BYTES, _jsonb_string_issue, _read_rows
+from garmin_ai.file_source import MAX_FILE_BYTES, _digest, _jsonb_string_issue, _read_rows
+
+
+def nested_json(opening, closing, depth, terminal=b"0"):
+    return b'[{"val":' + opening * depth + terminal + closing * depth + b"}]"
 
 
 def examples():
@@ -64,6 +68,16 @@ def examples():
         "long-lossy-coefficient": b'[{"x":1' + b"0" * 5000 + b"1e-5001}]",
         "long-invalid-coefficient": b'[{"x":1' + b"0" * 5000 + b".}]",
         "deep": b'[{"val":' + b"[" * 900 + b"0" + b"]" * 900 + b"}]",
+        "deep-1200": nested_json(b"[", b"]", 1_200),
+        "deep-array-42000": nested_json(b"[", b"]", 42_000),
+        "deep-array-44000": nested_json(b"[", b"]", 44_000),
+        "deep-object-28000": nested_json(b'{"v":', b"}", 28_000),
+        "deep-object-30000": nested_json(b'{"v":', b"}", 30_000),
+        "deep-mixed-17000": nested_json(b'[{"v":', b"}]", 17_000),
+        "deep-mixed-18000": nested_json(b'[{"v":', b"}]", 18_000),
+        "deep-malformed": nested_json(b"[", b"]", 42_000)[:-1],
+        "deep-duplicate": nested_json(b"[", b"]", 42_000)[:-2] + b',"val":1}]',
+        "deep-nul": nested_json(b"[", b"]", 42_000, rb'"\u0000"'),
         "too-deep": b'[{"val":' + b"[" * 100_000 + b"0" + b"]" * 100_000 + b"}]",
         "too-many": b"[" + b"{}," * 500 + b"{}]",
         "rows-at-limit": b"[" + b"{}," * 499 + b"{}]",
@@ -103,8 +117,10 @@ def capture(root):
                 "rows": [
                     {"issue": issue}
                     if (issue := _jsonb_string_issue(row))
+                    else {"canonical_sha256": _digest(row)}
+                    if name.startswith("deep")
                     else {"valid": True}
-                    if name in {"deep", "dense", "largest-string"}
+                    if name in {"dense", "largest-string"}
                     else {"row": row}
                     for row in rows
                 ]
