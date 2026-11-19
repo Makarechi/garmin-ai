@@ -42,6 +42,46 @@ Process RSS can count shared pages more than once. Component peaks may occur at 
 times. The sampling shell and its short-lived commands contribute to the cgroup counters.
 The evidence also preserves CPU, throttling, I/O, swap, memory pressure and task counters.
 
+## Paired Python and Rust startup
+
+Build the native image from a clean candidate worktree and label it with that revision.
+Pass the two local images to the same runner.
+
+```sh
+candidate_sha=$(git rev-parse HEAD)
+docker build -f Dockerfile.rust --label "org.opencontainers.image.revision=$candidate_sha" \
+  -t garmin-ai-rust:benchmark .
+python migration/measure_startup.py \
+  --image garmin-ai:benchmark --sha ee3a14a48a6ad30c1085951bac2f53c9088c2450 \
+  --candidate-image garmin-ai-rust:benchmark --candidate-sha "$candidate_sha" > startup-pair.json
+```
+
+The runner uses fresh databases, identical PostgreSQL settings and the same CPU, memory and
+swap limits. Both deployments must reach HTTP readiness and commit a worker heartbeat. The
+result records both image IDs and the shared schema revision. The same Python observer probes
+HTTP in both runs. It runs outside the measured application containers, as does the native
+worker readiness check.
+
+The [Linux ARM64 trial](evidence/python-rust-startup-linux-arm64.json.gz) used the pinned
+Python image and a local native runtime image containing the release binary for
+`b838708c4286bacea256ff94565fa0a0a333b559`. Each run started empty, reached schema
+`c54f8a72d130`, and recorded eight idle samples. No sample showed an OOM kill or swap use.
+
+| Observed startup and idle | Python | Rust |
+| --- | ---: | ---: |
+| API ready from deployment start | 10.77 s | 8.52 s |
+| Worker heartbeat from deployment start | 11.10 s | 8.69 s |
+| Peak migration cgroup charge | 92.58 MiB | 10.03 MiB |
+| Highest sampled combined API and worker charge | 261.73 MiB | 22.66 MiB |
+| Median idle PostgreSQL cgroup charge | 127.52 MiB | 117.83 MiB |
+
+The combined value sums the API and worker `memory.current` readings within each sample.
+The readings are sequential and include charged cache.
+
+Use the paired result for cold migration, startup and idle memory. The existing Python
+workload options run independently. The release still needs paired workload measurements,
+the small-host reserve and the sustained run described below.
+
 ## Verification boundary
 
 These Linux arm64 Docker runs are the local baseline with the documented service limits.
