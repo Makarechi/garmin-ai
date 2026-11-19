@@ -1,14 +1,12 @@
-use time::{Date, Duration, Weekday};
-
-use super::StoredInstant;
+use time::{Date, Weekday};
 
 // Compatibility details follow CPython 3.15.2 Modules/_datetimemodule.c.
-// This Rust adaptation returns a checked UTC instant for the aware cursor contract.
+// This Rust adaptation preserves microsecond positions for the application's aware cursors.
 // Python's source license is retained in the accompanying LICENSE-python.txt.
 
 /// The legacy cursor uses datetime.fromisoformat, including basic/week dates,
 /// arbitrary one-character separators and fractional-second UTC offsets.
-pub(super) fn parse(text: &str) -> Option<StoredInstant> {
+pub(super) fn parse(text: &str) -> Option<i64> {
     let characters: Vec<_> = text.chars().collect();
     let separator = date_length(&characters)?;
     let separator_byte = text.char_indices().nth(separator)?.0;
@@ -27,11 +25,11 @@ pub(super) fn parse(text: &str) -> Option<StoredInstant> {
         };
         sign * clock_microseconds(&clock[zone + 1..], false)?
     };
-    date.midnight()
-        .assume_utc()
-        .checked_add(Duration::microseconds(local - offset))?
-        .try_into()
-        .ok()
+    if local == 86_400_000_000 {
+        date.next_day()?;
+    }
+    let midnight = date.midnight().assume_utc().unix_timestamp() * 1_000_000;
+    midnight.checked_add(local - offset)
 }
 
 fn date_length(text: &[char]) -> Option<usize> {

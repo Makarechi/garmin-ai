@@ -45,11 +45,12 @@ pub(crate) enum ReadTool {
     MigraineWindows,
     WellbeingObservations,
     CoffeeSleep,
+    Insights,
     Sleep,
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 14] = [
+    pub(crate) const GARMIN_READS: [Self; 15] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -64,8 +65,9 @@ impl ReadTool {
         Self::EventWindows,
         Self::MigraineWindows,
         Self::CoffeeSleep,
+        Self::Insights,
     ];
-    const IMPLEMENTED: [Self; 19] = [
+    const IMPLEMENTED: [Self; 20] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -83,6 +85,7 @@ impl ReadTool {
         Self::MigraineWindows,
         Self::WellbeingObservations,
         Self::CoffeeSleep,
+        Self::Insights,
         Self::Sleep,
         Self::DeviceHistory,
     ];
@@ -107,6 +110,7 @@ impl ReadTool {
             Self::MigraineWindows => "analysis_migraine_windows",
             Self::WellbeingObservations => "wellbeing_observations",
             Self::CoffeeSleep => "analysis_coffee_sleep",
+            Self::Insights => "insights_list",
             Self::Sleep => "analysis_sleep",
         }
     }
@@ -256,6 +260,13 @@ impl ReadTool {
                     "late_hours":{"default":6,"title":"Late Hours","type":"number"},
                     "outcome":{"default":"sleep_score","enum":["sleep_score","sleep_seconds"],"title":"Outcome","type":"string"}}),
                 &["start", "end"][..],
+            ),
+            Self::Insights => (
+                "Stored insights, evidence and candidate/accepted status.",
+                "insights_listArgs",
+                json!({"limit":{"default":30,"title":"Limit","type":"integer"},
+                    "cursor":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Cursor"}}),
+                &[][..],
             ),
             Self::Freshness => (
                 "Separate API fetch times, observed-signal lag, coverage and current-state quality gates.",
@@ -535,36 +546,9 @@ fn bool_input(value: &Value) -> Option<bool> {
 }
 
 pub(super) fn integer_input(value: &Value) -> Option<u32> {
-    match value {
-        Value::Bool(value) => Some(u32::from(*value)),
-        Value::Number(_) => {
-            let value = value.as_f64()?;
-            (value.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&value))
-                .then_some(value as u32)
-        }
-        Value::String(value) => {
-            let value = value.trim();
-            let integer = match value.split_once('.') {
-                Some((integer, fraction))
-                    if !fraction.is_empty() && fraction.bytes().all(|b| b == b'0') =>
-                {
-                    integer
-                }
-                Some(_) => return None,
-                None => value,
-            };
-            let content = integer.strip_prefix(['+', '-']).unwrap_or(integer);
-            if !content.as_bytes().first().is_some_and(u8::is_ascii_digit)
-                || !content.as_bytes().last().is_some_and(u8::is_ascii_digit)
-                || content.contains("__")
-            {
-                return None;
-            }
-            let number = content.replace('_', "").parse::<u32>().ok()?;
-            (!integer.starts_with('-') || number == 0).then_some(number)
-        }
-        _ => None,
-    }
+    ga_domain::legacy_json::integer_argument(value)?
+        .try_into()
+        .ok()
 }
 
 enum BodyError {
@@ -748,6 +732,7 @@ fn health_failure(error: HealthAnalysisError) -> Response {
         | HealthAnalysisError::MigraineEpisodeLimit
         | HealthAnalysisError::CoffeeInputLimit
         | HealthAnalysisError::CoffeeEvidenceLimit
+        | HealthAnalysisError::InsightArguments
         | HealthAnalysisError::SleepSessionLimit => invalid_arguments(),
         _ => storage_unavailable(),
     }
