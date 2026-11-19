@@ -4,6 +4,7 @@ import argparse
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import quote
 
 import pytest
 from dotenv import dotenv_values
@@ -82,6 +83,39 @@ def release_mounts(binary):
         assert result.returncode != 0 and not result.stdout
 
 
+def preserved_regional_credentials(binary):
+    password = "p'ass$word-${SYNTHETIC}-replace-with-generated-password-real"
+    api_key = "synthetic-owner-replace-with-existing-private-key"
+    directory = "private' ${SYNTHETIC}/data"
+    url = f"postgresql+psycopg://garmin:{quote(password, safe='')}@127.0.0.1:55432/garmin_ai"
+    with TemporaryDirectory() as base:
+        for locale in ("en-GB", "ru-RU", "zh-Hans"):
+            root = Path(base) / locale
+            root.mkdir()
+            settings = root / ".env"
+            settings.write_text(
+                "SYNTHETIC=expanded\n"
+                f"GA_DATABASE_URL={url}\n"
+                f"GA_API_KEY='{api_key}'\n"
+                f"GA_LOCALE='{locale}'\n"
+                "GA_DATA_DIR='private\\' ${SYNTHETIC}/data'\n"
+            )
+            first = command(binary, root)
+            assert first.returncode == 0, first.stderr
+            assert password not in first.stdout + first.stderr
+            expected = settings.read_bytes()
+            actual = dotenv_values(settings, interpolate=False)
+            assert actual["GA_LOCALE"] == locale and actual["GA_API_KEY"] == api_key
+            for name in ("GA_DATABASE_URL", "GA_CONTAINER_DATABASE_URL"):
+                assert make_url(actual[name]).password == password
+            assert (root / directory).is_dir()
+            second = command(binary, root)
+            assert second.returncode == 0, second.stderr
+            assert settings.read_bytes() == expected
+            rejected = command(binary, root, "--instance", "a-different-installation")
+            assert rejected.returncode != 0 and settings.read_bytes() == expected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -99,6 +133,7 @@ def main():
         raise SystemExit(1)
     preserved_bindings(binary)
     release_mounts(binary)
+    preserved_regional_credentials(binary)
     print("Verified native setup and repeat runs against the deployment contract")
 
 

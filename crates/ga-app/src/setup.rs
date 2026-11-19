@@ -15,7 +15,10 @@ use base64::{
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
 use clap::Args;
-use ga_domain::{event_input::known_timezone, event_payload::legacy_boolean};
+use ga_domain::{
+    event_input::known_timezone, event_payload::legacy_boolean,
+    language_tags::normalize_language_tag,
+};
 use rustix::{
     fs::{FlockOperation, flock},
     process::{getgid, getuid},
@@ -102,7 +105,7 @@ fn read_settings(path: &Path) -> Result<String, &'static str> {
 }
 
 fn instance_settings(values: &mut ValueMap, options: &Options) -> Result<u16, &'static str> {
-    let initialized = configured(values, "GA_DATABASE_URL").is_some();
+    let initialized = database::configured_url(values, "GA_DATABASE_URL").is_some();
     for (key, requested, default) in [
         (
             "COMPOSE_PROJECT_NAME",
@@ -178,7 +181,9 @@ fn defaults(values: &mut ValueMap, options: Options) -> Result<(), &'static str>
     if configured(values, "GA_BACKUP_KEY").is_none() {
         values.insert("GA_BACKUP_KEY".into(), URL_SAFE.encode(random::<32>()?));
     }
-    if configured(values, "GA_API_KEY").is_none() {
+    if configured(values, "GA_API_KEY")
+        .is_none_or(|value| value == "replace-with-a-random-key-at-least-32-characters")
+    {
         let scoped = values
             .get("GA_API_TOKENS")
             .filter(|value| !value.is_empty())
@@ -200,7 +205,7 @@ fn validate_runtime(values: &ValueMap) -> Result<(), &'static str> {
             "GA_TIMEZONE must name a valid IANA timezone; existing settings were not changed",
         );
     }
-    if !matches!(values["GA_LOCALE"].as_str(), "ru" | "en")
+    if normalize_language_tag(&values["GA_LOCALE"]).is_none()
         || !matches!(values["GA_UNITS"].as_str(), "metric" | "imperial")
     {
         return Err(INVALID_SETTINGS);
@@ -383,7 +388,7 @@ fn configured<'a>(values: &'a ValueMap, key: &str) -> Option<&'a str> {
     values
         .get(key)
         .map(String::as_str)
-        .filter(|value| !value.is_empty() && !value.contains("replace-with-"))
+        .filter(|value| !value.is_empty())
 }
 
 fn set_default(values: &mut ValueMap, key: &str, default: &str) {

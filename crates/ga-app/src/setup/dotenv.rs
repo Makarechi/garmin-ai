@@ -29,14 +29,9 @@ impl<'a> SetupFile<'a> {
                 }
                 let offset = first_line.len() - value.len();
                 let value = remaining[offset..].trim_start_matches([' ', '\t']);
-                let (raw, literal, consumed) = parse_value(value)?;
+                let (decoded, consumed) = parse_value(value, &values)?;
                 let width = remaining.len() - value.len() + consumed;
-                let expanded = if literal {
-                    raw
-                } else {
-                    interpolate(raw, &values)?
-                };
-                (Some(key), Some(expanded), width)
+                (Some(key), Some(decoded), width)
             } else {
                 let key = binding.trim();
                 if !environment_name(key) {
@@ -106,16 +101,20 @@ fn line(input: &str) -> &str {
     &input[..input.find('\n').map_or(input.len(), |offset| offset + 1)]
 }
 
-fn parse_value(input: &str) -> Result<(String, bool, usize), &'static str> {
+fn parse_value(input: &str, current: &ValueMap) -> Result<(String, usize), &'static str> {
     let Some(quote @ ('\'' | '"')) = input.chars().next() else {
         let raw = line(input);
         let comment = raw
             .char_indices()
             .find(|(offset, character)| *character == '#' && raw[..*offset].ends_with([' ', '\t']))
             .map_or(raw.len(), |(offset, _)| offset);
-        return Ok((raw[..comment].trim_end().to_owned(), false, raw.len()));
+        return Ok((
+            interpolate(raw[..comment].trim_end(), current, &[])?,
+            raw.len(),
+        ));
     };
     let mut value = String::new();
+    let mut literal_dollars = Vec::new();
     let mut chars = input.char_indices();
     chars.next();
     while let Some((offset, character)) = chars.next() {
@@ -125,13 +124,22 @@ fn parse_value(input: &str) -> Result<(String, bool, usize), &'static str> {
             if !tail.is_empty() && !tail.starts_with('#') {
                 return Err(INVALID_SETTINGS);
             }
-            return Ok((value, quote == '\'', offset + 1 + suffix.len()));
+            let value = if quote == '\'' {
+                value
+            } else {
+                interpolate(&value, current, &literal_dollars)?
+            };
+            return Ok((value, offset + 1 + suffix.len()));
         }
         if character == '\\'
             && let Some((_, escaped)) = chars.next()
         {
             match (quote, escaped) {
                 (_, '\\') | ('\'', '\'') | ('"', '"') => value.push(escaped),
+                ('"', '$') => {
+                    literal_dollars.push(value.len());
+                    value.push('$');
+                }
                 ('"', 'n') => value.push('\n'),
                 ('"', 'r') => value.push('\r'),
                 ('"', 't') => value.push('\t'),
@@ -144,11 +152,21 @@ fn parse_value(input: &str) -> Result<(String, bool, usize), &'static str> {
     Err(INVALID_SETTINGS)
 }
 
-fn interpolate(value: String, current: &ValueMap) -> Result<String, &'static str> {
-    let mut tail = value.as_str();
+fn interpolate(
+    value: &str,
+    current: &ValueMap,
+    literal_dollars: &[usize],
+) -> Result<String, &'static str> {
+    let mut tail = value;
     let mut output = String::new();
     while let Some((prefix, reference)) = tail.split_once("${") {
         output.push_str(prefix);
+        let dollar = value.len() - tail.len() + prefix.len();
+        if literal_dollars.binary_search(&dollar).is_ok() {
+            output.push_str("${");
+            tail = reference;
+            continue;
+        }
         let (name, rest) = reference.split_once('}').ok_or(INVALID_SETTINGS)?;
         let (name, default) = name.split_once(":-").unwrap_or((name, ""));
         if !environment_name(name) {

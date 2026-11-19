@@ -9,6 +9,7 @@ use super::{ValueMap, configured, random};
 const HOST_KEY: &str = "GA_DATABASE_URL";
 const CONTAINER_KEY: &str = "GA_CONTAINER_DATABASE_URL";
 const PASSWORD_KEY: &str = "GA_POSTGRES_PASSWORD";
+const PASSWORD_PLACEHOLDER: &str = "replace-with-generated-password";
 const HOST_ERROR: &str =
     "Host database endpoint must use postgresql+psycopg at 127.0.0.1 and GA_DB_PORT";
 const CONTAINER_ERROR: &str = "Container database endpoint must use postgresql+psycopg at db:5432";
@@ -19,10 +20,10 @@ const PASSWORD_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 pub(super) fn prepare(values: &mut ValueMap, port: u16) -> Result<(), &'static str> {
-    let database = configured(values, HOST_KEY)
+    let database = configured_url(values, HOST_KEY)
         .map(|value| Url::parse(value).map_err(|_| HOST_ERROR))
         .transpose()?;
-    let entered = configured(values, PASSWORD_KEY);
+    let entered = configured(values, PASSWORD_KEY).filter(|value| *value != PASSWORD_PLACEHOLDER);
     let password = match (&database, entered) {
         (Some(url), entered) => {
             let decoded =
@@ -50,7 +51,7 @@ pub(super) fn prepare(values: &mut ValueMap, port: u16) -> Result<(), &'static s
     if !endpoint(&database, "127.0.0.1", port) {
         return Err(HOST_ERROR);
     }
-    let container = match configured(values, CONTAINER_KEY) {
+    let container = match configured_url(values, CONTAINER_KEY) {
         Some(value) => Url::parse(value).map_err(|_| CONTAINER_ERROR)?,
         None => {
             let mut url = database.clone();
@@ -73,14 +74,24 @@ pub(super) fn prepare(values: &mut ValueMap, port: u16) -> Result<(), &'static s
         }
         validate_query(url)?;
     }
-    if configured(values, HOST_KEY).is_none() {
+    if configured_url(values, HOST_KEY).is_none() {
         values.insert(HOST_KEY.into(), database.into());
     }
-    if configured(values, CONTAINER_KEY).is_none() {
+    if configured_url(values, CONTAINER_KEY).is_none() {
         values.insert(CONTAINER_KEY.into(), container.into());
     }
     values.insert(PASSWORD_KEY.into(), password);
     Ok(())
+}
+
+pub(super) fn configured_url<'a>(values: &'a ValueMap, key: &str) -> Option<&'a str> {
+    configured(values, key).filter(|value| {
+        Url::parse(value)
+            .ok()
+            .and_then(|url| password_from(&url))
+            .as_deref()
+            != Some(PASSWORD_PLACEHOLDER)
+    })
 }
 
 fn endpoint(url: &Url, host: &str, port: u16) -> bool {
