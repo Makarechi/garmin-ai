@@ -69,3 +69,22 @@ Use `verified` after the full area has been exercised.
 Run `python3 migration/check_parity.py --require-verified` when checking release readiness.
 The command exits unsuccessfully while any area remains unverified and lists each such area.
 Execute the recorded comparisons and the required release workloads before recording a result.
+
+## Rehearse recovery before and after native writes
+
+Run `python migration/check_cutover_restore.py /path/to/garmin-ai-rust` in the pinned Python
+test environment. Provide three distinct empty databases on the same isolated TimescaleDB
+server through `GA_TEST_DATABASE_URL`, `GA_TEST_BEFORE_RESTORE_URL` and
+`GA_TEST_AFTER_RESTORE_URL`. Each database name must end in `_test`. Use an internal network
+and the release binary under test.
+
+The fixture creates an encrypted baseline copy, probes native reads, and restores the
+initial copy for the Python reader. It then creates and corrects a diary record with Rust,
+stops that API, and makes a second encrypted copy. Recovery places the raw files and tokens
+in the restored installation and compares every table, including pending work, polling and
+replay cursors, bindings and the uncertain delivery receipt. A retry on the restored native
+installation returns the same corrected record. The initial copy predates that record.
+
+The reported timings cover archive authentication, database restore and file placement for
+the fixture. Release rehearsal also needs the final image, worker handover, queue drain and
+the independent recovery environment.
