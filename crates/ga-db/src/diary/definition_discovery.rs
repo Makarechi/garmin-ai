@@ -21,6 +21,25 @@ impl Database {
         page: DefinitionPage<'_>,
         model_owner: Option<Uuid>,
     ) -> Result<JsonDocument, DiaryReadError> {
+        self.definition_document(page, model_owner, false)
+            .await
+            .map(|(document, _)| document)
+    }
+
+    /// Return the owner's bare list and its continuation header from one snapshot.
+    pub async fn owner_event_definitions(
+        &self,
+        page: DefinitionPage<'_>,
+    ) -> Result<(JsonDocument, Option<String>), DiaryReadError> {
+        self.definition_document(page, None, true).await
+    }
+
+    async fn definition_document(
+        &self,
+        page: DefinitionPage<'_>,
+        model_owner: Option<Uuid>,
+        owner_http: bool,
+    ) -> Result<(JsonDocument, Option<String>), DiaryReadError> {
         let work = async {
             let mut txn = self.begin_diary_read().await?;
             sqlx::query("SET LOCAL statement_timeout = '120s'")
@@ -59,7 +78,8 @@ impl Database {
                 }
             }
             let mut output = JsonSpool::default();
-            let mut chunks = sqlx::query_scalar::<_, Vec<u8>>(concat!(
+            let mut cursor = None;
+            let mut chunks = sqlx::query_as::<_, (Vec<u8>, Option<String>)>(concat!(
                 include_str!("definition_discovery.sql"),
                 include_str!("../share_policy/consent.sql"),
                 include_str!("definition_discovery_page.sql"),
@@ -69,15 +89,20 @@ impl Database {
             .bind(page.before_version.as_deref())
             .bind(i64::from(page.limit))
             .bind(model_owner.map(|_| "model:mcp:local"))
+            .bind(owner_http)
             .fetch(&mut *txn);
-            while let Some(chunk) = chunks.try_next().await? {
+            while let Some((chunk, next_cursor)) = chunks.try_next().await? {
                 output
                     .write_all(&chunk)
                     .map_err(|_| DiaryReadError::Database)?;
+                cursor = next_cursor;
             }
             drop(chunks);
             txn.commit().await?;
-            output.finish().map_err(|_| DiaryReadError::Database)
+            Ok((
+                output.finish().map_err(|_| DiaryReadError::Database)?,
+                cursor,
+            ))
         };
         tokio::time::timeout(Duration::from_secs(120), work)
             .await
