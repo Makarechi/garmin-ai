@@ -5,6 +5,7 @@ mod diary;
 mod exports;
 mod garmin_auth;
 mod hypotheses;
+mod natural_language;
 mod personal_goals;
 mod source_mappings;
 pub(crate) mod tools;
@@ -46,6 +47,7 @@ fn router(state: AppState) -> Router {
         .route("/health/ready", any(readiness))
         .route("/capabilities", any(capabilities))
         .route("/actions", any(tracker_actions::available))
+        .route("/natural-language/trackers", any(natural_language::tracker))
         .route(
             "/source-metric-mappings/preview",
             any(source_mappings::preview),
