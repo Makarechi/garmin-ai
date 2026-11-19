@@ -1326,6 +1326,11 @@
       ],
       "rust_tests": [
         "migration/check_mcp_stdio.py",
+        "migration/check_mcp_diary_create.py",
+        "migration/check_mcp_diary_update.py",
+        "migration/check_mcp_diary_delete.py",
+        "migration/check_mcp_custom_diary.py",
+        "migration/check_mcp_write_recovery.py",
         "migration/check_activity_reads.py",
         "migration/check_wearable_http.py"
       ],
@@ -1340,7 +1345,9 @@
       "verification": "e2e_synthetic",
       "owner_task": "R29",
       "known_limits": [
-        "Pinned Python client initialization and diary reads, HTTP health reads, and bidirectional wearable upload retries have synthetic evidence. The complete MCP catalog and HTTP contract comparison remain pending."
+        "Pinned Python client initialization and diary reads, HTTP health reads, and bidirectional wearable upload retries have synthetic evidence.",
+        "All four MCP writes have cancellation-before-commit and bidirectional lost-response recovery evidence. Recovery checks creation IDs, current revision or deletion, and the exact audit sequence.",
+        "The complete MCP catalog and HTTP contract comparison remain pending."
       ],
       "approved_deviations": []
     },
