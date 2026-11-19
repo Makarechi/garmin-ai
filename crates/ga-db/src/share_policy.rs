@@ -306,7 +306,7 @@ pub(crate) async fn try_shared_lock(
     Ok(())
 }
 
-async fn allows(
+pub(crate) async fn allows(
     txn: &mut Transaction<'_, Postgres>,
     requirement: ShareRequirement<'_>,
     destination: ShareDestination<'_>,
