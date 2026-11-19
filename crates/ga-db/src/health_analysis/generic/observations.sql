@@ -18,7 +18,7 @@ WITH cutoff AS (SELECT 'epoch'::timestamptz+$4::interval AS at), observations AS
               AND observation.account IS NOT DISTINCT FROM $7::text
               AND observation.device IS NOT DISTINCT FROM $8::text))
       AND (observation.source_entry_id IS NULL OR (
-          (event.definition_version_id IS NULL OR event_version.allowed_operations ? 'query')
+          (event.definition_version_id IS NULL OR event_version.allowed_operations @> '["query"]'::jsonb)
           AND COALESCE(prior.after->>'status',CASE WHEN event.updated_at<=cutoff.at THEN event.status END)='confirmed'
           AND COALESCE((prior.after->>'deleted')::boolean,
               CASE WHEN event.updated_at<=cutoff.at THEN event.deleted END) IS FALSE))
