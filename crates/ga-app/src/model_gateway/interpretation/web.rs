@@ -56,7 +56,9 @@ impl ModelGateway<'_> {
                 mentioned_events: &interpretation.mentioned,
             };
             match command.intent() {
-                AgentIntent::Log => WebChatModelReply::Log { command, expected },
+                AgentIntent::Log | AgentIntent::Update | AgentIntent::Close => {
+                    WebChatModelReply::Mutation { command, expected }
+                }
                 AgentIntent::Safety => WebChatModelReply::SafetyNotice(urgent_notice(&language)),
                 AgentIntent::Clarify => WebChatModelReply::Clarify {
                     question: command

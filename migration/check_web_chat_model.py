@@ -11,6 +11,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -21,12 +22,15 @@ from capture_reference import isolated_engine
 from check_tracker_extraction_http import certificates
 from fastapi.testclient import TestClient
 from sqlalchemy import text, update
+from sqlalchemy.orm import Session
 
 from garmin_ai.agent import Interpretation
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
+from garmin_ai.events import EventInput, create_event
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Person
+from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
 HEADERS = {"Authorization": f"Bearer {TOKENS[0]['key']}"}
@@ -51,10 +55,44 @@ CONSENT = {
 NOTE = "Synthetic note for 20 September 2026 at 20:00 UTC"
 QUESTION = "What detail should the synthetic note contain?"
 DETAIL = "Synthetic model-generated note"
+CORRECTED = "Corrected synthetic web note"
 
 
 def output(prompt):
     sentence = prompt["text"]
+    if sentence.startswith("Correct the synthetic note "):
+        target = sentence.split()[4]
+        return Interpretation(
+            intent="update",
+            confidence=1,
+            response_language="en",
+            target_event_id=target,
+            changed_fields=["payload.description"],
+            events=[
+                {
+                    "start": "2026-09-20T20:00:00Z",
+                    "timezone": "UTC",
+                    "payload": {"type": "note", "description": CORRECTED},
+                }
+            ],
+        )
+    if sentence.startswith("Close the synthetic migraine "):
+        target = sentence.split()[4]
+        end = sentence.rsplit(" at ", 1)[1]
+        return Interpretation(
+            intent="close",
+            confidence=1,
+            response_language="en",
+            target_event_id=target,
+            events=[
+                {
+                    "start": "2026-09-20T20:00:00Z",
+                    "end": end,
+                    "timezone": "UTC",
+                    "payload": {"type": "migraine"},
+                }
+            ],
+        )
     if "synthetic failure" in sentence:
         raise ProviderUnavailable("Synthetic upstream failure")
     if "clarification" in sentence:
@@ -269,6 +307,8 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     assert pair[0]["message_id"] == pair[1]["message_id"]
     assert len(native_calls) == before + 1
 
+    exercise_corrections(engine, python, native, native_calls)
+
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
     assert "Ничего не сохранено" in withdrawn["reply"]["text"]
@@ -296,6 +336,96 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     assert (len(source_calls), len(native_calls)) == before
     print(
         "Paired web responses, shared retries, read confirmation, overlapping local controls, consent and model failure passed"
+    )
+
+
+def exercise_corrections(engine, python, native, native_calls):
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    start = now - timedelta(minutes=30)
+    end = now - timedelta(minutes=2)
+    with Session(engine) as session:
+        packs = ensure_scenario_packs(session)
+        for name in ("general_diary", "migraine"):
+            configure_scenario_pack(
+                session,
+                name,
+                {
+                    "revision": packs[name].revision,
+                    "tracking_enabled": True,
+                    "collection_enabled": True,
+                    "reminders_enabled": False,
+                    "visible": True,
+                    "llm_enabled": True,
+                },
+            )
+        notes = [
+            create_event(
+                session,
+                EventInput(
+                    start=start,
+                    timezone="UTC",
+                    source="manual",
+                    original_text="Synthetic original note text",
+                    payload={"type": "note", "description": "Synthetic note before correction"},
+                ),
+                actor="synthetic-fixture",
+            ).id
+            for _ in range(2)
+        ]
+        episodes = [
+            create_event(
+                session,
+                EventInput(start=start, timezone="UTC", payload={"type": "migraine"}),
+                actor="synthetic-fixture",
+            ).id
+            for _ in range(2)
+        ]
+        session.commit()
+
+    for pair, prefix in (
+        (notes, "Correct the synthetic note"),
+        (episodes, "Close the synthetic migraine"),
+    ):
+        ending = f" at {end.isoformat()}" if pair == episodes else ""
+        reference = submit(python, f"{prefix} {pair[0]}{ending}")
+        identity = str(uuid4())
+        sentence = f"{prefix} {pair[1]}{ending}"
+        reviewed = submit(native, sentence, identity)
+        assert reviewed["reply"]["text"].startswith("Saved:"), reviewed
+        assert reviewed["reply"]["text"] == reference["reply"]["text"]
+        calls = len(native_calls)
+        replay = submit(native, sentence, identity)
+        assert replay == {**reviewed, "duplicate": True}
+        assert len(native_calls) == calls
+        with engine.connect() as connection:
+            rows = [
+                connection.execute(
+                    text('SELECT revision, payload, "end", original_text FROM events WHERE id=:id'),
+                    {"id": event_id},
+                ).one()
+                for event_id in pair
+            ]
+            assert rows[0] == rows[1] and rows[0].revision == 2
+            for event_id, response in zip(pair, (reference, reviewed), strict=True):
+                audit = connection.execute(
+                    text(
+                        "SELECT a.actor,a.before->>'revision',a.after->>'revision',"
+                        "a.operation_id=i.operation_id FROM audit_log a "
+                        "JOIN inbound_messages i ON i.id=CAST(:message AS uuid) "
+                        "WHERE a.event_id=:event AND a.action='update'"
+                    ),
+                    {"message": response["message_id"], "event": event_id},
+                ).one()
+                assert audit == ("web:local", "1", "2", True)
+            if pair == notes:
+                assert rows[0].payload["description"] == CORRECTED
+                assert rows[0].original_text == "Synthetic original note text"
+            else:
+                assert rows[0].end == end
+    unoffered = submit(native, f"Correct the synthetic note {uuid4()}")
+    assert "Ничего не сохранено" in unoffered["reply"]["text"]
+    print(
+        "Matched single-target correction and episode close, with exact audit revisions and retries"
     )
 
 

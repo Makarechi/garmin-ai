@@ -19,8 +19,9 @@ use crate::{
     conversation_memory::ConversationBinding,
     diary::{
         ClarificationClock, ClarificationReply, CreateAgentLogBatch, InterpretationContext,
-        InterpretationContextQuery, StoredSystemEvent, cancel_in, interpretation_context_in,
-        save_clarification_in,
+        InterpretationContextQuery, StoredSystemEvent,
+        agent_correction::{AgentCorrection, AgentCorrectionContext},
+        cancel_in, interpretation_context_in, save_clarification_in,
     },
     health_analysis::owner_timezone,
     model_gate::onboarding::onboarding_allows_model,
@@ -47,7 +48,7 @@ pub enum WebChatModelReply<'a> {
         question: &'a str,
         expected: WebChatInterpretationContext<'a>,
     },
-    Log {
+    Mutation {
         command: &'a AgentInterpretation,
         expected: WebChatInterpretationContext<'a>,
     },
@@ -214,9 +215,8 @@ async fn render_model_reply(
         WebChatModelReply::Unverified => return Ok((MODEL_FAILED.to_owned(), Vec::new())),
         // The fixed safety notice uses no diary context or tracker references.
         WebChatModelReply::SafetyNotice(message) => return Ok(((*message).to_owned(), Vec::new())),
-        WebChatModelReply::Clarify { expected, .. } | WebChatModelReply::Log { expected, .. } => {
-            *expected
-        }
+        WebChatModelReply::Clarify { expected, .. }
+        | WebChatModelReply::Mutation { expected, .. } => *expected,
     };
     let Some(context) = current_interpretation(txn, session, configured_timezone, expected).await?
     else {
@@ -241,19 +241,26 @@ async fn render_model_reply(
             .map_err(|_| WebChatError::Database)?;
             question.to_owned()
         }
-        WebChatModelReply::Log { command, .. } => {
+        WebChatModelReply::Mutation { command, .. } => {
             if context.selection_unavailable
-                || context
-                    .pending_clarification
-                    .as_ref()
-                    .is_some_and(|pending| pending["explicit_selector"] == true)
+                || (command.intent() == AgentIntent::Log
+                    && context
+                        .pending_clarification
+                        .as_ref()
+                        .is_some_and(|pending| pending["explicit_selector"] == true))
             {
                 return Ok((SAVE_FAILED.to_owned(), Vec::new()));
             }
             let mut savepoint = txn.begin().await?;
-            let saved = apply_log(&mut savepoint, session, receipt, command)
-                .await
-                .and_then(|saved| saved_message(&saved));
+            let saved = apply_model_mutation(
+                &mut savepoint,
+                session,
+                receipt,
+                command,
+                &context.events.entries,
+            )
+            .await
+            .and_then(|saved| saved_message(&saved));
             match saved {
                 Some(message) => {
                     cancel_in(&mut savepoint, session.binding())
@@ -326,6 +333,35 @@ async fn current_interpretation(
         return Ok(None);
     }
     Ok(Some(context))
+}
+
+async fn apply_model_mutation(
+    txn: &mut Transaction<'_, Postgres>,
+    session: &WebChatModelSession,
+    receipt: &InboundReceipt,
+    command: &AgentInterpretation,
+    offered: &[serde_json::Value],
+) -> Option<Vec<StoredSystemEvent>> {
+    if command.intent() == AgentIntent::Log {
+        return apply_log(txn, session, receipt, command).await;
+    }
+    let correction = AgentCorrection::parse(command).ok()?;
+    correction
+        .apply(
+            txn,
+            AgentCorrectionContext {
+                owner_id: session.envelope.owner_id(),
+                actor: super::DESTINATION,
+                operation_id: receipt.operation_id,
+                text: session.envelope.text()?.trim(),
+                received_at: session.at,
+                offered,
+                timezone: &session.timezone,
+            },
+        )
+        .await
+        .ok()
+        .map(|saved| vec![saved])
 }
 
 async fn apply_log(
