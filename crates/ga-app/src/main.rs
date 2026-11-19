@@ -110,6 +110,11 @@ enum Command {
         executable: PathBuf,
         instance_id: String,
     },
+    /// Check an explicitly supplied channel extension with synthetic text
+    CheckChannelExtension {
+        executable: PathBuf,
+        instance_id: String,
+    },
     /// Read a configured source extension and save its validated pages
     PollSourceExtension {
         executable: PathBuf,
@@ -259,6 +264,12 @@ fn main() -> ExitCode {
             instance_id,
         }) => {
             return report(extensions::check_source(&executable, &instance_id));
+        }
+        Some(Command::CheckChannelExtension {
+            executable,
+            instance_id,
+        }) => {
+            return report(extensions::check_channel(&executable, &instance_id));
         }
         Some(Command::PollSourceExtension {
             executable,
