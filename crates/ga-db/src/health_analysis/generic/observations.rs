@@ -11,16 +11,16 @@ use super::{GenericAnalysisError, GenericAnalysisReader, source::SourceSelection
 impl GenericAnalysisReader {
     pub(super) async fn metric_contract(
         &mut self,
-        spec: &AnalysisSpec,
+        document: &serde_json::Value,
     ) -> Result<Uuid, GenericAnalysisError> {
         let definition: Option<(Uuid, i32)> =
             sqlx::query_as("SELECT id,current_version FROM metric_definitions WHERE key=$1")
-                .bind(spec.document()["metric_key"].as_str())
+                .bind(document["metric_key"].as_str())
                 .fetch_optional(&mut *self.txn)
                 .await?;
         let (definition, current_version) =
             definition.ok_or(GenericAnalysisError::Lookup("Metric definition not found"))?;
-        let requested = &spec.document()["metric_version"];
+        let requested = &document["metric_version"];
         let version = if requested.is_null() {
             current_version
         } else {
@@ -46,7 +46,7 @@ impl GenericAnalysisReader {
     ) -> Result<JsonDocument, GenericAnalysisError> {
         let work = async {
             self.prepare(spec).await?;
-            let contract = self.metric_contract(spec).await?;
+            let contract = self.metric_contract(spec.document()).await?;
             let source = SourceSelection::from_spec(spec)?;
             self.restore_display_timezone().await?;
             let limit = spec.document()["limit"]

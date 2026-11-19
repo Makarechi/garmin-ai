@@ -91,8 +91,8 @@ impl GenericAnalysisReader {
     ) -> Result<Vec<AggregateRow>, GenericAnalysisError> {
         let mut query = sqlx::query(include_str!("observations.sql"))
             .bind(contract.id)
-            .bind(window.start_at)
-            .bind(window.end_at)
+            .bind(interval(window.start))
+            .bind(interval(window.end))
             .bind(interval(window.cutoff))
             .bind(interval(window.predecessor_start))
             .bind(source.mode)
