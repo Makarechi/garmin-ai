@@ -11,6 +11,8 @@ import pytest
 from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
+from garmin_ai.config import Settings
+
 SELECTION = "test_setup or test_example_setup or test_invalid_instance or test_two_new_instances"
 
 
@@ -169,6 +171,53 @@ def reject_new_case_aliases(binary):
         return True
 
 
+def validate_integrations_before_writes(binary):
+    telegram = {"id": "channel:telegram:primary", "kind": "channel", "provider": "telegram"}
+    model = {
+        "id": "model:gemini:fixture",
+        "kind": "model",
+        "provider": "gemini",
+        "enabled": "no",
+        "request_timeout_seconds": "5.5",
+        "config": {"name": "fake-model", "retry": 1, "online": True},
+        "secret_refs": {"api_key": "GA_PLUGIN_SYNTHETIC_SETUP_KEY"},
+    }
+    valid = [telegram, model]
+    rejected = [
+        [{"kind": "channel", "provider": "telegram"}],
+        [telegram, {**model, "id": telegram["id"]}],
+        [telegram, {**model, "enabled": None}],
+        [telegram, {**model, "config": {"private": ["synthetic-invalid-config"]}}],
+        [telegram, {**model, "secret_refs": {"api_key": "GA_DATABASE_URL"}}],
+        [{**telegram, "request_timeout_seconds": 1}],
+        [{**telegram, "unrecognized": "synthetic-invalid-config"}],
+    ]
+    for entries in [*rejected, valid]:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / ".env"
+            current = (
+                "GA_TELEGRAM_USER_ID=12345\n"
+                "GA_TELEGRAM_BOT_TOKEN=1234:synthetic-fixture-telegram-token\n"
+                f"GA_INTEGRATIONS='{json.dumps(entries)}'\n"
+            )
+            settings.write_text(current)
+            result = command(binary, root)
+            if entries == valid:
+                assert Settings(_env_file=settings).telegram_user_id == 12345
+                assert result.returncode == 0, result.stderr
+                assert json.loads(dotenv_values(settings)["GA_INTEGRATIONS"]) == valid
+            else:
+                with pytest.raises(ValueError):
+                    Settings(_env_file=settings)
+                assert (
+                    result.returncode != 0 and "Invalid preserved runtime settings" in result.stderr
+                )
+                assert settings.read_text() == current and set(root.iterdir()) == {settings}
+                assert "synthetic" not in (result.stdout + result.stderr)
+    print("Verified rejected integrations leave existing settings and storage untouched")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -188,6 +237,7 @@ def main():
     release_mounts(binary)
     preserved_regional_credentials(binary)
     replace_runtime_placeholders(binary)
+    validate_integrations_before_writes(binary)
     if reject_new_case_aliases(binary):
         print("Verified overlapping storage paths whose case aliases did not exist before setup")
     print("Verified native setup and repeat runs against the deployment contract")

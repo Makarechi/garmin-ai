@@ -1,5 +1,6 @@
 mod database;
 mod dotenv;
+mod integrations;
 mod mounts;
 
 use std::{
@@ -252,16 +253,13 @@ fn validate_runtime(values: &ValueMap) -> Result<(), &'static str> {
             return Err(INVALID_SETTINGS);
         }
     }
-    if values
-        .get("GA_TELEGRAM_USER_ID")
-        .is_some_and(|value| value.parse::<i64>().is_err())
-    {
-        return Err(INVALID_SETTINGS);
-    }
+    integrations::validate(
+        values.get("GA_INTEGRATIONS").map(String::as_str),
+        values.get("GA_TELEGRAM_USER_ID").map(String::as_str),
+    )?;
     for key in [
         "GA_CAFFEINE_PRESETS",
         "GA_CALENDAR_SOURCES",
-        "GA_INTEGRATIONS",
         "GA_GEMINI_FALLBACK_MODELS",
     ] {
         if values
