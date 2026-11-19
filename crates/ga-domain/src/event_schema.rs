@@ -9,6 +9,7 @@ pub use entry::{CustomEntry, CustomEntryError, ResolvedCustomEntry};
 pub use specification::{CustomDefinition, CustomDefinitionError};
 pub use tracker_setup::{TrackerSettingsUpdate, TrackerSetupDraft, TrackerSetupError};
 
+pub(crate) use custom::python_equal;
 pub use custom::{CustomSchemaError, validate_custom_schema};
 
 use std::{collections::BTreeMap, error::Error, fmt};

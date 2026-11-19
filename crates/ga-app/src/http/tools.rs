@@ -770,7 +770,7 @@ pub(super) fn storage_unavailable() -> Response {
     )
 }
 
-fn health_failure(error: HealthAnalysisError) -> Response {
+pub(super) fn health_failure(error: HealthAnalysisError) -> Response {
     match error {
         HealthAnalysisError::ReplayPending => (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -468,7 +468,7 @@ fn finite_numbers(node: &Node, integer_only: bool) -> Result<(), CustomSchemaErr
     Ok(())
 }
 
-pub(super) fn python_equal(left: &Value, right: &Value) -> bool {
+pub(crate) fn python_equal(left: &Value, right: &Value) -> bool {
     let number = |value: &Value| {
         ExactNumber::read(value).or_else(|| {
             value.as_bool().map(|value| ExactNumber {
