@@ -1,6 +1,7 @@
 use std::{
     error::Error,
-    io::{Read, stdin},
+    fs::OpenOptions,
+    io::{Read, Write, stdin},
 };
 
 use serde_json::{Value, json};
@@ -26,7 +27,7 @@ fn deliver(intent: &Value, now: &str) -> Option<Value> {
     Some(json!({
         "intent_id":id,"state":"provider_accepted",
         "rendered":{"intent_id":id,"texts":texts,"mode":"send","medium":"text"},
-        "receipt":{"intent_id":id,"state":"provider_accepted","observed_at":now,
+        "receipt":{"intent_id":id,"receipt_id":id,"state":"provider_accepted","observed_at":now,
                    "provider_reference":"local-synthetic-receipt"},
     }))
 }
@@ -41,6 +42,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     let instance = request["instance_id"].as_str().ok_or("missing instance")?;
     let id = request["request_id"].as_u64().ok_or("missing request ID")?;
     let params = &request["params"];
+    if let Some(log) = request["context"]["config"]["invocation_log"].as_str() {
+        if request["context"]["secrets"]["key"] != "synthetic-native-channel-secret"
+            || std::env::var("GA_PLUGIN_NATIVE_SYNTHETIC_CHANNEL_KEY").is_ok()
+        {
+            return Err("unexpected fixture context".into());
+        }
+        let method = request["method"].as_str().ok_or("missing fixture method")?;
+        writeln!(
+            OpenOptions::new().create(true).append(true).open(log)?,
+            "{method}"
+        )?;
+        if method == "deliver"
+            && params["intent"]["blocks"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("private_uncertain"))
+        {
+            return Ok(());
+        }
+    }
     let result = match (request["version"].as_u64(), request["method"].as_str()) {
         (Some(1), Some("describe")) => Ok(json!({
             "kind":"channel","instance_id":instance,"implementation_version":env!("CARGO_PKG_VERSION"),

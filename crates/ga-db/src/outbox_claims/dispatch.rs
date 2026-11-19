@@ -36,6 +36,7 @@ pub struct ReplyObservation {
 
 pub enum ReplySendOutcome {
     Observation(ReplyObservation),
+    Receipt(Uuid, ReplyObservation),
     /// The provider explicitly declined the whole request before any acceptance.
     RetryAt(StoredInstant),
 }
@@ -217,6 +218,23 @@ impl Database {
         .await
     }
 
+    /// Send an external channel reminder under the current owner policy and sharing fences.
+    pub async fn dispatch_channel_tracker_checkin<F>(
+        &self,
+        destination: ReplyDestination<'_>,
+        claim: ReplyClaim,
+        send: impl FnOnce(Value) -> F,
+    ) -> Result<ReplyDispatchResult, ReplyDispatchError>
+    where
+        F: Future<Output = Option<ReplySendOutcome>>,
+    {
+        if destination.channel == "telegram" {
+            return Ok(ReplyDispatchResult::ClaimUnavailable);
+        }
+        self.dispatch_reply(destination, claim, &[], None, true, |body, _| send(body))
+            .await
+    }
+
     async fn dispatch_reply<F>(
         &self,
         destination: ReplyDestination<'_>,
@@ -299,21 +317,25 @@ impl Database {
             });
         }
         let observation = match outcome {
-            Some(ReplySendOutcome::Observation(observation))
-                if !matches!(
-                    observation.state,
-                    DeliveryState::Queued | DeliveryState::Sending
-                ) =>
-            {
-                observation
-            }
-            _ => ReplyObservation {
-                state: DeliveryState::Uncertain,
-                observed_at: inferred_clock(),
-                provider_reference: None,
-                detail: None,
-            },
+            Some(ReplySendOutcome::Receipt(id, observation)) => Some((id, observation)),
+            Some(ReplySendOutcome::Observation(observation)) => Some((Uuid::new_v4(), observation)),
+            _ => None,
         };
+        let (receipt_id, observation) = observation
+            .filter(|(_, value)| {
+                !matches!(value.state, DeliveryState::Queued | DeliveryState::Sending)
+            })
+            .unwrap_or_else(|| {
+                (
+                    Uuid::new_v4(),
+                    ReplyObservation {
+                        state: DeliveryState::Uncertain,
+                        observed_at: inferred_clock(),
+                        provider_reference: None,
+                        detail: None,
+                    },
+                )
+            });
         let recorded = tokio::time::timeout(
             DATABASE_DEADLINE,
             persist(
@@ -321,6 +343,7 @@ impl Database {
                 destination.owner_id,
                 claim.outbox_id,
                 token,
+                receipt_id,
                 &observation,
                 notice,
             ),
@@ -354,10 +377,11 @@ async fn prepare(
     ] {
         acquire_shared(connection, lock).await?;
     }
+    if expected_chat.is_some() || tracker {
+        acquire_shared(connection, CHANNEL_SELECTION_LOCK).await?;
+    }
     if expected_chat.is_some() {
-        for lock in [CHANNEL_SELECTION_LOCK, CHANNEL_BINDING_LOCK] {
-            acquire_shared(connection, lock).await?;
-        }
+        acquire_shared(connection, CHANNEL_BINDING_LOCK).await?;
     }
     let mut txn = connection.begin().await?;
     sqlx::query("SET LOCAL statement_timeout='750ms'")
@@ -632,6 +656,7 @@ async fn persist(
     owner_id: Uuid,
     outbox_id: Uuid,
     lease_token: Uuid,
+    receipt_id: Uuid,
     observation: &ReplyObservation,
     notice: Option<(&TelegramNoticeFence, &str)>,
 ) -> Result<Uuid, ReplyDispatchError> {
@@ -644,7 +669,7 @@ async fn persist(
             lease_token: Some(lease_token),
         },
         DeliveryReceipt {
-            id: Uuid::new_v4(),
+            id: receipt_id,
             intent_id: outbox_id,
             state: observation.state,
             observed_at: observation.observed_at,

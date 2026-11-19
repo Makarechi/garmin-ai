@@ -31,7 +31,10 @@ use ga_fit::{ExportLimits, MAX_FIT_BYTES};
 use time::Time;
 use tokio::{signal, sync::watch, time::Instant};
 
-use crate::{configuration, extensions::ScheduledSourcePlugins};
+use crate::{
+    configuration,
+    extensions::{ScheduledChannelPlugins, ScheduledSourcePlugins},
+};
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
 const PLAN_BUSY: Duration = Duration::from_secs(30);
@@ -248,6 +251,15 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             }
         })
         .flatten();
+    let channels = worker
+        .then(|| match ScheduledChannelPlugins::read() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("{error}");
+                None
+            }
+        })
+        .flatten();
     let selected_model = telegram.as_ref().and_then(|_| model_settings());
     let model_configuration = selected_model
         .as_ref()
@@ -387,6 +399,13 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
             future::pending().await
         }
     };
+    let channel_work = async {
+        if let Some(channels) = &channels {
+            channels.run(&database).await
+        } else {
+            future::pending().await
+        }
+    };
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
@@ -395,6 +414,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
         result = garmin_work => result,
         result = backup_work => result,
         result = source_work => result,
+        result = channel_work => result,
         result = process_archive(&database, archive, &timezone, once) => result,
     }
 }

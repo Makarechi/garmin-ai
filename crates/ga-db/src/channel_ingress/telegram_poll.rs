@@ -371,12 +371,20 @@ pub(crate) async fn telegram_primary(
     txn: &mut Transaction<'_, Postgres>,
     instance: &str,
 ) -> Result<bool, sqlx::Error> {
+    channel_primary(txn, "telegram", instance).await
+}
+
+pub(crate) async fn channel_primary(
+    txn: &mut Transaction<'_, Postgres>,
+    channel: &str,
+    instance: &str,
+) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS (SELECT 1 FROM app_state WHERE key='preferences:onboarding')
             OR EXISTS(SELECT 1 FROM app_state WHERE key='preferences:onboarding'
-                AND value->'channel'=jsonb_build_object('channel','telegram','instance_id',$1::text))",
+                AND value->'channel'=jsonb_build_object('channel',$1::text,'instance_id',$2::text))",
     )
-    .bind(instance).fetch_one(&mut **txn).await
+    .bind(channel).bind(instance).fetch_one(&mut **txn).await
 }
 
 async fn save_event(
