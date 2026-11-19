@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 import httpx
 from capture_reference import isolated_engine
@@ -17,8 +18,10 @@ from garmin_ai.definitions import (
     DefinitionSpec,
     activate_definition,
     create_definition_draft,
+    definition_state,
     propose_definition_revision,
     retire_definition,
+    version_state,
 )
 
 ROUTE = "/definitions"
@@ -142,6 +145,93 @@ def exercise(python, native):
     )
 
 
+def reference(engine, operation):
+    with Session(engine) as session:
+        outcome = operation(session)
+        session.rollback()
+        return outcome
+
+
+def check_mutations(engine, python, native):
+    key = "user.synthetic_management"
+    draft = spec(key).model_dump(mode="json", by_alias=True)
+    for client in (python, native):
+        assert client.post(ROUTE, json=draft).status_code == 401
+        assert client.post(ROUTE, json=draft, headers=READER).status_code == 403
+
+    expected = reference(
+        engine,
+        lambda session: definition_state(
+            create_definition_draft(session, draft, actor="api", authorized=True)
+        ),
+    )
+    response = native.post(ROUTE, json=draft, headers=MANAGER)
+    assert response.status_code == 200, response.text
+    created = response.json()
+    identity = created["id"]
+    assert created == {**expected, "id": identity}
+    assert created["status"] == "draft" and created["revision"] == 1
+
+    item = f"{ROUTE}/{identity}"
+    for client in (python, native):
+        response = client.post(ROUTE, json=draft, headers=MANAGER)
+        assert response.status_code == 422 and response.json() == {"detail": "Invalid arguments"}
+        absent = f"{ROUTE}/{uuid4()}/activate"
+        response = client.post(absent, json={"revision": 1}, headers=MANAGER)
+        assert response.status_code == 404 and response.json() == {"detail": "Record not found"}
+
+    revised_spec = spec(key, 2).model_dump(mode="json", by_alias=True)
+    expected = reference(
+        engine,
+        lambda session: definition_state(
+            propose_definition_revision(
+                session, identity, 1, revised_spec, actor="api", authorized=True
+            )
+        ),
+    )
+    response = native.put(item, json={"revision": 1, "spec": revised_spec}, headers=MANAGER)
+    assert response.status_code == 200 and response.json() == expected, response.text
+    assert expected["status"] == "proposed" and expected["revision"] == 2
+    for client in (python, native):
+        stale = client.put(item, json={"revision": 1, "spec": revised_spec}, headers=MANAGER)
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Definition changed; reload before editing"}
+        stale = client.post(item + "/activate", json={"revision": 1}, headers=MANAGER)
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Definition changed; reload before activation"}
+
+    expected = reference(
+        engine,
+        lambda session: version_state(
+            activate_definition(session, identity, 2, actor="api", authorized=True)
+        ),
+    )
+    response = native.post(item + "/activate", json={"revision": 2}, headers=MANAGER)
+    assert response.status_code == 200, response.text
+    activated = response.json()
+    assert activated == {**expected, "id": activated["id"]}
+    assert activated["definition_id"] == identity and activated["version"] == 1
+    current, _ = compare(python, native, definition_key=key)
+    assert current[0]["revision"] == 3 and current[0]["contract"] == activated
+
+    for client in (python, native):
+        repeated = client.post(item + "/activate", json={"revision": 3}, headers=MANAGER)
+        assert repeated.status_code == 422 and repeated.json() == {"detail": "Invalid arguments"}
+        stale = client.post(item + "/retire", json={"revision": 2}, headers=MANAGER)
+        assert stale.status_code == 409
+        assert stale.json() == {"detail": "Definition changed; reload before retirement"}
+    expected = reference(
+        engine,
+        lambda session: definition_state(retire_definition(session, identity, 3, authorized=True)),
+    )
+    response = native.post(item + "/retire", json={"revision": 3}, headers=MANAGER)
+    assert response.status_code == 200 and response.json() == expected, response.text
+    assert expected["status"] == "retired" and expected["revision"] == 4
+    retired, _ = compare(python, native, definition_key=key)
+    assert retired[0]["status"] == "retired" and retired[0]["contract"] == activated
+    print("Matched draft, proposal, activation snapshot, revision conflicts and retirement")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -169,6 +259,7 @@ def main():
                 assert url.startswith("http://127.0.0.1:")
                 with httpx.Client(base_url=url, timeout=6, trust_env=False) as native:
                     exercise(python, native)
+                    check_mutations(engine, python, native)
             finally:
                 server.terminate()
                 server.wait(timeout=5)

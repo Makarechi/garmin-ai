@@ -1,8 +1,11 @@
+mod management;
+pub(super) use management::{activate, collection, retire, revise};
+
 use std::collections::BTreeMap;
 
 use axum::{
     Json,
-    extract::{Request, State},
+    extract::Request,
     http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -15,7 +18,7 @@ use super::{
     tools::{document_response, forbidden, storage_unavailable, unauthorized},
 };
 
-pub(super) async fn list(State(state): State<AppState>, request: Request) -> Response {
+async fn list(state: AppState, request: Request) -> Response {
     let (parts, _) = request.into_parts();
     let response = if parts.method != Method::GET {
         method_not_allowed("GET")

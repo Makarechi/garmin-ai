@@ -150,6 +150,31 @@ impl Database {
         Ok(version)
     }
 
+    /// Return the activated version as it was recorded, before another edit can change the definition.
+    pub async fn activate_custom_definition_document(
+        &self,
+        request: ManageCustomDefinition<'_>,
+        id: Uuid,
+        revision: i32,
+    ) -> Result<Value, CustomRegistryError> {
+        let mut txn = self.begin_definition_management(request).await?;
+        let version = Self::activate_custom_definition_in(&mut txn, request, id, revision).await?;
+        let document: String = sqlx::query_scalar(
+            "SELECT jsonb_build_object('id',id,'definition_id',definition_id,'version',version,
+                 'schema',schema,'schema_hash',schema_hash,'topology',topology,'fields',field_metadata,
+                 'labels',labels,'privacy',privacy,'allowed_operations',allowed_operations)::text
+             FROM event_definition_versions WHERE id=$1 AND definition_id=$2",
+        )
+        .bind(version.id)
+        .bind(id)
+        .fetch_one(&mut *txn)
+        .await?;
+        let document = serde_json::from_str(&document)
+            .map_err(|_| CustomRegistryError::InvalidStoredContract)?;
+        txn.commit().await?;
+        Ok(document)
+    }
+
     pub(super) async fn activate_custom_definition_in(
         txn: &mut Transaction<'_, Postgres>,
         request: ManageCustomDefinition<'_>,
