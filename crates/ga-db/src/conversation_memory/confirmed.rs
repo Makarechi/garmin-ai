@@ -10,7 +10,7 @@ use super::{
     Conversation, ConversationBinding, DEADLINE, MemoryError, MemoryFence, RECENT_MICROS,
     bounded_turns, conversation, persist_turns, recent_turns,
 };
-use crate::Database;
+use crate::{Database, diary::analysis_evidence::DiaryAnalysisFence};
 
 pub struct ConfirmedAnalysis<'a> {
     pub binding: ConversationBinding,
@@ -57,7 +57,8 @@ pub(crate) async fn remember_delivered_in(
         "SELECT o.conversation_id,o.operation_id,o.intent::text,o.memory_fence::text,i.normalized_text
          FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
          WHERE o.id=$1 AND o.owner_id=$2 AND o.state IN ('delivered','read')
-           AND o.memory_fence ? 'telegram_diary_analysis' AND i.normalized_text IS NOT NULL",
+           AND o.memory_fence ?| ARRAY['telegram_diary_analysis','web_diary_analysis']
+           AND i.normalized_text IS NOT NULL",
     )
     .bind(outbox_id)
     .bind(owner_id)
@@ -81,6 +82,7 @@ pub(crate) async fn remember_delivered_in(
         .map(|block| block["text"].as_str().ok_or(MemoryError::InvalidState))
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
+    let pinned: Value = serde_json::from_str(&pinned).map_err(|_| MemoryError::InvalidState)?;
     let fence = read_fence(&pinned)?;
     let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **txn)
@@ -111,7 +113,7 @@ pub(super) async fn refresh_delivered_in(
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT o.id FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
          WHERE o.owner_id=$1 AND o.conversation_id=$2 AND o.state IN ('delivered','read')
-           AND o.memory_fence ? 'telegram_diary_analysis'
+           AND o.memory_fence ?| ARRAY['telegram_diary_analysis','web_diary_analysis']
            AND i.received_at BETWEEN $3::timestamptz-interval '7 days' AND $3
          ORDER BY i.received_at DESC,o.id DESC LIMIT 6",
     )
@@ -140,10 +142,20 @@ async fn remember(
     }
     let (intent, pinned, question, asked_at, revision, newest) =
         delivered_reply(txn, &analysis).await?;
-    if let Some(pinned) = pinned.as_deref().filter(|value| *value != "null")
-        && read_fence(pinned)? != *analysis.fence
-    {
-        return Ok(false);
+    let mut specs = None;
+    if let Some(pinned) = pinned.as_deref().filter(|value| *value != "null") {
+        let pinned: Value = serde_json::from_str(pinned).map_err(|_| MemoryError::InvalidState)?;
+        if read_fence(&pinned)? != *analysis.fence {
+            return Ok(false);
+        }
+        if let Some(proof) = pinned
+            .get("web_diary_analysis")
+            .or_else(|| pinned.get("telegram_diary_analysis"))
+        {
+            let proof: DiaryAnalysisFence =
+                serde_json::from_value(proof.clone()).map_err(|_| MemoryError::InvalidState)?;
+            specs = Some(proof.model_specs());
+        }
     }
     if revision != newest {
         return Ok(false);
@@ -197,7 +209,7 @@ async fn remember(
         .iter()
         .map(|(source, epoch)| (source.to_string(), epoch.to_string()))
         .collect();
-    retained.push(json!({
+    let mut turn = json!({
         "operation_id": operation,
         "revision": revision,
         "asked_at": asked_at.to_string(),
@@ -206,7 +218,11 @@ async fn remember(
         "question_truncated": analysis.question.chars().count() > 1000,
         "answer_truncated": analysis.answer.chars().count() > 1500,
         "source_epochs": sources,
-    }));
+    });
+    if let Some(specs) = specs {
+        turn["specs"] = json!(specs);
+    }
+    retained.push(turn);
     let retained = bounded_turns(retained)?;
     persist_turns(txn, analysis.binding, &retained).await?;
     Ok(true)
@@ -252,8 +268,7 @@ async fn delivered_reply(
     .ok_or(MemoryError::Unconfirmed)
 }
 
-fn read_fence(raw: &str) -> Result<MemoryFence, MemoryError> {
-    let value: Value = serde_json::from_str(raw).map_err(|_| MemoryError::InvalidState)?;
+fn read_fence(value: &Value) -> Result<MemoryFence, MemoryError> {
     let target_epoch = value["target_epoch"]
         .as_str()
         .and_then(|value| value.parse().ok())

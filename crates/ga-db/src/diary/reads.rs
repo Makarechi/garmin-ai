@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::{EventSnapshotRow, event_snapshot, load_event};
 use crate::{
     Database, ReadinessError, check_readiness,
-    conversation_memory::{AnalysisReadContext, analysis_channel_in},
+    conversation_memory::{AnalysisSubject, analysis_channel_in},
     scenario_packs::model_disallowed_event_kinds,
     share_policy::{DestinationKind, ShareDestination},
     system_definitions::known_system_event,
@@ -267,7 +267,11 @@ impl Database {
     }
 
     /// Revalidate the question and diary grant before preparing the next model request.
-    pub async fn analysis_diary_context_current(&self, context: AnalysisReadContext<'_>) -> bool {
+    pub async fn analysis_diary_context_current<'a>(
+        &self,
+        context: impl Into<AnalysisSubject<'a>>,
+    ) -> bool {
+        let context = context.into();
         matches!(
             tokio::time::timeout(Duration::from_millis(1500), async {
                 let mut txn = self.begin_diary_read().await?;
@@ -279,7 +283,7 @@ impl Database {
                 };
                 ShareDestination::new(DestinationKind::Channel, &channel)
                     .map_err(|_| DiaryReadError::InvalidDestination)?;
-                model_diary_allowed(&mut txn, context.binding.owner_id).await?;
+                model_diary_allowed(&mut txn, context.binding().owner_id).await?;
                 txn.commit().await?;
                 Ok::<_, DiaryReadError>(true)
             })
@@ -289,12 +293,13 @@ impl Database {
     }
 
     /// Resolve the delivery channel from the current authenticated question in the same snapshot.
-    pub async fn list_analysis_events(
+    pub async fn list_analysis_events<'a>(
         &self,
-        context: AnalysisReadContext<'_>,
+        context: impl Into<AnalysisSubject<'a>>,
         model: ShareDestination<'_>,
         range: DiaryEventRange<'_>,
     ) -> Result<ModelDiaryPage, DiaryReadError> {
+        let context = context.into();
         tokio::time::timeout(Duration::from_millis(1500), async {
             let mut txn = self.begin_diary_read().await?;
             let page = analysis_events_in(&mut txn, context, model, range).await?;
@@ -322,12 +327,13 @@ impl Database {
     }
 }
 
-pub(crate) async fn analysis_events_in(
+pub(crate) async fn analysis_events_in<'a>(
     txn: &mut Transaction<'_, Postgres>,
-    context: AnalysisReadContext<'_>,
+    context: impl Into<AnalysisSubject<'a>>,
     model: ShareDestination<'_>,
     range: DiaryEventRange<'_>,
 ) -> Result<ModelDiaryPage, DiaryReadError> {
+    let context = context.into();
     let channel = analysis_channel_in(txn, context)
         .await
         .map_err(|_| DiaryReadError::ContextChanged)?
@@ -335,7 +341,7 @@ pub(crate) async fn analysis_events_in(
     let channel = ShareDestination::new(DestinationKind::Channel, &channel)
         .map_err(|_| DiaryReadError::InvalidDestination)?;
     let query = ModelDiaryQuery {
-        owner_id: context.binding.owner_id,
+        owner_id: context.binding().owner_id,
         model,
         channel: Some(channel),
         start: range.start,
