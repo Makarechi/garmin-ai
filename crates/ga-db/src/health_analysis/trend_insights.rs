@@ -7,7 +7,7 @@ use ga_domain::{
 };
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
-use time::{Date, OffsetDateTime};
+use time::{Date, OffsetDateTime, format_description::well_known::Iso8601};
 use uuid::Uuid;
 
 use super::{HealthAnalysisError, HealthPeriod, owner_timezone, period_comparison};
@@ -28,6 +28,43 @@ const METRICS: [(&str, &str, &str); 5] = [
     ("resting_hr", "wellbeing", "Пульс покоя (уд/мин)"),
     ("stress_avg", "wellbeing", "Средний стресс"),
 ];
+
+pub(crate) async fn stored_trend_current(
+    txn: &mut Transaction<'_, Postgres>,
+    metric: &str,
+    evidence: &Value,
+) -> Result<bool, HealthAnalysisError> {
+    let dates = |key: &str| -> Option<(Date, Date)> {
+        let window = &evidence[key];
+        Some((
+            Date::parse(window["start"].as_str()?, &Iso8601::DATE).ok()?,
+            Date::parse(window["end"].as_str()?, &Iso8601::DATE).ok()?,
+        ))
+    };
+    let (Some((a0, a1)), Some((b0, b1))) = (dates("a"), dates("b")) else {
+        return Ok(false);
+    };
+    if (a1 - a0).whole_days() != 13
+        || (b1 - b0).whole_days() != 13
+        || b1.next_day() != Some(a0)
+        || !METRICS.iter().any(|(known, _, _)| *known == metric)
+    {
+        return Ok(false);
+    }
+    let current = period_comparison(
+        txn,
+        metric,
+        HealthPeriod::new(a0, a1)?,
+        HealthPeriod::new(b0, b1)?,
+    )
+    .await?
+    .document();
+    Ok(sqlx::query_scalar("SELECT $1::jsonb=$2::jsonb")
+        .bind(evidence.to_string())
+        .bind(current.to_string())
+        .fetch_one(&mut **txn)
+        .await?)
+}
 
 impl Database {
     /// Generate existing trend records at most once per six-hour interval.

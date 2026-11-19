@@ -322,6 +322,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_local_text(&database, settings, &config.locale, reminders_available) => result,
                 result = transport.run_replies_with_garmin_notices(&database, settings, garmin_notice.as_ref()) => result,
                 result = transport.run_tracker_checkins(&database, settings, reminders, wait_for_recovery.clone()) => result,
+                result = transport.run_trend_notifications(&database, settings, reminders, wait_for_recovery.clone()) => result,
                 result = async {
                     if let (Some(selected), Some(gateway)) = (&model_configuration, &model_gateway) {
                         transport.run_model_diary(&database,settings,selected,gateway,&config.timezone,&config.locale).await

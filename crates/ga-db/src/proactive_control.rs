@@ -7,6 +7,7 @@ mod policy;
 mod question_delivery;
 mod question_selection;
 mod tracker_checkins;
+mod trend_delivery;
 pub use budget::NotificationExclusions;
 pub use diary_questions::GeneratedDiaryQuestions;
 pub use garmin_context::DiaryContextAvailability;

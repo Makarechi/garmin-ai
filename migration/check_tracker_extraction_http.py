@@ -158,7 +158,7 @@ class SyntheticProvider:
         pass
 
 
-def certificates(directory):
+def certificates(directory, hostname="api.openai.com"):
     now = datetime.now(UTC)
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Synthetic tracker test CA")])
@@ -174,7 +174,7 @@ def certificates(directory):
         .sign(ca_key, hashes.SHA256())
     )
     leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "api.openai.com")])
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
     leaf = (
         x509.CertificateBuilder()
         .subject_name(leaf_name)
@@ -184,9 +184,7 @@ def certificates(directory):
         .not_valid_before(now - timedelta(days=1))
         .not_valid_after(now + timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("api.openai.com")]), critical=False
-        )
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
         .sign(ca_key, hashes.SHA256())
     )
     ca_path, cert_path, key_path = [
