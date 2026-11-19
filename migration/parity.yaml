@@ -57,7 +57,10 @@
         "tests/test_core_only_flow.py",
         "tests/test_release_bundle.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_native_compose.py",
+        "migration/check_native_worker_health.py"
+      ],
       "data_contracts": [
         "Environment and config precedence, instance isolation, owner locale/time zone/units, repeatable onboarding."
       ],
@@ -65,10 +68,12 @@
         "Onboarding requires its management scope or admin."
       ],
       "resource_scenario": "Clean core-only install and cold startup",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R34",
-      "known_limits": [],
+      "known_limits": [
+        "Verify the source-free installer, preserved configuration and owner onboarding together on both Linux architectures."
+      ],
       "approved_deviations": []
     },
     {
@@ -99,7 +104,11 @@
         "tests/test_account_binding.py",
         "tests/test_pairing.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "crates/ga-db/tests/garmin_owner.rs",
+        "migration/check_garmin_terminal.py",
+        "migration/check_garmin_web_reauth.py"
+      ],
       "data_contracts": [
         "Internal UUID, singleton owner, explicit account binding, legacy owner confirmation, and account mismatch fencing."
       ],
@@ -107,10 +116,12 @@
         "Only its owner can bind an account; a conflicting account cannot read, fetch, archive or write owner data."
       ],
       "resource_scenario": "Startup and gated import with legacy owner",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R07",
-      "known_limits": [],
+      "known_limits": [
+        "Rehearse the historical owner transition with native Telegram pairing and verify the approved account and device binding cases."
+      ],
       "approved_deviations": []
     },
     {
@@ -151,7 +162,11 @@
         "tests/test_integration_state.py",
         "tests/test_account_binding.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_garmin_terminal.py",
+        "migration/check_garmin_web_reauth.py",
+        "migration/check_garmin_source_settings.py"
+      ],
       "data_contracts": [
         "Interactive login, MFA, saved sessions, refresh, and web reauth with email code and optional Secret Manager."
       ],
@@ -159,10 +174,12 @@
         "Local terminal or authenticated owner web session; never expose credentials or reusable session state."
       ],
       "resource_scenario": "Bounded Garmin reauth attempts",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R12",
-      "known_limits": [],
+      "known_limits": [
+        "Verify approved live login, MFA, token refresh and replacement through the final installation."
+      ],
       "approved_deviations": []
     },
     {
@@ -220,7 +237,11 @@
         "tests/test_integration_state.py",
         "tests/test_ingestion.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "crates/ga-db/tests/garmin_endpoint.rs",
+        "migration/check_health_publication.py",
+        "migration/check_garmin_source_settings.py"
+      ],
       "data_contracts": [
         "Endpoint identity, pagination, per-capability availability, request pacing, retry and cooldown."
       ],
@@ -228,10 +249,12 @@
         "Allowlisted reads to the bound account, including optional archive-only endpoints."
       ],
       "resource_scenario": "Synthetic day sync using all enabled endpoints",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R13",
-      "known_limits": [],
+      "known_limits": [
+        "Compare all configured acquisition capabilities and limits against the authorized account and the final normal worker."
+      ],
       "approved_deviations": []
     },
     {
@@ -310,18 +333,24 @@
         "tests/test_storage.py",
         "tests/test_archive_replay.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "crates/ga-archive/tests/archive.rs",
+        "migration/check_authoritative_replacement.py",
+        "migration/check_health_publication.py"
+      ],
       "data_contracts": [
-        "Legacy serialized JSON and untouched binary, immutable identity bytes, A–B–A revisions, timestamp order."
+        "Legacy serialized JSON and untouched binary, immutable identity bytes, A\u2013B\u2013A revisions, timestamp order."
       ],
       "permissions": [
         "Private storage and bound source; safe path and permission checks."
       ],
       "resource_scenario": "Streaming ingest plus archive write and staging",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "db",
       "owner_task": "R08",
-      "known_limits": [],
+      "known_limits": [
+        "Verify the final mixed acquisition, backup and replay run with the versioned archive and recovery comparison."
+      ],
       "approved_deviations": []
     },
     {
@@ -348,7 +377,11 @@
         "tests/test_device_history.py",
         "tests/test_activity_generations.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_fit_projection.py",
+        "migration/check_fit_replay.py",
+        "migration/check_device_history.py"
+      ],
       "data_contracts": [
         "FIT/ZIP message order, original bytes, developer and unknown fields, CRC and atomic replacement."
       ],
@@ -356,10 +389,12 @@
         "Only private files and approved Garmin/wearable ingress; bounded archive decoding."
       ],
       "resource_scenario": "Large multi-member FIT ZIP plus 10x larger record count",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R15",
-      "known_limits": [],
+      "known_limits": [
+        "Run the final resource ceiling and historical FIT corpus comparison on the release artifact."
+      ],
       "approved_deviations": []
     },
     {
@@ -629,7 +664,12 @@
         "tests/test_tracker_chat_form.py",
         "tests/test_dynamic_scales.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_definitions_http.py",
+        "migration/check_custom_definition_registry.py",
+        "migration/check_generated_forms.py",
+        "migration/check_user_metric_registry.py"
+      ],
       "data_contracts": [
         "Versioned event/metric schemas, reserved namespaces, unit and scale validation, generated forms."
       ],
@@ -637,10 +677,12 @@
         "Definition management controls changes; diary read scope gates discovery and sharing may narrow access."
       ],
       "resource_scenario": "Many custom definitions, form rendering and validation",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R18",
-      "known_limits": [],
+      "known_limits": [
+        "Repeat lifecycle, old readings, generated forms and permission checks with upgraded data in the assembled release."
+      ],
       "approved_deviations": []
     },
     {
@@ -792,7 +834,12 @@
         "tests/test_integrations.py",
         "tests/test_synthetic_plugin.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_scenario_packs.py",
+        "migration/check_channel_extension_runtime.py",
+        "migration/check_model_extension_runtime.py",
+        "migration/check_scheduled_source_extension.py"
+      ],
       "data_contracts": [
         "Built-in and portable data-only packs, scoped configured extension instances, declared capabilities and TCK."
       ],
@@ -800,10 +847,12 @@
         "Owner manages packs and may enable an extension explicitly; installation is separate from activation."
       ],
       "resource_scenario": "Core startup and extension selection with failure",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R31",
-      "known_limits": [],
+      "known_limits": [
+        "Exercise the implemented extension boundaries against the final package and verify the approved third-party inventory."
+      ],
       "approved_deviations": []
     },
     {
@@ -845,7 +894,12 @@
         "tests/test_source_metric_plugin.py",
         "tests/test_file_source.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_file_import_cli.py",
+        "migration/check_source_page_storage.py",
+        "migration/check_source_metric_mappings.py",
+        "migration/check_scheduled_source_extension.py"
+      ],
       "data_contracts": [
         "Source identity, preview/confirmation, revisioned numeric mappings, pagination, corrections and quarantine."
       ],
@@ -853,10 +907,12 @@
         "Owner/admin confirms mapping changes or the local import preview digest; plugins cannot directly write facts."
       ],
       "resource_scenario": "Paginated imports and repeated mapping corrections",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R20",
-      "known_limits": [],
+      "known_limits": [
+        "Verify automatic source import, retries, correction, erasure and replay together, including supported edge input sizes on both platforms."
+      ],
       "approved_deviations": []
     },
     {
@@ -1006,7 +1062,12 @@
         "tests/test_timestamp_claims.py",
         "tests/test_metric_evidence_delivery.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_web_chat_model.py",
+        "migration/check_web_sleep_history.py",
+        "migration/check_conversation_memory.py",
+        "migration/check_confirmed_analysis.py"
+      ],
       "data_contracts": [
         "Delivered context only, goals revision, numeric claims, evidence provenance, staleness, expiry and forget fence."
       ],
@@ -1014,10 +1075,12 @@
         "Owner-only conversation state; provider context scope and revocation apply before dispatch/delivery."
       ],
       "resource_scenario": "Evidence budget boundary and long conversation history",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R25",
-      "known_limits": [],
+      "known_limits": [
+        "Complete the native agent health-tool menu, compound evidence and multi-turn comparisons across normal channel workers."
+      ],
       "approved_deviations": []
     },
     {
@@ -1068,7 +1131,12 @@
         "tests/test_provider_instance_gate.py",
         "tests/test_model_contract.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_model_fallback.py",
+        "migration/check_model_extension_runtime.py",
+        "migration/check_web_chat_model.py",
+        "migration/check_model_runtime_settings.py"
+      ],
       "data_contracts": [
         "Structured output, budgeted tools, usage, typed refusal/truncation, retry/fallback, no secret-bearing error text."
       ],
@@ -1076,10 +1144,12 @@
         "Explicit provider/instance/category consent; no unconsented fallback; cancellation and cooldown are bounded."
       ],
       "resource_scenario": "Provider timeouts, fallback and voice limit with simulated replies",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R24",
-      "known_limits": [],
+      "known_limits": [
+        "Verify the full provider, voice and fallback matrix through the release artifacts and approved live providers."
+      ],
       "approved_deviations": []
     },
     {
@@ -1278,7 +1348,13 @@
         "tests/test_web_chat.py",
         "tests/test_web_chat_browser.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_live_web_shells.py",
+        "migration/check_web_chat_model.py",
+        "migration/check_web_chat_read.py",
+        "migration/check_web_sleep_history.py",
+        "migration/check_web_tracker_checkins.py"
+      ],
       "data_contracts": [
         "Local dashboard and demo assets, web command behavior, client message IDs and observed read receipts."
       ],
@@ -1286,10 +1362,12 @@
         "Authenticated owner chat; assets and synthetic demo are independently available."
       ],
       "resource_scenario": "Browser startup, concurrent chat and refresh/receipt",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R28",
-      "known_limits": [],
+      "known_limits": [
+        "Run the full browser and dashboard acceptance including combined historical answers, playback and unavailable providers."
+      ],
       "approved_deviations": []
     },
     {
@@ -1388,7 +1466,12 @@
         "tests/test_initiative_rules.py",
         "tests/test_notification_policy.py"
       ],
-      "rust_tests": [],
+      "rust_tests": [
+        "migration/check_tracker_checkins.py",
+        "migration/check_web_tracker_checkins.py",
+        "migration/check_notification_budget.py",
+        "migration/check_context_question_generation.py"
+      ],
       "data_contracts": [
         "Daily budget, time window and pause/snooze, priority and cooldown, delivery revalidation, stale reminder recovery."
       ],
@@ -1396,10 +1479,12 @@
         "Only configured primary or authorized fallback destination; mode and capability checked before claim and send."
       ],
       "resource_scenario": "Overlapping periodic jobs and notification backlog",
-      "status": "not_started",
-      "verification": "none",
+      "status": "implemented",
+      "verification": "e2e_synthetic",
       "owner_task": "R30",
-      "known_limits": [],
+      "known_limits": [
+        "Complete persisted trend generation and delivery on the final native worker and verify repeat suppression and shared budgets under load."
+      ],
       "approved_deviations": []
     },
     {
