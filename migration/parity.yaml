@@ -706,7 +706,14 @@
         "crates/ga-domain/contracts/tracker-extraction-calendar-bounds.json",
         "migration/check_tracker_extraction_http.py",
         "crates/ga-domain/src/tracker_nl/extraction/tests.rs",
-        "crates/ga-app/src/model_gateway/tracker/tests.rs::applies_only_evidenced_tracker_text_and_replays_atomic_receipts"
+        "crates/ga-app/src/model_gateway/tracker/tests.rs::applies_only_evidenced_tracker_text_and_replays_atomic_receipts",
+        "migration/capture_tracker_legacy_conversation.py",
+        "crates/ga-app/src/telegram_transport/model_worker/tests/tracker.rs::legacy_tracker_model_messages_match_the_frozen_conversation",
+        "crates/ga-app/src/telegram_transport/model_worker/tests/tracker/atomic.rs::assert_atomic_commit",
+        "migration/contracts/tracker-legacy/tracker-chat-legacy-model-reference-ru.json",
+        "migration/contracts/tracker-legacy/tracker-chat-legacy-model-reference.json",
+        "migration/contracts/tracker-legacy/tracker-chat-legacy-reference-ru.json",
+        "migration/contracts/tracker-legacy/tracker-chat-legacy-reference.json"
       ],
       "data_contracts": [
         "Preview and confirmation, exact evidence text and offsets, ambiguity/clarification, deterministic fallbacks."
@@ -726,7 +733,8 @@
         "Tracker HTTP proposals/extraction match 360 frozen typed-model contracts and 1,178 evidence calls and ten calendar-bound cases captured while all 168 source natural-language tests passed. A paired HTTP proof compares created/corrected facts and provenance, refusals, proposals, privacy, permissions and cross-runtime receipts against an actual native synthetic HTTPS provider. Matching concurrent model requests return the same atomic receipt and use one provider call. Complete channel integration, broader malformed legacy state and combined R19/R25 acceptance remain pending.",
         "The calendar boundary matrix uses the exact frozen TZif bytes for 598 source timezone keys. Operating-system historical timezone data vary, and deployment timezone-data alignment remains part of R34/R36 verification.",
         "Callback notices after configuration-locale changes, malformed legacy state and complete R36 validation/transport behavior still require broader combined checks.",
-        "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."
+        "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending.",
+        "Legacy selected Telegram tracker prompts match 33 frozen offline and 12 model-backed steps per locale, including complete operation contexts and receipts. Native proofs also cover atomic rollback after an outbox failure, resumed final writes, denied sensitive model disclosure and analysis replies bypassing local tracker state. Persisted safety-screen results across interrupted legacy tracker work remain pending under R25/R27. Complete voice, malformed legacy state, channel integration and combined release workloads remain pending."
       ],
       "approved_deviations": []
     },

@@ -319,7 +319,16 @@ impl Database {
         envelope: &InboundEnvelope,
     ) -> Result<Transaction<'_, Postgres>, TelegramDiaryCommitError> {
         let mut txn = begin(&self.work).await?;
-        if !try_ingress_lock(&mut txn).await? {
+        Self::verify_telegram_text_in(&mut txn, lease, envelope).await?;
+        Ok(txn)
+    }
+
+    pub(super) async fn verify_telegram_text_in(
+        txn: &mut Transaction<'_, Postgres>,
+        lease: &TelegramInboundLease,
+        envelope: &InboundEnvelope,
+    ) -> Result<(), TelegramDiaryCommitError> {
+        if !try_ingress_lock(txn).await? {
             return Err(TelegramDiaryCommitError::Outbox(QueueIntentError::Busy));
         }
         let owner = envelope.owner_id();
@@ -328,10 +337,10 @@ impl Database {
             .sender_ref()
             .parse()
             .map_err(|_| TelegramDiaryCommitError::BindingChanged)?;
-        if !selection(&mut txn, instance)
+        if !selection(txn, instance)
             .await
             .map_err(|_| TelegramDiaryCommitError::BindingChanged)?
-            || confirmed_pairing(&mut txn, instance, chat)
+            || confirmed_pairing(txn, instance, chat)
                 .await
                 .map_err(|_| TelegramDiaryCommitError::BindingChanged)?
                 != owner
@@ -354,18 +363,18 @@ impl Database {
         .bind(lease.message_id)
         .bind(lease.envelope_json())
         .bind(lease.operation_id)
-        .fetch_one(&mut *txn)
+        .fetch_one(&mut **txn)
         .await?;
-        if !active || superseded(&mut txn, lease.message_id).await? {
+        if !active || superseded(txn, lease.message_id).await? {
             return Err(JobStoreError::LeaseLost.into());
         }
-        Self::require_diary_owner(&mut txn, owner)
+        Self::require_diary_owner(txn, owner)
             .await
             .map_err(|error| match error {
                 DiaryWriteError::Busy => TelegramDiaryCommitError::Outbox(QueueIntentError::Busy),
                 error => TelegramDiaryCommitError::Diary(error),
             })?;
-        Ok(txn)
+        Ok(())
     }
 }
 

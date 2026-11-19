@@ -19,13 +19,20 @@ use crate::{
 };
 
 impl TrackerTextSession {
-    pub async fn apply(self, extraction: TrackerExtraction) -> Result<Value, TrackerTextError> {
-        tokio::time::timeout(Duration::from_millis(2500), self.apply_in(extraction))
-            .await
-            .map_err(|_| TrackerTextError::Database)?
+    pub async fn apply(mut self, extraction: TrackerExtraction) -> Result<Value, TrackerTextError> {
+        tokio::time::timeout(Duration::from_millis(2500), async {
+            let result = self.apply_uncommitted(extraction).await?;
+            self.txn.commit().await?;
+            Ok(result)
+        })
+        .await
+        .map_err(|_| TrackerTextError::Database)?
     }
 
-    async fn apply_in(mut self, extraction: TrackerExtraction) -> Result<Value, TrackerTextError> {
+    pub(crate) async fn apply_uncommitted(
+        &mut self,
+        extraction: TrackerExtraction,
+    ) -> Result<Value, TrackerTextError> {
         let raw = extraction.document();
         let intent = raw["intent"].as_str().ok_or(TrackerTextError::Invalid)?;
         let response = if raw["confidence"]
@@ -85,7 +92,6 @@ impl TrackerTextSession {
                 _ => return Err(TrackerTextError::Invalid),
             }
         };
-        self.txn.commit().await?;
         Ok(response)
     }
 
@@ -207,7 +213,7 @@ impl TrackerTextSession {
             TrackerFormWrite {
                 owner_id: self.owner,
                 actor: &self.actor,
-                source: Some("manual"),
+                source: Some(self.source),
                 idempotency_key: (!update).then_some(idempotency.as_str()),
                 original_text: Some(&self.request.text),
                 evidence_refs: Some(&references),

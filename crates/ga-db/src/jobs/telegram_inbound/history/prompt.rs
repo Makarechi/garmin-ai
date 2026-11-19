@@ -18,6 +18,7 @@ pub(in crate::jobs::telegram_inbound) struct PromptState {
     pub(in crate::jobs::telegram_inbound) draft: Option<SetupDraft>,
     pub(in crate::jobs::telegram_inbound) pending: bool,
     pub(in crate::jobs::telegram_inbound) guided_form: bool,
+    pub(in crate::jobs::telegram_inbound) legacy_tracker: bool,
 }
 
 pub(in crate::jobs::telegram_inbound) struct SetupDraft {
@@ -86,10 +87,9 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
         .await
         .map_err(TelegramDiaryCommitError::Clarification)?;
     }
-    if pending
-        .as_ref()
-        .is_some_and(|form| form["button"] == "tracker_select")
-        && super::super::analysis_reply::is_analytic_reply(txn, envelope).await?
+    if pending.as_ref().is_some_and(|form| {
+        form["button"] == "tracker_select" || form["definition_version_id"].is_string()
+    }) && super::super::analysis_reply::is_analytic_reply(txn, envelope).await?
     {
         pending = None;
     }
@@ -100,6 +100,11 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             || form["button"].as_str().is_some_and(|button| {
                 button == "tracker_select" || form["explicit_selector"] != true
             })
+    });
+    let legacy_tracker = pending.as_ref().is_some_and(|form| {
+        form["definition_version_id"].is_string()
+            && !form["chat_form"].is_object()
+            && !form["chat_close"].is_object()
     });
     let key = format!("tracker:chat-setup:{destination}");
     let draft: Option<(String, OffsetDateTime)> =
@@ -158,6 +163,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
                 draft: None,
                 pending: pending.is_some(),
                 guided_form,
+                legacy_tracker,
             });
         }
     }
@@ -172,6 +178,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
             draft: setup,
             pending: true,
             guided_form,
+            legacy_tracker,
         });
     }
     Ok(PromptState {
@@ -188,6 +195,7 @@ pub(in crate::jobs::telegram_inbound) async fn inspect(
         draft: setup,
         pending: pending.is_some(),
         guided_form,
+        legacy_tracker,
     })
 }
 

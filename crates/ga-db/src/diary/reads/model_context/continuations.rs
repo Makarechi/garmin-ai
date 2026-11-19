@@ -266,7 +266,7 @@ impl Continuations<'_> {
         let Some(pending) = pending else {
             return Ok((None, false));
         };
-        if pending["button"] == "tracker_select" {
+        if pending["button"] == "tracker_select" || pending["definition_version_id"].is_string() {
             return Ok((None, false));
         }
         let explicit_target = pending["explicit_selector"] == true

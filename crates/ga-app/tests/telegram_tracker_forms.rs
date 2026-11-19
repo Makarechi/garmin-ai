@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     env,
     error::Error,
     fs,
@@ -30,10 +30,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
-use sqlx::{
-    ConnectOptions, FromRow, PgPool, Row,
-    postgres::{PgConnectOptions, PgRow},
-};
+use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -70,102 +67,17 @@ async fn receive(
     .await??)
 }
 
-fn normalize(value: Value, identities: &BTreeMap<String, String>) -> Result<Value, Box<dyn Error>> {
-    Ok(match value {
-        Value::Object(fields) => {
-            let mut normalized = serde_json::Map::new();
-            for (key, mut item) in fields {
-                if matches!(key.as_str(), "created_at" | "prompt_advanced_at") {
-                    assert!(StoredInstant::from_legacy_input(&item).is_some());
-                    continue;
-                }
-                if key == "submission_id" && !item.is_null() {
-                    let nonce = item.as_str().ok_or("Expected submission nonce")?;
-                    assert_eq!(nonce.len(), 32);
-                    assert!(nonce.bytes().all(|c| c.is_ascii_hexdigit()));
-                    item = json!("synthetic-submission");
-                }
-                normalized.insert(key, normalize(item, identities)?);
-            }
-            Value::Object(normalized)
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(|item| normalize(item, identities))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Value::String(mut text) => {
-            for (id, key) in identities {
-                text = text.replace(id, key);
-            }
-            json!(text)
-        }
-        other => other,
-    })
-}
-
-async fn snapshot(pool: &PgPool) -> Result<Value, Box<dyn Error>> {
-    let versions:Vec<(Uuid,String)>=sqlx::query_as("SELECT v.id,d.key FROM event_definition_versions v JOIN event_definitions d ON d.id=v.definition_id").fetch_all(pool).await?;
-    let mut identities = versions
-        .into_iter()
-        .map(|(id, key)| (id.to_string(), key))
-        .collect::<BTreeMap<_, _>>();
-    struct Event {
-        id: Uuid,
-        kind: String,
-        start: OffsetDateTime,
-        end: Option<OffsetDateTime>,
-        timezone: String,
-        topology: String,
-        revision: i32,
-        deleted: bool,
-        source: String,
-        payload: String,
+#[path = "support/tracker_snapshot.rs"]
+mod tracker_snapshot;
+async fn snapshot(pool: &PgPool, cases: &[Value]) -> Result<Value, Box<dyn Error>> {
+    if cases
+        .iter()
+        .any(|case| case["snapshot"]["nl_state"].is_object())
+    {
+        tracker_snapshot::with_nl_state(pool, cases).await
+    } else {
+        tracker_snapshot::snapshot(pool).await
     }
-    impl<'row> FromRow<'row, PgRow> for Event {
-        fn from_row(row: &'row PgRow) -> Result<Self, sqlx::Error> {
-            Ok(Self {
-                id: row.try_get("id")?,
-                kind: row.try_get("kind")?,
-                start: row.try_get("start")?,
-                end: row.try_get("end")?,
-                timezone: row.try_get("timezone")?,
-                topology: row.try_get("topology")?,
-                revision: row.try_get("revision")?,
-                deleted: row.try_get("deleted")?,
-                source: row.try_get("source")?,
-                payload: row.try_get("payload")?,
-            })
-        }
-    }
-    let rows:Vec<Event>=sqlx::query_as("SELECT id,kind,start,\"end\",timezone,topology,revision,deleted,source,payload::text FROM events WHERE starts_with(kind,'user.synthetic_chat_') ORDER BY start,id").fetch_all(pool).await?;
-    let mut events = Vec::new();
-    for row in rows {
-        let start = StoredInstant::try_from(row.start)?.to_string();
-        identities.insert(row.id.to_string(), format!("entry:{}:{start}", row.kind));
-        events.push(json!({"kind":row.kind,"start":start,"end":row.end.map(StoredInstant::try_from).transpose()?.map(|at|at.to_string()),"timezone":row.timezone,"topology":row.topology,"revision":row.revision,"deleted":row.deleted,"source":row.source,"payload":serde_json::from_str::<Value>(&row.payload)?}));
-    }
-    let pending: Option<String> =
-        sqlx::query_scalar("SELECT value::text FROM app_state WHERE key='conversation:pending'")
-            .fetch_optional(pool)
-            .await?;
-    let audit:Vec<(String,OffsetDateTime,String,String,i64)>=sqlx::query_as("SELECT e.kind,e.start,a.action,a.actor,count(*) FROM audit_log a JOIN events e ON e.id=a.event_id WHERE starts_with(e.kind,'user.synthetic_chat_') GROUP BY e.kind,e.start,a.action,a.actor ORDER BY e.kind,e.start,a.action,a.actor").fetch_all(pool).await?;
-    let audit = audit
-        .into_iter()
-        .map(|(kind, start, action, actor, count)| {
-            Ok(json!([
-                kind,
-                StoredInstant::try_from(start)?.to_string(),
-                action,
-                actor,
-                count
-            ]))
-        })
-        .collect::<Result<Vec<Value>, Box<dyn Error>>>()?;
-    Ok(
-        json!({"pending":normalize(pending.map(|raw|serde_json::from_str(&raw)).transpose()?.unwrap_or(Value::Null),&identities)?,"events":events,"audit":audit}),
-    )
 }
 
 async fn wire(
@@ -175,6 +87,27 @@ async fn wire(
     id: i64,
     at: StoredInstant,
 ) -> Result<Value, Box<dyn Error>> {
+    if let Some(name) = case["legacy_tracker"].as_str() {
+        let version: Uuid = sqlx::query_scalar(
+            "SELECT v.id FROM event_definitions d JOIN event_definition_versions v
+             ON v.definition_id=d.id AND v.version=d.current_version WHERE d.key=$1",
+        )
+        .bind(format!("user.synthetic_chat_{name}"))
+        .fetch_one(pool)
+        .await?;
+        let pending = json!({
+            "definition_version_id":version.to_string(), "button":"tracker_form",
+            "action":"log", "event_ids":[], "question":"Synthetic legacy tracker prompt",
+            "channel_instance_id":"telegram:primary", "created_at":at.to_string()
+        });
+        sqlx::query(
+            "INSERT INTO app_state(key,value) VALUES('conversation:pending',$1::jsonb)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        )
+        .bind(pending.to_string())
+        .execute(pool)
+        .await?;
+    }
     if let Some(states) = case["states"].as_object() {
         for (key, value) in states {
             sqlx::query("DELETE FROM app_state WHERE key=$1")
@@ -299,7 +232,9 @@ async fn wire(
     } else {
         None
     };
-    let date = OffsetDateTime::from(at).unix_timestamp();
+    let date = case["source_message_date"]
+        .as_i64()
+        .unwrap_or_else(|| OffsetDateTime::from(at).unix_timestamp());
     if let Some(callback) = callback {
         Ok(
             json!({"update_id":id,"callback_query":{"id":format!("synthetic-form-{id}"),"data":callback,"from":{"id":42},"message":{"message_id":id,"date":date,"chat":{"id":42,"type":"private"}}}}),
@@ -420,10 +355,18 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         result=timeout(Duration::from_secs(5),urgent_reply)=>result??,
         worker=transport.run_local_text(&database,&settings,&locale,true)=>worker,
     }
-    let voice = database
-        .claim_telegram_no_model_text(probe_target, clock(&pool).await?, 10)
-        .await?
-        .ok_or("Expected untouched voice fallback")?;
+    let voice = timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(lease) = database
+                .claim_telegram_no_model_text(probe_target, clock(&pool).await?, 10)
+                .await?
+            {
+                return Ok::<_, Box<dyn Error>>(lease);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
     database
         .apply_local_telegram_text(&voice, LocalTelegramText::ProviderUnavailable, &locale)
         .await?;
@@ -495,7 +438,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
             }).await.map_err(|_|format!("Missing reply at step {index}: {case}"))??;
             assert_eq!(json!(text), case["reply"], "Reply at step {index}: {case}");
             assert_eq!(
-                snapshot(&pool).await?,
+                snapshot(&pool, &cases).await?,
                 case["snapshot"],
                 "State at step {index}: {case}"
             );
@@ -564,19 +507,19 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         .claim_telegram_model_text(target, clock(&pool).await?, 10)
         .await?
         .ok_or("Expected recovered form lease")?;
-    let before = snapshot(&pool).await?;
+    let before = snapshot(&pool, &cases).await?;
     assert!(matches!(
         admission(&database, &abandoned, &locale).await,
         Err(TelegramDiaryCommitError::Job(
             ga_db::jobs::JobStoreError::LeaseLost
         ))
     ));
-    assert_eq!(snapshot(&pool).await?, before);
+    assert_eq!(snapshot(&pool, &cases).await?, before);
     assert!(matches!(
         admission(&database, &recovered, &locale).await?,
         TelegramModelAdmission::Replied
     ));
-    assert_eq!(snapshot(&pool).await?, final_case["snapshot"]);
+    assert_eq!(snapshot(&pool, &cases).await?, final_case["snapshot"]);
     let replies: Vec<String> = sqlx::query_scalar(
         "SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE inbound_message_id=$1",
     )
@@ -590,7 +533,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
             ga_db::jobs::JobStoreError::LeaseLost
         ))
     ));
-    assert_eq!(snapshot(&pool).await?, final_case["snapshot"]);
+    assert_eq!(snapshot(&pool, &cases).await?, final_case["snapshot"]);
     let duplicate = receive(&mut runtime, binding, &update, at)
         .await?
         .inbound
