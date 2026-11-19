@@ -54,6 +54,47 @@ impl fmt::Display for ModelResponseError {
 }
 impl Error for ModelResponseError {}
 
+/// Validate an out-of-process adapter result against the original application schema.
+pub struct ExtensionResponseSchema(Validator);
+
+impl ExtensionResponseSchema {
+    pub fn new(schema: &Value) -> Result<Self, ModelResponseError> {
+        application_validator(schema).map(Self)
+    }
+
+    pub fn decode(&self, input: &[u8]) -> Result<StructuredModelOutput, ModelResponseError> {
+        let mut response = decode_envelope(input)?;
+        let envelope = response
+            .as_object_mut()
+            .ok_or(ModelResponseError::InvalidEnvelope)?;
+        let value = envelope
+            .remove("value")
+            .ok_or(ModelResponseError::InvalidEnvelope)?;
+        let usage = envelope.remove("usage");
+        if !envelope.is_empty() {
+            return Err(ModelResponseError::InvalidEnvelope);
+        }
+        if !self.0.is_valid(&value) {
+            return Err(ModelResponseError::InvalidOutput);
+        }
+        let usage = match usage {
+            None | Some(Value::Null) => None,
+            Some(Value::Object(usage))
+                if usage
+                    .keys()
+                    .all(|name| matches!(name.as_str(), "input_tokens" | "output_tokens")) =>
+            {
+                Some(ModelUsage {
+                    input_tokens: tokens(usage.get("input_tokens").unwrap_or(&Value::Null))?,
+                    output_tokens: tokens(usage.get("output_tokens").unwrap_or(&Value::Null))?,
+                })
+            }
+            _ => return Err(ModelResponseError::InvalidEnvelope),
+        };
+        Ok(StructuredModelOutput { value, usage })
+    }
+}
+
 /// Compile the provider wire contract and the full local application contract.
 pub struct StructuredResponseSchema {
     wire: Validator,
