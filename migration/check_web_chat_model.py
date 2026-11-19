@@ -60,6 +60,9 @@ CORRECTED = "Corrected synthetic web note"
 
 def output(prompt):
     sentence = prompt["text"]
+    if sentence.startswith("Undo"):
+        confidence = 0.84 if "synthetic low confidence" in sentence else 1
+        return Interpretation(intent="undo", confidence=confidence, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
         return Interpretation(
@@ -308,6 +311,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     assert len(native_calls) == before + 1
 
     exercise_corrections(engine, python, native, native_calls)
+    exercise_undo(engine, python, native, native_calls, active, release)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -426,6 +430,73 @@ def exercise_corrections(engine, python, native, native_calls):
     assert "Ничего не сохранено" in unoffered["reply"]["text"]
     print(
         "Matched single-target correction and episode close, with exact audit revisions and retries"
+    )
+
+
+def exercise_undo(engine, python, native, native_calls, active, release):
+    query = text(
+        "SELECT e.revision,e.deleted,ARRAY(SELECT action FROM audit_log WHERE event_id=e.id "
+        "ORDER BY id) AS actions FROM events e WHERE original_text=:label"
+    )
+
+    def state(label):
+        with engine.connect() as connection:
+            return connection.execute(query, {"label": label}).one()
+
+    sentence = "Undo the last web diary entry"
+    origin = "Synthetic reference undo entry"
+    target = "Synthetic native undo entry"
+    submit(python, f"/note {origin}")
+    low_confidence = "Undo with synthetic low confidence"
+    clarification = submit(python, low_confidence)["reply"]["text"]
+    assert state(origin) == (1, False, ["create"])
+    expected = submit(python, sentence)
+    submit(native, f"/note {target}")
+    response = submit(native, low_confidence)
+    assert response["reply"]["text"] == clarification, response
+    assert state(target) == (1, False, ["create"])
+    foreign = "Synthetic separate API entry"
+    with Session(engine) as session, session.begin():
+        create_event(
+            session,
+            EventInput(
+                start=datetime.now(UTC),
+                timezone="UTC",
+                source="manual",
+                original_text=foreign,
+                payload={"type": "note", "description": foreign},
+            ),
+            actor="api",
+        )
+    message = str(uuid4())
+    undone = submit(native, sentence, message)
+    assert undone["reply"]["text"] == expected["reply"]["text"] == "Last change undone."
+    assert state(origin) == state(target) == (2, True, ["create", "undo"])
+    assert state(foreign) == (1, False, ["create"])
+    calls = len(native_calls)
+    assert submit(native, sentence, message) == {**undone, "duplicate": True}
+    assert len(native_calls) == calls
+    assert "Ничего не сохранено" in submit(native, sentence)["reply"]["text"]
+    assert state(target) == (2, True, ["create", "undo"])
+
+    previous = "Synthetic prior entry before delayed undo"
+    newer = "Synthetic local entry during delayed undo"
+    submit(native, f"/note {previous}")
+    active.clear()
+    release.clear()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(submit, native, "Undo concurrent web diary change")
+        try:
+            assert active.wait(3)
+            assert "Заметка сохранена" in submit(native, f"/note {newer}")["reply"]["text"]
+        finally:
+            release.set()
+        result = waiting.result(timeout=5)
+    assert "Ничего не сохранено" in result["reply"]["text"]
+    assert state(previous) == state(newer) == (1, False, ["create"])
+    print(
+        "Matched Python undo and low-confidence clarification; preserved separate API entries, "
+        "duplicate requests and newer web changes"
     )
 
 

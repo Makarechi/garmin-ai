@@ -34,5 +34,10 @@ the same reply. A duplicate reused that reply and an unoffered target
 produced a local refusal. The native Telegram stale-revision regression
 also passed on Linux ARM64 under a 48 MiB limit.
 
+Natural-language undo uses the web conversation's latest recorded operation.
+The paired fixture matched the Python response and audit revision. It also
+verified that a duplicate request reuses the original response and a delayed
+model decision cannot undo a newer entry from another tab.
+
 Analysis, corrections with linked additional entries and combined browser
 flows remain release work.

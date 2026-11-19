@@ -20,7 +20,10 @@ use super::{
 use crate::{
     Database,
     conversation_memory::ConversationBinding,
-    diary::{DiaryWriteError, UndoDiaryOperation, cancel_in, undo::try_undo_and_reconcile},
+    diary::{
+        DiaryWriteError, UndoDiaryOperation, cancel_in,
+        undo::{latest_undo_audit, try_undo_and_reconcile},
+    },
     outbox_enqueue::QueuedIntent,
 };
 
@@ -66,14 +69,15 @@ impl Database {
             }
             let reply_kind = match work {
                 ModelContinuation::Undo { offered_audit } => {
-                    if latest_undo_anchor(&mut txn, envelope.sender_ref()).await? != offered_audit {
+                    let actor = format!("telegram:{}", envelope.sender_ref());
+                    if latest_undo_audit(&mut txn, &actor).await? != offered_audit {
                         return Err(TelegramDiaryCommitError::ModelContextChanged);
                     }
                     let Some(undone) = try_undo_and_reconcile(
                         &mut txn,
                         &UndoDiaryOperation {
                             owner_id: binding.owner_id,
-                            authenticated_actor: &format!("telegram:{}", envelope.sender_ref()),
+                            authenticated_actor: &actor,
                         },
                         expected.configured_timezone,
                     )
@@ -154,18 +158,6 @@ pub(super) async fn queue_local_notice(
     let queued = queue_reply(txn, lease, envelope, intent, None).await?;
     complete_reply_as(txn, lease, state).await?;
     Ok(queued)
-}
-
-pub(super) async fn latest_undo_anchor(
-    txn: &mut Transaction<'_, Postgres>,
-    sender: &str,
-) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT id FROM audit_log WHERE actor=$1 AND action<>'undo' ORDER BY id DESC LIMIT 1",
-    )
-    .bind(format!("telegram:{sender}"))
-    .fetch_optional(&mut **txn)
-    .await
 }
 
 async fn acknowledge(
