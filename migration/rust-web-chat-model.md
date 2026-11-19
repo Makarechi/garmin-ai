@@ -26,5 +26,13 @@ A separate run cancelled a pending clarification from another tab during a
 safety classification. The safety notice reached the owner and was reused
 after reconnecting through the Python server with the same message ID.
 
-The tested model flows are new entries, clarifications and safety replies.
-Corrections, analysis and combined browser flows remain release work.
+The same paired fixture covers a single-target note correction and closure
+of a confirmed open episode. Both channels use the same revision and field
+validation. In the web fixture, both runtimes preserved original text,
+wrote one audit revision with the matching inbound operation and returned
+the same reply. A duplicate reused that reply and an unoffered target
+produced a local refusal. The native Telegram stale-revision regression
+also passed on Linux ARM64 under a 48 MiB limit.
+
+Analysis, corrections with linked additional entries and combined browser
+flows remain release work.
