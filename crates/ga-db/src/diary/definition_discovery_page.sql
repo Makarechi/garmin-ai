@@ -39,13 +39,17 @@
         )
     ) AS document
     FROM numbered AS definition WHERE position<=$4
-), source AS MATERIALIZED (
-    SELECT convert_to(json_build_object(
-        'rows',COALESCE((SELECT json_agg(document ORDER BY key) FROM rows),'[]'::json),
-        'next_cursor',(SELECT key FROM numbered WHERE position=$4
+), document AS (
+    SELECT COALESCE((SELECT json_agg(document ORDER BY key) FROM rows),'[]'::json) AS content,
+        (SELECT key FROM numbered WHERE position=$4
             AND EXISTS (SELECT 1 FROM numbered WHERE position>$4))
-    )::text,'UTF8') AS bytes
+            AS next_cursor
+), source AS MATERIALIZED (
+    SELECT convert_to(CASE WHEN $6::boolean THEN content
+        ELSE json_build_object('rows',content,'next_cursor',next_cursor)
+        END::text,'UTF8') AS bytes,next_cursor
+    FROM document
 )
-SELECT substring(bytes FROM byte_offset FOR 65536)
+SELECT substring(bytes FROM byte_offset FOR 65536),next_cursor
 FROM source CROSS JOIN LATERAL generate_series(1,octet_length(bytes),65536) AS parts(byte_offset)
 ORDER BY byte_offset

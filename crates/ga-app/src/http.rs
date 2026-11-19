@@ -1,5 +1,6 @@
 mod browser;
 mod community_packs;
+mod definitions;
 pub(crate) mod demo;
 mod diary;
 mod exports;
@@ -73,6 +74,7 @@ fn router(state: AppState) -> Router {
         .route("/events", any(diary::create))
         .route("/events/undo", any(diary::undo))
         .route("/events/{event_id}", any(diary::entry))
+        .route("/definitions", any(definitions::list))
         .route("/exports/diary", any(exports::diary))
         .route("/entries", any(diary::create_custom))
         .route("/entries/{event_id}", any(diary::edit_custom))
