@@ -123,7 +123,11 @@ fn scoped_token(value: &Value) -> Option<Token> {
 }
 
 fn strong(key: &str) -> bool {
-    key.chars().count() >= 32 && !key.starts_with("replace-with-")
+    key.chars().count() >= 32 && !is_placeholder(key)
+}
+
+pub(crate) fn is_placeholder(key: &str) -> bool {
+    key.starts_with("replace-with-")
 }
 
 fn credential(key: &str) -> [u8; 32] {

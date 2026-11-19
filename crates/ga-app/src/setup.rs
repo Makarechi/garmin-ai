@@ -25,7 +25,10 @@ use rustix::{
 };
 use serde_json::Value;
 
-use crate::{authorization::Authorization, backup::decode_key};
+use crate::{
+    authorization::{Authorization, is_placeholder},
+    backup::decode_key,
+};
 use dotenv::SetupFile;
 
 const INVALID_SETTINGS: &str =
@@ -181,9 +184,7 @@ fn defaults(values: &mut ValueMap, options: Options) -> Result<(), &'static str>
     if configured(values, "GA_BACKUP_KEY").is_none() {
         values.insert("GA_BACKUP_KEY".into(), URL_SAFE.encode(random::<32>()?));
     }
-    if configured(values, "GA_API_KEY")
-        .is_none_or(|value| value == "replace-with-a-random-key-at-least-32-characters")
-    {
+    if configured(values, "GA_API_KEY").is_none_or(is_placeholder) {
         let scoped = values
             .get("GA_API_TOKENS")
             .filter(|value| !value.is_empty())
@@ -297,36 +298,29 @@ fn prepare_directories(values: &mut ValueMap, root: &Path) -> Result<(), &'stati
         return Err("Use a dedicated source directory at least three levels below root");
     }
     let paths = [data, tokens, locks, backups];
+    check_layout(&paths, root, home.as_deref())?;
     for path in &paths {
-        if within(root, path) || home.as_ref().is_some_and(|home| same_directory(home, path)) {
-            return Err(DIRECTORY_ERROR);
-        }
         if let Ok(info) = path.metadata()
             && (info.uid(), info.gid()) != (uid, gid)
         {
             return Err("Storage ownership must match GA_APP_UID and GA_APP_GID");
         }
     }
-    let [data, tokens, locks, backups] = &paths;
-    if within(data, tokens) || within(tokens, data) {
-        return Err("Data and token directories must not overlap");
-    }
-    if within(backups, data) || within(backups, tokens) {
-        return Err("Backups must be outside private source directories");
-    }
-    if within(locks, data) || within(locks, tokens) {
-        return Err("Lock directory must be outside private source directories");
-    }
-    for ((name, _), path) in STORAGE.into_iter().zip(paths) {
+    for path in &paths {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&path)
+            .create(path)
             .map_err(|_| DIRECTORY_ERROR)?;
         let metadata = path.metadata().map_err(|_| DIRECTORY_ERROR)?;
         if (metadata.uid(), metadata.gid()) != (uid, gid) {
             return Err("Storage ownership must match GA_APP_UID and GA_APP_GID");
         }
+    }
+    // A case-insensitive filesystem may resolve different spellings to the
+    // same directory only once the paths have been created.
+    check_layout(&paths, root, home.as_deref())?;
+    for ((name, _), path) in STORAGE.into_iter().zip(paths) {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
             .map_err(|_| DIRECTORY_ERROR)?;
         values.insert(
@@ -335,6 +329,29 @@ fn prepare_directories(values: &mut ValueMap, root: &Path) -> Result<(), &'stati
                 .into_string()
                 .map_err(|_| DIRECTORY_ERROR)?,
         );
+    }
+    Ok(())
+}
+
+fn check_layout(
+    paths: &[PathBuf; 4],
+    root: &Path,
+    home: Option<&Path>,
+) -> Result<(), &'static str> {
+    for path in paths {
+        if within(root, path) || home.is_some_and(|home| same_directory(home, path)) {
+            return Err(DIRECTORY_ERROR);
+        }
+    }
+    let [data, tokens, locks, backups] = paths;
+    if within(data, tokens) || within(tokens, data) {
+        return Err("Data and token directories must not overlap");
+    }
+    if within(backups, data) || within(backups, tokens) {
+        return Err("Backups must be outside private source directories");
+    }
+    if within(locks, data) || within(locks, tokens) {
+        return Err("Lock directory must be outside private source directories");
     }
     Ok(())
 }

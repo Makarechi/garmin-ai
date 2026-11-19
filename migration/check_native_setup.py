@@ -1,6 +1,7 @@
 """Run the pinned deployment setup tests against the native command."""
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -116,6 +117,58 @@ def preserved_regional_credentials(binary):
             assert rejected.returncode != 0 and settings.read_bytes() == expected
 
 
+def replace_runtime_placeholders(binary):
+    placeholder = "replace-with-a-nonstandard-synthetic-placeholder"
+    scoped_key = "synthetic-existing-scoped-key-setup-verification"
+    for scoped in (None, scoped_key):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = root / ".env"
+            current = f"GA_API_KEY='{placeholder}'\n"
+            if scoped:
+                tokens = json.dumps([{"key": scoped, "scopes": ["admin"]}])
+                current += f"GA_API_TOKENS='{tokens}'\n"
+            settings.write_text(current)
+            result = command(binary, root)
+            assert result.returncode == 0, result.stderr
+            values = dotenv_values(settings, interpolate=False)
+            if scoped:
+                assert values["GA_API_KEY"] == "" and scoped in values["GA_API_TOKENS"]
+            else:
+                assert len(values["GA_API_KEY"]) >= 32
+                assert not values["GA_API_KEY"].startswith("replace-with-")
+            saved = settings.read_bytes()
+            assert command(binary, root).returncode == 0
+            assert settings.read_bytes() == saved
+
+
+def reject_new_case_aliases(binary):
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "case_probe").touch()
+        if not (root / "CASE_PROBE").is_file():
+            return False
+        for index, aliases in enumerate(
+            (
+                ("store/data", "STORE/DATA", ".state", "backups"),
+                ("store/data", "store/tokens", "STORE/DATA/state", "backups"),
+                ("store/data", "store/tokens", ".state", "STORE/TOKENS/backups"),
+            )
+        ):
+            case = root / str(index)
+            case.mkdir()
+            names = ("GA_DATA_DIR", "GA_TOKEN_DIR", "GA_LOCK_DIR", "GA_BACKUP_DIR")
+            current = "".join(
+                f"{name}='{alias}'\n" for name, alias in zip(names, aliases, strict=True)
+            )
+            settings = case / ".env"
+            settings.write_text(current)
+            result = command(binary, case)
+            assert result.returncode != 0 and "directories" in result.stderr, result
+            assert settings.read_text() == current
+        return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -134,6 +187,9 @@ def main():
     preserved_bindings(binary)
     release_mounts(binary)
     preserved_regional_credentials(binary)
+    replace_runtime_placeholders(binary)
+    if reject_new_case_aliases(binary):
+        print("Verified overlapping storage paths whose case aliases did not exist before setup")
     print("Verified native setup and repeat runs against the deployment contract")
 
 
