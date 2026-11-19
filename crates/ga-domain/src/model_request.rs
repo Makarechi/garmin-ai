@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 
 use crate::{
     model_response::{
-        ModelResponseError, StructuredModelOutput, StructuredProvider, StructuredResponseSchema,
+        ExtensionResponseSchema, ModelResponseError, StructuredModelOutput, StructuredProvider,
+        StructuredResponseSchema,
     },
     model_schema::{ModelSchemaError, compile_model_schema},
 };
@@ -45,6 +46,11 @@ pub struct StructuredModelRequest {
     schema: StructuredResponseSchema,
 }
 
+pub struct ExtensionModelRequest {
+    params: Value,
+    schema: ExtensionResponseSchema,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelRequestError {
     InvalidConfiguration,
@@ -64,6 +70,36 @@ impl fmt::Display for ModelRequestError {
     }
 }
 impl Error for ModelRequestError {}
+
+impl ExtensionModelRequest {
+    pub fn prepare(
+        contract: ApprovedModelSchema,
+        model: Option<&str>,
+        instruction: &str,
+        prompt: &str,
+    ) -> Result<Self, ModelRequestError> {
+        let application: Value = serde_json::from_slice(contract.document())
+            .map_err(|_| ModelRequestError::Schema(ModelSchemaError::InvalidDocument))?;
+        let schema = ExtensionResponseSchema::new(&application)
+            .map_err(ModelRequestError::ResponseSchema)?;
+        let mut params = json!({"schema":application,"instruction":instruction,"prompt":prompt});
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        Ok(Self { params, schema })
+    }
+
+    pub fn params(&self) -> &Value {
+        &self.params
+    }
+
+    pub fn decode_response(
+        &self,
+        response: &[u8],
+    ) -> Result<StructuredModelOutput, ModelResponseError> {
+        self.schema.decode(response)
+    }
+}
 
 impl StructuredModelRequest {
     pub fn prepare(

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
+use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, time::Duration};
 
 use ga_db::{
     Database,
@@ -16,7 +16,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use super::{
     CurrentModelPolicy, GatewayError, GeminiOptions, ModelGateway, SelectedModel, StructuredOptions,
@@ -64,6 +64,12 @@ enum ProviderSettings {
         key: String,
         max_tokens: u16,
         timeout: Duration,
+    },
+    Extension {
+        provider: String,
+        executable: PathBuf,
+        context: Value,
+        identity: ModelGateIdentity,
     },
 }
 
@@ -131,7 +137,8 @@ impl RuntimeModelSettings {
         }
         let (provider, instance) = if let Some(spec) = configured {
             let instance = spec["id"].as_str().ok_or(Invalid)?;
-            let provider = parse_provider(spec["provider"].as_str().ok_or(Invalid)?)?;
+            let name = spec["provider"].as_str().ok_or(Invalid)?;
+            let provider = parse_provider(name).unwrap_or(ModelProvider::Extension);
             (provider, instance)
         } else {
             (ModelProvider::Gemini, PRIMARY_GEMINI_INSTANCE)
@@ -239,6 +246,10 @@ impl RuntimeModelSettings {
                     },
                 )
             }
+            ModelProvider::Extension => {
+                let spec = configured.ok_or(Invalid)?;
+                extension_settings(spec, instance, &mut variable, &mut secret)?
+            }
         };
         if !valid_model(&model) {
             return Err(Invalid);
@@ -258,6 +269,7 @@ impl RuntimeModelSettings {
                 .configuration()
                 .to_owned()
             }
+            ProviderSettings::Extension { identity, .. } => identity.configuration().to_owned(),
         };
         Ok(Some(Self {
             instance: instance.into(),
@@ -275,7 +287,7 @@ impl RuntimeModelSettings {
             ProviderSettings::Gemini { fallback, .. } => {
                 fallback.iter().map(String::as_str).collect()
             }
-            ProviderSettings::Structured { .. } => Vec::new(),
+            ProviderSettings::Structured { .. } | ProviderSettings::Extension { .. } => Vec::new(),
         };
         let approved = self
             .consent
@@ -348,6 +360,12 @@ impl ConfiguredModel<'_> {
                     },
                 )
             }
+            ProviderSettings::Extension {
+                executable,
+                context,
+                identity,
+                ..
+            } => ModelGateway::extension(database, selected, executable, context, identity.clone()),
         }
     }
 
@@ -373,8 +391,15 @@ impl ConfiguredModel<'_> {
                 fallback_models: &self.fallback,
             },
             consent: self.settings.consent.as_ref().and_then(|grant| {
+                let provider = match &self.settings.options {
+                    ProviderSettings::Extension { provider, .. } if grant.provider == *provider => {
+                        ModelProvider::Extension
+                    }
+                    ProviderSettings::Extension { .. } => return None,
+                    _ => parse_provider(&grant.provider).ok()?,
+                };
                 Some(ModelConsent {
-                    provider: parse_provider(&grant.provider).ok()?,
+                    provider,
                     instance_id: &grant.provider_instance_id,
                     primary_model: &grant.model,
                     fallback_models: &self.approved,
@@ -387,6 +412,78 @@ impl ConfiguredModel<'_> {
             }),
         }
     }
+}
+
+fn extension_settings(
+    spec: &Value,
+    instance: &str,
+    variable: &mut impl FnMut(&str) -> Result<Option<String>, ModelEnvironmentError>,
+    secret: &mut impl FnMut(&str) -> Result<Option<String>, ModelEnvironmentError>,
+) -> Result<(String, ProviderSettings), ModelEnvironmentError> {
+    use ModelEnvironmentError::{Invalid, UnsupportedProvider};
+
+    let provider = spec["provider"]
+        .as_str()
+        .filter(|name| {
+            let mut bytes = name.bytes();
+            name.len() <= 100
+                && bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+                && bytes.all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(&byte)
+                })
+        })
+        .ok_or(Invalid)?;
+    let registry = variable("GA_NATIVE_MODEL_PLUGINS")?.ok_or(UnsupportedProvider)?;
+    if registry.len() > 64 * 1024 {
+        return Err(Invalid);
+    }
+    let mut executables: BTreeMap<String, PathBuf> =
+        serde_json::from_str(&registry).map_err(|_| Invalid)?;
+    let executable = executables.remove(instance).ok_or(UnsupportedProvider)?;
+    if !executable.is_absolute() {
+        return Err(Invalid);
+    }
+    let config = spec["config"].as_object().ok_or(Invalid)?;
+    let model = config
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or(Invalid)?
+        .to_owned();
+    let mut secrets = Map::new();
+    if !spec["secret_refs"].is_null() {
+        let references = spec["secret_refs"]
+            .as_object()
+            .filter(|refs| refs.len() <= 16)
+            .ok_or(Invalid)?;
+        for (name, reference) in references {
+            let mut slot = name.bytes();
+            if name.len() > 64
+                || !slot.next().is_some_and(|first| first.is_ascii_lowercase())
+                || !slot
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return Err(Invalid);
+            }
+            let reference = reference
+                .as_str()
+                .filter(|name| valid_secret_name(name))
+                .ok_or(Invalid)?;
+            let value = present(secret(reference)?).ok_or(Invalid)?;
+            secrets.insert(name.to_owned(), Value::String(value));
+        }
+    }
+    let resolved = secrets
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let identity = ModelGateIdentity::plugin(instance, provider, &resolved).map_err(|_| Invalid)?;
+    let options = ProviderSettings::Extension {
+        provider: provider.to_owned(),
+        executable,
+        context: json!({"config":config,"secrets":secrets}),
+        identity,
+    };
+    Ok((model, options))
 }
 
 impl SavedConsent {

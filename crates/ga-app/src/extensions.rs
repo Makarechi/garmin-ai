@@ -8,26 +8,16 @@ pub(crate) use channel::check_channel;
 pub(crate) use model::check_model;
 pub(crate) use source_poll::{ScheduledSourcePlugins, configured_source_fingerprint, poll_source};
 
-use std::{
-    collections::BTreeSet, error::Error, fmt, future::Future, path::Path, process::Stdio,
-    time::Duration,
-};
+use std::{collections::BTreeSet, error::Error, fmt, future::Future, path::Path, time::Duration};
 
+use ga_app::extension_process::{ExtensionProcess, ExtensionProcessError};
 use ga_domain::{
     source_contract::{SourceCapabilities, SourcePage, SourceRequest},
     timestamp::StoredInstant,
 };
-use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json, value::RawValue};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::Command,
-    sync::watch,
-    time::{sleep, timeout},
-};
+use tokio::{sync::watch, time::sleep};
 
-const VERSION: u8 = 1;
-const MAX_REQUEST: usize = 64 * 1024;
 const MAX_REPLY: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_REPLY: usize = 8 * 1024 * 1024;
 const MAX_PAGES: usize = 1000;
@@ -50,12 +40,9 @@ fn valid_secret_reference(slot: &str, reference: &str) -> bool {
 #[derive(Clone, Copy, Debug)]
 enum ExtensionError {
     Configuration,
-    Launch,
     Timeout,
+    Process(ExtensionProcessError),
     Cancelled,
-    Transport,
-    Protocol,
-    Rejected,
     Capabilities,
     SourcePage,
     ChannelConfiguration,
@@ -69,13 +56,10 @@ enum ExtensionError {
 impl fmt::Display for ExtensionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Process(error) => return error.fmt(f),
             Self::Configuration => "The source extension configuration is invalid.",
-            Self::Launch => "The configured extension could not be started.",
             Self::Timeout => "The extension exceeded its response deadline.",
             Self::Cancelled => "The extension check was cancelled.",
-            Self::Transport => "The extension process failed.",
-            Self::Protocol => "The extension returned an invalid response envelope.",
-            Self::Rejected => "The extension refused the request.",
             Self::Capabilities => "The extension's source capabilities are invalid.",
             Self::SourcePage => "The extension returned a page outside the source contract.",
             Self::ChannelConfiguration => "The channel extension configuration is invalid.",
@@ -92,66 +76,17 @@ impl fmt::Display for ExtensionError {
 
 impl Error for ExtensionError {}
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Reply<'a> {
-    version: u8,
-    request_id: u64,
-    #[serde(borrow, default, deserialize_with = "present")]
-    result: Option<&'a RawValue>,
-    #[serde(default, deserialize_with = "present")]
-    error: Option<WireError>,
-}
-
-fn present<'input, D, T>(decoder: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'input>,
-    T: Deserialize<'input>,
-{
-    T::deserialize(decoder).map(Some)
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum WireError {
-    Unsupported,
-    InvalidRequest,
-    Unavailable,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExtensionDescriptor {
-    kind: String,
-    instance_id: String,
-    implementation_version: String,
-    capabilities: Value,
-}
-
 struct Extension<'a> {
-    executable: &'a Path,
-    directory: &'a Path,
     instance_id: &'a str,
-    context: Option<Value>,
+    process: ExtensionProcess<'a>,
 }
 
 impl<'a> Extension<'a> {
     fn new(executable: &'a Path, instance_id: &'a str) -> Result<Self, ExtensionError> {
-        let mut id = instance_id.bytes();
-        let directory = executable.parent().filter(|_| executable.is_absolute());
-        if instance_id.len() > 200
-            || !id.next().is_some_and(|byte| byte.is_ascii_lowercase())
-            || !id.all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.:-".contains(&byte)
-            })
-        {
-            return Err(ExtensionError::Configuration);
-        }
         Ok(Self {
-            executable,
-            directory: directory.ok_or(ExtensionError::Configuration)?,
             instance_id,
-            context: None,
+            process: ExtensionProcess::new(executable, instance_id)
+                .map_err(|_| ExtensionError::Configuration)?,
         })
     }
 
@@ -163,90 +98,17 @@ impl<'a> Extension<'a> {
         max_reply: usize,
         cancelled: &mut watch::Receiver<bool>,
     ) -> Result<Box<RawValue>, ExtensionError> {
-        let mut envelope = json!({
-            "version": VERSION,
-            "request_id": request_id,
-            "instance_id": self.instance_id,
-            "method": method,
-            "params": params,
-        });
-        if let Some(context) = &self.context {
-            envelope["context"] = context.clone();
-        }
-        let mut wire = serde_json::to_vec(&envelope).map_err(|_| ExtensionError::Protocol)?;
-        if wire.len() >= MAX_REQUEST {
-            return Err(ExtensionError::Protocol);
-        }
-        wire.push(b'\n');
-        let response = self.exchange(&wire, max_reply, cancelled).await?;
-        let line = response
-            .strip_suffix(b"\n")
-            .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-            .filter(|line| !line.contains(&b'\n'))
-            .ok_or(ExtensionError::Protocol)?;
-        let reply: Reply<'_> =
-            serde_json::from_slice(line).map_err(|_| ExtensionError::Protocol)?;
-        if reply.version != VERSION || reply.request_id != request_id {
-            return Err(ExtensionError::Protocol);
-        }
-        match (reply.result, reply.error) {
-            (Some(result), None) => Ok(result.to_owned()),
-            (None, Some(_)) => Err(ExtensionError::Rejected),
-            _ => Err(ExtensionError::Protocol),
-        }
-    }
-
-    async fn exchange(
-        &self,
-        request: &[u8],
-        max_reply: usize,
-        cancelled: &mut watch::Receiver<bool>,
-    ) -> Result<Vec<u8>, ExtensionError> {
-        if *cancelled.borrow() {
-            return Err(ExtensionError::Cancelled);
-        }
-        let mut child = Command::new(self.executable)
-            .current_dir(self.directory)
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| ExtensionError::Launch)?;
-        let mut stdin = child.stdin.take().ok_or(ExtensionError::Transport)?;
-        let stdout = child.stdout.take().ok_or(ExtensionError::Transport)?;
-        let mut response = Vec::new();
-        let mut bounded_output = stdout.take((max_reply + 1) as u64);
-        let exchange = async {
-            tokio::try_join!(
-                async move {
-                    stdin.write_all(request).await?;
-                    drop(stdin);
-                    Ok(())
-                },
-                bounded_output.read_to_end(&mut response)
+        self.process
+            .request(
+                request_id,
+                method,
+                params,
+                max_reply,
+                CALL_TIMEOUT,
+                cancelled,
             )
-            .map_err(|_| ExtensionError::Transport)?;
-            if response.len() > max_reply {
-                return Err(ExtensionError::Protocol);
-            }
-            let status = child.wait().await.map_err(|_| ExtensionError::Transport)?;
-            if status.success() {
-                Ok(response)
-            } else {
-                Err(ExtensionError::Transport)
-            }
-        };
-        let result = tokio::select! {
-            _ = cancelled.changed() => Err(ExtensionError::Cancelled),
-            result = timeout(CALL_TIMEOUT, exchange) => result.unwrap_or(Err(ExtensionError::Timeout)),
-        };
-        if result.is_err() {
-            // Kill and reap the direct child before returning after a deadline or signal.
-            let _ = child.kill().await;
-        }
-        result
+            .await
+            .map_err(ExtensionError::Process)
     }
 
     async fn describe(
@@ -268,19 +130,13 @@ impl<'a> Extension<'a> {
         cancelled: &mut watch::Receiver<bool>,
         invalid: ExtensionError,
     ) -> Result<Value, ExtensionError> {
-        let descriptor = self
-            .request(1, "describe", Value::Null, MAX_REPLY, cancelled)
-            .await?;
-        let descriptor: ExtensionDescriptor =
-            serde_json::from_str(descriptor.get()).map_err(|_| invalid)?;
-        if descriptor.kind != kind
-            || descriptor.instance_id != self.instance_id
-            || descriptor.implementation_version.is_empty()
-            || descriptor.implementation_version.len() > 100
-        {
-            return Err(invalid);
-        }
-        Ok(descriptor.capabilities)
+        self.process
+            .describe(kind, MAX_REPLY, CALL_TIMEOUT, cancelled)
+            .await
+            .map_err(|error| match error {
+                ExtensionProcessError::Descriptor => invalid,
+                _ => ExtensionError::Process(error),
+            })
     }
 
     async fn read_page(

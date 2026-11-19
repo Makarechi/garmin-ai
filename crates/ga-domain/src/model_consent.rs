@@ -42,6 +42,7 @@ impl ModelCategories {
 pub enum ModelProvider {
     Gemini,
     Structured(StructuredProvider),
+    Extension,
 }
 
 #[derive(Clone, Copy)]

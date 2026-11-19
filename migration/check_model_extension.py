@@ -69,8 +69,10 @@ else:
         result["usage"]["unexpected"] = 1
     if MODE == "wrong_version":
         reply["version"] += 1
-    if MODE == "refusal":
+    if MODE == "unavailable":
         reply["error"] = "unavailable"
+    elif MODE == "refusal":
+        reply["error"] = "unsupported"
     else:
         reply["result"] = result
 print(json.dumps(reply))
@@ -124,6 +126,7 @@ def verify(binary, sample):
             ("unknown_usage", invalid, True),
             ("wrong_version", "invalid response envelope", True),
             ("refusal", "refused the request", True),
+            ("unavailable", "temporarily unavailable", True),
             ("oversized", "invalid response envelope", True),
             ("timeout", "exceeded its response deadline", True),
         ):
