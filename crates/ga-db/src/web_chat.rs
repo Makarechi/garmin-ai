@@ -167,12 +167,14 @@ impl Database {
             .bind(conversation.owner).bind(conversation.id).bind(MAX_MESSAGES)
             .fetch_all(&mut *txn).await?;
             let mut replies = VecDeque::with_capacity(recorded.len());
-            let mut has_point_observation = false;
+            let mut has_timing_evidence = false;
             for (id, inbound, state, at, count, raw) in recorded.into_iter().rev() {
                 let Some(document) = binding_document(conversation, id, &raw) else {
                     continue;
                 };
-                has_point_observation |= has_point_sleep_reference(&document);
+                has_timing_evidence |= evidence_refs(&document)
+                    .any(|value| value != ANALYSIS_REFERENCE &&
+                        (value.starts_with(SLEEP_REFERENCE) || value.starts_with(DEPENDENT_REFERENCE)));
                 if can_show(&mut txn, conversation, id, &state, &document, replay_locked, true).await? {
                     replies.push_back((id, count, WebChatReply {
                         id:id.to_string(), inbound_message_id:inbound.map(|id| id.to_string()),
@@ -180,7 +182,7 @@ impl Database {
                     }));
                 }
             }
-            if !replay_locked && !has_point_observation {
+            if !replay_locked && !has_timing_evidence {
                 return Err(WebChatError::Database);
             }
             let mut opening = b"{\"messages\":".to_vec();
@@ -341,11 +343,6 @@ async fn can_show(
     replay_locked: bool,
     include_initiatives: bool,
 ) -> Result<bool, WebChatError> {
-    if evidence_refs(document).any(|reference| {
-        reference != ANALYSIS_REFERENCE && reference.starts_with(DEPENDENT_REFERENCE)
-    }) {
-        return Ok(false);
-    }
     if state == "queued"
         && evidence_refs(document).any(|reference| reference == ANALYSIS_REFERENCE)
         && (!replay_locked || !current_web_analysis(txn, conversation, outbox).await?)
@@ -358,9 +355,14 @@ async fn can_show(
     if !sharing {
         return Ok(false);
     }
-    for reference in
-        evidence_refs(document).filter(|reference| reference.starts_with(SLEEP_REFERENCE))
-    {
+    for reference in evidence_refs(document).filter(|reference| {
+        *reference != ANALYSIS_REFERENCE
+            && (reference.starts_with(SLEEP_REFERENCE)
+                || reference.starts_with(DEPENDENT_REFERENCE))
+    }) {
+        if !replay_locked && reference.starts_with(DEPENDENT_REFERENCE) {
+            return Ok(false);
+        }
         if !can_show_timing(txn, conversation, reference).await? {
             return Ok(false);
         }
