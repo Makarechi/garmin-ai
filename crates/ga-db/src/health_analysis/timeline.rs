@@ -1,8 +1,9 @@
 mod render;
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, io::Read, time::Duration};
 
 use futures_util::TryStreamExt;
+use ga_archive::json_spool::JsonDocument;
 use ga_domain::{
     legacy_json::{Utf8Layout, encode_ascii},
     timestamp::StoredInstant,
@@ -11,22 +12,23 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use super::{DailyHealthReader, HealthAnalysisError, check_calendar_bounds};
 use crate::{
     Database,
-    diary::{DiaryReadError, owner_events_in},
+    diary::{DiaryReadError, ModelDiaryQuery, model_events_in, owner_events_in},
+    scenario_packs::model_disallowed_event_kinds,
+    share_policy::{DestinationKind, ShareDestination},
 };
 
 const MAX_ANNOTATIONS: u16 = 500;
-const MAX_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum TimelineError {
     CalendarRange,
     TimestampRange,
     AnnotationLimit,
-    ResponseLimit,
     Health(HealthAnalysisError),
     Diary(DiaryReadError),
     Database,
@@ -39,9 +41,6 @@ impl fmt::Display for TimelineError {
             Self::TimestampRange => f.write_str("Timestamp range must be ordered and bounded"),
             Self::AnnotationLimit => {
                 f.write_str("Timeline exceeds 500 annotations; narrow the interval")
-            }
-            Self::ResponseLimit => {
-                f.write_str("Timeline exceeds the size limit; narrow the interval")
             }
             Self::Health(error) => error.fmt(f),
             Self::Diary(error) => error.fmt(f),
@@ -169,12 +168,12 @@ impl Database {
             self.verified_health_reader()
                 .await
                 .map_err(TimelineError::Health)?
-                .timeline_snapshot(start, end)
+                .timeline_snapshot(start, end, None)
                 .await
         })
         .await
         .map_err(|_| TimelineError::Database)??;
-        render_timeline(start, end, annotations, &events)
+        document_bytes(render_timeline(start, end, annotations, &events)?)
     }
 }
 
@@ -188,7 +187,42 @@ impl DailyHealthReader {
         timeline_range(start, end)?;
         let (annotations, events) = tokio::time::timeout(
             Duration::from_millis(1500),
-            self.timeline_snapshot(start, end),
+            self.timeline_snapshot(start, end, None),
+        )
+        .await
+        .map_err(|_| TimelineError::Database)??;
+        document_bytes(render_timeline(start, end, annotations, &events)?)
+    }
+
+    /// Stream the owner's layered timeline through the shared bounded spool.
+    pub async fn owner_timeline_document(
+        self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> Result<JsonDocument, TimelineError> {
+        self.timeline_document(start, end, None).await
+    }
+
+    /// Use the exact recorded-version diary policy for the model's timeline.
+    pub async fn model_timeline_document(
+        self,
+        owner: Uuid,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> Result<JsonDocument, TimelineError> {
+        self.timeline_document(start, end, Some(owner)).await
+    }
+
+    async fn timeline_document(
+        self,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        owner: Option<Uuid>,
+    ) -> Result<JsonDocument, TimelineError> {
+        timeline_range(start, end)?;
+        let (annotations, events) = tokio::time::timeout(
+            Duration::from_millis(1500),
+            self.timeline_snapshot(start, end, owner),
         )
         .await
         .map_err(|_| TimelineError::Database)??;
@@ -199,11 +233,52 @@ impl DailyHealthReader {
         mut self,
         start: OffsetDateTime,
         end: OffsetDateTime,
+        model_owner: Option<Uuid>,
     ) -> Result<(Vec<Annotation>, Value), TimelineError> {
         let mut annotations = read_intervals(&mut self.0, start, end).await?;
-        let events = owner_events_in(&mut self.0, start, end, None, MAX_ANNOTATIONS)
-            .await
-            .map_err(TimelineError::Diary)?;
+        let events = match model_owner {
+            Some(owner) => {
+                let model = ShareDestination::new(DestinationKind::Model, "model:mcp:local")
+                    .map_err(|_| TimelineError::Database)?;
+                let page = model_events_in(
+                    &mut self.0,
+                    ModelDiaryQuery {
+                        owner_id: owner,
+                        start: StoredInstant::try_from(start)
+                            .map_err(|_| TimelineError::TimestampRange)?,
+                        end: StoredInstant::try_from(end)
+                            .map_err(|_| TimelineError::TimestampRange)?,
+                        kind: None,
+                        limit: MAX_ANNOTATIONS,
+                        model,
+                        channel: None,
+                    },
+                    Some((start, end)),
+                )
+                .await
+                .map_err(TimelineError::Diary)?;
+                let denied = model_disallowed_event_kinds(&mut self.0)
+                    .await
+                    .map_err(|_| TimelineError::Database)?;
+                // Python bounds the preliminary SQL candidates before checking grant time.
+                // A future-dated facts grant can therefore still exceed this candidate cap.
+                let overflow: bool =
+                    sqlx::query_scalar(include_str!("timeline/model_candidates.sql"))
+                        .bind(start)
+                        .bind(end)
+                        .bind(denied)
+                        .bind(model.instance())
+                        .fetch_one(&mut *self.0)
+                        .await?;
+                if overflow {
+                    return Err(TimelineError::AnnotationLimit);
+                }
+                page.value
+            }
+            None => owner_events_in(&mut self.0, start, end, None, MAX_ANNOTATIONS)
+                .await
+                .map_err(TimelineError::Diary)?,
+        };
         let entries = events["rows"].as_array().ok_or(TimelineError::Database)?;
         if events["truncated"] == true
             || annotations.len() + entries.len() > usize::from(MAX_ANNOTATIONS)
@@ -240,13 +315,12 @@ fn render_timeline(
     end: OffsetDateTime,
     mut annotations: Vec<Annotation>,
     events: &Value,
-) -> Result<Vec<u8>, TimelineError> {
+) -> Result<JsonDocument, TimelineError> {
     for annotation in &mut annotations {
         let evidence =
             serde_json::to_vec(&annotation.evidence).map_err(|_| TimelineError::Database)?;
-        annotation.evidence_order =
-            encode_ascii(&evidence, Utf8Layout::Archive, MAX_EVIDENCE_BYTES)
-                .map_err(|_| TimelineError::ResponseLimit)?;
+        annotation.evidence_order = encode_ascii(&evidence, Utf8Layout::Archive, usize::MAX)
+            .map_err(|_| TimelineError::Database)?;
     }
     annotations.sort_by(|left, right| {
         (
@@ -305,29 +379,22 @@ async fn read_intervals(
         bool,
         OffsetDateTime,
         OffsetDateTime,
-        Option<String>,
+        String,
     );
     let mut intervals = sqlx::query_as::<_, IntervalRow>(
         r#"SELECT label, source, confidence, confirmed, start, "end",
-                  CASE WHEN octet_length(evidence::text)<=$3 THEN evidence::text END
-           FROM timeline_intervals WHERE start<$2 AND "end">$1 LIMIT $4"#,
+                  evidence::text
+           FROM timeline_intervals WHERE start<$2 AND "end">$1 LIMIT $3"#,
     )
     .bind(start)
     .bind(end)
-    .bind(MAX_EVIDENCE_BYTES as i64)
     .bind(i64::from(MAX_ANNOTATIONS) - rows.len() as i64 + 1)
     .fetch(&mut **txn);
-    let mut evidence_bytes = 0;
     while let Some((label, source, confidence, confirmed, begin, finish, evidence)) =
         intervals.try_next().await?
     {
         if rows.len() == usize::from(MAX_ANNOTATIONS) {
             return Err(TimelineError::AnnotationLimit);
-        }
-        let evidence = evidence.ok_or(TimelineError::ResponseLimit)?;
-        evidence_bytes += evidence.len();
-        if evidence_bytes > MAX_EVIDENCE_BYTES {
-            return Err(TimelineError::ResponseLimit);
         }
         let planned = matches!(source.as_str(), "calendar" | "external_calendar");
         let layer = if planned {
@@ -370,4 +437,13 @@ async fn read_intervals(
 
 fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, TimelineError> {
     value[key].as_str().ok_or(TimelineError::Database)
+}
+
+fn document_bytes(document: JsonDocument) -> Result<Vec<u8>, TimelineError> {
+    let mut bytes = Vec::new();
+    document
+        .reader()
+        .read_to_end(&mut bytes)
+        .map_err(|_| TimelineError::Database)?;
+    Ok(bytes)
 }

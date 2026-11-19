@@ -2,8 +2,9 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
-    io::{self, Write},
 };
+
+use ga_archive::json_spool::{JsonDocument, JsonSpool};
 
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use serde_json::Value;
@@ -11,7 +12,6 @@ use time::OffsetDateTime;
 
 use super::{Annotation, EventFields, TimelineError};
 
-const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const SEMANTICS: &str = "Layers preserve overlapping evidence; segment label is a legacy display projection. Calendar entries are plans, not attendance. Open symptoms have no recorded end, not confirmed persistence.";
 
 pub(super) fn timeline(
@@ -19,7 +19,7 @@ pub(super) fn timeline(
     end: OffsetDateTime,
     annotations: &[Annotation],
     events: &Value,
-) -> Result<Vec<u8>, TimelineError> {
+) -> Result<JsonDocument, TimelineError> {
     let mut layers = BTreeMap::from([
         ("sleep", Vec::new()),
         ("activity", Vec::new()),
@@ -37,7 +37,7 @@ pub(super) fn timeline(
             end: (!annotation.missing_end()).then_some(Timestamp(annotation.end)),
         });
     }
-    let mut output = BoundedOutput(Vec::new());
+    let mut output = JsonSpool::default();
     let document = Timeline {
         segments: Segments {
             start,
@@ -48,14 +48,8 @@ pub(super) fn timeline(
         events,
         semantics: SEMANTICS,
     };
-    serde_json::to_writer(&mut output, &document).map_err(|error| {
-        if error.io_error_kind() == Some(io::ErrorKind::FileTooLarge) {
-            TimelineError::ResponseLimit
-        } else {
-            TimelineError::Database
-        }
-    })?;
-    Ok(output.0)
+    serde_json::to_writer(&mut output, &document).map_err(|_| TimelineError::Database)?;
+    output.finish().map_err(|_| TimelineError::Database)
 }
 
 #[derive(Serialize)]
@@ -223,21 +217,6 @@ impl fmt::Display for Timestamp {
         if !seconds.is_multiple_of(60) {
             write!(f, ":{:02}", seconds % 60)?;
         }
-        Ok(())
-    }
-}
-
-struct BoundedOutput(Vec<u8>);
-
-impl Write for BoundedOutput {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_RESPONSE_BYTES - self.0.len() {
-            return Err(io::Error::from(io::ErrorKind::FileTooLarge));
-        }
-        self.0.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }

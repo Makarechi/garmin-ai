@@ -384,7 +384,7 @@ fn model_window(
     Ok((start, end))
 }
 
-async fn model_events_in(
+pub(crate) async fn model_events_in(
     txn: &mut Transaction<'_, Postgres>,
     query: ModelDiaryQuery<'_>,
     validated_window: Option<(OffsetDateTime, OffsetDateTime)>,

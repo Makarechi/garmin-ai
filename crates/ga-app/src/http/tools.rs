@@ -10,7 +10,7 @@ use axum::{
 use ga_archive::json_spool::JsonDocument;
 use ga_db::{
     diary::DiaryReadError,
-    health_analysis::{HealthAnalysisError, NapPolicy, TimelineError},
+    health_analysis::{HealthAnalysisError, NapPolicy},
 };
 use ga_domain::{
     access::{ReadToolInput, Scopes},
@@ -52,7 +52,7 @@ pub(crate) enum ReadTool {
 }
 
 impl ReadTool {
-    pub(crate) const GARMIN_READS: [Self; 16] = [
+    pub(crate) const GARMIN_READS: [Self; 17] = [
         Self::Snapshot,
         Self::Range,
         Self::Activities,
@@ -69,10 +69,13 @@ impl ReadTool {
         Self::CoffeeSleep,
         Self::Insights,
         Self::Sleep,
+        Self::Timeline,
     ];
-    const IMPLEMENTED: [Self; 22] = [
+    pub(crate) const IMPLEMENTED: [Self; 22] = [
         Self::Snapshot,
         Self::Range,
+        Self::MetricSeries,
+        Self::StressHours,
         Self::Activities,
         Self::ActivityDetails,
         Self::Events,
@@ -80,18 +83,16 @@ impl ReadTool {
         Self::ResourceCatalog,
         Self::Timeline,
         Self::Freshness,
+        Self::Insights,
         Self::Baseline,
         Self::ComparePeriods,
         Self::RunningEfficiency,
-        Self::MetricSeries,
-        Self::StressHours,
-        Self::LaggedAssociation,
         Self::EventWindows,
         Self::MigraineWindows,
+        Self::LaggedAssociation,
+        Self::Sleep,
         Self::WellbeingObservations,
         Self::CoffeeSleep,
-        Self::Insights,
-        Self::Sleep,
         Self::DeviceHistory,
     ];
 
@@ -493,30 +494,7 @@ async fn execute_read_tool(
             Err(_) => invalid_arguments(),
         };
     }
-    let reader = match database.verified_health_reader().await {
-        Ok(reader) => reader,
-        Err(error) => return health_failure(error),
-    };
-    if tool != ReadTool::Timeline || arguments.len() != 2 {
-        return invalid_arguments();
-    }
-    let (Some(start), Some(end)) = (
-        arguments
-            .get("start")
-            .and_then(StoredInstant::legacy_input_with_offset),
-        arguments
-            .get("end")
-            .and_then(StoredInstant::legacy_input_with_offset),
-    ) else {
-        return invalid_arguments();
-    };
-    match reader.owner_timeline(start, end).await {
-        Ok(document) => ([(header::CONTENT_TYPE, "application/json")], document).into_response(),
-        Err(TimelineError::Health(error)) => health_failure(error),
-        Err(TimelineError::Diary(error)) => diary_failure(error),
-        Err(TimelineError::Database) => storage_unavailable(),
-        Err(_) => invalid_arguments(),
-    }
+    invalid_arguments()
 }
 
 fn device_arguments(arguments: &Map<String, Value>) -> Option<(StoredInstant, StoredInstant, u16)> {
