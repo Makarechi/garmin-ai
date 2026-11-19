@@ -6,43 +6,13 @@ use ga_domain::analysis_spec::AnalysisSpec;
 use sqlx_postgres::types::PgInterval;
 use uuid::Uuid;
 
-use super::{GenericAnalysisError, GenericAnalysisReader};
-
-struct SourceSelection {
-    mode: &'static str,
-    account: Option<String>,
-    device: Option<String>,
-    measurement: Option<String>,
-}
-
-impl SourceSelection {
-    fn from_spec(spec: &AnalysisSpec) -> Result<Self, GenericAnalysisError> {
-        let mut selection = Self {
-            mode: "all",
-            account: None,
-            device: None,
-            measurement: None,
-        };
-        if let Some(source) = spec.document()["source"].as_str() {
-            if let Some(value) = source.strip_prefix("measurement:") {
-                selection.mode = "measurement";
-                selection.measurement = Some(value.to_owned());
-            } else if let Some(value) = source.strip_prefix("observation:") {
-                selection.mode = "observation";
-                let [account, device]: [Option<String>; 2] =
-                    serde_json::from_str(value).map_err(|_| GenericAnalysisError::Encoding)?;
-                selection.account = account;
-                selection.device = device;
-            } else {
-                selection.mode = "event";
-            }
-        }
-        Ok(selection)
-    }
-}
+use super::{GenericAnalysisError, GenericAnalysisReader, source::SourceSelection};
 
 impl GenericAnalysisReader {
-    async fn metric_contract(&mut self, spec: &AnalysisSpec) -> Result<Uuid, GenericAnalysisError> {
+    pub(super) async fn metric_contract(
+        &mut self,
+        spec: &AnalysisSpec,
+    ) -> Result<Uuid, GenericAnalysisError> {
         let definition: Option<(Uuid, i32)> =
             sqlx::query_as("SELECT id,current_version FROM metric_definitions WHERE key=$1")
                 .bind(spec.document()["metric_key"].as_str())

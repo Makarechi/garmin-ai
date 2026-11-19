@@ -1,5 +1,7 @@
+mod aggregate;
 mod entries;
 mod observations;
+mod source;
 
 use std::{error::Error, fmt};
 
@@ -37,6 +39,8 @@ pub enum GenericAnalysisError {
     Data,
     Encoding,
     InvalidSnapshot,
+    Calendar,
+    Calculation(ga_domain::metric_aggregate::MetricAggregateError),
     Permission,
     Health(HealthAnalysisError),
     Database,
@@ -50,6 +54,8 @@ impl fmt::Display for GenericAnalysisError {
             Self::Data => "Generic analysis data is incompatible with its database type",
             Self::Encoding => "Metric source cannot be encoded as UTF-8",
             Self::InvalidSnapshot => "Historical event snapshot could not be read",
+            Self::Calendar => "Metric window exceeds the datetime calendar",
+            Self::Calculation(_) => "Metric values could not be aggregated",
             Self::Health(_) => "Generic analysis storage is unavailable",
             Self::Database => "Generic analysis could not be read",
         })
