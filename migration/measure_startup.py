@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -90,8 +91,26 @@ def sample(container, *, user=None):
     }
 
 
-def report_run(args):
+def local_image(reference, revision):
+    image = docker("image", "inspect", reference, "--format", "{{.Id}}").stdout.strip()
+    actual = docker(
+        "image",
+        "inspect",
+        image,
+        "--format",
+        '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+    ).stdout.strip()
+    if actual != revision:
+        raise RuntimeError("Application image revision label does not match the requested revision")
+    platform = docker(
+        "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"
+    ).stdout.strip()
+    return image, platform
+
+
+def report_run(args, image, platform, *, native=False, observer_image=None):
     started = time.monotonic()
+    executable = "garmin-ai-rust" if native else "garmin-ai"
     prefix = f"garmin-benchmark-{secrets.token_hex(5)}"
     db, api, worker, migrate, observer, workload = (
         f"{prefix}-{role}" for role in ("db", "api", "worker", "migrate", "observer", "workload")
@@ -108,6 +127,13 @@ def report_run(args):
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
     }
+    if native:
+        app_env.update(
+            GA_LOCK_DIR="/app/state",
+            GA_DATA_DIR="/app/data",
+            GA_TOKEN_DIR="/app/tokens/garmin",
+            GA_BACKUP_DIR="/app/backups",
+        )
     if args.replay_days:
         app_env["GA_TIMEZONE"] = "UTC"
     api_env = dict(app_env)
@@ -127,26 +153,14 @@ def report_run(args):
         "POSTGRES_DB": DATABASE,
         "NO_TS_TUNE": "true",
     }
-    image = docker("image", "inspect", args.image, "--format", "{{.Id}}").stdout.strip()
-    image_revision = docker(
-        "image",
-        "inspect",
-        image,
-        "--format",
-        '{{index .Config.Labels "org.opencontainers.image.revision"}}',
-    ).stdout.strip()
-    if image_revision != args.sha:
-        raise RuntimeError("Application image revision label does not match --sha")
-    platform = docker(
-        "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}"
-    ).stdout.strip()
     server_format = "{{.CgroupVersion}} {{.NCPU}} {{.MemTotal}} {{.KernelVersion}}"
     engine = docker("info", "--format", server_format).stdout.strip()
     if not engine.startswith("2 "):
         raise RuntimeError("The startup benchmark requires cgroup v2")
 
-    def launch(name, image, *command, limits=(), env=None, mounts=()):
+    def launch(name, container_image, *command, limits=(), env=None, mounts=()):
         env_flags = [flag for key in env or {} for flag in ("-e", key)]
+        native_flags = ("--entrypoint", "") if native and container_image == image else ()
         cleanup.callback(docker, "rm", "-fv", name, check=False)
         docker(
             "run",
@@ -157,10 +171,12 @@ def report_run(args):
             name,
             "--network",
             prefix,
+            "--no-healthcheck",
+            *native_flags,
             *limits,
             *mounts,
             *env_flags,
-            image,
+            container_image,
             *command,
             variables=env,
         )
@@ -169,7 +185,7 @@ def report_run(args):
         return round(time.monotonic() - started, 3)
 
     cpu = ["--cpuset-cpus", args.cpu]
-    entry = Path(args.healthcheck).read_text(encoding="utf-8")
+    entry = None if native else Path(args.healthcheck).read_text(encoding="utf-8")
     with ExitStack() as cleanup:
         docker("network", "create", "--internal", prefix)
         cleanup.callback(docker, "network", "rm", prefix, check=False)
@@ -228,7 +244,7 @@ def report_run(args):
             image,
             "sh",
             "-ec",
-            "garmin-ai migrate; touch /tmp/migrated; exec sleep 300",
+            f"{executable} migrate; touch /tmp/migrated; exec sleep 300",
             limits=(*cpu, "-m", "256m"),
             env=app_env,
         )
@@ -242,7 +258,7 @@ def report_run(args):
         launch(
             api,
             image,
-            "garmin-ai",
+            executable,
             "serve",
             "--host",
             "0.0.0.0",
@@ -252,13 +268,13 @@ def report_run(args):
         launch(
             worker,
             image,
-            "garmin-ai",
+            executable,
             "worker",
             limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
             env=app_env,
         )
         # Readiness probes execute in a separate cgroup. Their RSS is excluded.
-        launch(observer, image, "sleep", "infinity", env=app_env | control_env)
+        launch(observer, observer_image or image, "sleep", "infinity", env=app_env | control_env)
 
         def probe(path):
             url = f"http://{api}:8080{path}"
@@ -267,9 +283,29 @@ def report_run(args):
 
         until_ready(lambda: probe("/health/ready"), "API readiness")
         lifecycle["api_observed_ready_seconds"] = elapsed()
-        until_ready(
-            lambda: docker("exec", observer, "python", "-c", entry, check=False), "worker heartbeat"
-        )
+
+        def heartbeat():
+            if native:
+                return docker(
+                    "run",
+                    "--rm",
+                    "--pull",
+                    "never",
+                    "--network",
+                    prefix,
+                    "--entrypoint",
+                    executable,
+                    "-e",
+                    "GA_DATABASE_URL",
+                    image,
+                    "healthcheck",
+                    "--worker",
+                    variables=app_env,
+                    check=False,
+                )
+            return docker("exec", observer, "python", "-c", entry, check=False)
+
+        until_ready(heartbeat, "worker heartbeat")
         lifecycle["worker_observed_ready_seconds"] = elapsed()
         samples = []
         for _ in range(args.samples):
@@ -403,7 +439,9 @@ def report_run(args):
             "SELECT version_num FROM alembic_version",
         ).stdout.strip()
         return {
-            "baseline_sha": args.sha,
+            "candidate_sha" if native else "baseline_sha": args.candidate_sha
+            if native
+            else args.sha,
             "platform": platform,
             "docker_engine": engine,
             "application_image_id": image,
@@ -430,6 +468,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="Locally built baseline application image")
     parser.add_argument("--sha", required=True, help="Git SHA from which the image was built")
+    parser.add_argument("--candidate-image", help="Locally built Rust release image for comparison")
+    parser.add_argument("--candidate-sha", help="Git SHA of the Rust release image")
     parser.add_argument("--healthcheck", default="deploy/gcp/healthcheck.py", type=Path)
     parser.add_argument("--cpu", default="0", help="Shared Docker CPU affinity")
     parser.add_argument("--samples", default=8, type=int, choices=range(1, 61), metavar="1..60")
@@ -454,7 +494,41 @@ def main():
         parser.error("--fit-developer requires --fit-records")
     if args.controls_during_fit and args.fit_records != 50000:
         parser.error("--controls-during-fit requires --fit-records 50000")
-    report = report_run(args)
+    if bool(args.candidate_image) != bool(args.candidate_sha):
+        parser.error("--candidate-image and --candidate-sha must be supplied together")
+    if args.candidate_image and any(
+        getattr(args, name) is not None
+        for name in (
+            "fit_records",
+            "fit_limit_mib",
+            "sync_days",
+            "reconcile_days",
+            "backup_mib",
+            "analytics_rounds",
+            "mcp_idle_seconds",
+            "voice_rounds",
+            "replay_days",
+        )
+    ):
+        parser.error("The paired comparison measures startup and idle only")
+    baseline_image, platform = local_image(args.image, args.sha)
+    if args.candidate_image:
+        candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
+        if candidate_image == baseline_image or candidate_platform != platform:
+            parser.error("Comparison requires distinct images built for the same platform")
+        baseline = report_run(args, baseline_image, platform)
+        candidate = report_run(
+            args, candidate_image, platform, native=True, observer_image=baseline_image
+        )
+        revision = baseline["migration_revision"]
+        if (
+            not re.fullmatch(r"[0-9a-f]{12}", revision)
+            or revision != candidate["migration_revision"]
+        ):
+            raise RuntimeError("Benchmark versions migrated to different database schemas")
+        print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+        return 0
+    report = report_run(args, baseline_image, platform)
     print(json.dumps(report, indent=2))
     return 1 if report.get("fitlimit_workload", {}).get("exit_code") else 0
 
