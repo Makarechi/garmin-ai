@@ -2,6 +2,7 @@ mod analysis;
 mod initiative;
 mod model;
 mod send;
+mod sleep_history;
 
 pub use model::{
     WebChatInterpretationContext, WebChatModelPreparation, WebChatModelReply, WebChatModelSession,
@@ -15,6 +16,7 @@ use ga_domain::timestamp::StoredInstant;
 use initiative::can_show_checkin;
 use serde::Serialize;
 use serde_json::Value;
+use sleep_history::{DEPENDENT_REFERENCE, SLEEP_REFERENCE, can_show_timing, evidence_refs};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -141,7 +143,7 @@ impl Database {
     pub async fn web_chat_messages(&self) -> Result<WebChatSnapshot, WebChatError> {
         tokio::time::timeout(Duration::from_secs(4), async {
             let mut txn = self.work.begin().await?;
-            let conversation = prepare(&mut txn, false).await?;
+            let (conversation, replay_locked) = prepare_history(&mut txn, false).await?;
             let messages = sqlx::query_as::<_, (Uuid, Option<String>, OffsetDateTime)>(
                 "SELECT id,normalized_text,received_at FROM inbound_messages
                  WHERE owner_id=$1 AND conversation_id=$2 AND channel='web' AND channel_instance_id='local'
@@ -165,15 +167,21 @@ impl Database {
             .bind(conversation.owner).bind(conversation.id).bind(MAX_MESSAGES)
             .fetch_all(&mut *txn).await?;
             let mut replies = VecDeque::with_capacity(recorded.len());
+            let mut has_point_observation = false;
             for (id, inbound, state, at, count, raw) in recorded.into_iter().rev() {
-                if let Some(document) = binding_document(conversation, id, &raw)
-                    && can_show(&mut txn, conversation, id, &state, &document, true).await?
-                {
+                let Some(document) = binding_document(conversation, id, &raw) else {
+                    continue;
+                };
+                has_point_observation |= has_point_sleep_reference(&document);
+                if can_show(&mut txn, conversation, id, &state, &document, replay_locked, true).await? {
                     replies.push_back((id, count, WebChatReply {
                         id:id.to_string(), inbound_message_id:inbound.map(|id| id.to_string()),
                         state, created_at:timestamp(at)?.to_string(),
                     }));
                 }
+            }
+            if !replay_locked && !has_point_observation {
+                return Err(WebChatError::Database);
             }
             let mut opening = b"{\"messages\":".to_vec();
             serde_json::to_writer(&mut opening, &messages).map_err(|_| WebChatError::Database)?;
@@ -188,7 +196,7 @@ impl Database {
     pub async fn mark_web_chat_read(&self, outbox: Uuid) -> Result<(), WebChatError> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let mut txn = self.work.begin().await?;
-            let conversation = prepare(&mut txn, true).await?;
+            let (conversation, replay_locked) = prepare_history(&mut txn, true).await?;
             let (inbound, state, raw): (Option<Uuid>, String, String) = sqlx::query_as(
                 "SELECT inbound_message_id,state,(intent - ARRAY['blocks','attachments','form','actions'])::text
                  FROM outbox_messages
@@ -200,8 +208,11 @@ impl Database {
             if inbound.is_none() && document["initiative"] != true {
                 return Err(WebChatError::Missing);
             }
+            if !replay_locked && !has_point_sleep_reference(&document) {
+                return Err(WebChatError::Database);
+            }
             if !matches!(state.as_str(), "queued" | "read")
-                || !can_show(&mut txn, conversation, outbox, &state, &document, true).await?
+                || !can_show(&mut txn, conversation, outbox, &state, &document, replay_locked, true).await?
             {
                 txn.commit().await?;
                 return Err(WebChatError::Unavailable);
@@ -235,10 +246,7 @@ async fn prepare(
     txn: &mut Transaction<'_, Postgres>,
     writing: bool,
 ) -> Result<Conversation, WebChatError> {
-    sqlx::query("SET LOCAL statement_timeout='750ms'")
-        .execute(&mut **txn)
-        .await?;
-    check_readiness(txn).await.map_err(WebChatError::Storage)?;
+    prepare_storage(txn).await?;
     let action = if writing {
         "SELECT pg_advisory_xact_lock($1)"
     } else {
@@ -250,6 +258,37 @@ async fn prepare(
         .bind(REPLAY_MUTATION_LOCK)
         .execute(&mut **txn)
         .await?;
+    prepare_conversation(txn).await
+}
+
+async fn prepare_history(
+    txn: &mut Transaction<'_, Postgres>,
+    writing: bool,
+) -> Result<(Conversation, bool), WebChatError> {
+    prepare_storage(txn).await?;
+    // A verified point observation remains readable during unrelated replay.
+    let action = if writing {
+        "SELECT pg_try_advisory_xact_lock($1)"
+    } else {
+        "SELECT pg_try_advisory_xact_lock_shared($1)"
+    };
+    let acquired = sqlx::query_scalar(action)
+        .bind(REPLAY_MUTATION_LOCK)
+        .fetch_one(&mut **txn)
+        .await?;
+    Ok((prepare_conversation(txn).await?, acquired))
+}
+
+async fn prepare_storage(txn: &mut Transaction<'_, Postgres>) -> Result<(), WebChatError> {
+    sqlx::query("SET LOCAL statement_timeout='750ms'")
+        .execute(&mut **txn)
+        .await?;
+    check_readiness(txn).await.map_err(WebChatError::Storage)
+}
+
+async fn prepare_conversation(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<Conversation, WebChatError> {
     let consent: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1)")
         .bind(CHANNEL_CONSENT_LOCK)
         .fetch_one(&mut **txn)
@@ -287,32 +326,29 @@ fn binding_document(conversation: Conversation, id: Uuid, raw: &str) -> Option<V
         .then_some(document)
 }
 
+fn has_point_sleep_reference(document: &Value) -> bool {
+    document["initiative"] != true
+        && evidence_refs(document).any(|value| value.starts_with(SLEEP_REFERENCE))
+        && !evidence_refs(document).any(|value| value.starts_with(DEPENDENT_REFERENCE))
+}
+
 async fn can_show(
     txn: &mut Transaction<'_, Postgres>,
     conversation: Conversation,
     outbox: Uuid,
     state: &str,
     document: &Value,
+    replay_locked: bool,
     include_initiatives: bool,
 ) -> Result<bool, WebChatError> {
-    if document["evidence_refs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|value| {
-            value != ANALYSIS_REFERENCE
-                && (value.starts_with("sleep-timing:")
-                    || value.starts_with("analysis-sleep-timing:"))
-        })
-    {
+    if evidence_refs(document).any(|reference| {
+        reference != ANALYSIS_REFERENCE && reference.starts_with(DEPENDENT_REFERENCE)
+    }) {
         return Ok(false);
     }
     if state == "queued"
-        && document["evidence_refs"]
-            .as_array()
-            .is_some_and(|refs| refs.iter().any(|entry| entry == ANALYSIS_REFERENCE))
-        && !current_web_analysis(txn, conversation, outbox).await?
+        && evidence_refs(document).any(|reference| reference == ANALYSIS_REFERENCE)
+        && (!replay_locked || !current_web_analysis(txn, conversation, outbox).await?)
     {
         return Ok(false);
     }
@@ -322,12 +358,24 @@ async fn can_show(
     if !sharing {
         return Ok(false);
     }
-    if state == "queued" && document["initiative"] == true {
-        return if include_initiatives {
-            can_show_checkin(txn, conversation, outbox).await
-        } else {
-            Ok(false)
-        };
+    for reference in
+        evidence_refs(document).filter(|reference| reference.starts_with(SLEEP_REFERENCE))
+    {
+        if !can_show_timing(txn, conversation, reference).await? {
+            return Ok(false);
+        }
+    }
+    if document["initiative"] == true {
+        if !replay_locked {
+            return Ok(false);
+        }
+        if state == "queued" {
+            return if include_initiatives {
+                can_show_checkin(txn, conversation, outbox).await
+            } else {
+                Ok(false)
+            };
+        }
     }
     Ok(true)
 }
