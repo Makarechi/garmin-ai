@@ -7,12 +7,13 @@ use std::{
 use ga_domain::{
     event_schema::{CustomEntry, form_schema_flags, project_form_fields, tracker_form_issues},
     file_import::{
-        FileFieldInput, FileMappedRow, FileMapping, ImportFileError, JsonRow, document_hash,
+        FileFieldInput, FileMappedRow, FileMapping, FileObjectRow, ImportFileError, JsonRow,
+        document_hash,
     },
     sha256_hex,
     source_contract::validate_source_payload,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -76,7 +77,7 @@ pub struct FileImportOutcome {
 }
 
 struct ImportRow<'a> {
-    source: &'a Map<String, Value>,
+    source: &'a FileObjectRow,
     entry: FileMappedRow<'a>,
 }
 
@@ -362,8 +363,8 @@ async fn apply(
                 row.entry.source_id
             ]))?;
             let key = format!("file-import:row:{identity}");
-            let raw = serde_json::to_value(row.source).map_err(|_| INVALID_ROW_STATE)?;
-            let hash = document_hash(&raw)?;
+            let raw = row.source.canonical_json()?;
+            let hash = sha256_hex(raw.as_bytes());
             let receipt: Option<String> =
                 sqlx::query_scalar("SELECT value::text FROM app_state WHERE key=$1")
                     .bind(&key)
@@ -383,7 +384,7 @@ async fn apply(
                                       fetched_at,parser_version,status)
                          VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,0,'applied')")
                 .bind(payload).bind(&source).bind(plan.mapping.definition_key()).bind(&identity).bind(&hash)
-                .bind(raw.to_string()).bind(format!("sha256:{}",plan.file_hash)).bind(at).execute(&mut **txn).await?;
+                .bind(raw).bind(format!("sha256:{}",plan.file_hash)).bind(at).execute(&mut **txn).await?;
             let document = json!({"definition_key":plan.mapping.definition_key(),"start":row.entry.start.to_string(),
                 "end":row.entry.end.map(|end| end.to_string()),"timezone":plan.mapping.timezone(),
                 "source":"file_import","values":row.entry.values,"units":row.entry.units});

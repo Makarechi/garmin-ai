@@ -204,45 +204,116 @@ impl FileMapping {
     }
 }
 
+impl super::FileObjectRow {
+    /// Use the same sorted UTF-8 representation for storage and the row receipt.
+    pub fn canonical_json(&self) -> Result<String, ImportFileError> {
+        let mut encoded = Vec::new();
+        write_document(&mut encoded, DocumentValue::Object(self.fields()))?;
+        String::from_utf8(encoded).map_err(|_| ImportFileError::InvalidMapping)
+    }
+}
+
 pub fn document_hash(value: &Value) -> Result<String, ImportFileError> {
     let mut encoded = Vec::new();
-    write_document(&mut encoded, value)?;
+    write_document(&mut encoded, DocumentValue::Value(value))?;
     Ok(sha256_hex(&encoded))
 }
 
-fn write_document(out: &mut Vec<u8>, value: &Value) -> Result<(), ImportFileError> {
-    let invalid = ImportFileError::InvalidMapping;
-    match value {
-        Value::Object(fields) => {
-            out.push(b'{');
-            let mut fields: Vec<_> = fields.iter().collect();
-            fields.sort_unstable_by_key(|(key, _)| key.as_str());
-            for (index, (key, field)) in fields.into_iter().enumerate() {
-                if index != 0 {
-                    out.push(b',');
-                }
-                serde_json::to_writer(&mut *out, key).map_err(|_| invalid)?;
-                out.push(b':');
-                write_document(out, field)?;
-            }
-            out.push(b'}');
+enum DocumentValue<'a> {
+    Value(&'a Value),
+    Object(&'a serde_json::Map<String, Value>),
+}
+
+enum DocumentItems<'a> {
+    Object(std::vec::IntoIter<(&'a String, &'a Value)>),
+    Array(std::slice::Iter<'a, Value>),
+}
+
+struct DocumentFrame<'a> {
+    items: DocumentItems<'a>,
+    first: bool,
+}
+
+impl<'a> DocumentFrame<'a> {
+    fn object(fields: &'a serde_json::Map<String, Value>) -> Self {
+        let mut sorted: Vec<_> = fields.iter().collect();
+        sorted.sort_unstable_by_key(|(key, _)| key.as_str());
+        Self {
+            items: DocumentItems::Object(sorted.into_iter()),
+            first: true,
         }
-        Value::Array(items) => {
-            out.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index != 0 {
-                    out.push(b',');
-                }
-                write_document(out, item)?;
-            }
-            out.push(b']');
-        }
-        Value::Number(number) if number.as_str().contains(['.', 'e', 'E']) => {
-            write_float(out, number.as_f64().ok_or(invalid)?).map_err(|_| invalid)?;
-        }
-        _ => serde_json::to_writer(out, value).map_err(|_| invalid)?,
     }
-    Ok(())
+
+    fn array(values: &'a [Value]) -> Self {
+        Self {
+            items: DocumentItems::Array(values.iter()),
+            first: true,
+        }
+    }
+
+    fn next(&mut self, out: &mut Vec<u8>) -> Result<Option<DocumentValue<'a>>, ImportFileError> {
+        let (key, value) = match &mut self.items {
+            DocumentItems::Object(items) => match items.next() {
+                Some((key, value)) => (Some(key), value),
+                None => {
+                    out.push(b'}');
+                    return Ok(None);
+                }
+            },
+            DocumentItems::Array(items) => match items.next() {
+                Some(value) => (None, value),
+                None => {
+                    out.push(b']');
+                    return Ok(None);
+                }
+            },
+        };
+        if !self.first {
+            out.push(b',');
+        }
+        self.first = false;
+        if let Some(key) = key {
+            serde_json::to_writer(&mut *out, key).map_err(|_| ImportFileError::InvalidMapping)?;
+            out.push(b':');
+        }
+        Ok(Some(DocumentValue::Value(value)))
+    }
+}
+
+fn write_document(out: &mut Vec<u8>, root: DocumentValue<'_>) -> Result<(), ImportFileError> {
+    let invalid = ImportFileError::InvalidMapping;
+    let mut pending = Vec::<DocumentFrame<'_>>::new();
+    let mut current = root;
+    loop {
+        match current {
+            DocumentValue::Object(fields) | DocumentValue::Value(Value::Object(fields)) => {
+                out.push(b'{');
+                pending.push(DocumentFrame::object(fields));
+            }
+            DocumentValue::Value(Value::Array(items)) => {
+                out.push(b'[');
+                pending.push(DocumentFrame::array(items));
+            }
+            DocumentValue::Value(Value::Number(number))
+                if number.as_str().contains(['.', 'e', 'E']) =>
+            {
+                write_float(out, number.as_f64().ok_or(invalid)?).map_err(|_| invalid)?;
+            }
+            DocumentValue::Value(value) => {
+                serde_json::to_writer(&mut *out, value).map_err(|_| invalid)?;
+            }
+        }
+        loop {
+            let Some(frame) = pending.last_mut() else {
+                return Ok(());
+            };
+            if let Some(next) = frame.next(out)? {
+                current = next;
+                break;
+            }
+            pending.pop();
+        }
+    }
 }
 
 const KNOWN: &[&str] = &[

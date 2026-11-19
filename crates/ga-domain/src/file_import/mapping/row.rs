@@ -70,7 +70,8 @@ impl FileMapping {
                     .iter()
                     .cloned()
                     .zip(row.into_iter().map(Value::String))
-                    .collect())
+                    .collect::<Map<_, _>>()
+                    .into())
             })
             .collect())
     }
@@ -82,7 +83,7 @@ impl FileMapping {
         fields: &BTreeMap<&str, FileFieldInput>,
         seen: &mut BTreeSet<&'a str>,
     ) -> Result<FileMappedRow<'a>, FileRowIssue<'a>> {
-        let row = raw.as_ref().map_err(|issue| issue.code())?;
+        let row = raw.as_ref().map_err(|issue| issue.code())?.fields();
         let source_id = row
             .get(&self.row_id_column)
             .and_then(Value::as_str)

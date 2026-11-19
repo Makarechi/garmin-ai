@@ -1,14 +1,40 @@
 mod numbers;
 mod strings;
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, mem};
 
 use jiter::{Jiter, JiterError, JiterErrorType, JsonErrorType, Peek};
 use serde_json::{Map, Value};
 
 use super::{ImportFileError, MAX_FILE_ROWS, read_text};
 
-const MAX_NESTING: usize = 1_000;
+const CHAT_NESTING: usize = 1_000;
+// The frozen file decoder accepts substantially deeper input than the chat parser.
+// Keep a bounded, shape-aware budget below the measured Linux ARM64 stack limit.
+const FILE_CONTAINER_BUDGET: usize = 86_900;
+
+#[derive(Clone, Copy)]
+enum ContainerLimit {
+    File,
+    Chat,
+}
+
+impl ContainerLimit {
+    fn budget(self) -> usize {
+        match self {
+            Self::File => FILE_CONTAINER_BUDGET,
+            Self::Chat => CHAT_NESTING,
+        }
+    }
+
+    fn cost(self, peek: Peek) -> usize {
+        match self {
+            Self::File if peek == Peek::Object => 3,
+            Self::File => 2,
+            Self::Chat => 1,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JsonRowIssue {
@@ -31,12 +57,32 @@ impl From<JiterError> for ImportFileError {
     }
 }
 
-pub type JsonRow = Result<Map<String, Value>, JsonRowIssue>;
+pub type JsonRow = Result<FileObjectRow, JsonRowIssue>;
+
+pub struct FileObjectRow(Map<String, Value>);
+
+impl FileObjectRow {
+    pub fn fields(&self) -> &Map<String, Value> {
+        &self.0
+    }
+}
+
+impl From<Map<String, Value>> for FileObjectRow {
+    fn from(fields: Map<String, Value>) -> Self {
+        Self(fields)
+    }
+}
+
+impl Drop for FileObjectRow {
+    fn drop(&mut self) {
+        drop_nested(Value::Object(mem::take(&mut self.0)));
+    }
+}
 
 /// Decode the whole JSON document before reporting row-local storage issues.
 pub fn read_json_rows(bytes: &[u8]) -> Result<Vec<JsonRow>, ImportFileError> {
     let input = strings::escape_unpaired(read_text(bytes)?)?;
-    let mut reader = JsonReader::new(input.as_bytes());
+    let mut reader = JsonReader::new(input.as_bytes(), ContainerLimit::File);
     if reader.parser.peek()? != Peek::Array {
         let peek = reader.parser.peek()?;
         read_value(&mut reader, peek)?;
@@ -49,11 +95,17 @@ pub fn read_json_rows(bytes: &[u8]) -> Result<Vec<JsonRow>, ImportFileError> {
     let mut object_rows = true;
     let mut next = reader.parser.known_array()?;
     while let Some(peek) = next {
-        let item = read_value(&mut reader, peek)?;
+        let mut item = read_value(&mut reader, peek)?;
         count += 1;
-        if let Value::Object(object) = item.value {
+        if item.value.is_object() {
             if count <= MAX_FILE_ROWS {
-                rows.push(item.issue.map_or(Ok(object), Err));
+                rows.push(match item.issue {
+                    Some(issue) => Err(issue),
+                    None => match mem::take(&mut item.value) {
+                        Value::Object(object) => Ok(FileObjectRow::from(object)),
+                        _ => return Err(ImportFileError::InvalidFormat),
+                    },
+                });
             }
         } else {
             object_rows = false;
@@ -70,6 +122,28 @@ pub fn read_json_rows(bytes: &[u8]) -> Result<Vec<JsonRow>, ImportFileError> {
 struct Item {
     value: Value,
     issue: Option<JsonRowIssue>,
+}
+
+impl Drop for Item {
+    fn drop(&mut self) {
+        drop_nested(mem::take(&mut self.value));
+    }
+}
+
+fn drop_nested(value: Value) {
+    let mut remaining = match value {
+        Value::Array(items) => items,
+        Value::Object(fields) => fields.into_values().collect(),
+        _ => return,
+    };
+    while let Some(item) = remaining.pop() {
+        match item {
+            Value::Array(items) if remaining.is_empty() => remaining = items,
+            Value::Array(items) => remaining.extend(items),
+            Value::Object(fields) => remaining.extend(fields.into_values()),
+            _ => {}
+        }
+    }
 }
 
 enum Container {
@@ -113,10 +187,10 @@ impl Frame {
         self.key.push_str(key);
     }
 
-    fn push(&mut self, item: Item) -> Result<(), ImportFileError> {
+    fn push(&mut self, mut item: Item) -> Result<(), ImportFileError> {
         self.value_issue = item.issue.or(self.value_issue);
         match &mut self.container {
-            Container::Array(items) => items.push(item.value),
+            Container::Array(items) => items.push(mem::take(&mut item.value)),
             Container::Object {
                 fields,
                 invalid_keys,
@@ -125,11 +199,16 @@ impl Frame {
                 let key = std::mem::take(&mut self.key);
                 let (valid_key, issue) = strings::decode(&key);
                 *key_issue = issue.or(*key_issue);
-                let repeated = match valid_key {
-                    Some(key) => fields.insert(key.into_owned(), item.value).is_some(),
-                    None => !invalid_keys.insert(key),
-                };
-                if repeated {
+                if let Some(key) = valid_key {
+                    match fields.entry(key.into_owned()) {
+                        serde_json::map::Entry::Vacant(field) => {
+                            field.insert(mem::take(&mut item.value));
+                        }
+                        serde_json::map::Entry::Occupied(_) => {
+                            return Err(ImportFileError::JsonDuplicateKey);
+                        }
+                    }
+                } else if !invalid_keys.insert(key) {
                     return Err(ImportFileError::JsonDuplicateKey);
                 }
             }
@@ -150,30 +229,41 @@ impl Frame {
         }
     }
 
-    fn finish(self) -> Item {
-        match self.container {
+    fn finish(mut self) -> Item {
+        match &mut self.container {
             Container::Array(items) => Item {
-                value: Value::Array(items),
+                value: Value::Array(mem::take(items)),
                 issue: self.value_issue,
             },
             Container::Object {
                 fields, key_issue, ..
             } => Item {
-                value: Value::Object(fields),
+                value: Value::Object(mem::take(fields)),
                 // Python walks values in reverse insertion order, then keys.
-                issue: self.value_issue.or(key_issue),
+                issue: self.value_issue.or(*key_issue),
             },
         }
     }
 }
 
+impl Drop for Frame {
+    fn drop(&mut self) {
+        match &mut self.container {
+            Container::Array(items) => drop_nested(Value::Array(mem::take(items))),
+            Container::Object { fields, .. } => drop_nested(Value::Object(mem::take(fields))),
+        }
+    }
+}
+
 fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFileError> {
-    let mut stack = Vec::<Frame>::new();
+    let mut stack = Vec::<(Frame, usize)>::new();
+    let mut cost = 0;
     let mut peek = first;
     loop {
         let mut item = match peek {
             Peek::Array | Peek::Object => {
-                if stack.len() == MAX_NESTING {
+                let next_cost = reader.limit.cost(peek);
+                if cost + next_cost > reader.limit.budget() {
                     return Err(ImportFileError::InvalidFormat);
                 }
                 let (frame, child) = if peek == Peek::Array {
@@ -189,7 +279,8 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
                     (frame, child)
                 };
                 if let Some(child) = child {
-                    stack.push(frame);
+                    cost += next_cost;
+                    stack.push((frame, next_cost));
                     peek = child;
                     continue;
                 }
@@ -209,7 +300,7 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
         };
 
         loop {
-            let Some(frame) = stack.last_mut() else {
+            let Some((frame, _)) = stack.last_mut() else {
                 return Ok(item);
             };
             frame.push(item)?;
@@ -217,7 +308,9 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
                 peek = next;
                 break;
             }
-            item = stack.pop().ok_or(ImportFileError::InvalidFormat)?.finish();
+            let (frame, frame_cost) = stack.pop().ok_or(ImportFileError::InvalidFormat)?;
+            cost -= frame_cost;
+            item = frame.finish();
         }
     }
 }
@@ -225,14 +318,16 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
 struct JsonReader<'source> {
     input: &'source [u8],
     parser: Jiter<'source>,
+    limit: ContainerLimit,
     number_parser: fn(&[u8]) -> Result<serde_json::Number, ImportFileError>,
 }
 
 impl<'source> JsonReader<'source> {
-    fn new(input: &'source [u8]) -> Self {
+    fn new(input: &'source [u8], limit: ContainerLimit) -> Self {
         Self {
             input,
             parser: Jiter::new(input).with_allow_inf_nan(),
+            limit,
             number_parser: numbers::parse,
         }
     }
@@ -279,10 +374,12 @@ pub(crate) fn read_chat_value(
     number_parser: fn(&[u8]) -> Result<serde_json::Number, ImportFileError>,
 ) -> Result<Result<Value, JsonRowIssue>, ImportFileError> {
     let input = strings::escape_unpaired(text)?;
-    let mut reader = JsonReader::new(input.as_bytes());
+    let mut reader = JsonReader::new(input.as_bytes(), ContainerLimit::Chat);
     reader.number_parser = number_parser;
     let peek = reader.parser.peek()?;
-    let item = read_value(&mut reader, peek)?;
+    let mut item = read_value(&mut reader, peek)?;
     reader.parser.finish()?;
-    Ok(item.issue.map_or(Ok(item.value), Err))
+    Ok(item
+        .issue
+        .map_or_else(|| Ok(mem::take(&mut item.value)), Err))
 }

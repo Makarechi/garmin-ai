@@ -87,7 +87,7 @@ def exercise(engine, binary, root):
     assert len(imported(engine)) == 1
 
     unprojected = 0
-    for _ in range(220):
+    for _ in range(1_200):
         unprojected = [unprojected]
     payload = [
         {
@@ -113,6 +113,17 @@ def exercise(engine, binary, root):
     stored = imported(engine)
     assert len(stored) == 2
     assert {row.description for row in stored} == {ENTRY, "Synthetic JSON note"}
+    with engine.connect() as connection:
+        retained = connection.scalar(
+            text(
+                """
+                SELECT payload #> (ARRAY['retained'] || array_fill('0'::text, ARRAY[1200]))
+                FROM source_payloads
+                WHERE source='file_import:synthetic-source:synthetic-json-device'
+                """
+            )
+        )
+    assert retained == 0
     assert all(
         row[1:] == (1, "file_import", "applied", 0, "file_import:synthetic-source", True)
         for row in stored
