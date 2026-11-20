@@ -34,6 +34,79 @@ IMAGE = "ghcr.io/example/garmin-ai@sha256:" + "a" * 64
 SHA = "b" * 40
 
 
+def native_config(revision, entrypoint=None):
+    return {
+        "os": "linux",
+        "config": {
+            "Labels": {bundle_module.REVISION_LABEL: revision} if revision else None,
+            "Entrypoint": entrypoint or ["garmin-ai-rust"],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("revision", "entrypoint", "error"),
+    [
+        (SHA, None, None),
+        ("c" * 40, None, "revision does not match"),
+        (None, None, "revision does not match"),
+        (SHA, ["garmin-ai"], "must start the native"),
+    ],
+)
+def test_native_bundle_checks_every_runnable_image(
+    tmp_path, monkeypatch, revision, entrypoint, error
+):
+    first = "sha256:" + "1" * 64
+    second = "sha256:" + "2" * 64
+    repository = IMAGE.split("@")[0]
+    inspected = []
+
+    def document(image, *options):
+        if image == IMAGE:
+            assert options == ("--raw",)
+            return {
+                "manifests": [
+                    {"digest": second, "platform": {"os": "linux", "architecture": "arm64"}},
+                    {"digest": first, "platform": {"os": "linux", "architecture": "amd64"}},
+                    {
+                        "digest": "sha256:" + "3" * 64,
+                        "platform": {"os": "unknown", "architecture": "unknown"},
+                        "annotations": {"vnd.docker.reference.type": "attestation-manifest"},
+                    },
+                ]
+            }
+        if options == ("--raw",):
+            return {"schemaVersion": 2}
+        assert image in {f"{repository}@{first}", f"{repository}@{second}"}
+        inspected.append(image)
+        return native_config(SHA) if image.endswith(first) else native_config(revision, entrypoint)
+
+    monkeypatch.setattr(bundle_module, "registry_document", document)
+    output = tmp_path / "bundle"
+    if error is None:
+        archive, _ = build_bundle(IMAGE, sha=SHA, output=output, runtime="rust")
+        assert archive.is_file()
+    else:
+        with pytest.raises(ValueError, match=error):
+            build_bundle(IMAGE, sha=SHA, output=output, runtime="rust")
+        assert not output.exists()
+    assert inspected == [f"{repository}@{first}", f"{repository}@{second}"]
+
+
+def test_registry_manifest_bytes_match_the_requested_digest(monkeypatch):
+    body = b'{"schemaVersion":2}'
+
+    def run(command, **kwargs):
+        assert command[:5] == ["docker", "buildx", "imagetools", "inspect", "--raw"]
+        return SimpleNamespace(stdout=body)
+
+    monkeypatch.setattr(bundle_module.subprocess, "run", run)
+    verified = IMAGE.split("@sha256:")[0] + "@sha256:" + hashlib.sha256(body).hexdigest()
+    assert bundle_module.registry_document(verified, "--raw") == {"schemaVersion": 2}
+    with pytest.raises(ValueError, match="differs from the requested image digest"):
+        bundle_module.registry_document(IMAGE, "--raw")
+
+
 def test_release_compose_tracks_the_reviewed_service_layout():
     check_compose()
     content = (ROOT / "compose.release.yml").read_text()
@@ -89,9 +162,17 @@ def test_bundled_markdown_links_resolve_within_bundle():
 
 
 @pytest.mark.parametrize(("runtime", "gcp"), [("python", False), ("rust", False), ("rust", True)])
-def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, runtime, gcp):
+def test_release_compose_resolves_to_the_pinned_image_without_source(
+    tmp_path, monkeypatch, runtime, gcp
+):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose is unavailable")
+    if runtime == "rust":
+        monkeypatch.setattr(
+            bundle_module,
+            "registry_document",
+            lambda _image, *options: {} if options == ("--raw",) else native_config(SHA),
+        )
     archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
     assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
     with tarfile.open(archive) as bundle:

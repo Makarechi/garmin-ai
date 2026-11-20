@@ -8,8 +8,10 @@ Docker Compose 2.24.0 or newer are required. Run the installer as a dedicated
 non-root account with Docker access. The database image is pinned in
 the bundle as well.
 
-To prepare a native candidate, pass `--runtime rust` when building the bundle
-and supply the digest of an image built with `Dockerfile.rust`. On the host,
+To prepare a native candidate, build from the clean checkout with `Dockerfile.rust`
+and pass `--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"` to
+`docker buildx build`. Pass `--runtime rust` and the resulting registry digest
+to the bundle builder. On the host,
 the native bundle uses Docker and Compose for setup, demo, start, status and
 stop. Pairing, login and encrypted backup use the native application inside
 the same image. Preserve the Compose project, settings and private storage
@@ -27,6 +29,8 @@ uv run python scripts/build_release_bundle.py \
 
 The builder rejects uncommitted changes, images without a full digest, and a
 release Compose file that has drifted from the development service layout. It
+uses Docker Buildx to check that every image in a native registry digest starts
+the native application and records the checkout's Git revision. It
 produces a `.tar.gz` and a SHA-256 checksum in `dist/`. The archive contains no
 credentials, health records or original data. The manifest records the exact Git
 SHA, application and database image digests, schema revision and candidate

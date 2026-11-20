@@ -14,6 +14,8 @@ from garmin_ai.operations import REVISION
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
+REVISION_LABEL = "org.opencontainers.image.revision"
+NATIVE_ENTRYPOINTS = (["garmin-ai-rust"], ["/usr/local/bin/garmin-ai-rust"])
 LOCAL_IMAGE = "${COMPOSE_PROJECT_NAME:-garmin-ai}:local"
 RELEASE_IMAGE = "${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}"
 CONTENTS = (
@@ -74,6 +76,68 @@ def check_compose() -> None:
         raise ValueError("compose.release.yml differs from the reviewed development layout")
 
 
+def registry_document(image: str, *options: str) -> dict:
+    try:
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect", *options, image],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+        if options == ("--raw",):
+            expected = image.rsplit("@sha256:", 1)[1]
+            if hashlib.sha256(result).hexdigest() != expected:
+                raise ValueError("Registry manifest differs from the requested image digest")
+        value = json.loads(result)
+    except (OSError, subprocess.SubprocessError, UnicodeError, json.JSONDecodeError):
+        raise ValueError("Could not inspect the pinned image with Docker Buildx") from None
+    if not isinstance(value, dict):
+        raise ValueError("Registry returned an invalid image document")
+    return value
+
+
+def verify_native_image(image: str, revision: str) -> None:
+    repository = image.split("@", 1)[0]
+    pending = [image]
+    verified = set()
+    while pending:
+        reference = pending.pop()
+        if reference in verified:
+            continue
+        manifest = registry_document(reference, "--raw")
+        if "manifests" in manifest:
+            try:
+                for descriptor in manifest["manifests"]:
+                    platform = descriptor.get("platform") or {}
+                    annotations = descriptor.get("annotations") or {}
+                    if (
+                        platform.get("os") == platform.get("architecture") == "unknown"
+                        and annotations.get("vnd.docker.reference.type") == "attestation-manifest"
+                    ):
+                        continue
+                    member = f"{repository}@{descriptor['digest']}"
+                    if not APP_IMAGE_RE.fullmatch(member):
+                        raise ValueError("Registry image index contains an invalid member digest")
+                    pending.append(member)
+            except (AttributeError, KeyError, TypeError):
+                raise ValueError("Registry returned an invalid image index") from None
+            continue
+        config = registry_document(reference, "--format", "{{json .Image}}")
+        try:
+            settings = config["config"]
+            label = (settings.get("Labels") or {}).get(REVISION_LABEL)
+            entrypoint = settings.get("Entrypoint")
+        except (AttributeError, KeyError, TypeError):
+            raise ValueError("Registry returned an invalid image configuration") from None
+        if config.get("os") != "linux" or entrypoint not in NATIVE_ENTRYPOINTS:
+            raise ValueError("The pinned image must start the native Garmin AI application")
+        if label != revision:
+            raise ValueError("The pinned native image revision does not match the bundle checkout")
+        verified.add(reference)
+    if not verified:
+        raise ValueError("The pinned image index contains no native application images")
+
+
 def build_bundle(
     app_image: str, *, sha: str, output: Path, runtime: str = "python"
 ) -> tuple[Path, Path]:
@@ -84,7 +148,9 @@ def build_bundle(
     if runtime not in ("python", "rust"):
         raise ValueError("Unsupported application runtime")
     native = runtime == "rust"
-    if not native:
+    if native:
+        verify_native_image(app_image, sha)
+    else:
         check_compose()
     compose_source = ROOT / ("compose.rust-release.yml" if native else "compose.release.yml")
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
@@ -171,9 +237,12 @@ def main() -> None:
     sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, capture_output=True, text=True
     ).stdout.strip()
-    archive, checksum = build_bundle(
-        args.app_image, sha=sha, output=args.output, runtime=args.runtime
-    )
+    try:
+        archive, checksum = build_bundle(
+            args.app_image, sha=sha, output=args.output, runtime=args.runtime
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     print(f"Created {archive} and {checksum}")
 
 
