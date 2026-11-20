@@ -1,6 +1,6 @@
 # Approved deviations from the Python baseline
 
-No observed product behavior changes are recorded at this stage.
+Approval remains pending for each candidate below.
 
 For each proposed change, identify the parity entry, baseline behavior, intended observable
 behavior, impacted data and callers, regression case, approval and recovery implications.
@@ -22,3 +22,12 @@ change has a documented decision.
   requires the header. Both runtimes reject explicit non-JSON media types and
   preserve the same malformed-request errors in the comparison.
   See the five settings and export requests in `check_http_json_requests.py`.
+- Installation rejects overlapping storage paths even when their capitalization
+  differs. In three case-insensitive filesystem checks (token, backup, and lock
+  directories under an existing data directory), both runtimes rejected setup
+  and preserved the settings file and directory permissions. The pinned Python
+  setup created the requested nested directory before rejecting the operation.
+  Native setup rejects the overlap before creating that directory. The check
+  is reproducible with [the native setup comparison](check_native_setup.py).
+  This affects failed installation attempts only. The existing data and settings
+  can be used when reverting to Python. Approval is pending for PAR-01.

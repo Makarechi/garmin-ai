@@ -145,12 +145,33 @@ def replace_runtime_placeholders(binary):
             assert settings.read_bytes() == saved
 
 
-def reject_new_case_aliases(binary):
+def reject_case_aliases(binary):
     with TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "case_probe").touch()
         if not (root / "CASE_PROBE").is_file():
             return False
+        existing_aliases = {
+            "GA_TOKEN_DIR": "Data and token directories must not overlap",
+            "GA_BACKUP_DIR": "Backups must be outside private source directories",
+            "GA_LOCK_DIR": "Lock directory must be outside private source directories",
+        }
+        for key, error in existing_aliases.items():
+            case = root / key
+            data = case / "store" / "data"
+            data.mkdir(parents=True)
+            data.chmod(0o750)
+            assert (case / "STORE" / "DATA").samefile(data)
+
+            settings = case / ".env"
+            current = f"GA_DATA_DIR=store/data\n{key}=STORE/DATA/nested\n"
+            settings.write_text(current)
+            result = command(binary, case)
+            assert result.returncode != 0 and error in result.stderr, result
+            assert settings.read_text() == current
+            assert data.stat().st_mode & 0o777 == 0o750
+            assert not (data / "nested").exists()
+
         for index, aliases in enumerate(
             (
                 ("store/data", "STORE/DATA", ".state", "backups"),
@@ -309,8 +330,10 @@ def main():
     replace_runtime_placeholders(binary)
     validate_integrations_before_writes(binary)
     validate_runtime_preferences(binary)
-    if reject_new_case_aliases(binary):
-        print("Verified overlapping storage paths whose case aliases did not exist before setup")
+    if reject_case_aliases(binary):
+        print(
+            "Verified rejection of existing and newly created case aliases without changing settings"
+        )
     print("Verified native setup and repeat runs against the deployment contract")
 
 
