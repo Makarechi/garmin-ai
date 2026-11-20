@@ -439,7 +439,10 @@
       "rust_tests": [
         "migration/check_replay_status.py",
         "migration/check_replay_selection.py",
-        "crates/ga-app/tests/replay_worker.rs"
+        "crates/ga-app/tests/replay_worker.rs",
+        "crates/ga-db/tests/replay_status.rs",
+        "migration/check_replay_calendar.py",
+        "migration/evidence/native-offline-replay-linux-arm64.json"
       ],
       "data_contracts": [
         "Parser-version identity, replay checkpoint, failed revisions, historical timezone and invalidation."
@@ -448,12 +451,10 @@
         "Replay only approved local archive and associated owner; fenced partial outputs remain unavailable."
       ],
       "resource_scenario": "Full offline replay, corruption and restart",
-      "status": "implemented",
-      "verification": "db",
+      "status": "verified",
+      "verification": "e2e_synthetic",
       "owner_task": "R16",
-      "known_limits": [
-        "Synthetic database and worker comparisons cover pending, failed and completed projections. The full replay acceptance workload and cutover rehearsal remain pending."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {

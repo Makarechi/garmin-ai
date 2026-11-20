@@ -1,0 +1,141 @@
+{
+  "scope": "PAR-08",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "version": "3.15.2",
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_archive_replay.py": 194,
+      "tests/test_metric_definitions.py": 42,
+      "tests/test_observation_freshness.py": 31,
+      "tests/test_temporal.py": 13
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "test_source_commit": "ed4614ed96bbd64d57321d961f01278e932a149a",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94",
+    "benchmark_image_equivalence_sha256": "7e143c9f0f381f2e04d4d559348ee9560ec29db7ecb800d5b971ba7bdcf8f6a9"
+  },
+  "paired_month": {
+    "trace_sha256": "1966a63aa24a2f84f2f0ddef00706c48821d6cddc79e2491edeac02efe066495",
+    "constraints": {
+      "shared_cpu_affinity": "5",
+      "database_memory_mib": 320,
+      "api_memory_mib": 192,
+      "worker_memory_mib": 384,
+      "migration_memory_mib": 256
+    },
+    "history_days": 30,
+    "archive_objects": 600,
+    "outcomes": {
+      "archived": 239,
+      "error": 1,
+      "normalized": 360
+    },
+    "target_parser_version": 9,
+    "archive_rows_sha256": "3dccb481067b437f291511610dd28d31561008426b434adfceec232c72996de7",
+    "projection_sha256": "f4e390c905d40d5772da59ad8d7d3eccab319fc680735891c81b5d7d92d89f49",
+    "valid_archives_verified": 599,
+    "corrupt_archives_preserved": 1,
+    "ready_with_corrupt_input": false,
+    "python_queue_and_startup_seconds": 1507.850014,
+    "rust_queue_and_startup_seconds": 729.878679,
+    "python_sampled_resources": {
+      "database": {
+        "sampled_peak_bytes": 201129984,
+        "sampled_swap_bytes": 10711040,
+        "sampled_oom_kills": 0
+      },
+      "api": {
+        "sampled_peak_bytes": 136204288,
+        "sampled_swap_bytes": 92680192,
+        "sampled_oom_kills": 0
+      },
+      "worker": {
+        "sampled_peak_bytes": 154894336,
+        "sampled_swap_bytes": 7241728,
+        "sampled_oom_kills": 0
+      }
+    },
+    "rust_sampled_resources": {
+      "database": {
+        "sampled_peak_bytes": 155222016,
+        "sampled_swap_bytes": 4968448,
+        "sampled_oom_kills": 0
+      },
+      "api": {
+        "sampled_peak_bytes": 15028224,
+        "sampled_swap_bytes": 266240,
+        "sampled_oom_kills": 0
+      },
+      "worker": {
+        "sampled_peak_bytes": 28704768,
+        "sampled_swap_bytes": 0,
+        "sampled_oom_kills": 0
+      }
+    }
+  },
+  "paired_post_restore": {
+    "trace_sha256": "091c1db4bbe1664bc266f2bd51344931936aee1f485d8a4bb20a7cc2ecb1ff0f",
+    "archive_rows": 140,
+    "encrypted_backup_and_original_preserved": true,
+    "endpoints": 20,
+    "paired_result": {
+      "archive_rows_sha256": "ed2d0b0454ce6bea6440c125b34528847aa5be0611731d2cf332ef48532da28d",
+      "corrupt_archives_preserved": 1,
+      "projection_sha256": "509165e6ac4274217f3afa668be985dc56bf6d10ae148a573d5298500b48e518",
+      "status": {
+        "outcomes": {
+          "archived": 55,
+          "error": 1,
+          "normalized": 84
+        },
+        "ready_with_corrupt_input": false,
+        "successfully_replayed": 139,
+        "target_parser_version": 9
+      },
+      "valid_archives_verified": 139
+    }
+  },
+  "native_postgres_checks": {
+    "replay_worker": {
+      "passed": 1,
+      "test_executable_sha256": "1fa758e0b5559758a8589c7b2256d305aa03ae994cc01fb8042488c5a3ad3a1c",
+      "trace_sha256": "da55041c77dae3c616ba05f6a852c711d87a0dd9448e1b6e3b7f980bc24ee662"
+    },
+    "replay_selection": {
+      "passed": 1,
+      "test_executable_sha256": "a25eb2d1c113b7986368d959482660035b88f4c765082c046be59a472f2b4a1d",
+      "trace_sha256": "7af54b02e028a90b66eaf2857086b13a03fd6357254c033044a60173ca30146e"
+    },
+    "replay_calendar": {
+      "passed": 1,
+      "test_executable_sha256": "b209160ccbde9ca70e39726b2cfa2603938e1bae211180afcbda9cf14597882d",
+      "trace_sha256": "01b809e073ad6abac0e3c07313e29b0ef64f1bf07abcd946a046080e9ac15b21"
+    },
+    "replay_status": {
+      "passed": 1,
+      "test_executable_sha256": "248e340737182cf35f9a261937c6c3f76231e1429f89402f3c0f6f63e5f36262",
+      "trace_sha256": "02055ef4b4db793eab483ada6e91455dc335fa1933903a03e1d34da697c7b79b"
+    }
+  },
+  "fault_cases": [
+    {
+      "trace_sha256": "e59a9b8622154eafc3a09c417d6120861d637b808c7f04d0bc55d98c7c490a65",
+      "observed": "Rust respected the live Python lease, recovered after its five-minute expiration and returned ownership to Python with unchanged projections."
+    },
+    {
+      "trace_sha256": "105d34871c7fe07329aaa165a3bf2e4d94d98db1f59e6d2bf16eacecf1fd8539",
+      "observed": "Both recovery boundaries preserved queued work and confirmed or uncertain delivery receipts."
+    },
+    {
+      "trace_sha256": "02055ef4b4db793eab483ada6e91455dc335fa1933903a03e1d34da697c7b79b",
+      "observed": "Across 7,300 older archive revisions and 52,560 measurements, a newly retained stale revision fenced analytical reads until it was brought current. Readiness and outcome counts matched the reference."
+    }
+  ],
+  "remaining_release_validation": "The release-level unattended observation remains pending."
+}
