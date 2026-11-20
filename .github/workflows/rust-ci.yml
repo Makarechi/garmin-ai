@@ -49,7 +49,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             machine: aarch64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: test "$(uname -m)" = "${{ matrix.machine }}"
@@ -65,21 +65,17 @@ jobs:
           ref: ee3a14a48a6ad30c1085951bac2f53c9088c2450
           path: test-results/python-file-reference
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.13.5"
-          enable-cache: true
-          cache-dependency-glob: test-results/python-file-reference/uv.lock
-      - uses: actions/setup-python@v6
-        with:
-          python-version-file: test-results/python-file-reference/.python-version
-      - name: Compare JSON import with the reference on this Linux architecture
+      - name: Build the frozen Python image for this Linux architecture
         run: |
           reference="$GITHUB_WORKSPACE/test-results/python-file-reference"
           test "$(git -C "$reference" rev-parse HEAD)" = ee3a14a48a6ad30c1085951bac2f53c9088c2450
+          docker build --tag garmin-ai-file-reference "$reference"
+      - name: Compare JSON import with the reference on this Linux architecture
+        run: |
           fixtures=$(mktemp -d)
-          ulimit -s 8192
-          uv run --project "$reference" --locked --no-dev python "$GITHUB_WORKSPACE/migration/check_file_json.py" "$fixtures"
+          docker run --rm --network none --user "$(id -u):$(id -g)" --ulimit stack=8388608:8388608 \
+            --volume "$GITHUB_WORKSPACE/migration/check_file_json.py:/capture.py:ro" \
+            --volume "$fixtures:/fixtures" garmin-ai-file-reference python /capture.py /fixtures
           GA_TEST_FILE_JSON="$fixtures" cargo test --locked -p ga-domain --test file_json -- --ignored
       - name: Record crate and license inventory
         run: cargo metadata --locked --format-version 1 > rust-package-inventory.json
