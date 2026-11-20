@@ -6,6 +6,8 @@ use ga_domain::sha256_hex;
 
 use super::*;
 
+#[path = "history_workload/daily.rs"]
+mod daily;
 #[path = "history_workload/reconciliation.rs"]
 mod reconciliation;
 
@@ -39,19 +41,37 @@ impl EndpointSource for HistorySource {
             LegacyRead::Devices => ("global".to_owned(), "devices"),
             _ => return Err(GarminError::InvalidRequest),
         };
+        self.read_file(&key, endpoint, maximum_bytes)
+            .await
+            .map(Some)
+    }
+}
+
+impl HistorySource {
+    async fn read_file(
+        &self,
+        key: &str,
+        endpoint: &str,
+        maximum_bytes: u64,
+    ) -> Result<Vec<u8>, GarminError> {
         let response = tokio::fs::read(self.root.join(format!("{key}-{endpoint}.json")))
             .await
             .map_err(|_| GarminError::InvalidRequest)?;
         if response.len() as u64 > maximum_bytes {
             return Err(GarminError::ResponseTooLarge);
         }
-        self.calls
+        self.record_call(endpoint)?;
+        Ok(response)
+    }
+
+    fn record_call(&self, endpoint: &str) -> Result<(), GarminError> {
+        *self
+            .calls
             .lock()
             .map_err(|_| GarminError::InvalidRequest)?
             .entry(endpoint.to_owned())
-            .and_modify(|count| *count += 1)
-            .or_insert(1);
-        Ok(Some(response))
+            .or_default() += 1;
+        Ok(())
     }
 }
 

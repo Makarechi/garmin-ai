@@ -77,8 +77,32 @@ CHECKS = {
     """,
 }
 
+DAILY_CHECKS = {
+    "activity": """
+        SELECT ((to_jsonb(a)-'updated_at') || jsonb_build_object('details',
+            CASE WHEN raw.id IS NULL THEN a.details
+            ELSE jsonb_set(a.details,'{fit_attempt_source_ref}',
+                jsonb_build_array(raw.source,raw.endpoint,raw.source_key,raw.payload_hash))
+            END))::text
+        FROM activities a LEFT JOIN source_payloads raw
+            ON raw.id::text=a.details->>'fit_attempt_source_ref'
+        ORDER BY a.id
+    """,
+    "activity_parts": """
+        SELECT to_jsonb(p)::text FROM activity_parts p ORDER BY activity_id,kind,sequence
+    """,
+    "jobs": """
+        SELECT jsonb_build_array(kind,payload->>'endpoint',payload->>'key',
+            payload->>'offset',payload->>'activity_id',status,attempts,last_error,
+            lease_token IS NULL,lease_until IS NULL,completed_at IS NOT NULL)::text
+        FROM jobs WHERE kind IN ('garmin_endpoint','garmin_activities','garmin_fit')
+        ORDER BY kind,payload->>'endpoint',payload->>'key',payload->>'offset',
+            payload->>'activity_id',status
+    """,
+}
 
-def snapshot(url, *, periodic=False):
+
+def snapshot(url, *, mode="sync"):
     dsn = url.replace("postgresql+psycopg://", "postgresql://", 1)
     name = conninfo_to_dict(dsn).get("dbname", "")
     if not name.endswith("_test"):
@@ -90,12 +114,15 @@ def snapshot(url, *, periodic=False):
             guard.execute("SET LOCAL TIME ZONE 'UTC'")
             if guard.execute("SELECT current_database()").fetchone() != (name,):
                 raise ValueError("Synthetic history database does not match the configured target")
-        for label, sql in CHECKS.items():
+        checks = CHECKS | DAILY_CHECKS if mode == "daily_sync" else CHECKS
+        for label, sql in checks.items():
             digest = hashlib.sha256()
             count = 0
             with connection.cursor(name=f"history_{label}") as cursor:
                 cursor.itersize = 200
-                args = ("" if periodic else "syncwindow:",) if label == "jobs" else ()
+                args = ()
+                if label == "jobs" and mode != "daily_sync":
+                    args = ("" if mode == "reconcile" else "syncwindow:",)
                 cursor.execute(sql, args)
                 for (line,) in cursor:
                     digest.update((line + "\n").encode())
@@ -105,6 +132,7 @@ def snapshot(url, *, periodic=False):
 
 
 if __name__ == "__main__":
-    print(
-        json.dumps(snapshot(os.environ["GA_DATABASE_URL"], periodic=sys.argv[1:] == ["reconcile"]))
-    )
+    mode = sys.argv[1] if len(sys.argv) > 1 else "sync"
+    if mode not in ("daily_sync", "reconcile", "sync"):
+        raise SystemExit("Unknown synthetic Garmin workload")
+    print(json.dumps(snapshot(os.environ["GA_DATABASE_URL"], mode=mode)))

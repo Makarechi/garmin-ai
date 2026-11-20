@@ -671,7 +671,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
         workload_modes = (
             ("fit", args.fit_records),
             ("fitlimit", args.fit_limit_mib),
-            ("sync", args.sync_days),
+            ("daily_sync" if args.sync_days == 1 and history_fixture else "sync", args.sync_days),
             ("reconcile", args.reconcile_days),
             ("backup", None if paired_backup else args.backup_mib),
             ("analytics", None if paired_analytics else args.analytics_rounds),
@@ -694,7 +694,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                 docker("exec", db, "createdb", "-U", "garmin", "garmin_resource_restore_test")
                 mounts.extend(("--tmpfs", "/tmp/low-backup-space:rw,size=8m,uid=1000,gid=1000"))
             extra = " --preload-history" if args.preload_history else ""
-            if name in {"sync", "reconcile"} and history_fixture is not None:
+            if name in {"sync", "reconcile", "daily_sync"} and history_fixture is not None:
                 mounts.extend(("--mount", f"type=bind,src={history_fixture},dst=/history,readonly"))
                 extra += " --history-fixture /history"
             if args.fit_developer:
@@ -706,7 +706,11 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                 "task_status=$?; echo $task_status > /tmp/finished; "
                 "exec sleep infinity"
             )
-            if name in {"sync", "reconcile"} and history_fixture is not None and native:
+            if (
+                name in {"sync", "reconcile", "daily_sync"}
+                and history_fixture is not None
+                and native
+            ):
                 binary = args.native_history_test.resolve(strict=True)
                 mounts.extend(("--mount", f"type=bind,src={binary},dst=/history-test,readonly"))
                 workload_env.update(
@@ -716,11 +720,11 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                     GA_TEST_HISTORY_FIXTURE="/history",
                     GA_TEST_HISTORY_PRELOAD="1" if args.preload_history else "0",
                 )
-                scenario = (
-                    "history_workload::reconciliation::reconciles_two_shared_periodic_windows"
-                    if name == "reconcile"
-                    else "history_workload::processes_shared_history_workload"
-                )
+                scenario = {
+                    "daily_sync": "history_workload::daily::processes_shared_evening_workload",
+                    "reconcile": "history_workload::reconciliation::reconciles_two_shared_periodic_windows",
+                    "sync": "history_workload::processes_shared_history_workload",
+                }[name]
                 workload_command = (
                     f"/history-test --ignored --exact {scenario} "
                     "--nocapture > /tmp/history-output; task_status=$?; "
@@ -785,7 +789,9 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
             status = int(docker("exec", workload, "cat", "/tmp/finished").stdout)
             if status and name != "fitlimit":
                 lines = (
-                    "16" if name in {"sync", "reconcile"} and history_fixture is not None else "1"
+                    "16"
+                    if name in {"sync", "reconcile", "daily_sync"} and history_fixture is not None
+                    else "1"
                 )
                 logs = docker("logs", "--tail", lines, workload, check=False).stderr
                 detail = logs.replace(password, "<redacted>").strip()[:1000]
@@ -798,7 +804,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                 "samples": workload_samples,
                 **({"control_overlap": controls} if controls else {}),
             }
-            if name in {"sync", "reconcile"} and history_fixture is not None:
+            if name in {"sync", "reconcile", "daily_sync"} and history_fixture is not None:
                 script = (
                     Path(__file__)
                     .with_name("check_history_workload.py")
@@ -970,14 +976,11 @@ def main():
         )
     ):
         parser.error(
-            "The paired comparison supports startup, web chat, analytics, MCP, FIT replay, backup, history and reconciliation"
+            "The paired comparison supports startup, web chat, analytics, MCP, FIT replay, backup, Garmin sync and reconciliation"
         )
     if args.candidate_image and (args.sync_days is not None or args.reconcile_days is not None):
-        if args.sync_days == 1 or not args.native_history_test:
-            parser.error(
-                "Paired history and reconciliation require multi-day --sync-days or "
-                "--reconcile-days and --native-history-test"
-            )
+        if not args.native_history_test:
+            parser.error("A paired Garmin sync or reconciliation requires --native-history-test")
         if not args.native_history_test.is_file() or not os.access(
             args.native_history_test, os.X_OK
         ):
@@ -985,7 +988,7 @@ def main():
                 "--native-history-test must name the built Linux endpoint_worker test executable"
             )
     elif args.native_history_test:
-        parser.error("--native-history-test requires paired history or reconciliation")
+        parser.error("--native-history-test requires paired Garmin sync or reconciliation")
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
@@ -994,7 +997,7 @@ def main():
         with ExitStack() as work:
             history_fixture = None
             if args.sync_days is not None or args.reconcile_days is not None:
-                mode = "reconcile" if args.reconcile_days is not None else "sync"
+                mode = {1: "daily_sync", None: "reconcile"}.get(args.sync_days, "sync")
                 quantity = args.reconcile_days or args.sync_days
                 directory = Path(__file__).resolve().parent
                 staging = Path(work.enter_context(TemporaryDirectory(prefix="garmin-history-")))
@@ -1079,7 +1082,40 @@ def main():
             before, after = baseline["mcp_workload"], candidate["mcp_workload"]
             if any(before[key] != after[key] for key in ("tool_names", "read_result")):
                 raise RuntimeError("The paired MCP sessions produced different results")
-        if args.sync_days is not None:
+        if args.sync_days == 1:
+            before, after = baseline["daily_sync_workload"], candidate["daily_sync_workload"]
+            digest = hashlib.sha256()
+            with args.native_history_test.open("rb") as executable:
+                for block in iter(lambda: executable.read(1024 * 1024), b""):
+                    digest.update(block)
+            after["test_executable_sha256"] = digest.hexdigest()
+            fields = (
+                "days",
+                "fetch_counts",
+                "jobs_done",
+                "delayed_followups",
+                "archive_objects_verified",
+                "stored_projection",
+            )
+            expected_counts = {
+                "raw": 29,
+                "daily": 1,
+                "samples": 144,
+                "revisions": 144,
+                "activity": 1,
+                "activity_parts": 125,
+                "jobs": 35,
+            }
+            mismatched = [key for key in fields if before[key] != after[key]]
+            if any(
+                after["stored_projection"][name]["rows"] != count
+                for name, count in expected_counts.items()
+            ):
+                mismatched.append("row_counts")
+            if mismatched:
+                print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+                raise RuntimeError(f"The paired evening sync workloads differed in {mismatched}")
+        elif args.sync_days is not None:
             before, after = baseline["sync_workload"], candidate["sync_workload"]
             digest = hashlib.sha256()
             with args.native_history_test.open("rb") as executable:
