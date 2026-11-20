@@ -11,7 +11,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +69,9 @@ GENERIC_DETAIL = "Synthetic historical analysis entry"
 AGGREGATE_QUESTION = "Show the synthetic step aggregate."
 MEASUREMENT_START = datetime(2026, 10, 10, 14, tzinfo=UTC)
 MEASUREMENT_SOURCE = "synthetic-historical-aggregate"
+STATISTICS_QUESTION = "Compare the synthetic lags and matched controls."
+STATISTICS_START = date(2026, 11, 2)
+STATISTICS_END = STATISTICS_START + timedelta(days=13)
 HEALTH_READS = {
     "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
     "analysis_compare_periods": {
@@ -91,6 +94,8 @@ def output(prompt):
             return generic_output(prompt)
         if prompt["question"].startswith(AGGREGATE_QUESTION):
             return aggregate_output(prompt)
+        if prompt["question"].startswith(STATISTICS_QUESTION):
+            return statistics_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -117,7 +122,14 @@ def output(prompt):
         confidence = 0.84 if "synthetic low confidence" in sentence else 1
         return Interpretation(intent="undo", confidence=confidence, response_language="en")
     if sentence.startswith(
-        (DIARY_QUESTION, HEALTH_QUESTION, FRESHNESS_QUESTION, GENERIC_QUESTION, AGGREGATE_QUESTION)
+        (
+            DIARY_QUESTION,
+            HEALTH_QUESTION,
+            FRESHNESS_QUESTION,
+            GENERIC_QUESTION,
+            AGGREGATE_QUESTION,
+            STATISTICS_QUESTION,
+        )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
@@ -278,6 +290,55 @@ def aggregate_output(prompt):
         answer="The synthetic step aggregate is available.",
         evidence_ids=[1],
         numeric_claims=[{"evidence_id": 1, "path": ["value"], "value": result["value"]}],
+        response_language="en",
+    )
+
+
+def statistics_output(prompt):
+    common = {"start": STATISTICS_START.isoformat(), "end": STATISTICS_END.isoformat()}
+    lagged = "analysis_lagged_association"
+    migraine = "analysis_migraine_windows"
+    if not prompt["evidence"]:
+        tools = {entry["name"] for entry in prompt["tools"]}
+        assert lagged in tools
+        if prompt["question"].endswith(" without the migraine pack"):
+            assert migraine not in tools
+            return AgentStep(response_language="en")
+        assert migraine in tools
+        return AgentStep(
+            calls=[
+                {
+                    "name": lagged,
+                    "arguments_json": json.dumps(
+                        {
+                            **common,
+                            "metric_a": "steps",
+                            "metric_b": "sleep_score",
+                            "lags": [-1, 0, 1],
+                        }
+                    ),
+                },
+                {
+                    "name": migraine,
+                    "arguments_json": json.dumps(
+                        {
+                            **common,
+                            "metric": "sleep_score",
+                        }
+                    ),
+                },
+            ],
+            response_language="en",
+        )
+    first, second = prompt["evidence"]
+    assert first["tool"] == lagged and second["tool"] == migraine
+    assert [row["n"] for row in first["result"]["results"]] == [13, 14, 13]
+    assert second["result"]["matched_pairs"] == 1 and second["result"]["episodes"] == 1
+    [pair] = second["result"]["pairs"]
+    assert pair["event_day"] == "2026-11-04" and pair["control_day"] == "2026-11-11"
+    return AgentStep(
+        answer="The stored synthetic records contain matched daily observations.",
+        evidence_ids=[1, 2],
         response_language="en",
     )
 
@@ -485,6 +546,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_generic_analysis(engine, python, native)
     exercise_legacy_aggregate(engine, python, native)
     exercise_current_freshness(engine, python, native)
+    exercise_statistics(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1036,6 +1098,58 @@ def exercise_legacy_aggregate(engine, python, native):
         == 409
     )
     print("Verified historical aggregates and withheld changed measurement and event evidence")
+
+
+def exercise_statistics(engine, python, native):
+    def midnight(offset):
+        return datetime.combine(STATISTICS_START + timedelta(days=offset), time.min, tzinfo=UTC)
+
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for pack in ("sleep", "training", "migraine"):
+            packs[pack].llm_enabled = True
+            packs[pack].tracking_enabled = True
+        for offset in range(14):
+            session.add(
+                HealthDay(
+                    day=midnight(offset).date(),
+                    steps=3000 + 37 * offset,
+                    sleep_score=50 + 2 * offset,
+                )
+            )
+        for event in (
+            EventInput(
+                start=midnight(2) + timedelta(hours=10),
+                end=midnight(2) + timedelta(hours=14),
+                timezone="UTC",
+                payload={"type": "migraine"},
+            ),
+            EventInput(
+                start=midnight(9),
+                end=midnight(10),
+                timezone="UTC",
+                payload={"type": "headache_observation", "headache": "no", "migraine": "no"},
+            ),
+        ):
+            create_event(session, event, actor="synthetic-fixture")
+    old, new = [submit(client, STATISTICS_QUESTION)["reply"] for client in (python, native)]
+    assert old["text"] == new["text"]
+    assert new["text"] == (
+        "The stored synthetic records contain matched daily observations.\n\n"
+        "Based on saved Garmin and diary data."
+    )
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        packs["training"].llm_enabled = False
+        packs["migraine"].llm_enabled = False
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert new["id"] not in {row["id"] for row in history.json()["replies"]}
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    question = STATISTICS_QUESTION + " without the migraine pack"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and "The analysis could not be completed" in denied[1]
+    print("Matched paired lag and migraine analysis and withheld sources after a pack was disabled")
 
 
 def main():

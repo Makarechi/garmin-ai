@@ -14,9 +14,10 @@ use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
     HealthAnalysisError, HealthPeriod, NapPolicy, begin_daily_analysis, daily_metric,
-    freshness_report::model_freshness_in, main_sleep_timing_in, model_metric_packs,
-    observed_values, owner_timezone, period_comparison, period_document, permits_timing_in,
-    read_daily::model_packs_allowed, require_current_projection, sleep_analysis::sleep_analysis_in,
+    freshness_report::model_freshness_in, lagged::lagged_association_in, main_sleep_timing_in,
+    migraine::migraine_comparison_in, model_metric_packs, observed_values, owner_timezone,
+    period_comparison, period_document, permits_timing_in, read_daily::model_packs_allowed,
+    require_current_projection, sleep_analysis::sleep_analysis_in,
 };
 use crate::{
     Database,
@@ -28,6 +29,8 @@ pub const PERSONAL_BASELINE: &str = "personal_baseline";
 pub const PERIOD_COMPARISON: &str = "analysis_compare_periods";
 pub const SLEEP_ANALYSIS: &str = "analysis_sleep";
 pub const DATA_FRESHNESS: &str = "data_freshness";
+pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
+pub const MIGRAINE_WINDOWS: &str = "analysis_migraine_windows";
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "tool", content = "arguments", deny_unknown_fields)]
@@ -57,6 +60,21 @@ pub enum DailyAnalysisQuery {
     },
     #[serde(rename = "data_freshness")]
     Freshness {},
+    #[serde(rename = "analysis_lagged_association")]
+    Lagged {
+        metric_a: String,
+        metric_b: String,
+        start: String,
+        end: String,
+        lags: Vec<i64>,
+    },
+    #[serde(rename = "analysis_migraine_windows")]
+    Migraine {
+        metric: String,
+        start: String,
+        end: String,
+        timezone: Option<String>,
+    },
 }
 
 impl DailyAnalysisQuery {
@@ -147,6 +165,46 @@ impl DailyAnalysisQuery {
                 .await?
                 .document()
             }
+            Self::Lagged {
+                metric_a,
+                metric_b,
+                start,
+                end,
+                lags,
+            } => {
+                let (metric_a, _) = daily_metric(metric_a)?;
+                let (metric_b, _) = daily_metric(metric_b)?;
+                let owner = context.binding().owner_id;
+                if !model_packs_allowed(txn, owner, model_metric_packs(metric_a)).await?
+                    || !model_packs_allowed(txn, owner, model_metric_packs(metric_b)).await?
+                {
+                    return Ok(None);
+                }
+                lagged_association_in(txn, metric_a, metric_b, period(start, end)?, lags).await?
+            }
+            Self::Migraine {
+                metric,
+                start,
+                end,
+                timezone,
+            } => {
+                let (metric, _) = daily_metric(metric)?;
+                let owner = context.binding().owner_id;
+                if !onboarding_allows_model(txn, ModelCategories::DIARY).await?
+                    || !model_packs_allowed(txn, owner, &["migraine"]).await?
+                    || !model_packs_allowed(txn, owner, model_metric_packs(metric)).await?
+                {
+                    return Ok(None);
+                }
+                migraine_comparison_in(
+                    txn,
+                    metric,
+                    period(start, end)?,
+                    timezone.as_deref(),
+                    configured_timezone,
+                )
+                .await?
+            }
             Self::Sleep { .. } => return Err(HealthAnalysisError::SleepRange),
             Self::Freshness {} => return Ok(None),
         };
@@ -168,7 +226,12 @@ impl DailyAnalysisEvidence {
     pub fn is_daily_tool(tool: &str) -> bool {
         matches!(
             tool,
-            PERSONAL_BASELINE | PERIOD_COMPARISON | SLEEP_ANALYSIS | DATA_FRESHNESS
+            PERSONAL_BASELINE
+                | PERIOD_COMPARISON
+                | SLEEP_ANALYSIS
+                | DATA_FRESHNESS
+                | LAGGED_ASSOCIATION
+                | MIGRAINE_WINDOWS
         )
     }
 
@@ -191,6 +254,7 @@ impl DailyAnalysisEvidence {
         }
         let (timezone, checked_at) = match &query {
             DailyAnalysisQuery::Sleep { .. } => (Some(result["timezone"].as_str()?.into()), None),
+            DailyAnalysisQuery::Migraine { .. } => (Some(timezone.into()), None),
             DailyAnalysisQuery::Freshness {} => {
                 let checked_at = result["checked_at"].as_str()?;
                 StoredInstant::from_python_isoformat(checked_at)?;
@@ -213,7 +277,9 @@ impl DailyAnalysisEvidence {
     ) -> Result<bool, HealthAnalysisError> {
         if matches!(
             self.query,
-            DailyAnalysisQuery::Sleep { .. } | DailyAnalysisQuery::Freshness {}
+            DailyAnalysisQuery::Sleep { .. }
+                | DailyAnalysisQuery::Freshness {}
+                | DailyAnalysisQuery::Migraine { .. }
         ) && self.timezone.is_none()
         {
             return Ok(false);
@@ -250,16 +316,27 @@ fn result_hash(value: &Value) -> Option<String> {
     ))
 }
 
+pub struct DailyAnalysisAccess {
+    pub migraine: bool,
+}
+
 impl Database {
-    pub async fn analysis_health_allowed(&self, context: AnalysisSubject<'_>) -> bool {
+    pub async fn analysis_health_access(
+        &self,
+        context: AnalysisSubject<'_>,
+    ) -> Option<DailyAnalysisAccess> {
         timeout_read(async {
             let mut txn = begin_daily_analysis(&self.work).await?;
-            let allowed = health_allowed(&mut txn, context).await?;
+            if !health_allowed(&mut txn, context).await? {
+                return Ok(None);
+            }
+            let migraine = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?
+                && model_packs_allowed(&mut txn, context.binding().owner_id, &["migraine"]).await?;
             txn.commit().await?;
-            Ok(allowed)
+            Ok(Some(DailyAnalysisAccess { migraine }))
         })
         .await
-        .unwrap_or(false)
+        .ok()?
     }
 
     pub async fn read_analysis_daily(

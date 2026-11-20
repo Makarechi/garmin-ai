@@ -6,7 +6,8 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 use ga_db::{
     conversation_memory::AnalysisSubject,
     health_analysis::{
-        DATA_FRESHNESS, DailyAnalysisEvidence, SLEEP_ANALYSIS,
+        DATA_FRESHNESS, DailyAnalysisEvidence, LAGGED_ASSOCIATION, MIGRAINE_WINDOWS,
+        SLEEP_ANALYSIS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -329,7 +330,13 @@ where
             question
                 .tools
                 .iter()
-                .filter(|tool| !replaying || tool.name != GENERIC_ANALYSIS)
+                .filter(|tool| {
+                    !replaying
+                        || !matches!(
+                            tool.name,
+                            GENERIC_ANALYSIS | LAGGED_ASSOCIATION | MIGRAINE_WINDOWS
+                        )
+                })
                 .map(|tool| tool.description)
                 .collect()
         };
@@ -616,6 +623,7 @@ pub(crate) fn format_analysis_answer(
     if evidence.iter().any(|item| {
         item["tool"] == "events"
             || item["tool"] == GENERIC_ANALYSIS
+            || item["tool"] == MIGRAINE_WINDOWS
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
     }) {

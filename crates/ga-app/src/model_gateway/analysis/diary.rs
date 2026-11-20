@@ -5,8 +5,8 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     health_analysis::{
-        DATA_FRESHNESS, DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON,
-        PERSONAL_BASELINE, SLEEP_ANALYSIS,
+        DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
+        LAGGED_ASSOCIATION, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, SLEEP_ANALYSIS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -28,6 +28,8 @@ static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool
 static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sleep));
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
+static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
+static MIGRAINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MigraineWindows));
 
 fn model_description(tool: ReadTool) -> Value {
     let entry = tool.catalog_entry();
@@ -39,7 +41,7 @@ pub struct DiaryAnalysisTools<'a> {
     database: &'a Database,
     context: AnalysisSubject<'a>,
     model: ShareDestination<'a>,
-    daily_read: Option<(&'a str, StoredInstant)>,
+    daily_read: Option<(&'a str, StoredInstant, DailyAnalysisAccess)>,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
@@ -72,9 +74,9 @@ impl<'a> DiaryAnalysisTools<'a> {
             ModelOperation::Structured(categories)
         };
         if authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
-            && self.database.analysis_health_allowed(self.context).await
+            && let Some(access) = self.database.analysis_health_access(self.context).await
         {
-            self.daily_read = Some((configured_timezone, question_at));
+            self.daily_read = Some((configured_timezone, question_at, access));
         }
         self
     }
@@ -90,7 +92,7 @@ impl<'a> DiaryAnalysisTools<'a> {
                 description: &GENERIC,
             },
         ];
-        if self.daily_read.is_some() {
+        if let Some((_, _, access)) = &self.daily_read {
             offered.extend([
                 OfferedReadTool {
                     name: PERSONAL_BASELINE,
@@ -108,7 +110,17 @@ impl<'a> DiaryAnalysisTools<'a> {
                     name: DATA_FRESHNESS,
                     description: &FRESHNESS,
                 },
+                OfferedReadTool {
+                    name: LAGGED_ASSOCIATION,
+                    description: &LAGS,
+                },
             ]);
+            if access.migraine {
+                offered.push(OfferedReadTool {
+                    name: MIGRAINE_WINDOWS,
+                    description: &MIGRAINE,
+                });
+            }
         }
         offered
     }
@@ -130,7 +142,7 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     }
 
     async fn quality_report(&self) -> Option<(Value, bool)> {
-        let (zone, at) = self.daily_read?;
+        let &(zone, at, _) = self.daily_read.as_ref()?;
         self.database
             .read_analysis_quality(self.context, zone, at)
             .await
@@ -159,7 +171,7 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
                 Err(_) => None,
             };
         }
-        if let Some((timezone, at)) = self.daily_read
+        if let Some(&(timezone, at, _)) = self.daily_read.as_ref()
             && DailyAnalysisEvidence::is_daily_tool(name)
         {
             let query = DailyAnalysisQuery::from_arguments(name, args)?;
