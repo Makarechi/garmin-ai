@@ -1,0 +1,32 @@
+[
+  {
+    "source": "https://github.com/Stranger6667/jsonschema/tree/0e82636fde8b2afb5e712ede6c261166ea10fc17",
+    "packages": {
+      "jsonschema-regex": "0.61.2",
+      "jsonschema-value": "0.61.2"
+    },
+    "files": {
+      "jsonschema/LICENSE": "117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038"
+    }
+  },
+  {
+    "source": "https://github.com/John-Cusack/markdown_it-rust/tree/636c80c8c06d8298cb4790071cd2acd2602c3ff5",
+    "packages": {
+      "markdown-it-rust-core": "4.2.0"
+    },
+    "files": {
+      "markdown-it-rust/LICENSE": "4a2260d6e2cd0f5a151a1e86dbfe7d3ed552b1e2beabf9941c1ba5c49cbce484",
+      "markdown-it-rust/NOTICE": "535b53e47112f52d0e7da4cb2fec5e22853259380c03b4eb562ce48070563bfa"
+    }
+  },
+  {
+    "source": "https://github.com/Nugine/simd/tree/d74c030d9dc4f3cae02146d1f497ff62726ef09a",
+    "packages": {
+      "uuid-simd": "0.8.0",
+      "vsimd": "0.8.0"
+    },
+    "files": {
+      "simd/LICENSE": "71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d"
+    }
+  }
+]

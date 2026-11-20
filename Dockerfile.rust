@@ -17,12 +17,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/collect_rust_notices.py ./scripts/
+COPY scripts/rust-license-notices ./scripts/rust-license-notices
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     target="$(rustc -vV | sed -n 's/^host: //p')" \
     && cargo metadata --locked --format-version 1 --filter-platform "$target" > /tmp/metadata.json \
     && cargo tree --locked --target "$target" -p ga-app --edges normal,no-proc-macro \
        --prefix none --no-dedupe --format '{p}' > /tmp/tree.txt \
     && python3 scripts/collect_rust_notices.py --metadata /tmp/metadata.json --tree /tmp/tree.txt \
+       --supplements scripts/rust-license-notices \
        --notices /rust-third-party-notices.txt --inventory /rust-third-party-inventory.json
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc

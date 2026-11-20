@@ -42,10 +42,12 @@ manifest only from that evidence. This bundle alone is not release clearance.
 Run `./install.sh licenses` to read the application's bundled license texts.
 The Rust image includes its embedded FIT profile notice and collects the license
 files from the locked dependencies selected for that image's Linux architecture.
+When a crate omits the notice, the inventory identifies any texts taken from
+its pinned upstream source.
 Its machine-readable inventory is `/usr/share/doc/garmin-ai/rust-third-party-inventory.json`.
 Python bundles continue to include the installed Python distributions' license files
-and inventory. An entry marked `REVIEW REQUIRED` has missing license text in the
-dependency package. The final distribution review also covers the base image,
+and inventory. An entry marked `REVIEW REQUIRED` needs a missing license text.
+The final distribution review also covers the base image,
 operating-system packages and the separate database image.
 
 ## Use the bundle on a private host

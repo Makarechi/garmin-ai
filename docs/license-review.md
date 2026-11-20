@@ -34,7 +34,8 @@ project's `LICENSE`.
 
 For the exact release digest, inspect the dependency inventory and bundled
 notices produced by the image build. The Rust inventory uses the locked normal
-dependency tree for the target platform and records missing texts for review.
+dependency tree for the target platform. It includes source notices pinned to
+the affected crate versions and flags any remaining missing texts for review.
 The Python inventory reflects the installed distributions. Inspect the base
 image and the Timescale image contents and verify that the final artifact
 includes the required notices. CP-05 release
