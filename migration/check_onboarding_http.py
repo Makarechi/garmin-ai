@@ -13,11 +13,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from garmin_ai.accounts import owner
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.definitions import create_definition_draft
-from garmin_ai.models import Conversation, EventDefinition
+from garmin_ai.models import (
+    ChannelBinding,
+    Conversation,
+    EventDefinition,
+    EventDefinitionVersion,
+    Person,
+    SourceConnection,
+)
 from garmin_ai.onboarding import apply_onboarding
 from garmin_ai.tracker_forms import TrackerSetupDraft, definition_spec
 
@@ -125,7 +131,7 @@ def save(engine, native, plan):
     return actual
 
 
-def exercise(engine, python, native):
+def exercise(engine, python, native, owner_id):
     for route, access, expected in (
         ("/onboarding", {}, 401),
         ("/onboarding", MANAGER, 403),
@@ -146,7 +152,7 @@ def exercise(engine, python, native):
         "selected_packs": ["general_diary", "caffeine"],
         "reminder_packs": ["caffeine"],
         "trackers": [draft("fixture_onboarding")],
-        "source_instance_ids": ["source:garmin:daily"],
+        "source_instance_ids": [],
         "channel": WEB,
         "fallback_channels": [FALLBACK],
         "model_categories": ["health", "diary"],
@@ -169,16 +175,28 @@ def exercise(engine, python, native):
     assert owner_state(engine) == before
 
     created = save(engine, native, plan)
+    assert created["complete"] and created["preferences"]["source_instance_ids"] == []
     assert created["preferences"]["revision"] == 1 and len(created["created_trackers"]) == 1
-    assert status(native) == status(python)
+    completed = status(native)
+    assert completed == status(python) and completed["complete"]
     for client in (python, native):
         profile = client.get("/tracker-profile", headers=MANAGER)
         assert profile.status_code == 200
         assert profile.json() == {"locale": "ru", "timezone": "Europe/Bratislava"}
 
     with Session(engine) as session, session.begin():
+        assert session.scalars(select(Person.id)).one() == owner_id
+        assert session.scalar(select(SourceConnection.id)) is None
+        assert session.scalar(select(ChannelBinding.id)) is None
+        definition_id, version_id = session.execute(
+            select(EventDefinition.id, EventDefinitionVersion.id)
+            .select_from(EventDefinitionVersion)
+            .join(EventDefinition)
+            .where(EventDefinition.key == "user.fixture_onboarding")
+        ).one()
+        assert str(version_id) == created["created_trackers"][0]["action"]["definition_version_id"]
         remembered = Conversation(
-            owner_id=owner(session).id,
+            owner_id=owner_id,
             channel="web",
             channel_instance_id="local",
             state={"analysis_turns": [{"question": "Synthetic retained state"}]},
@@ -186,10 +204,22 @@ def exercise(engine, python, native):
         session.add(remembered)
         session.flush()
         conversation_id, epoch = remembered.id, remembered.memory_epoch
-    saved = save(engine, native, plan | {"model_categories": [], "reminder_packs": []})
+    saved = save(
+        engine,
+        native,
+        plan
+        | {
+            "source_instance_ids": ["source:garmin:daily"],
+            "model_categories": [],
+            "reminder_packs": [],
+        },
+    )
     assert saved["preferences"]["revision"] == 2 and not saved["created_trackers"]
+    assert saved["preferences"]["source_instance_ids"] == ["source:garmin:daily"]
     assert all(not pack["llm_enabled"] and not pack["reminders_enabled"] for pack in saved["packs"])
     with Session(engine) as session, session.begin():
+        version = session.get(EventDefinitionVersion, version_id)
+        assert version is not None and version.definition_id == definition_id
         retired = session.get(Conversation, conversation_id)
         assert retired.memory_epoch != epoch and retired.state == {}
         create_definition_draft(
@@ -224,7 +254,8 @@ def exercise(engine, python, native):
             is None
         )
     print(
-        "Matched owner setup, declared integrations, tracker retry, revocation and atomic rollback"
+        "Matched Garmin-free owner setup, source replacement, retained tracker version, "
+        "declared integrations, revocation and atomic rollback"
     )
 
 
@@ -315,13 +346,16 @@ def main():
     engine = isolated_engine()
     settings = Settings(_env_file=None, api_tokens=TOKENS, integrations=INTEGRATIONS)
     try:
-        with (
-            TestClient(create_app(settings, engine)) as python,
-            TemporaryDirectory(prefix="synthetic-onboarding-") as directory,
-        ):
+        with TemporaryDirectory(prefix="synthetic-onboarding-") as directory:
             directory = Path(directory)
             with native_client(args.binary, engine, directory, INTEGRATIONS) as native:
-                exercise(engine, python, native)
+                assert not status(native)["complete"]
+                with Session(engine) as session:
+                    owner_id = session.scalars(select(Person.id)).one()
+                    assert session.scalar(select(SourceConnection.id)) is None
+                    assert session.scalar(select(ChannelBinding.id)) is None
+                with TestClient(create_app(settings, engine)) as python:
+                    exercise(engine, python, native, owner_id)
             verify_extensions(args.binary, engine, directory)
     finally:
         engine.dispose()
