@@ -1188,7 +1188,10 @@
         "migration/check_model_fallback.py",
         "migration/check_model_extension_runtime.py",
         "migration/check_web_chat_model.py",
-        "migration/check_model_runtime_settings.py"
+        "migration/check_model_runtime_settings.py",
+        "crates/ga-model/src/tests.rs",
+        "crates/ga-model/tests/fallback.rs",
+        "migration/evidence/native-channel-provider-linux-arm64.json"
       ],
       "data_contracts": [
         "Structured output, budgeted tools, usage, typed refusal/truncation, retry/fallback, no secret-bearing error text."
@@ -1201,7 +1204,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R24",
       "known_limits": [
-        "Verify the full provider, voice and fallback matrix through the release artifacts and approved live providers."
+        "Provider responses, fallback sequences and the maximum voice workload have synthetic evidence from the packaged build. The full matrix still needs approved live providers."
       ],
       "approved_deviations": []
     },
@@ -1296,7 +1299,11 @@
       "rust_tests": [
         "migration/check_legacy_telegram_schema.py",
         "crates/ga-app/src/telegram_transport/tests/poller.rs",
-        "crates/ga-app/tests/telegram_webhook.rs"
+        "crates/ga-app/tests/telegram_webhook.rs",
+        "crates/ga-app/tests/telegram_callback_ingress.rs",
+        "crates/ga-app/tests/telegram_tracker_forms.rs",
+        "crates/ga-app/src/telegram_transport/model_worker/tests/voice.rs",
+        "migration/evidence/native-channel-provider-linux-arm64.json"
       ],
       "data_contracts": [
         "Poll/Webhook ordering, callback ACK, neutral shadow and legacy modes, voice and text, owner history and setup."
@@ -1309,7 +1316,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R27",
       "known_limits": [
-        "Native ingress and callback acknowledgement have loopback HTTP evidence. Full owner diary, voice, forms and live private bot smoke remain pending."
+        "Synthetic checks cover webhook ingress, signed callbacks, English and Russian tracker forms, language changes, and a voice message through diary write and queued reply. The owner flow through an approved live private bot remains pending."
       ],
       "approved_deviations": []
     },
