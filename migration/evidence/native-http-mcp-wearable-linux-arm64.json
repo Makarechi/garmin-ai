@@ -1,0 +1,95 @@
+{
+  "scope": "PAR-21",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "version": "3.15.2",
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_access_scopes.py": 13,
+      "tests/test_api_analytics.py": 25,
+      "tests/test_operations_mcp.py": 147,
+      "tests/test_wearable.py": 13
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "interface_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_mcp_stdio.py",
+      "result": "passed",
+      "trace_sha256": "a4e74b13a4d9f2d3f65ad87fda70f93d333d44e83c638f49f1723b2c3b2d1c9b"
+    },
+    {
+      "comparison": "migration/check_mcp_diary_create.py",
+      "result": "passed",
+      "trace_sha256": "22ec7e0b263ec8ffa4025229d420de980c842d269b9d861df3f2e86cde936592"
+    },
+    {
+      "comparison": "migration/check_mcp_diary_update.py",
+      "result": "passed",
+      "trace_sha256": "90f5d0bc75330d9edfcd7c560f14b537e2c324a898cea46731092ff020b5925d"
+    },
+    {
+      "comparison": "migration/check_mcp_diary_delete.py",
+      "result": "passed",
+      "trace_sha256": "479df0fc680944f8dd9c1b23bcb71aa079b0b94ed5c1c821c79953f35db0334a"
+    },
+    {
+      "comparison": "migration/check_mcp_custom_diary.py",
+      "result": "passed",
+      "trace_sha256": "72cab3d4f1bbd541f01abd56f203031882473b39e87d3fc22fe7cfd32f069a92"
+    },
+    {
+      "comparison": "migration/check_mcp_write_recovery.py",
+      "result": "passed",
+      "trace_sha256": "4d5bdada5150aeb59186ce7f282a5987936428e9e3fcef6d6178e048324b8a39"
+    },
+    {
+      "comparison": "migration/check_activity_reads.py",
+      "result": "passed",
+      "trace_sha256": "02f06a1c3bb8ed9fae8c26e0569b08a8e21f860981cbf2ae255af9afcaa37127"
+    },
+    {
+      "comparison": "migration/check_wearable_http.py",
+      "result": "passed",
+      "trace_sha256": "204bdfe633d5038cc360837eff29835fb1351c1df138df48c3b0aea6f89b37e9"
+    },
+    {
+      "comparison": "migration/check_mcp_catalog.py",
+      "result": "passed",
+      "trace_sha256": "d29b429721b826e536fa58891b3beb0488e808d9a0510291e76eb29066780364"
+    },
+    {
+      "comparison": "migration/check_mcp_protocol.py",
+      "result": "passed",
+      "trace_sha256": "e9a98ad58aea55884a483b080d21d65b2b8dc3b93e1310a7e12d46d200cfb887"
+    },
+    {
+      "comparison": "migration/check_http_health_tools.py",
+      "result": "passed",
+      "trace_sha256": "ac0e3bda84c75703296fd55f423812aaca2cc69b223bf10835f88ae0abe5e2b3"
+    },
+    {
+      "comparison": "migration/check_http_json_requests.py",
+      "result": "passed",
+      "trace_sha256": "ec50d6cb4ab27b56392a829ccd29f9fcc4aa6abb1489a51a2a34e83f7195368f"
+    }
+  ],
+  "access_scopes": {
+    "comparison": "crates/ga-app/tests/http.rs::scope_matrix_matches_reference_at_http_boundary",
+    "capabilities_http_cases": 52,
+    "scope_decisions": 4096,
+    "trace_sha256": "72e5d474c32c3c01a288dd436ba620563e6a17a7b1915ae73a6280f87f0d2d89"
+  },
+  "release_scope": [
+    "Local synthetic accounts and isolated TimescaleDB.",
+    "MCP read-only and opt-in write catalogs, protocol lifecycle, all four opt-in writes, and the narrow wearable HTTP key.",
+    "Resource and unattended release acceptance use their own recorded conditions."
+  ]
+}
