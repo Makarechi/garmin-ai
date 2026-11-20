@@ -178,9 +178,8 @@ impl Database {
             .validate_for_write()
             .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let written = Self::create_system_event_in(&mut txn, request).await?;
-        commit_diary_write(txn, is_cancelled).await?;
-        Ok(written)
+        let written = Self::create_system_event_in(&mut txn, request).await;
+        finish_diary_write(txn, written, is_cancelled).await
     }
 
     pub(crate) async fn create_system_event_in(
@@ -286,7 +285,10 @@ impl Database {
         check_readiness(&mut txn)
             .await
             .map_err(DiaryWriteError::Storage)?;
-        Self::require_diary_owner(&mut txn, owner).await?;
+        if let Err(error) = Self::require_diary_owner(&mut txn, owner).await {
+            txn.rollback().await?;
+            return Err(error);
+        }
         Ok(txn)
     }
 
@@ -313,16 +315,25 @@ impl Database {
     }
 }
 
-async fn commit_diary_write(
+async fn finish_diary_write<T>(
     txn: Transaction<'_, Postgres>,
+    result: Result<T, DiaryWriteError>,
     is_cancelled: impl Fn() -> bool,
-) -> Result<(), DiaryWriteError> {
-    if is_cancelled() {
+) -> Result<T, DiaryWriteError> {
+    let result = result.and_then(|value| {
+        if is_cancelled() {
+            Err(DiaryWriteError::Cancelled)
+        } else {
+            Ok(value)
+        }
+    });
+    if result.is_ok() {
+        txn.commit().await?;
+    } else {
+        // Wait until PostgreSQL releases the write lock before returning the rejection.
         txn.rollback().await?;
-        return Err(DiaryWriteError::Cancelled);
     }
-    txn.commit().await?;
-    Ok(())
+    result
 }
 
 struct AuditEntry<'a> {

@@ -8,8 +8,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, commit_diary_write,
-    creation_audit, event_document, load_event, metrics, stored_instant,
+    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, creation_audit, event_document,
+    finish_diary_write, load_event, metrics, stored_instant,
 };
 use crate::Database;
 
@@ -52,9 +52,8 @@ impl Database {
             return Err(DiaryWriteError::Cancelled);
         }
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let stored = Self::create_custom_entry_in(&mut txn, request).await?;
-        commit_diary_write(txn, is_cancelled).await?;
-        Ok(stored)
+        let stored = Self::create_custom_entry_in(&mut txn, request).await;
+        finish_diary_write(txn, stored, is_cancelled).await
     }
 
     pub(crate) async fn create_custom_entry_in(
@@ -171,9 +170,8 @@ impl Database {
         display_times: [Option<&str>; 2],
     ) -> Result<(StoredCustomEntry, bool), DiaryWriteError> {
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let updated = Self::update_custom_entry_in(&mut txn, request, display_times).await?;
-        txn.commit().await?;
-        Ok(updated)
+        let updated = Self::update_custom_entry_in(&mut txn, request, display_times).await;
+        finish_diary_write(txn, updated, || false).await
     }
 
     pub(crate) async fn update_custom_entry_in(

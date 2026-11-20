@@ -298,19 +298,37 @@ async fn verify_episode_corrections(
     };
 
     let too_short = report(migraine.clone(), Some("2026-10-25T10:30:00Z"), "confirmed")?;
+    let mut competing = inspect.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104619)")
+        .execute(&mut *competing)
+        .await?;
+    assert!(matches!(
+        db.update_system_event(request(&too_short, 1)).await,
+        Err(DiaryWriteError::Busy)
+    ));
+    competing.rollback().await?;
     assert!(matches!(
         db.update_system_event(request(&too_short, 1)).await,
         Err(DiaryWriteError::SymptomBounds)
     ));
+    let released: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(72104619)")
+        .fetch_one(inspect)
+        .await?;
+    assert!(
+        released,
+        "the rejected correction still held the write lock"
+    );
     let converted = report(
         json!({"type":"note","description":"Synthetic"}),
         None,
         "confirmed",
     )?;
-    assert!(matches!(
-        db.update_system_event(request(&converted, 1)).await,
-        Err(DiaryWriteError::LinkedObservations)
-    ));
+    let conversion = db.update_system_event(request(&converted, 1)).await;
+    assert!(
+        matches!(conversion, Err(DiaryWriteError::LinkedObservations)),
+        "unexpected linked episode conversion result: {:?}",
+        conversion.as_ref().err()
+    );
     let pending = report(migraine.clone(), None, "inferred")?;
     assert!(matches!(
         db.update_system_event(request(&pending, 1)).await,
