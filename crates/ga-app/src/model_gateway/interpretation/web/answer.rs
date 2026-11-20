@@ -7,7 +7,7 @@ use ga_domain::{
     analysis_budget::AnalysisBudget, event_input::source_offset_datetime,
     localization::catalog_text,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 
 use super::{CurrentModelPolicy, ModelGateway, WebInterpretation, urgent_notice};
@@ -87,6 +87,7 @@ impl ModelGateway<'_> {
                 session.at,
                 false,
                 &session.timezone,
+                session.at,
             )
             .await;
         let answer = self
@@ -97,7 +98,6 @@ impl ModelGateway<'_> {
                     text,
                     locale: language,
                     conversation: &analysis_conversation(memory.turns),
-                    quality_context: &json!({}),
                     personal_goals: &serde_json::to_value(&goals).ok()?,
                     replay_notice: None,
                     tools: &tools.offered_tools(),
@@ -120,6 +120,9 @@ impl ModelGateway<'_> {
             AnalysisResult::Safety { language } => {
                 Some(WebAnswer::Notice(urgent_notice(&language)))
             }
+            AnalysisResult::Replay { language } => {
+                Some(WebAnswer::Notice(catalog_text(&language, "agent.replay")?))
+            }
             AnalysisResult::NoAnswer { language } => Some(WebAnswer::Notice(catalog_text(
                 &language,
                 "agent.steps_exhausted",
@@ -129,12 +132,13 @@ impl ModelGateway<'_> {
                 narrative,
                 numbers,
                 timestamps,
-                include_current_state_freshness: false,
+                freshness,
                 used_evidence,
                 ..
             } => Some(WebAnswer::Grounded {
                 text: format_analysis_answer(
                     &language,
+                    freshness,
                     narrative,
                     numbers,
                     timestamps,
@@ -144,7 +148,6 @@ impl ModelGateway<'_> {
                 goals_revision: goals.revision,
                 interpretation,
             }),
-            _ => None,
         }
     }
 }

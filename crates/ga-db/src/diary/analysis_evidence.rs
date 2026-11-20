@@ -68,7 +68,8 @@ impl DiaryAnalysisFence {
                         .as_str()
                         .is_some_and(DailyAnalysisEvidence::is_daily_tool)
                     {
-                        DailyAnalysisEvidence::from_read(read).map(AnalysisReadFence::Daily)
+                        DailyAnalysisEvidence::from_read(read, timezone)
+                            .map(AnalysisReadFence::Daily)
                     } else {
                         DiaryReadFence::from_evidence(read).map(AnalysisReadFence::Diary)
                     }

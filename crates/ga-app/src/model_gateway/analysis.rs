@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 
 use ga_db::{
     conversation_memory::AnalysisSubject,
-    health_analysis::{DailyAnalysisEvidence, SLEEP_ANALYSIS},
+    health_analysis::{DATA_FRESHNESS, DailyAnalysisEvidence, SLEEP_ANALYSIS},
     share_policy::{
         ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
     },
@@ -14,10 +14,12 @@ use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError, AnalysisStage},
     analysis_claims::AnswerEvidence,
     analysis_step::{AnalysisStep, AnalysisStepAction, AnalysisStepError},
+    freshness::render_current_state_freshness,
     legacy_json::{JsonError, Utf8Layout, encode},
     localization::catalog_text,
     model_consent::ModelCategories,
     model_request::ApprovedModelSchema,
+    timestamp::StoredInstant,
 };
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -44,7 +46,6 @@ pub struct AnalysisQuestion<'a> {
     pub text: &'a str,
     pub locale: &'a str,
     pub conversation: &'a Value,
-    pub quality_context: &'a Value,
     pub personal_goals: &'a Value,
     pub replay_notice: Option<&'a str>,
     pub tools: &'a [OfferedReadTool<'a>],
@@ -81,10 +82,17 @@ pub trait AnalysisReadTools: Sync {
         name: &str,
         arguments: &Map<String, Value>,
     ) -> impl Future<Output = Option<AnalysisToolRead>> + Send;
+
+    fn quality_report(&self) -> impl Future<Output = Option<(Value, bool)>> + Send {
+        std::future::ready(None)
+    }
 }
 
 pub enum AnalysisResult {
     Safety {
+        language: String,
+    },
+    Replay {
         language: String,
     },
     Answer {
@@ -92,7 +100,7 @@ pub enum AnalysisResult {
         narrative: Option<String>,
         numbers: Vec<String>,
         timestamps: Vec<String>,
-        include_current_state_freshness: bool,
+        freshness: Option<String>,
         used_evidence: Vec<Value>,
         tracker_versions: BTreeSet<Uuid>,
     },
@@ -261,8 +269,43 @@ where
     let mut evidence: Vec<Value> = Vec::new();
     let mut tracker_versions = BTreeSet::new();
     let mut language = question.locale.to_owned();
+    let mut quality = None;
+    let mut quality_loaded = false;
+    let mut replaying = question.replay_notice.is_some();
     for turn in 0..MAX_ROUNDS {
         check_context(tools, budget).await?;
+        let point = matches!(evidence.as_slice(), [item] if
+            item["tool"] == SLEEP_ANALYSIS
+                && item["arguments"]["timing_only"] == true
+                && item["result"]["algorithm_version"] == "main-sleep-timing-v1"
+        );
+        if turn > 0 && !point && !quality_loaded {
+            let remaining = budget.remaining(Instant::now())?;
+            if let Some((report, ready)) = tokio::time::timeout(remaining, tools.quality_report())
+                .await
+                .map_err(|_| AnalysisBudgetError::Timeout)?
+            {
+                replaying |= !ready;
+                if report["channels"]
+                    .as_object()
+                    .is_some_and(|channels| !channels.is_empty())
+                {
+                    quality = Some(
+                        json!({"tool":DATA_FRESHNESS,"arguments":{},"result":report,"implicit":true}),
+                    );
+                }
+            }
+            quality_loaded = true;
+        }
+        let mut conversation = question.conversation.clone();
+        let replay_notice = if replaying {
+            if conversation.is_object() {
+                conversation["turns"] = json!([]);
+            }
+            catalog_text(&language, "agent.replay").or(question.replay_notice)
+        } else {
+            None
+        };
         let rounds = budget.remaining_tool_rounds(turn);
         let answer_only = rounds == 0;
         let descriptions: Vec<_> = if answer_only {
@@ -274,14 +317,15 @@ where
             "now": question.now,
             "timezone": question.timezone,
             "question": question.text,
-            "conversation": question.conversation,
-            "quality_context": question.quality_context,
+            "conversation": conversation,
+            "quality_context": quality.as_ref().map_or_else(|| json!({}), |value| value["result"]["channels"].clone()),
             "tools": descriptions,
             "personal_goals": question.personal_goals,
             "remaining_tool_rounds": rounds,
             "remaining_tool_calls": budget.remaining_tool_calls(),
             "answer_only": answer_only,
-            "garmin_replay_notice": question.replay_notice,
+            "planning_only": turn == 0,
+            "garmin_replay_notice": replay_notice,
             "evidence": evidence,
         }))?;
         let remaining = budget.record_model_call(
@@ -292,6 +336,7 @@ where
         )?;
         let daily = evidence
             .iter()
+            .chain(quality.iter())
             .filter(|item| {
                 item["tool"]
                     .as_str()
@@ -299,7 +344,8 @@ where
                     && item["result"].get("error").is_none()
             })
             .map(|item| {
-                DailyAnalysisEvidence::from_read(item).ok_or(AnalysisError::InvalidDocument)
+                DailyAnalysisEvidence::from_read(item, question.timezone)
+                    .ok_or(AnalysisError::InvalidDocument)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let output = tokio::time::timeout(
@@ -335,18 +381,41 @@ where
                 });
             }
             AnalysisStepAction::Answer(answer) => {
+                if answer.include_current_state_freshness && replaying {
+                    return Ok(AnalysisResult::Replay {
+                        language: answer.language.to_owned(),
+                    });
+                }
+                let mut selected: Vec<_> = evidence
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, _)| answer.selected.contains(&((*index + 1) as u64)))
+                    .map(|(_, item)| item)
+                    .collect();
+                let freshness = if answer.include_current_state_freshness {
+                    quality.as_ref().and_then(|read| {
+                        let at = StoredInstant::from_python_isoformat(question.now)?;
+                        let display = render_current_state_freshness(
+                            &read["result"]["channels"],
+                            at,
+                            question.timezone,
+                            answer.language,
+                        )?;
+                        if !display.is_empty() {
+                            selected.push(read.clone());
+                        }
+                        Some(display)
+                    })
+                } else {
+                    None
+                };
                 return Ok(AnalysisResult::Answer {
                     language: answer.language.to_owned(),
                     narrative: answer.narrative.map(str::to_owned),
                     numbers: answer.numbers,
                     timestamps: answer.timestamps,
-                    include_current_state_freshness: answer.include_current_state_freshness,
-                    used_evidence: evidence
-                        .into_iter()
-                        .enumerate()
-                        .filter(|(index, _)| answer.selected.contains(&((*index + 1) as u64)))
-                        .map(|(_, item)| item)
-                        .collect(),
+                    freshness,
+                    used_evidence: selected,
                     tracker_versions,
                 });
             }
@@ -482,12 +551,14 @@ pub(crate) fn analysis_conversation(turns: Vec<Value>) -> Value {
 
 pub(crate) fn format_analysis_answer(
     language: &str,
+    freshness: Option<String>,
     narrative: Option<String>,
     numbers: Vec<String>,
     timestamps: Vec<String>,
     evidence: &[Value],
 ) -> String {
     let body = [
+        freshness.unwrap_or_default(),
         narrative.unwrap_or_default(),
         numbers.join("\n"),
         timestamps.join("\n"),
@@ -499,9 +570,10 @@ pub(crate) fn format_analysis_answer(
     let message = |key| catalog_text(language, key).unwrap_or_default();
     let mut sources = Vec::new();
     if evidence.iter().any(|item| {
-        item["tool"]
-            .as_str()
-            .is_some_and(DailyAnalysisEvidence::is_daily_tool)
+        item["implicit"] != true
+            && item["tool"]
+                .as_str()
+                .is_some_and(DailyAnalysisEvidence::is_daily_tool)
     }) {
         sources.push("Garmin");
     }

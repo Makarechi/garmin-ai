@@ -46,7 +46,6 @@ fn request<'a>(tools: &'a [OfferedReadTool<'a>], empty: &'a Value) -> AnalysisQu
         text: "Synthetic вопрос",
         locale: "en",
         conversation: empty,
-        quality_context: empty,
         personal_goals: empty,
         replay_notice: None,
         tools,

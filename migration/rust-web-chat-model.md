@@ -39,5 +39,13 @@ The paired fixture matched the Python response and audit revision. It also
 verified that a duplicate request reuses the original response and a delayed
 model decision cannot undo a newer entry from another tab.
 
-Analysis, corrections with linked additional entries and combined browser
-flows remain release work.
+The ordinary model flow can include a localized description of the latest
+stored Garmin observations and daily summaries. The model receives only the
+channels permitted by the owner's current categories and packs. A replay
+in progress withholds dependent channels and keeps the recalculation notice.
+The server rechecks the underlying report and permissions before showing or
+acknowledging a stored answer. The paired web fixture exercised both permission
+revocation and replay after drafting, and matched the frozen Python replies.
+
+The remaining analytical tools, corrections with linked additional entries,
+and combined browser flows remain release work.

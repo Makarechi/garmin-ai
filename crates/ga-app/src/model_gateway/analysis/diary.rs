@@ -5,8 +5,8 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     health_analysis::{
-        DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON, PERSONAL_BASELINE,
-        SLEEP_ANALYSIS,
+        DATA_FRESHNESS, DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON,
+        PERSONAL_BASELINE, SLEEP_ANALYSIS,
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
@@ -25,6 +25,7 @@ static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| model_description(ReadToo
 static BASELINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Baseline));
 static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ComparePeriods));
 static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sleep));
+static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 
 fn model_description(tool: ReadTool) -> Value {
     let entry = tool.catalog_entry();
@@ -36,7 +37,7 @@ pub struct DiaryAnalysisTools<'a> {
     database: &'a Database,
     context: AnalysisSubject<'a>,
     model: ShareDestination<'a>,
-    daily_timezone: Option<&'a str>,
+    daily_read: Option<(&'a str, StoredInstant)>,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
@@ -49,7 +50,7 @@ impl<'a> DiaryAnalysisTools<'a> {
             database,
             context: context.into(),
             model: ShareDestination::new(DestinationKind::Model, model_instance)?,
-            daily_timezone: None,
+            daily_read: None,
         })
     }
 
@@ -60,6 +61,7 @@ impl<'a> DiaryAnalysisTools<'a> {
         at: StoredInstant,
         uses_voice: bool,
         configured_timezone: &'a str,
+        question_at: StoredInstant,
     ) -> Self {
         let categories = ModelCategories::HEALTH_AND_DIARY;
         let operation = if uses_voice {
@@ -70,7 +72,7 @@ impl<'a> DiaryAnalysisTools<'a> {
         if authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
             && self.database.analysis_health_allowed(self.context).await
         {
-            self.daily_timezone = Some(configured_timezone);
+            self.daily_read = Some((configured_timezone, question_at));
         }
         self
     }
@@ -80,7 +82,7 @@ impl<'a> DiaryAnalysisTools<'a> {
             name: EVENTS,
             description: &DESCRIPTION,
         }];
-        if self.daily_timezone.is_some() {
+        if self.daily_read.is_some() {
             offered.extend([
                 OfferedReadTool {
                     name: PERSONAL_BASELINE,
@@ -94,6 +96,10 @@ impl<'a> DiaryAnalysisTools<'a> {
                     name: SLEEP_ANALYSIS,
                     description: &SLEEP,
                 },
+                OfferedReadTool {
+                    name: DATA_FRESHNESS,
+                    description: &FRESHNESS,
+                },
             ]);
         }
         offered
@@ -102,7 +108,7 @@ impl<'a> DiaryAnalysisTools<'a> {
 
 impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     fn categories(&self) -> ModelCategories {
-        if self.daily_timezone.is_some() {
+        if self.daily_read.is_some() {
             ModelCategories::HEALTH_AND_DIARY
         } else {
             ModelCategories::DIARY
@@ -115,15 +121,23 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
             .await
     }
 
+    async fn quality_report(&self) -> Option<(Value, bool)> {
+        let (zone, at) = self.daily_read?;
+        self.database
+            .read_analysis_quality(self.context, zone, at)
+            .await
+            .ok()?
+    }
+
     async fn read(&self, name: &str, args: &Map<String, Value>) -> Option<AnalysisToolRead> {
-        if let Some(timezone) = self.daily_timezone
+        if let Some((timezone, at)) = self.daily_read
             && DailyAnalysisEvidence::is_daily_tool(name)
         {
             let query = DailyAnalysisQuery::from_arguments(name, args)?;
             return Some(AnalysisToolRead {
                 value: self
                     .database
-                    .read_analysis_daily(self.context, &query, timezone)
+                    .read_analysis_daily(self.context, &query, timezone, at)
                     .await
                     .ok()??,
                 tracker_versions: Default::default(),

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::{
     DailyHealthReader, HealthAnalysisError, begin_daily_analysis,
     freshness::{freshness_day, observation_freshness_in, timestamp},
+    read_daily::model_packs_allowed,
 };
 use crate::{
     Database,
@@ -108,26 +109,9 @@ impl Database {
                 return Ok(None);
             }
             let timezone = super::owner_timezone(&mut reader.0, configured_timezone).await?;
-            let mut report = data_freshness_in(&mut reader.0, at, &timezone).await?;
-            let Value::Object(channels) = report["channels"].take() else {
-                return Err(HealthAnalysisError::Database);
-            };
-            let mut visible = Map::new();
-            for (metric, channel) in channels {
-                if reader
-                    .permits_model_packs(owner, model_metric_packs(&metric))
-                    .await?
-                {
-                    visible.insert(metric, channel);
-                }
-            }
+            let (report, _) = model_freshness_in(&mut reader.0, owner, at, &timezone).await?;
             reader.0.commit().await?;
-            Ok(Some(json!({
-                "checked_at": report["checked_at"],
-                "available": !visible.is_empty(),
-                "channels": visible,
-                "limitations": report["limitations"],
-            })))
+            Ok(Some(report))
         })
         .await
         .map_err(|_| HealthAnalysisError::Database)?
@@ -153,6 +137,36 @@ impl Database {
         .await
         .map_err(|_| HealthAnalysisError::Database)?
     }
+}
+
+pub(super) async fn model_freshness_in(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    at: StoredInstant,
+    timezone: &str,
+) -> Result<(Value, bool), HealthAnalysisError> {
+    let mut report = data_freshness_in(txn, at, timezone).await?;
+    let ready = report["archive_replay"]["ready"]
+        .as_bool()
+        .ok_or(HealthAnalysisError::Database)?;
+    let Value::Object(channels) = report["channels"].take() else {
+        return Err(HealthAnalysisError::Database);
+    };
+    let mut visible = Map::new();
+    for (metric, channel) in channels {
+        if model_packs_allowed(txn, owner, model_metric_packs(&metric)).await? {
+            visible.insert(metric, channel);
+        }
+    }
+    Ok((
+        json!({
+            "checked_at": report["checked_at"],
+            "available": !visible.is_empty(),
+            "channels": visible,
+            "limitations": report["limitations"],
+        }),
+        ready,
+    ))
 }
 
 pub(crate) async fn data_freshness_in(
