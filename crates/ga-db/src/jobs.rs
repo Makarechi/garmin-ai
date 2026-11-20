@@ -19,7 +19,8 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    Database, ReadinessError, check_readiness, garmin_integration::current_source_selected,
+    Database, ReadinessError, check_readiness,
+    garmin_integration::{GarminIntegrationError, current_source_selected},
 };
 
 const ATTEMPT_LIMIT: i32 = 8;
@@ -309,8 +310,12 @@ impl Database {
         }
         let seconds = lease_seconds as i32;
         let mut txn = begin(&self.work).await?;
-        if !source_allows_job(&mut txn, source_instance).await? {
-            return Ok(None);
+        if let Some(instance) = source_instance {
+            match current_source_selected(&mut txn, instance).await {
+                Ok(true) => {}
+                Ok(false) | Err(GarminIntegrationError::Busy) => return Ok(None),
+                Err(_) => return Err(JobStoreError::Database),
+            }
         }
         let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(STORAGE_QUEUE_LOCK)
@@ -323,9 +328,7 @@ impl Database {
         let paused = crate::garmin_integration::garmin_pause(&mut *txn, now)
             .await
             .map_err(|error| match error {
-                crate::garmin_integration::GarminIntegrationError::InvalidState => {
-                    JobStoreError::InvalidRecordedState
-                }
+                GarminIntegrationError::InvalidState => JobStoreError::InvalidRecordedState,
                 _ => JobStoreError::Database,
             })?;
         if paused.is_some() {
