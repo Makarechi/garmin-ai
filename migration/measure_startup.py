@@ -125,7 +125,27 @@ def collect_web_chat_workload(args, observer, db, api, worker, elapsed):
     ]
     if args.web_chat_multibyte:
         command.append("--multibyte")
+    return collect_http_workload(command, args.interval, db, api, worker, elapsed)
 
+
+def collect_http_analytics(args, observer, db, api, worker, elapsed):
+    for filename in ("analytics_workload.py", "web_chat_workload.py"):
+        source = Path(__file__).with_name(filename)
+        docker("cp", str(source), f"{observer}:/tmp/{filename}")
+    command = [
+        "docker",
+        "exec",
+        observer,
+        "python",
+        "/tmp/analytics_workload.py",
+        str(args.analytics_rounds),
+        "--http-base",
+        f"http://{api}:8080",
+    ]
+    return collect_http_workload(command, args.interval, db, api, worker, elapsed)
+
+
+def collect_http_workload(command, interval, db, api, worker, elapsed):
     def capture():
         return {
             "elapsed_seconds": elapsed(),
@@ -142,13 +162,13 @@ def collect_web_chat_workload(args, observer, db, api, worker, elapsed):
         try:
             while process.poll() is None:
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("Synthetic web workload exceeded the measurement deadline")
+                    raise RuntimeError("Synthetic HTTP workload exceeded the measurement deadline")
                 samples.append(capture())
-                time.sleep(args.interval)
+                time.sleep(interval)
             stdout, _stderr = process.communicate(timeout=5)
             if process.returncode:
                 raise RuntimeError(
-                    f"Synthetic web workload failed with status {process.returncode}"
+                    f"Synthetic HTTP workload failed with status {process.returncode}"
                 )
         finally:
             if process.poll() is None:
@@ -232,7 +252,8 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
         app_env["GA_TIMEZONE"] = "UTC"
     api_env = dict(app_env)
     control_env = {}
-    if args.web_chat_messages:
+    paired_analytics = args.candidate_image is not None and args.analytics_rounds is not None
+    if args.web_chat_messages or paired_analytics:
         control_env["GA_API_KEY"] = secrets.token_urlsafe(32)
         api_env.update(control_env)
     if args.controls_during_fit:
@@ -425,13 +446,17 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             result = collect_web_chat_workload(args, observer, db, api, worker, elapsed)
             verify_web_chat_storage(db, result, multibyte=args.web_chat_multibyte)
             workload_result["web_chat_workload"] = result
+        if paired_analytics:
+            workload_result["http_analytics_workload"] = collect_http_analytics(
+                args, observer, db, api, worker, elapsed
+            )
         workload_modes = (
             ("fit", args.fit_records),
             ("fitlimit", args.fit_limit_mib),
             ("sync", args.sync_days),
             ("reconcile", args.reconcile_days),
             ("backup", args.backup_mib),
-            ("analytics", args.analytics_rounds),
+            ("analytics", None if paired_analytics else args.analytics_rounds),
             ("mcp", args.mcp_idle_seconds),
             ("voice", args.voice_rounds),
             ("replay", args.replay_days),
@@ -609,13 +634,14 @@ def main():
             "sync_days",
             "reconcile_days",
             "backup_mib",
-            "analytics_rounds",
             "mcp_idle_seconds",
             "voice_rounds",
             "replay_days",
         )
     ):
-        parser.error("The paired comparison supports startup, idle and --web-chat-messages")
+        parser.error(
+            "The paired comparison supports startup, idle, --web-chat-messages and --analytics-rounds"
+        )
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
@@ -645,6 +671,11 @@ def main():
             after = candidate["web_chat_workload"]
             if any(before[field] != after[field] for field in fields):
                 raise RuntimeError("The paired web chat workloads produced different results")
+        if args.analytics_rounds:
+            before = baseline["http_analytics_workload"]["result"]
+            after = candidate["http_analytics_workload"]["result"]
+            if before != after:
+                raise RuntimeError("The paired HTTP analytics workloads produced different results")
         print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
         return 0
     report = report_run(args, baseline_image, platform)

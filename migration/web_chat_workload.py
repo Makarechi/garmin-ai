@@ -19,7 +19,7 @@ LONG_MESSAGE_INTERVAL = 8
 MULTIBYTE_FILLER = "\U0001f7e6"
 
 
-def call(base, path, *, token=None, body=None):
+def call(base, path, *, token=None, body=None, timeout=8):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     data = None
     if body is not None:
@@ -27,7 +27,7 @@ def call(base, path, *, token=None, body=None):
         data = json.dumps(body, ensure_ascii=False).encode()
     request = Request(f"{base}{path}", headers=headers, data=data)
     start = monotonic()
-    with urlopen(request, timeout=8) as response:
+    with urlopen(request, timeout=timeout) as response:
         if response.status != 200:
             raise RuntimeError("Synthetic web request did not return HTTP 200")
         decoded = json.load(response)

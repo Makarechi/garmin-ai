@@ -196,6 +196,34 @@ measurements. All 55 sampled HTTP liveness probes succeeded while the work ran.
 The workload cgroups include fixture preparation, validation and charged file cache. Compare
 the named pipeline timings separately from the peak counters.
 
+### Paired analytical HTTP requests
+
+With both images supplied, `--analytics-rounds 1` and `--analytics-rounds 10`
+send the same four authenticated requests to each running API. A separate
+client writes the synthetic fixture to each fresh database. The measured query
+time starts after seeding. The API and worker retain their normal service limits,
+and liveness and operations probes run during the queries.
+
+The [first round](evidence/python-rust-http-analytics-1-linux-arm64.json.gz) and
+[ten rounds](evidence/python-rust-http-analytics-10-linux-arm64.json.gz) used the
+pinned Python runtime and the same native ARM64 installer preview built from
+tree `ac7683415de57a12c66b7a3e45e6e6829802dda7`. Both reached schema `c54f8a72d130`.
+Every round returned the same period estimate and confidence interval, all fifteen
+lag-pair counts, 23 matched migraine controls, and the same distribution across
+122 entries.
+
+| Observed workload | Python, 1 | Rust, 1 | Python, 10 | Rust, 10 |
+| --- | ---: | ---: | ---: | ---: |
+| Elapsed HTTP query phase | 0.245 s | 0.071 s | 1.837 s | 0.278 s |
+| Highest sampled API and worker charge | 376.11 MiB | 23.55 MiB | 275.52 MiB | 23.77 MiB |
+| Highest sampled charge including database | 541.80 MiB | 148.36 MiB | 414.06 MiB | 150.20 MiB |
+| Successful overlapping probe pairs | 2 | 1 | 14 | 3 |
+
+Each measurement ran on one shared Docker CPU. Memory samples cover fixture
+seeding, the query phase and the final reading. No sample showed swap use,
+a memory-limit event or an OOM kill. The Rust query phases yielded few overlapping
+probes. Sustained query concurrency and small-host operation still need measurement.
+
 
 ## Recovery, provider timeout and controls
 
