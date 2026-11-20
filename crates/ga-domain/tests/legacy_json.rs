@@ -60,3 +60,47 @@ fn retains_python_integer_digit_limit() -> Result<(), JsonError> {
     );
     Ok(())
 }
+
+#[test]
+fn canonical_json_stabilizes_after_one_pass_and_keeps_the_exact_byte_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    for layout in [
+        Utf8Layout::Archive,
+        Utf8Layout::Ordered,
+        Utf8Layout::Compact,
+    ] {
+        for text in [
+            "",
+            "кириллица ☕",
+            "e\u{0301}",
+            "🧪\n\t\u{0000}",
+            "quote \" slash \\",
+        ] {
+            for number in ["0", "-0.0", "1e-07", "1e+20", "9007199254740993000000"] {
+                let text = serde_json::to_string(text)?;
+                let input = format!(
+                    r#"{{ "z": [null, false, 0, {number}], "текст": {text}, "z": ["last", {number}] }}"#,
+                );
+                let input = input.as_bytes();
+                let encoded = encode(input, layout, input.len())?;
+                assert_eq!(
+                    encode(&encoded, layout, encoded.len())?,
+                    encoded,
+                    "{layout:?}, {text:?}, {number}"
+                );
+                assert_eq!(
+                    encode(&encoded, layout, encoded.len() - 1),
+                    Err(JsonError::InputTooLarge)
+                );
+                let parsed: serde_json::Value = serde_json::from_slice(&encoded)?;
+                assert_eq!(
+                    parsed["текст"],
+                    serde_json::from_str::<serde_json::Value>(&text)?
+                );
+                assert_eq!(parsed["z"][0], "last");
+                assert!(parsed["z"][1].is_number());
+            }
+        }
+    }
+    Ok(())
+}
