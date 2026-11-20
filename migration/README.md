@@ -86,6 +86,10 @@ Execute the recorded comparisons and the required release workloads before recor
 
 ## Rehearse recovery before and after native writes
 
+The [cutover](cutover-runbook.md) and [rollback](rollback-runbook.md) procedures
+connect these fixture checks to the release installation and change record.
+The [lock order](lock-order.md) describes the ownership and recovery fences.
+
 Run `python migration/check_cutover_restore.py /path/to/garmin-ai-rust` in the pinned Python
 test environment. Provide three distinct empty databases on the same isolated TimescaleDB
 server through `GA_TEST_DATABASE_URL`, `GA_TEST_BEFORE_RESTORE_URL` and
