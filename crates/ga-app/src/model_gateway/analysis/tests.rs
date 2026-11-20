@@ -38,6 +38,7 @@ impl AnalysisReadTools for Reader {
         Some(AnalysisToolRead {
             value: self.result.clone(),
             tracker_versions: self.tracker_version.into_iter().collect(),
+            ..Default::default()
         })
     }
 }
@@ -94,7 +95,7 @@ async fn shares_the_interpretation_budget_and_executes_only_offered_reads()
         request(&menu, &empty),
         &mut budget,
         &reader,
-        |prompt, versions, _daily, _generic, _timeline| {
+        |prompt, versions, _schemas, _daily, _generic, _timeline| {
             prompts.push(prompt);
             sent_requirements.push(versions);
             ready(replies.next().ok_or(AnalysisError::InvalidDocument))
@@ -157,7 +158,7 @@ async fn stops_before_a_second_model_call_after_context_revocation_or_oversized_
             request(&menu, &empty),
             &mut AnalysisBudget::new(Instant::now()),
             &reader,
-            |_, _, _, _, _| {
+            |_, _, _, _, _, _| {
                 calls += 1;
                 ready(Ok(
                     json!({"calls":[{"name":"personal_baseline","arguments_json":r#"{"metric":"sleep_score","start":"2026-11-15","end":"2026-11-16"}"#}]}),
@@ -200,7 +201,7 @@ async fn carries_timeline_evidence_to_the_next_send_check() -> Result<(), Box<dy
         request(&menu, &empty),
         &mut AnalysisBudget::new(Instant::now()),
         &reader,
-        |_, versions, _, _, timeline| {
+        |_, versions, _, _, _, timeline| {
             assert!(versions.is_empty());
             checked.push(timeline.len());
             ready(Ok(if timeline.is_empty() {

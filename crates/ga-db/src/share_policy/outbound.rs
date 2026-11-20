@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -143,4 +143,34 @@ async fn facts_allowed(
         destination,
     )
     .await
+}
+
+/// Legacy analytic delivery checks the current contract for each inspected schema.
+pub(crate) async fn schema_answer_references(
+    txn: &mut Transaction<'_, Postgres>,
+    target: &str,
+    versions: &BTreeSet<Uuid>,
+) -> Result<Option<Vec<String>>, SharePolicyError> {
+    if versions.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let ids: Vec<_> = versions.iter().copied().collect();
+    let definitions: Vec<Uuid> =
+        sqlx::query_scalar("SELECT definition_id FROM event_definition_versions WHERE id=ANY($1)")
+            .bind(&ids)
+            .fetch_all(&mut **txn)
+            .await?;
+    if definitions.len() != ids.len() {
+        return Ok(None);
+    }
+    let refs: Vec<_> = definitions
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| format!("definition:{id}"))
+        .collect();
+    if !intent_sharing_allowed(txn, target, &json!({"evidence_refs": &refs}), &[]).await? {
+        return Ok(None);
+    }
+    Ok(Some(refs))
 }

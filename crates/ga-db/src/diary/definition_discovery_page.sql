@@ -1,4 +1,5 @@
-            ) IS TRUE
+                ) IS TRUE
+            )
         )) AS permitted
     FROM event_definition_versions AS version
 ), selected AS (

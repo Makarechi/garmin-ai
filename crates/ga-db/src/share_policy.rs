@@ -4,7 +4,7 @@ mod outbound;
 
 pub use consent_records::TrackerShareConsent;
 pub use consent_writes::TrackerShareGrant;
-pub(crate) use outbound::intent_sharing_allowed;
+pub(crate) use outbound::{intent_sharing_allowed, schema_answer_references};
 
 use std::{error::Error, fmt, future::Future, time::Duration};
 

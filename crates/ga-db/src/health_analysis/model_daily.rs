@@ -834,7 +834,7 @@ fn oversized_model_result() -> Value {
         "instruction":"Narrow the date range or use an analysis tool. Do not treat this as empty data."})
 }
 
-pub(super) fn compact_document(document: JsonDocument) -> Result<Value, HealthAnalysisError> {
+pub(crate) fn compact_document(document: JsonDocument) -> Result<Value, HealthAnalysisError> {
     if document.byte_len() > MAX_MODEL_RESULT_BYTES as u64 {
         return Ok(oversized_model_result());
     }

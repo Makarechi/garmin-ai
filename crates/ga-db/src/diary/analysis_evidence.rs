@@ -6,11 +6,14 @@ use ga_domain::{
     sha256_hex,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use super::{DiaryEventRange, DiaryReadError, analysis_events_in};
+use super::{
+    DefinitionPage, DiaryEventRange, DiaryReadError, EVENT_DEFINITIONS, analysis_events_in,
+    definition_discovery::analysis_definitions_in,
+};
 use crate::{
     conversation_memory::{AnalysisReadContext, AnalysisSubject, ConversationBinding, MemoryFence},
     health_analysis::{
@@ -20,7 +23,7 @@ use crate::{
         owner_timezone,
     },
     model_gate::onboarding::onboarding_allows_model,
-    share_policy::{DestinationKind, ShareDestination},
+    share_policy::{DestinationKind, ShareDestination, schema_answer_references},
 };
 
 #[derive(Deserialize, Serialize)]
@@ -30,6 +33,8 @@ pub(crate) struct DiaryAnalysisFence {
     configured_timezone: String,
     goals_revision: u64,
     reads: Vec<AnalysisReadFence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    schema_versions: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -38,7 +43,14 @@ enum AnalysisReadFence {
     Daily(DailyAnalysisEvidence),
     Generic(GenericAnalysisEvidence),
     Timeline(TimelineReadFence),
+    Definitions(DefinitionReadFence),
     Diary(DiaryReadFence),
+}
+
+#[derive(Deserialize, Serialize)]
+struct DefinitionReadFence {
+    definition_arguments: Map<String, Value>,
+    definition_result_hash: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -68,12 +80,14 @@ impl DiaryAnalysisFence {
         configured_timezone: &str,
         goals_revision: u64,
         evidence: &[Value],
+        schema_versions: &BTreeSet<Uuid>,
     ) -> Option<Self> {
         Some(Self {
             model: model.to_owned(),
             timezone: timezone.to_owned(),
             configured_timezone: configured_timezone.to_owned(),
             goals_revision,
+            schema_versions: schema_versions.iter().map(Uuid::to_string).collect(),
             reads: evidence
                 .iter()
                 .map(|read| {
@@ -83,6 +97,8 @@ impl DiaryAnalysisFence {
                             read["generic_request_time"].as_str()?,
                         )
                         .map(AnalysisReadFence::Generic)
+                    } else if read["tool"] == EVENT_DEFINITIONS {
+                        DefinitionReadFence::from_evidence(read).map(AnalysisReadFence::Definitions)
                     } else if read["tool"] == TIMELINE {
                         TimelineReadFence::from_read(read).map(AnalysisReadFence::Timeline)
                     } else if read["tool"]
@@ -129,6 +145,7 @@ impl DiaryAnalysisFence {
                 AnalysisReadFence::Daily(read) => read.specification(),
                 AnalysisReadFence::Generic(read) => read.specification(),
                 AnalysisReadFence::Timeline(read) => read.specification(),
+                AnalysisReadFence::Definitions(read) => read.specification(),
             })
             .collect()
     }
@@ -173,10 +190,55 @@ impl DiaryAnalysisFence {
         let Ok(channel) = ShareDestination::new(DestinationKind::Channel, &channel) else {
             return Ok(None);
         };
+        let Ok(schema_versions) = self
+            .schema_versions
+            .iter()
+            .map(|id| id.parse::<Uuid>())
+            .collect::<Result<BTreeSet<_>, _>>()
+        else {
+            return Ok(None);
+        };
+        if schema_answer_references(txn, channel.instance(), &schema_versions)
+            .await
+            .map_err(|_| {
+                sqlx::Error::Protocol("Could not validate channel schema references".into())
+            })?
+            .is_none()
+        {
+            return Ok(None);
+        }
         let mut versions = BTreeSet::new();
         for read in &self.reads {
             let read = match read {
                 AnalysisReadFence::Diary(read) => read,
+                AnalysisReadFence::Definitions(read) => {
+                    let Some(input) = DefinitionPage::parse(&read.definition_arguments) else {
+                        return Ok(None);
+                    };
+                    let result = match analysis_definitions_in(
+                        txn,
+                        context.binding().owner_id,
+                        model,
+                        channel,
+                        input,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(DiaryReadError::Database) => {
+                            return Err(sqlx::Error::Protocol(
+                                "Could not validate definition evidence".into(),
+                            ));
+                        }
+                        Err(_) => return Ok(None),
+                    };
+                    if evidence_digest(&result.value).as_deref()
+                        != Some(&read.definition_result_hash)
+                    {
+                        return Ok(None);
+                    }
+                    continue;
+                }
                 AnalysisReadFence::Timeline(read) => {
                     match read.current(txn, context, model).await {
                         Ok(Some(current)) => versions.extend(current),
@@ -242,6 +304,28 @@ impl DiaryAnalysisFence {
             versions.extend(page.channel_versions);
         }
         Ok(Some(versions))
+    }
+}
+
+impl DefinitionReadFence {
+    fn from_evidence(evidence: &Value) -> Option<Self> {
+        let arguments = evidence["arguments"].as_object()?;
+        DefinitionPage::parse(arguments)?;
+        let result = &evidence["result"];
+        if !result.is_object() || result.get("error").is_some() {
+            return None;
+        }
+        Some(Self {
+            definition_arguments: arguments.clone(),
+            definition_result_hash: evidence_digest(result)?,
+        })
+    }
+
+    fn specification(&self) -> Value {
+        json!({
+            "tool": EVENT_DEFINITIONS, "arguments": &self.definition_arguments,
+            "result_hash": &self.definition_result_hash,
+        })
     }
 }
 

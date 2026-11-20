@@ -530,40 +530,7 @@ pub(super) fn document_response(document: JsonDocument) -> Response {
 pub(crate) fn definition_input(
     arguments: &Map<String, Value>,
 ) -> Result<ga_db::diary::DefinitionPage<'_>, &'static str> {
-    if arguments.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "after_key" | "definition_key" | "before_version" | "limit"
-        )
-    }) {
-        return Err("ValidationError");
-    }
-    let text = |key| match arguments.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.as_str())),
-        _ => Err("ValidationError"),
-    };
-    let before_version = match arguments.get("before_version") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(
-            ga_domain::legacy_json::integer_argument(value)
-                .ok_or("ValidationError")?
-                .to_string(),
-        ),
-    };
-    let limit = match arguments.get("limit") {
-        None => 10,
-        Some(value) => ga_domain::legacy_json::integer_argument(value)
-            .ok_or("ValidationError")?
-            .try_into()
-            .unwrap_or(0),
-    };
-    Ok(ga_db::diary::DefinitionPage {
-        after_key: text("after_key")?,
-        definition_key: text("definition_key")?,
-        before_version,
-        limit,
-    })
+    ga_db::diary::DefinitionPage::parse(arguments).ok_or("ValidationError")
 }
 
 pub(crate) fn catalog_input(

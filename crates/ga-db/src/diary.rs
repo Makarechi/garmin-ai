@@ -19,7 +19,7 @@ mod definition_discovery;
 pub use custom_registry::{
     ActivatedCustomDefinition, CustomRegistryError, ManageCustomDefinition, StoredCustomDefinition,
 };
-pub use definition_discovery::DefinitionPage;
+pub use definition_discovery::{DefinitionPage, EVENT_DEFINITIONS, ModelDefinitionPage};
 
 mod metrics;
 mod proactive_answers;
