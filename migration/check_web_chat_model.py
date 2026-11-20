@@ -96,6 +96,10 @@ WELLBEING_START = datetime(2026, 8, 1, 12, tzinfo=UTC)
 DEVICES_QUESTION = "What device and zone evidence exists for the synthetic activities?"
 DEVICES_ANSWER = "Current, older, and unavailable device evidence remain separate."
 DEVICES_START = datetime(2026, 6, 21, 10, tzinfo=UTC)
+ACTIVITIES_QUESTION = "Show the synthetic run summary and its saved activity parts."
+ACTIVITIES_ANSWER = "The saved lap and explicitly requested sample are available."
+ACTIVITY_START = datetime(2026, 6, 24, 10, tzinfo=UTC)
+ACTIVITY_ID = "synthetic-chat-activity"
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -136,6 +140,8 @@ def output(prompt):
             return wellbeing_output(prompt)
         if prompt["question"].startswith(DEVICES_QUESTION):
             return devices_output(prompt)
+        if prompt["question"].startswith(ACTIVITIES_QUESTION):
+            return activities_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -184,6 +190,7 @@ def output(prompt):
             WINDOWS_QUESTION,
             WELLBEING_QUESTION,
             DEVICES_QUESTION,
+            ACTIVITIES_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -477,6 +484,57 @@ def devices_output(prompt):
     }
     return AgentStep(
         calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
+    )
+
+
+def activities_output(prompt):
+    name = "activity_details"
+    oversized = prompt["question"].endswith(" including the large sample")
+    if prompt["evidence"]:
+        if oversized:
+            [item] = prompt["evidence"]
+            assert item["tool"] == name and item["result"]["error"] == "result_too_large"
+            return AgentStep(response_language="en")
+        summary, default, requested = prompt["evidence"]
+        assert [item["tool"] for item in (summary, default, requested)] == [
+            "activities",
+            name,
+            name,
+        ]
+        [activity] = summary["result"]["rows"]
+        assert activity["id"] == ACTIVITY_ID and activity["distance_m"] == 5000
+        [lap] = default["result"]["parts"]
+        assert lap["kind"] == "fit_lap" and not default["result"]["truncated"]
+        assert "synthetic-unrequested-raw" not in json.dumps(default["result"])
+        [sample] = requested["result"]["parts"]
+        assert sample["kind"] == "fit_record" and sample["payload"]["heart_rate"] == 132
+        assert requested["result"]["next_offset"] == 3 and requested["result"]["truncated"]
+        return AgentStep(answer=ACTIVITIES_ANSWER, evidence_ids=[1, 2, 3], response_language="en")
+    assert {"activities", name} <= {tool["name"] for tool in prompt["tools"]}
+    selected = {
+        "activity_id": ACTIVITY_ID,
+        "include_samples": True,
+        "offset": 3 if oversized else 2,
+        "limit": 1,
+    }
+    if oversized:
+        arguments = [(name, selected)]
+    else:
+        arguments = [
+            (
+                "activities",
+                {
+                    "start": ACTIVITY_START.isoformat(),
+                    "end": (ACTIVITY_START + timedelta(hours=3)).isoformat(),
+                    "kind": "running",
+                },
+            ),
+            (name, {"activity_id": ACTIVITY_ID}),
+            (name, selected),
+        ]
+    return AgentStep(
+        calls=[{"name": tool, "arguments_json": json.dumps(args)} for tool, args in arguments],
+        response_language="en",
     )
 
 
@@ -840,6 +898,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_event_windows(engine, python, native)
     exercise_wellbeing(engine, python, native)
     exercise_devices(engine, python, native)
+    exercise_activities(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1799,6 +1858,47 @@ def exercise_devices(engine, python, native):
     denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
     assert denied[0] == denied[1] and DEVICES_ANSWER not in denied[1], denied
     print("Matched bounded device evidence and withheld changed or unconsented fitness records")
+
+
+def exercise_activities(engine, python, native):
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["training"].llm_enabled = True
+        session.add(
+            Activity(
+                id=ACTIVITY_ID,
+                start=ACTIVITY_START,
+                end=ACTIVITY_START + timedelta(minutes=30),
+                kind="running",
+                timezone="UTC",
+                distance_m=5000,
+            )
+        )
+        session.flush()
+        for kind, sequence, payload in (
+            ("activity_details", 0, {"detail": "synthetic-unrequested-raw"}),
+            ("fit_lap", 0, {"distance": 5000}),
+            ("fit_record", 0, {"heart_rate": 132}),
+            ("fit_record", 1, {"synthetic": "x" * 100_000}),
+        ):
+            session.add(
+                ActivityPart(activity_id=ACTIVITY_ID, kind=kind, sequence=sequence, payload=payload)
+            )
+    old, new = [submit(client, ACTIVITIES_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert ACTIVITIES_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved Garmin data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    question = ACTIVITIES_QUESTION + " including the large sample"
+    excess = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert excess[0] == excess[1] and ACTIVITIES_ANSWER not in excess[1], excess
+    with Session(engine) as session, session.begin():
+        part = session.get(ActivityPart, (ACTIVITY_ID, "fit_record", 0))
+        part.payload = {"heart_rate": 133}
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    print(
+        "Matched filtered activities, default sample omission, pagination and bounded model output"
+    )
 
 
 def main():

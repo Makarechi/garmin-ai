@@ -14,7 +14,9 @@ use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
     ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod, MODEL_HEALTH_PACKS,
-    NapPolicy, SeriesReadError, begin_daily_analysis,
+    NapPolicy, SeriesReadError,
+    activity_reads::{model_activity_details_in, model_activity_summaries_in},
+    begin_daily_analysis,
     coffee::coffee_sleep_in,
     daily_metric,
     device_history::{device_history_in, device_range},
@@ -59,6 +61,8 @@ pub const STRESS_HOURS: &str = "analysis_stress_by_hour";
 pub const MIGRAINE_WINDOWS: &str = "analysis_migraine_windows";
 pub const WELLBEING_OBSERVATIONS: &str = "wellbeing_observations";
 pub const DEVICE_HISTORY: &str = "device_history";
+pub const ACTIVITIES: &str = "activities";
+pub const ACTIVITY_DETAILS: &str = "activity_details";
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "tool", content = "arguments", deny_unknown_fields)]
@@ -156,6 +160,22 @@ pub enum DailyAnalysisQuery {
         #[serde(default = "default_activity_limit")]
         limit: u16,
     },
+    #[serde(rename = "activities")]
+    Activities {
+        start: Value,
+        end: Value,
+        kind: Option<String>,
+    },
+    #[serde(rename = "activity_details")]
+    ActivityDetails {
+        activity_id: String,
+        #[serde(default)]
+        include_samples: bool,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default = "default_activity_limit")]
+        limit: u16,
+    },
     #[serde(rename = "analysis_migraine_windows")]
     Migraine {
         metric: String,
@@ -181,17 +201,18 @@ impl DailyAnalysisQuery {
             if !wellbeing_allowed(txn, context).await? {
                 return Ok(None);
             }
-            let parse = |value: &Value| {
-                StoredInstant::from_legacy_input(value)
-                    .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
-            };
-            return wellbeing_observations_in(txn, parse(start)?, parse(end)?, cursor.as_deref())
-                .await
-                .map(Some)
-                .map_err(|error| match error {
-                    DiaryReadError::Database => HealthAnalysisError::Database,
-                    _ => HealthAnalysisError::DateRange,
-                });
+            return wellbeing_observations_in(
+                txn,
+                parse_instant(start)?,
+                parse_instant(end)?,
+                cursor.as_deref(),
+            )
+            .await
+            .map(Some)
+            .map_err(|error| match error {
+                DiaryReadError::Database => HealthAnalysisError::Database,
+                _ => HealthAnalysisError::DateRange,
+            });
         }
         if !health_allowed(txn, context).await? {
             return Ok(None);
@@ -229,6 +250,13 @@ impl DailyAnalysisQuery {
                 .map(Some);
         }
         require_current_projection(txn).await?;
+        if matches!(
+            self,
+            Self::Activities { .. } | Self::ActivityDetails { .. } | Self::DeviceHistory { .. }
+        ) && !model_packs_allowed(txn, context.binding().owner_id, &["training"]).await?
+        {
+            return Ok(None);
+        }
         let period = |start: &str, end: &str| HealthPeriod::new(parse_day(start)?, parse_day(end)?);
         let result = match self {
             Self::Baseline { metric, start, end } => {
@@ -311,12 +339,8 @@ impl DailyAnalysisQuery {
                     .await
                     .map_err(model_series_error)?;
                 const MAX_RESULT_CHARS: usize = 24_000;
-                let too_large = || {
-                    Ok(Some(json!({"error":"result_too_large",
-                        "instruction":"Narrow the date range or use an analysis tool. Do not treat this as empty data."})))
-                };
                 if output.byte_len() > (MAX_RESULT_CHARS * 4) as u64 {
-                    return too_large();
+                    return Ok(Some(oversized_model_result()));
                 }
                 let mut bytes = Vec::with_capacity(output.byte_len() as usize);
                 output
@@ -331,7 +355,7 @@ impl DailyAnalysisQuery {
                     .count()
                     > MAX_RESULT_CHARS
                 {
-                    return too_large();
+                    return Ok(Some(oversized_model_result()));
                 }
                 serde_json::from_slice(&bytes).map_err(|_| HealthAnalysisError::Database)?
             }
@@ -429,23 +453,34 @@ impl DailyAnalysisQuery {
                 .map_err(model_series_error)?
             }
             Self::DeviceHistory { start, end, limit } => {
-                if !model_packs_allowed(txn, context.binding().owner_id, &["training"]).await? {
-                    return Ok(None);
-                }
-                let parse = |value: &Value| {
-                    StoredInstant::from_legacy_input(value)
-                        .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
-                };
                 let map_error = |error| match error {
                     DeviceHistoryError::Analysis(error) => error,
                     _ => HealthAnalysisError::DateRange,
                 };
-                let (start, end) =
-                    device_range(parse(start)?, parse(end)?, *limit).map_err(map_error)?;
+                let (start, end) = device_range(parse_instant(start)?, parse_instant(end)?, *limit)
+                    .map_err(map_error)?;
                 device_history_in(txn, start, end, *limit)
                     .await
                     .map_err(map_error)?
             }
+            Self::Activities { start, end, kind } => model_activity_result(
+                model_activity_summaries_in(
+                    txn,
+                    parse_instant(start)?,
+                    parse_instant(end)?,
+                    kind.as_deref(),
+                )
+                .await,
+            )?,
+            Self::ActivityDetails {
+                activity_id,
+                include_samples,
+                offset,
+                limit,
+            } => model_activity_result(
+                model_activity_details_in(txn, activity_id, *include_samples, *offset, *limit)
+                    .await,
+            )?,
             Self::Migraine {
                 metric,
                 start,
@@ -519,6 +554,8 @@ impl DailyAnalysisEvidence {
                 | EVENT_WINDOWS
                 | WELLBEING_OBSERVATIONS
                 | DEVICE_HISTORY
+                | ACTIVITIES
+                | ACTIVITY_DETAILS
         )
     }
 
@@ -760,6 +797,26 @@ fn default_hr_min() -> Number {
 
 fn default_hr_max() -> Number {
     250.into()
+}
+
+fn parse_instant(value: &Value) -> Result<StoredInstant, HealthAnalysisError> {
+    StoredInstant::from_legacy_input(value).ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
+}
+
+fn model_activity_result(
+    result: Result<Value, ActivityReadError>,
+) -> Result<Value, HealthAnalysisError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(ActivityReadError::ResultTooLarge) => Ok(oversized_model_result()),
+        Err(ActivityReadError::Analysis(error)) => Err(error),
+        Err(_) => Err(HealthAnalysisError::DateRange),
+    }
+}
+
+fn oversized_model_result() -> Value {
+    json!({"error":"result_too_large",
+        "instruction":"Narrow the date range or use an analysis tool. Do not treat this as empty data."})
 }
 
 fn default_activity_limit() -> u16 {

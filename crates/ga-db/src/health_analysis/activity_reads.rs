@@ -3,8 +3,12 @@ mod nonsample;
 use std::{error::Error, fmt, time::Duration};
 
 use futures_util::TryStreamExt;
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{
+    legacy_json::{Utf8Layout, encode},
+    timestamp::StoredInstant,
+};
 use serde_json::{Value, json};
+use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 
 use self::nonsample::NON_SAMPLE_FIT;
@@ -20,6 +24,7 @@ pub enum ActivityReadError {
     ActivityAnalysisLimit,
     Pagination,
     Missing,
+    ResultTooLarge,
     Analysis(HealthAnalysisError),
 }
 
@@ -35,6 +40,7 @@ impl fmt::Display for ActivityReadError {
             }
             Self::Pagination => f.write_str("Invalid activity pagination"),
             Self::Missing => f.write_str("Activity not found"),
+            Self::ResultTooLarge => f.write_str("Activity evidence exceeds the model result limit"),
             Self::Analysis(error) => error.fmt(f),
         }
     }
@@ -56,6 +62,7 @@ impl From<sqlx::Error> for ActivityReadError {
 
 type ActivityRow = (String, OffsetDateTime, OffsetDateTime, OffsetDateTime);
 
+const MODEL_RESULT_CHARS: usize = 24_000;
 const ACTIVITY_FLOATS: &[&str] = &[
     "duration_seconds",
     "moving_seconds",
@@ -136,31 +143,9 @@ impl DailyHealthReader {
         kind: Option<&str>,
         limit: u16,
     ) -> Result<Value, ActivityReadError> {
-        let mut rows = Vec::new();
-        let truncated = {
-            let mut results = sqlx::query_as::<_, ActivityRow>(
-                r#"SELECT row_to_json(activity)::text, start, "end", updated_at
-                   FROM activities AS activity WHERE start >= $1 AND start < $2
-                       AND ($3::text IS NULL OR kind = $3)
-                   ORDER BY start LIMIT $4"#,
-            )
-            .bind(start)
-            .bind(end)
-            .bind(kind.filter(|kind| !kind.is_empty()))
-            .bind(i64::from(limit) + 1)
-            .fetch(&mut *self.0);
-            let mut truncated = false;
-            while let Some(row) = results.try_next().await? {
-                if rows.len() == usize::from(limit) {
-                    truncated = true;
-                    break;
-                }
-                rows.push(activity(row)?);
-            }
-            truncated
-        };
+        let result = summaries_in(&mut self.0, start, end, kind, limit, false).await?;
         self.0.commit().await?;
-        Ok(page("rows", rows, truncated))
+        Ok(result)
     }
 
     pub async fn activity_details(
@@ -186,43 +171,161 @@ impl DailyHealthReader {
         offset: u32,
         limit: u16,
     ) -> Result<Value, ActivityReadError> {
-        let row = sqlx::query_as::<_, ActivityRow>(
-            r#"SELECT row_to_json(activity)::text, start, "end", updated_at
-                   FROM activities AS activity WHERE id=$1"#,
+        let result = details_in(
+            &mut self.0,
+            activity_id,
+            include_samples,
+            offset,
+            limit,
+            false,
         )
-        .bind(activity_id)
-        .fetch_optional(&mut *self.0)
-        .await?
-        .ok_or(ActivityReadError::Missing)?;
-        let summary = activity(row)?;
-        let mut parts = Vec::new();
-        let truncated = {
-            let mut results =
-                sqlx::query_scalar::<_, Option<String>>(include_str!("activity_reads/parts.sql"))
-                    .bind(activity_id)
-                    .bind(include_samples)
-                    .bind(i64::from(offset))
-                    .bind(i64::from(limit))
-                    .bind(NON_SAMPLE_FIT)
-                    .fetch(&mut *self.0);
-            let mut truncated = false;
-            while let Some(document) = results.try_next().await? {
-                match document {
-                    Some(document) => parts.push(
-                        serde_json::from_str(&document)
-                            .map_err(|_| HealthAnalysisError::Database)?,
-                    ),
-                    None => truncated = true,
-                }
-            }
-            truncated
-        };
+        .await?;
         self.0.commit().await?;
-        let mut response = page("parts", parts, truncated);
-        response["activity"] = summary;
-        response["next_offset"] = json!(truncated.then(|| offset + u32::from(limit)));
-        Ok(response)
+        Ok(result)
     }
+}
+
+pub(super) async fn model_activity_summaries_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: StoredInstant,
+    end: StoredInstant,
+    kind: Option<&str>,
+) -> Result<Value, ActivityReadError> {
+    const LIMIT: u16 = 200;
+    let (start, end) = activity_range(start, end, LIMIT)?;
+    summaries_in(txn, start, end, kind, LIMIT, true).await
+}
+
+pub(super) async fn model_activity_details_in(
+    txn: &mut Transaction<'_, Postgres>,
+    activity_id: &str,
+    include_samples: bool,
+    offset: u32,
+    limit: u16,
+) -> Result<Value, ActivityReadError> {
+    check_pagination(offset, limit)?;
+    details_in(txn, activity_id, include_samples, offset, limit, true).await
+}
+
+async fn summaries_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    kind: Option<&str>,
+    limit: u16,
+    model: bool,
+) -> Result<Value, ActivityReadError> {
+    let mut remaining = model.then_some(MODEL_RESULT_CHARS);
+    let mut rows = Vec::new();
+    let mut results = sqlx::query_as::<_, ActivityRow>(
+        r#"SELECT CASE WHEN octet_length(document) > $5 THEN '' ELSE document END,
+                   start, "end", updated_at
+            FROM (
+                SELECT row_to_json(activity)::text AS document, start, "end", updated_at
+                FROM activities AS activity WHERE start >= $1 AND start < $2
+                    AND ($3::text IS NULL OR kind = $3)
+                ORDER BY start LIMIT $4
+            ) AS selected ORDER BY start"#,
+    )
+    .bind(start)
+    .bind(end)
+    .bind(kind.filter(|kind| !kind.is_empty()))
+    .bind(i64::from(limit) + 1)
+    .bind(document_byte_limit(model))
+    .fetch(&mut **txn);
+    let mut truncated = false;
+    while let Some(row) = results.try_next().await? {
+        if rows.len() == usize::from(limit) {
+            truncated = true;
+            break;
+        }
+        let row = activity(row)?;
+        account_for_value(&row, &mut remaining)?;
+        rows.push(row);
+    }
+    let response = page("rows", rows, truncated);
+    account_for_value(&response, &mut model.then_some(MODEL_RESULT_CHARS))?;
+    Ok(response)
+}
+
+async fn details_in(
+    txn: &mut Transaction<'_, Postgres>,
+    activity_id: &str,
+    include_samples: bool,
+    offset: u32,
+    limit: u16,
+    model: bool,
+) -> Result<Value, ActivityReadError> {
+    let mut remaining = model.then_some(MODEL_RESULT_CHARS);
+    let row = sqlx::query_as::<_, ActivityRow>(
+        r#"SELECT CASE WHEN octet_length(document) > $2 THEN '' ELSE document END,
+                   start, "end", updated_at
+            FROM (
+                SELECT row_to_json(activity)::text AS document, start, "end", updated_at
+                FROM activities AS activity WHERE id=$1
+            ) AS selected"#,
+    )
+    .bind(activity_id)
+    .bind(document_byte_limit(model))
+    .fetch_optional(&mut **txn)
+    .await?
+    .ok_or(ActivityReadError::Missing)?;
+    let summary = activity(row)?;
+    account_for_value(&summary, &mut remaining)?;
+    let mut parts = Vec::new();
+    let mut results =
+        sqlx::query_scalar::<_, Option<String>>(include_str!("activity_reads/parts.sql"))
+            .bind(activity_id)
+            .bind(include_samples)
+            .bind(i64::from(offset))
+            .bind(i64::from(limit))
+            .bind(NON_SAMPLE_FIT)
+            .bind(document_byte_limit(model))
+            .fetch(&mut **txn);
+    let mut truncated = false;
+    while let Some(document) = results.try_next().await? {
+        match document {
+            Some(document) if document.is_empty() => return Err(ActivityReadError::ResultTooLarge),
+            Some(document) => {
+                let part =
+                    serde_json::from_str(&document).map_err(|_| HealthAnalysisError::Database)?;
+                account_for_value(&part, &mut remaining)?;
+                parts.push(part);
+            }
+            None => truncated = true,
+        }
+    }
+    let mut response = page("parts", parts, truncated);
+    response["activity"] = summary;
+    response["next_offset"] = json!(truncated.then(|| offset + u32::from(limit)));
+    account_for_value(&response, &mut model.then_some(MODEL_RESULT_CHARS))?;
+    Ok(response)
+}
+
+fn document_byte_limit(model: bool) -> Option<i32> {
+    model.then_some((4 * MODEL_RESULT_CHARS) as i32)
+}
+
+fn account_for_value(
+    value: &Value,
+    remaining: &mut Option<usize>,
+) -> Result<(), ActivityReadError> {
+    if let Some(remaining) = remaining {
+        let raw = serde_json::to_vec(value).map_err(|_| HealthAnalysisError::Database)?;
+        if raw.len() > *remaining * 4 {
+            return Err(ActivityReadError::ResultTooLarge);
+        }
+        let encoded = encode(&raw, Utf8Layout::Ordered, raw.len())
+            .map_err(|_| HealthAnalysisError::Database)?;
+        let characters = std::str::from_utf8(&encoded)
+            .map_err(|_| HealthAnalysisError::Database)?
+            .chars()
+            .count();
+        *remaining = remaining
+            .checked_sub(characters)
+            .ok_or(ActivityReadError::ResultTooLarge)?;
+    }
+    Ok(())
 }
 
 fn activity_range(
@@ -257,7 +360,10 @@ fn page(key: &str, values: Vec<Value>, truncated: bool) -> Value {
     response
 }
 
-fn activity((document, start, end, updated_at): ActivityRow) -> Result<Value, HealthAnalysisError> {
+fn activity((document, start, end, updated_at): ActivityRow) -> Result<Value, ActivityReadError> {
+    if document.is_empty() {
+        return Err(ActivityReadError::ResultTooLarge);
+    }
     let mut row: Value =
         serde_json::from_str(&document).map_err(|_| HealthAnalysisError::Database)?;
     let values = row.as_object_mut().ok_or(HealthAnalysisError::Database)?;
