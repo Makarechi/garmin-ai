@@ -78,9 +78,39 @@ Python image and a local native runtime image containing the release binary for
 The combined value sums the API and worker `memory.current` readings within each sample.
 The readings are sequential and include charged cache.
 
-Use the paired result for cold migration, startup and idle memory. The existing Python
-workload options run independently. The release still needs paired workload measurements,
-the small-host reserve and the sustained run described below.
+## Paired web chat under tenfold message volume
+
+Add `--web-chat-messages 80` or `--web-chat-messages 800` to the paired command above.
+Each run writes a fresh synthetic conversation through HTTP. Seven messages in every
+eight write a 4,000-character note. Each eighth message is 16,000 characters, the
+web chat limit. The runner retries a note with the same request ID, checks the 100-message
+history limit, and compares all committed note content, counts and audit records. A second
+client probes liveness and the authenticated operations endpoint during the writes.
+
+The [80-message](evidence/python-rust-web-chat-80-linux-arm64.json.gz) and
+[800-message](evidence/python-rust-web-chat-800-linux-arm64.json.gz) trials used the same
+Linux ARM64 images, one shared CPU, PostgreSQL settings and memory limits as the startup
+comparison. Both implementations stored the same input text and one response per request.
+At 800 messages, both stored 700 notes, 100 maximum-length messages, and 700 create audit
+records. The final HTTP page contained 100 messages and their replies.
+
+| Observed workload | Python, 80 | Rust, 80 | Python, 800 | Rust, 800 |
+| --- | ---: | ---: | ---: | ---: |
+| Highest sampled API and worker charge | 356.74 MiB | 29.81 MiB | 262.25 MiB | 30.47 MiB |
+| Highest sampled charge including database | 532.76 MiB | 155.80 MiB | 416.49 MiB | 166.35 MiB |
+| Message write latency, p95 | 21.95 ms | 12.52 ms | 29.88 ms | 14.58 ms |
+| Liveness latency during writes, p95 | 27.69 ms | 53.27 ms | 5.32 ms | 8.15 ms |
+| Operations latency during writes, p95 | 27.98 ms | 8.01 ms | 27.60 ms | 9.76 ms |
+
+No sample showed swap use, a memory-limit event, or an OOM kill. The charges include
+cache, and the containers are sampled sequentially. The two message counts ran
+against four independent fresh databases, so their startup and cache charges can vary.
+The 80-message runs yielded only 10 and 6 liveness probes and 4 and 3 memory samples.
+Treat their peaks and percentiles as individual observations.
+
+The fixtures use ASCII text in the core-only configuration. The remaining release
+comparison includes multibyte payloads, external integrations, background workloads,
+and the sustained run on a representative small host.
 
 ## Verification boundary
 
