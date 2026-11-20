@@ -374,6 +374,24 @@ an OOM kill. In a preliminary 384 MiB-per-backup trial, the 128 MiB Rust case re
 392.55 MiB including the API, with up to 364.80 MiB of file charge in the backup cgroup.
 The tighter profile keeps the full workload within the combined budget.
 
+### Paired offline archive replay
+
+Add `--replay-days 7` or `--replay-days 30` to the paired image command.
+The fixture prepares independent archives and databases, then starts each ordinary
+worker. It checks every saved archive key, content hash, parser version and status,
+and compares the retained daily and intraday projection. One deliberately damaged
+object leaves a single error and keeps replay readiness false in both runtimes.
+
+| Window | Matched outcomes | Python / Rust completion time | Python / Rust sampled API and worker peak |
+| --- | --- | --- | --- |
+| [7 days](evidence/python-rust-offline-replay-7-linux-arm64.json.gz) | 84 normalized, 55 archived, 1 error | 423.099 s / 181.687 s | 267.97 MiB / 25.62 MiB |
+| [30 days](evidence/python-rust-offline-replay-30-linux-arm64.json.gz) | 360 normalized, 239 archived, 1 error | 1565.521 s / 699.088 s | 270.45 MiB / 45.10 MiB |
+
+Both runtimes used the same CPU affinity and PostgreSQL configuration within each
+comparison. Completion includes ordinary worker startup and queue pacing. The
+recorded application samples reported zero swap and zero OOM kills. Each pair
+matched both the archive and projection SHA-256 digests.
+
 ## Recovery, provider timeout and controls
 
 | Case | Result |
