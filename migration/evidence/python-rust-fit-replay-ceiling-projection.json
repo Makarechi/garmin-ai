@@ -1,0 +1,16 @@
+{
+  "fixture": "100 MiB generated FIT archive",
+  "python_git_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+  "python_image_id": "sha256:c99c94edb95f38260cb5fcde2f7949a02648641de086e2461065cc7ea41aa95c",
+  "rust_git_sha": "9f982edca566bee9a6c053952d79b07041e67064",
+  "rust_image_id": "sha256:059d72e3182966ce8d098bd68704910440521ce79995d5f47b94c336716cc276",
+  "migration_revision": "c54f8a72d130",
+  "reference_worker_limit_bytes": 4294967296,
+  "matching": {
+    "status": "normalized",
+    "stored_rows": 409600,
+    "source_parser_version": 9,
+    "archive_sha256": "a182ed98122c41ae1e275cfb9765a285d324a2c1c8cc229b180c955a60cacc71",
+    "projection_sha256": "fdc981447141e8cd99c4f8303a0c131915f5db7a22c288647d26d78aa0637179"
+  }
+}

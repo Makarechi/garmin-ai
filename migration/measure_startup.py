@@ -146,7 +146,23 @@ def collect_http_analytics(args, observer, db, api, worker, elapsed):
     return collect_client_workload(command, args.interval, db, api, worker, elapsed)
 
 
-def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=None):
+def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
+    for filename in ("fit_replay_workload.py", "fit_workload.py", "fitlimit_workload.py"):
+        source = Path(__file__).with_name(filename)
+        docker("cp", str(source), f"{observer}:/tmp/{filename}")
+    command = ["docker", "exec", observer, "python", "/tmp/fit_replay_workload.py"]
+    fixture = json.loads(docker(*command[1:], "prepare", args.fit_replay, timeout=300).stdout)
+    start = time.monotonic()
+    result = collect_client_workload(
+        [*command, "wait", fixture["source"]], args.interval, db, api, worker, elapsed, probe=probe
+    )
+    processing = round(time.monotonic() - start, 3)
+    validated = json.loads(docker(*command[1:], "verify", json.dumps(fixture), timeout=600).stdout)
+    public_fixture = {key: value for key, value in fixture.items() if key not in {"source", "job"}}
+    return {**public_fixture, **result, **validated, "observed_queue_seconds": processing}
+
+
+def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=None, probe=None):
     def capture():
         resources = {
             "elapsed_seconds": elapsed(),
@@ -156,6 +172,9 @@ def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=
         }
         if mcp:
             resources["mcp"] = sample(mcp)
+        if probe:
+            live = probe("/health/live")
+            resources["health_live_ms"] = float(live.stdout) if not live.returncode else None
         return resources
 
     samples = []
@@ -254,8 +273,10 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             GA_TOKEN_DIR="/app/tokens/garmin",
             GA_BACKUP_DIR="/app/backups",
         )
-    if args.replay_days:
+    if args.replay_days or args.fit_replay:
         app_env["GA_TIMEZONE"] = "UTC"
+    if args.fit_replay:
+        app_env["GA_DATA_DIR"] = "/fit-fixture"
     api_env = dict(app_env)
     control_env = {}
     paired_analytics = args.candidate_image is not None and args.analytics_rounds is not None
@@ -390,16 +411,53 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             limits=(*cpu, "-m", "192m", "--memory-swap", "384m"),
             env=api_env,
         )
+        shared_archive = ()
+        worker_command = (executable, "worker")
+        if args.fit_replay:
+            volume = f"{prefix}-fit"
+            docker("volume", "create", volume)
+            cleanup.callback(docker, "volume", "rm", volume, check=False)
+            shared_archive = ("--mount", f"type=volume,src={volume},dst=/fit-fixture")
+            # Retain the cgroup counters even if the workload exceeds its memory limit.
+            worker_command = (
+                "sh",
+                "-c",
+                f"{executable} worker; echo $? > /fit-fixture/worker-exit; exec sleep infinity",
+            )
+        # Readiness probes execute in a separate cgroup. Their RSS is excluded.
+        launch(
+            observer,
+            observer_image or image,
+            "sleep",
+            "infinity",
+            env=app_env | control_env,
+            mounts=shared_archive,
+        )
+        if shared_archive:
+            docker(
+                "exec",
+                "--user",
+                "0",
+                observer,
+                "install",
+                "-d",
+                "-m",
+                "0700",
+                "-o",
+                "1000",
+                "-g",
+                "1000",
+                "/fit-fixture",
+                "/fit-fixture/raw",
+            )
         launch(
             worker,
             image,
-            executable,
-            "worker",
+            *worker_command,
             limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
             env=app_env,
+            mounts=shared_archive,
         )
-        # Readiness probes execute in a separate cgroup. Their RSS is excluded.
-        launch(observer, observer_image or image, "sleep", "infinity", env=app_env | control_env)
 
         def probe(path):
             url = f"http://{api}:8080{path}"
@@ -449,6 +507,10 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             time.sleep(args.interval)
 
         workload_result = {}
+        if args.fit_replay:
+            workload_result["fit_replay_workload"] = collect_fit_replay(
+                args, observer, db, api, worker, elapsed, probe
+            )
         if args.web_chat_messages:
             result = collect_web_chat_workload(args, observer, db, api, worker, elapsed)
             verify_web_chat_storage(db, result, multibyte=args.web_chat_multibyte)
@@ -619,6 +681,56 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
         }
 
 
+def check_fit_replay(size, before, after):
+    fixture = ("records", "uncompressed_bytes", "compressed_bytes", "archive_sha256")
+    if any(before[key] != after[key] for key in fixture):
+        raise RuntimeError("The paired FIT experiments used different archived inputs")
+    if size == "over-limit":
+        for result in (before, after):
+            if (
+                result.get("status") != "error"
+                or result["stored_rows"]
+                or result["fit_pointer_published"]
+            ):
+                raise RuntimeError("Oversized FIT input published a projection")
+        return
+    for result in (before, after):
+        if result is before and size == "ceiling" and result.get("worker_exit_code") == 137:
+            memory = result["after_workload"]["worker"]["memory.events"]
+            counters = {
+                name: int(value) for name, value in (line.split() for line in memory.splitlines())
+            }
+            if not counters["oom_kill"] or result["stored_rows"] or result["fit_pointer_published"]:
+                raise RuntimeError("Baseline FIT exit lacked clean OOM evidence")
+            continue
+        if (
+            result.get("status"),
+            result["source_status"],
+            result["stored_rows"],
+            result["fit_pointer_published"],
+        ) != ("normalized", "normalized", result["records"], True):
+            runtime = "Python" if result is before else "Rust"
+            summary = {
+                key: result.get(key)
+                for key in (
+                    "status",
+                    "error_type",
+                    "source_status",
+                    "stored_rows",
+                    "fit_pointer_published",
+                    "job_status",
+                )
+            }
+            raise RuntimeError(
+                f"{runtime} FIT replay did not publish the expected records {summary}"
+            )
+    if (
+        before.get("status") == "normalized"
+        and before["projection_sha256"] != after["projection_sha256"]
+    ):
+        raise RuntimeError("The paired FIT experiments published different projections")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="Locally built baseline application image")
@@ -632,6 +744,7 @@ def main():
     workload = parser.add_mutually_exclusive_group()
     workload.add_argument("--fit-records", type=int, choices=(5000, 50000))
     workload.add_argument("--fit-limit-mib", type=int, choices=(100,))
+    workload.add_argument("--fit-replay", choices=("developer", "ceiling", "over-limit"))
     workload.add_argument("--sync-days", type=int, choices=(1, 7, 30, 365))
     workload.add_argument("--reconcile-days", type=int, choices=(7, 30))
     workload.add_argument("--backup-mib", type=int, choices=(32, 128))
@@ -667,7 +780,9 @@ def main():
             "replay_days",
         )
     ):
-        parser.error("The paired comparison supports startup, web chat, HTTP analytics and MCP")
+        parser.error(
+            "The paired comparison supports startup, web chat, analytics, MCP and FIT replay"
+        )
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
@@ -683,6 +798,16 @@ def main():
             or revision != candidate["migration_revision"]
         ):
             raise RuntimeError("Benchmark versions migrated to different database schemas")
+        if args.fit_replay:
+            try:
+                check_fit_replay(
+                    args.fit_replay,
+                    baseline["fit_replay_workload"],
+                    candidate["fit_replay_workload"],
+                )
+            except RuntimeError:
+                print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+                raise
         if args.web_chat_messages:
             fields = (
                 "notes",
