@@ -261,6 +261,7 @@ async fn delete_entry(database: &Database, owner: Uuid, id: Uuid, query: Option<
             StatusCode::CONFLICT,
             "Detach linked medication or symptom observations before removing or changing this migraine",
         ),
+        Err(error @ DiaryWriteError::Busy) => write_failure(error),
         Err(_) => storage_unavailable(),
     }
 }
@@ -385,6 +386,11 @@ pub(super) fn access_failure(status: StatusCode) -> Response {
 
 pub(super) fn write_failure(error: DiaryWriteError) -> Response {
     match error {
+        DiaryWriteError::Busy => (
+            [(header::RETRY_AFTER, "1")],
+            detail(StatusCode::SERVICE_UNAVAILABLE, "Diary writes are busy"),
+        )
+            .into_response(),
         DiaryWriteError::Replay(ReplayConflict::InputChanged) => detail(
             StatusCode::CONFLICT,
             "Idempotency key already used for different data",

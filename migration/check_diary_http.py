@@ -4,9 +4,12 @@ import argparse
 import json
 import selectors
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
+from time import monotonic, sleep
 from uuid import UUID
 
 import httpx
@@ -651,6 +654,66 @@ def compare_linked_episode_edits(python, native, engine):
     assert changes == ["create"]
 
 
+def verify_busy_response(response):
+    assert response.status_code == 503, response.status_code
+    assert response.headers.get("Retry-After") == "1", response.headers
+    assert response.json() == {"detail": "Diary writes are busy"}
+
+
+def compare_concurrent_retries(python, native, engine):
+    request_headers = headers("both", "synthetic-concurrent-diary")
+    before_events, before_creates = counts(engine)
+    start = Barrier(10, timeout=10)
+
+    def submit(client):
+        start.wait()
+        return client.post(PATH, headers=request_headers, json=NOTE)
+
+    clients = [python, native] * 5
+    with ThreadPoolExecutor(max_workers=start.parties) as pool:
+        responses = list(pool.map(submit, clients))
+    retry = [index for index, response in enumerate(responses) if response.status_code == 503]
+    if retry:
+        for index in retry:
+            assert clients[index] is native
+            verify_busy_response(responses[index])
+        sleep(1)
+        for index in retry:
+            responses[index] = native.post(PATH, headers=request_headers, json=NOTE)
+    assert all(response.status_code == 200 for response in responses), [
+        response.status_code for response in responses
+    ]
+    canonical = responses[0].json()
+    assert all(response.json() == canonical for response in responses)
+    assert counts(engine) == (before_events + 1, before_creates + 1)
+
+    delete_path = f"{PATH}/{canonical['id']}?revision=1"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            waiting = pool.submit(python.post, PATH, headers=request_headers, json=NOTE)
+            deadline = monotonic() + 5
+            while not connection.scalar(
+                text("""
+                SELECT EXISTS(
+                    SELECT 1 FROM pg_locks
+                    WHERE locktype='advisory' AND classid=0 AND objid=72104619 AND NOT granted
+                      AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                )
+            """)
+            ):
+                assert monotonic() < deadline, "Pinned Python did not wait for the diary write lock"
+                sleep(0.02)
+            verify_busy_response(native.post(PATH, headers=request_headers, json=NOTE))
+            verify_busy_response(native.delete(delete_path, headers=headers("both")))
+            assert not waiting.done()
+            assert counts(engine) == (before_events + 1, before_creates + 1)
+        resumed = waiting.result(timeout=5)
+    assert resumed.status_code == 200 and resumed.json() == canonical
+    assert native.post(PATH, headers=request_headers, json=NOTE).json() == canonical
+    assert native.delete(delete_path, headers=headers("both")).status_code == 200
+
+
 def run(binary):
     engine = isolated_engine()
     try:
@@ -699,12 +762,15 @@ def run(binary):
                     compare_system_updates(python, native, engine)
                     compare_linked_episode_edits(python, native, engine)
                     compare_undo(python, native, engine)
+                    compare_concurrent_retries(python, native, engine)
             finally:
                 process.terminate()
                 process.wait(timeout=5)
     finally:
         engine.dispose()
-    print("Verified native diary HTTP authorization, canonical responses and durable retries")
+    print(
+        "Verified native diary HTTP authorization, canonical responses and durable concurrent retries"
+    )
 
 
 if __name__ == "__main__":
