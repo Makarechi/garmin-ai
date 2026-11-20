@@ -6,9 +6,9 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 use ga_db::{
     conversation_memory::AnalysisSubject,
     health_analysis::{
-        COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisEvidence, HEALTH_RANGE, HEALTH_SNAPSHOT,
-        LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
-        STRESS_HOURS,
+        COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE,
+        HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY,
+        SLEEP_ANALYSIS, STRESS_HOURS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -344,6 +344,7 @@ where
                                 | HEALTH_RANGE
                                 | METRIC_SERIES
                                 | COFFEE_SLEEP
+                                | EVENT_WINDOWS
                         )
                 })
                 .map(|tool| tool.description)
@@ -634,6 +635,7 @@ pub(crate) fn format_analysis_answer(
             || item["tool"] == GENERIC_ANALYSIS
             || item["tool"] == MIGRAINE_WINDOWS
             || item["tool"] == COFFEE_SLEEP
+            || item["tool"] == EVENT_WINDOWS
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
     }) {

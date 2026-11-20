@@ -21,8 +21,9 @@ pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
 pub use model_daily::{
     COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
-    HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
-    PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
+    EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES,
+    MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
+    STRESS_HOURS,
 };
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;
