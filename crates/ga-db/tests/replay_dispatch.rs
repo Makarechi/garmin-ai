@@ -225,6 +225,31 @@ async fn routes_supported_jobs_and_fences_fit_publication() -> Result<(), Box<dy
     let detail = run
         .capture("activity_weather", "10", json!({"wind":4}))
         .await?;
+    let mut archived = Vec::new();
+    for endpoint in [
+        "all_day_events",
+        "body_battery_events",
+        "body_composition",
+        "endurance",
+        "hill",
+        "intensity",
+        "resting_hr",
+        "training_status",
+        "devices",
+    ] {
+        let key = if endpoint == "devices" {
+            "global"
+        } else {
+            &day
+        };
+        archived.push(
+            run.capture(endpoint, key, json!({"synthetic": endpoint}))
+                .await?,
+        );
+    }
+    let empty = run
+        .capture("all_day_events", "2026-10-20", json!([]))
+        .await?;
     let fit = run.capture_fit("20").await?;
     let unknown: Uuid = sqlx::query_scalar(
         "INSERT INTO source_payloads(id,source,endpoint,source_key,payload_hash,archive_key,fetched_at,parser_version,status,payload)
@@ -253,12 +278,20 @@ async fn routes_supported_jobs_and_fences_fit_publication() -> Result<(), Box<dy
     );
     assert_eq!(result.job, RecordedJobStatus::Completed);
     // The remaining variants use the same dispatch entry point and publish one outcome per lease.
-    for (order, raw, expected) in [
-        (4, daily, DocumentStatus::Normalized),
-        (5, intraday, DocumentStatus::Normalized),
-        (6, summary, DocumentStatus::Normalized),
-        (7, detail, DocumentStatus::Archived),
-    ] {
+    let documents = [
+        (daily, DocumentStatus::Normalized),
+        (intraday, DocumentStatus::Normalized),
+        (summary, DocumentStatus::Normalized),
+        (detail, DocumentStatus::Archived),
+        (empty, DocumentStatus::Empty),
+    ];
+    let documents = documents.into_iter().chain(
+        archived
+            .into_iter()
+            .map(|raw| (raw, DocumentStatus::Archived)),
+    );
+    for (order, (raw, expected)) in documents.enumerate() {
+        let order = i64::try_from(order)? + 4;
         let job = run.queue(&raw.to_string(), 9, order).await?;
         let lease = run.claim(10).await?;
         assert_eq!(lease.id(), job);

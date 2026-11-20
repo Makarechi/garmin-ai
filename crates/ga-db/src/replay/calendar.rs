@@ -24,6 +24,7 @@ use crate::{
         replay_activity_summaries,
     },
     health_projection::{rebuild_calendar, rebuild_intraday_view},
+    history_windows::DAY_ENDPOINTS,
     jobs::{FailureReason, JobOutcome, JobStoreError, RecordedJobStatus, ReplayJobLease},
     raw_capture::{GARMIN_LEGACY_SOURCE, lock_legacy_scope},
 };
@@ -104,6 +105,7 @@ pub(super) enum ReplayScope {
     Intraday,
     ActivityDocument,
     ActivitySummary,
+    ArchiveOnly,
 }
 
 impl ReplayScope {
@@ -116,6 +118,8 @@ impl ReplayScope {
             Self::ActivityDocument
         } else if ActivitySummaryKind::for_endpoint(endpoint).is_some() {
             Self::ActivitySummary
+        } else if endpoint == "devices" || DAY_ENDPOINTS.contains(&endpoint) {
+            Self::ArchiveOnly
         } else {
             return Err(CalendarReplayError::OtherEndpoint);
         })
@@ -559,6 +563,11 @@ where
             .await
             .map(|status| status.label())
             .map_err(CalendarReplayError::Publication),
+            ReplayScope::ArchiveOnly => {
+                normalize_health_payload(endpoint, request.source_key, payload)
+                    .map(|projection| projection.status.label())
+                    .map_err(|_| DocumentError::InvalidHealthPayload.into())
+            }
             ReplayScope::ActivityDocument | ReplayScope::ActivitySummary => {
                 replay_activity_projection(&mut candidate, request, payload).await
             }
