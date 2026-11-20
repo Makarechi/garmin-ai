@@ -5,10 +5,11 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     health_analysis::{
-        COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY, DailyAnalysisAccess, DailyAnalysisEvidence,
-        DailyAnalysisQuery, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION,
-        METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY,
-        SLEEP_ANALYSIS, STRESS_HOURS, WELLBEING_OBSERVATIONS,
+        ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
+        DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery, EVENT_WINDOWS,
+        HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
+        PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
+        WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -37,6 +38,8 @@ static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::
 static RANGE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Range));
 static SERIES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MetricSeries));
 static RUNNING: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::RunningEfficiency));
+static ACTIVITY_LIST: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Activities));
+static DETAILS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ActivityDetails));
 static DEVICES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::DeviceHistory));
 static STRESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::StressHours));
 static WELLBEING: LazyLock<Value> =
@@ -181,10 +184,20 @@ impl<'a> DiaryAnalysisTools<'a> {
                 });
             }
             if access.training {
-                offered.push(OfferedReadTool {
-                    name: DEVICE_HISTORY,
-                    description: &DEVICES,
-                });
+                offered.extend([
+                    OfferedReadTool {
+                        name: DEVICE_HISTORY,
+                        description: &DEVICES,
+                    },
+                    OfferedReadTool {
+                        name: ACTIVITIES,
+                        description: &ACTIVITY_LIST,
+                    },
+                    OfferedReadTool {
+                        name: ACTIVITY_DETAILS,
+                        description: &DETAILS,
+                    },
+                ]);
             }
             if access.wellbeing {
                 offered.push(OfferedReadTool {
