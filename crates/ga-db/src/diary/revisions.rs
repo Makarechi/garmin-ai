@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, check_pack, commit_diary_write,
+    AuditEntry, DiaryWriteError, StoredSystemEvent, append_audit, check_pack, finish_diary_write,
     invalidate_migraine_insights, load_event, metrics, relation_id, stored_instant,
     validate_relation,
 };
@@ -49,9 +49,8 @@ impl Database {
             return Err(DiaryWriteError::Cancelled);
         }
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let deleted = Self::delete_event_in(&mut txn, request, None).await?;
-        commit_diary_write(txn, is_cancelled).await?;
-        Ok(deleted)
+        let deleted = Self::delete_event_in(&mut txn, request, None).await;
+        finish_diary_write(txn, deleted, is_cancelled).await
     }
 
     pub(crate) async fn delete_event_in(
@@ -127,24 +126,26 @@ impl Database {
             .validate_for_write()
             .map_err(DiaryWriteError::Input)?;
         let mut txn = self.begin_diary_write(request.owner_id).await?;
-        let (revision, namespace, _) = lock_update_target(&mut txn, request.event_id).await?;
-        if revision != request.expected_revision {
-            return Err(DiaryWriteError::RevisionChanged);
+        let corrected = async {
+            let (revision, namespace, _) = lock_update_target(&mut txn, request.event_id).await?;
+            if revision != request.expected_revision {
+                return Err(DiaryWriteError::RevisionChanged);
+            }
+            let before = load_event(&mut txn, request.event_id, false).await?;
+            let display_times = report
+                .display_times()
+                .map(|time| time.map(display_timestamp));
+            update_system_event_in(
+                &mut txn,
+                request,
+                before,
+                namespace.as_deref(),
+                display_times,
+            )
+            .await
         }
-        let before = load_event(&mut txn, request.event_id, false).await?;
-        let display_times = report
-            .display_times()
-            .map(|time| time.map(display_timestamp));
-        let corrected = update_system_event_in(
-            &mut txn,
-            request,
-            before,
-            namespace.as_deref(),
-            display_times,
-        )
-        .await?;
-        txn.commit().await?;
-        Ok(corrected)
+        .await;
+        finish_diary_write(txn, corrected, || false).await
     }
 
     /// Merge an MCP correction into the locked current revision, then apply the ordinary audit.
@@ -160,35 +161,38 @@ impl Database {
             return Err(DiaryWriteError::Cancelled);
         }
         let mut txn = self.begin_diary_write(owner_id).await?;
-        let (revision, namespace, change_allowed) = lock_update_target(&mut txn, event_id).await?;
-        if namespace.as_deref() == Some("user") {
-            return Err(DiaryWriteError::CustomEntry);
+        let corrected = async {
+            let (revision, namespace, change_allowed) =
+                lock_update_target(&mut txn, event_id).await?;
+            if namespace.as_deref() == Some("user") {
+                return Err(DiaryWriteError::CustomEntry);
+            }
+            if !change_allowed {
+                return Err(DiaryWriteError::OperationForbidden);
+            }
+            let before = load_event(&mut txn, event_id, false).await?;
+            let (report, display_times) = corrected_report(&before.snapshot, changes)?;
+            if revision != expected_revision {
+                return Err(DiaryWriteError::RevisionChanged);
+            }
+            update_system_event_in(
+                &mut txn,
+                UpdateSystemEvent {
+                    owner_id,
+                    authenticated_actor: "mcp",
+                    event_id,
+                    expected_revision,
+                    report: &report,
+                    operation_id: None,
+                },
+                before,
+                namespace.as_deref(),
+                display_times,
+            )
+            .await
         }
-        if !change_allowed {
-            return Err(DiaryWriteError::OperationForbidden);
-        }
-        let before = load_event(&mut txn, event_id, false).await?;
-        let (report, display_times) = corrected_report(&before.snapshot, changes)?;
-        if revision != expected_revision {
-            return Err(DiaryWriteError::RevisionChanged);
-        }
-        let corrected = update_system_event_in(
-            &mut txn,
-            UpdateSystemEvent {
-                owner_id,
-                authenticated_actor: "mcp",
-                event_id,
-                expected_revision,
-                report: &report,
-                operation_id: None,
-            },
-            before,
-            namespace.as_deref(),
-            display_times,
-        )
-        .await?;
-        commit_diary_write(txn, is_cancelled).await?;
-        Ok(corrected)
+        .await;
+        finish_diary_write(txn, corrected, is_cancelled).await
     }
 }
 

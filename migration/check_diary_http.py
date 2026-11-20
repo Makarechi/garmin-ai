@@ -602,6 +602,55 @@ def compare_system_updates(python, native, engine):
         assert saved.status_code == 200 and saved.json()["end"] is None
 
 
+def compare_linked_episode_edits(python, native, engine):
+    access = headers("both")
+    episode = {
+        "start": "2026-10-25T10:00:00Z",
+        "payload": {"type": "migraine", "severity": 4},
+    }
+    created = python.post(PATH, headers=access, json=episode)
+    assert created.status_code == 200, created.text
+    identity = UUID(created.json()["id"])
+    linked = python.post(
+        PATH,
+        headers=access,
+        json={
+            "start": "2026-10-25T10:45:00Z",
+            "payload": {
+                "type": "symptom_observation",
+                "severity": 3,
+                "episode_id": str(identity),
+            },
+        },
+    )
+    assert linked.status_code == 200, linked.text
+    path = f"{PATH}/{identity}"
+    invalid_edits = (
+        episode | {"end": "2026-10-25T10:30:00Z"},
+        episode | {"payload": {"type": "note", "description": "Synthetic replacement"}},
+        episode | {"status": "inferred"},
+    )
+    for event in invalid_edits:
+        request = {"revision": 1, "event": event}
+        expected, actual = (
+            client.put(path, headers=access, json=request) for client in (python, native)
+        )
+        assert expected.status_code == actual.status_code == 409, (expected.text, actual.text)
+        assert expected.json() == actual.json()
+    after = native.get(path, headers=headers("reader"))
+    assert after.status_code == 200 and after.json() == created.json()
+    with engine.connect() as connection:
+        changes = (
+            connection.execute(
+                text("SELECT action FROM audit_log WHERE event_id=:id ORDER BY id"),
+                {"id": identity},
+            )
+            .scalars()
+            .all()
+        )
+    assert changes == ["create"]
+
+
 def run(binary):
     engine = isolated_engine()
     try:
@@ -648,6 +697,7 @@ def run(binary):
                     compare_tracker_creation(python, native, engine)
                     compare_tracker_updates(python, native, engine)
                     compare_system_updates(python, native, engine)
+                    compare_linked_episode_edits(python, native, engine)
                     compare_undo(python, native, engine)
             finally:
                 process.terminate()
