@@ -915,7 +915,10 @@
         "migration/check_file_import_cli.py",
         "migration/check_source_page_storage.py",
         "migration/check_source_metric_mappings.py",
-        "migration/check_scheduled_source_extension.py"
+        "migration/check_scheduled_source_extension.py",
+        "migration/check_source_extension_poll.py",
+        "migration/check_erasure_live_writers.py",
+        "migration/evidence/native-source-file-import-linux.json"
       ],
       "data_contracts": [
         "Source identity, preview/confirmation, revisioned numeric mappings, pagination, corrections and quarantine."
@@ -928,7 +931,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R20",
       "known_limits": [
-        "Verify automatic source import, retries, correction, erasure and replay together, including supported edge input sizes on both platforms."
+        "Synthetic source import, retries, correction, erasure and replay matched the reference. The platform-dependent boundary for extreme JSON nesting still needs a release decision."
       ],
       "approved_deviations": []
     },

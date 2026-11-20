@@ -1,0 +1,33 @@
+{
+  "scope": "PAR-14",
+  "verification": "e2e_synthetic",
+  "reference": {
+    "source_commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_file_source.py": 31,
+      "tests/test_source_metric_mapping.py": 19,
+      "tests/test_source_metric_plugin.py": 1,
+      "tests/test_source_runtime.py": 18
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "test_source_commit": "ed4614ed96bbd64d57321d961f01278e932a149a",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "trace_sha256": {
+    "mapping_and_permissions": "59ffa4f3a1e523b5e035c91f6ca7c06764ea14700a2e3c09bf13e663625f3728",
+    "file_confirmation_and_atomic_retry": "3b744ae60a0ef3c87b1729f1e0c22ce3fccbf2af2c4d700baf34033976f62e5e",
+    "record_corrections_and_cursor": "268473c29cd8715affcb26c671f5e246b03e98f511b80e025a41a1f2c236e329",
+    "interrupted_source_worker": "bf5a357811bcdd5b62e70b5938ae8829d7a83d46a87ebd2024d09396a007b51f",
+    "source_erasure_and_late_pages": "b2e5c69fcc6f3944eae1940a100013cdc2726966a7191fcf081a686ce8c3cbae"
+  },
+  "emulated_linux_amd64": {
+    "image_digest": "sha256:df0cce863470a7a2de6ff4c519e5f3c3aef6b6fa93543149cdd06c9a9173f080",
+    "app_binary_sha256": "95ebd282f61a06d6e672f88039e0a05d21b84fce6eb3ee76398a9019a455de28",
+    "ordinary_cli_boundary_previews": 6,
+    "trace_sha256": "2293e6fcd2e875dd7bade96cba0b293db6620f5a649b7ca4c7dd70ec289ea768"
+  },
+  "remaining_release_validation": "The extreme, platform-dependent JSON nesting difference is pending a release decision."
+}
