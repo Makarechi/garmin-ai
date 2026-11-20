@@ -853,7 +853,11 @@
         "migration/check_model_extension_runtime.py",
         "migration/check_source_extension.py",
         "migration/check_source_extension_poll.py",
-        "migration/check_scheduled_source_extension.py"
+        "migration/check_scheduled_source_extension.py",
+        "migration/check_scenario_packs_http.py",
+        "migration/check_community_packs.py",
+        "migration/check_tracker_pack_export.py",
+        "migration/evidence/native-packs-extensions-linux-arm64.json"
       ],
       "data_contracts": [
         "Built-in and portable data-only packs, scoped configured extension instances, declared capabilities and TCK."
@@ -862,12 +866,10 @@
         "Owner manages packs and may enable an extension explicitly; installation is separate from activation."
       ],
       "resource_scenario": "Core startup and extension selection with failure",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R31",
-      "known_limits": [
-        "Exercise the implemented extension boundaries against the final package and verify the approved third-party inventory."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
