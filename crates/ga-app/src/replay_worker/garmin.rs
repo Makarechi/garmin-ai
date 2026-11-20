@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
+use std::{error::Error, fmt, path::Path, sync::Arc, time::Duration};
 
 use ga_app::garmin_worker::{
     EndpointWorker, GarminConfigurationError, GarminQueueStep, GarminSourceSettings,
@@ -10,19 +10,14 @@ use ga_db::{
     garmin_integration::{GarminSourceAdmission, GarminTransportOutcome},
     garmin_periodic::GarminSyncSchedule,
 };
-use ga_fit::{ExportLimits, MAX_FIT_BYTES};
 use ga_garmin::{GarminError, TransportConfig, legacy::LegacyReader};
 use tokio::time::{Instant, sleep};
 
-use super::{MAX_JSON_BYTES, clock};
+use super::{FIT_EXPORT_LIMITS, MAX_JSON_BYTES, clock};
 use crate::configuration;
 
 const PLAN_INTERVAL: Duration = Duration::from_secs(30);
 const JOB_INTERVAL: Duration = Duration::from_secs(1);
-const FIT_ZIP_ENTRIES: NonZeroUsize = match NonZeroUsize::new(4096) {
-    Some(limit) => limit,
-    None => NonZeroUsize::MIN,
-};
 
 #[derive(Debug)]
 pub(super) enum GarminWorkerError {
@@ -177,11 +172,7 @@ impl GarminWorkerSettings {
                 instance: self.source.instance_id(),
                 history_days: self.history_days,
                 backups_enabled: backups_running,
-                fit_limits: ExportLimits {
-                    max_bytes: MAX_FIT_BYTES,
-                    max_zip_entries: FIT_ZIP_ENTRIES,
-                    max_duration: Duration::from_secs(120),
-                },
+                fit_limits: FIT_EXPORT_LIMITS,
             };
             let Ok(now) = clock() else {
                 sleep(PLAN_INTERVAL).await;
