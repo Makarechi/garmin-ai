@@ -619,7 +619,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R17",
       "known_limits": [
-        "Synthetic HTTP, MCP and Telegram mutations matched the data, revisions and audit. The difference in HTTP responses during write contention still needs a release decision."
+        "Synthetic HTTP, MCP and Telegram mutations matched the data, revisions and audit. Admitted HTTP mutations now wait on a busy diary writer. The native limit on concurrent pending HTTP mutations still needs a release decision."
       ],
       "approved_deviations": []
     },

@@ -4,7 +4,7 @@ import argparse
 import json
 import selectors
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -660,7 +660,7 @@ def verify_busy_response(response):
     assert response.json() == {"detail": "Diary writes are busy"}
 
 
-def compare_concurrent_retries(python, native, engine):
+def compare_concurrent_writes(python, native, engine):
     request_headers = headers("both", "synthetic-concurrent-diary")
     before_events, before_creates = counts(engine)
     start = Barrier(10, timeout=10)
@@ -672,14 +672,6 @@ def compare_concurrent_retries(python, native, engine):
     clients = [python, native] * 5
     with ThreadPoolExecutor(max_workers=start.parties) as pool:
         responses = list(pool.map(submit, clients))
-    retry = [index for index, response in enumerate(responses) if response.status_code == 503]
-    if retry:
-        for index in retry:
-            assert clients[index] is native
-            verify_busy_response(responses[index])
-        sleep(1)
-        for index in retry:
-            responses[index] = native.post(PATH, headers=request_headers, json=NOTE)
     assert all(response.status_code == 200 for response in responses), [
         response.status_code for response in responses
     ]
@@ -687,11 +679,14 @@ def compare_concurrent_retries(python, native, engine):
     assert all(response.json() == canonical for response in responses)
     assert counts(engine) == (before_events + 1, before_creates + 1)
 
-    delete_path = f"{PATH}/{canonical['id']}?revision=1"
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    entry_path = f"{PATH}/{canonical['id']}"
+    with ThreadPoolExecutor(max_workers=2) as pool:
         with engine.begin() as connection:
             connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
-            waiting = pool.submit(python.post, PATH, headers=request_headers, json=NOTE)
+            waiting = [
+                pool.submit(client.post, PATH, headers=request_headers, json=NOTE)
+                for client in (python, native)
+            ]
             deadline = monotonic() + 5
             while not connection.scalar(
                 text("""
@@ -704,14 +699,81 @@ def compare_concurrent_retries(python, native, engine):
             ):
                 assert monotonic() < deadline, "Pinned Python did not wait for the diary write lock"
                 sleep(0.02)
-            verify_busy_response(native.post(PATH, headers=request_headers, json=NOTE))
-            verify_busy_response(native.delete(delete_path, headers=headers("both")))
-            assert not waiting.done()
+            assert not wait(waiting, timeout=0.2, return_when=FIRST_COMPLETED).done
+            assert native.get("/health/ready").status_code == 200
+            assert native.get(entry_path, headers=headers("reader")).json() == canonical
             assert counts(engine) == (before_events + 1, before_creates + 1)
-        resumed = waiting.result(timeout=5)
-    assert resumed.status_code == 200 and resumed.json() == canonical
-    assert native.post(PATH, headers=request_headers, json=NOTE).json() == canonical
-    assert native.delete(delete_path, headers=headers("both")).status_code == 200
+        for request in waiting:
+            resumed = request.result(timeout=5)
+            assert resumed.status_code == 200 and resumed.json() == canonical
+
+    with ThreadPoolExecutor(max_workers=17) as pool:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            waiting = [
+                pool.submit(native.post, PATH, headers=request_headers, json=NOTE)
+                for _ in range(17)
+            ]
+            excess, admitted = wait(waiting, timeout=3, return_when=FIRST_COMPLETED)
+            assert len(excess) == 1 and len(admitted) == 16
+            verify_busy_response(excess.pop().result())
+            assert native.get("/health/ready").status_code == 200
+            assert counts(engine) == (before_events + 1, before_creates + 1)
+        for request in admitted:
+            resumed = request.result(timeout=5)
+            assert resumed.status_code == 200 and resumed.json() == canonical
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            deletion = pool.submit(
+                native.delete, f"{entry_path}?revision=1", headers=headers("both")
+            )
+            assert not wait([deletion], timeout=0.2).done
+        assert deletion.result(timeout=5).status_code == 200
+    print("Verified shared lock waiting, bounded admission, and reads during queued writes")
+
+
+def verify_queue_byte_limit(native, engine):
+    previous = counts(engine)
+    prefix = json.dumps(
+        {"definition_key": "user.synthetic_byte_budget", "start": NOTE["start"], "timezone": "UTC"}
+    )[:-1].encode()
+    prefix += b',"values":{"load":['
+    suffix = b"0]}}"
+    body = prefix + b"0," * ((1024 * 1024 - len(prefix) - len(suffix)) // 2) + suffix
+    assert (1024 * 1024) - 1 <= len(body) <= 1024 * 1024
+    request_headers = {**headers("both"), "Content-Type": "application/json"}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            waiting = [
+                pool.submit(native.post, "/entries", headers=request_headers, content=body)
+                for _ in range(3)
+            ]
+            excess, admitted = wait(waiting, timeout=3, return_when=FIRST_COMPLETED)
+            assert len(excess) == 1 and len(admitted) == 2
+            verify_busy_response(excess.pop().result())
+            assert native.get("/health/ready").status_code == 200
+        for request in admitted:
+            assert request.result(timeout=5).status_code == 404
+    assert counts(engine) == previous
+    print("Verified diary write admission bounds the total size of waiting request bodies")
+
+
+def verify_shutdown_with_pending_write(native, engine, process):
+    previous = counts(engine)
+    request_headers = headers("both", "synthetic-shutdown-diary")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            request = pool.submit(native.post, PATH, headers=request_headers, json=NOTE)
+            assert not wait([request], timeout=0.2).done
+            process.terminate()
+            verify_busy_response(request.result(timeout=4))
+            assert process.wait(timeout=4) == 0
+    assert counts(engine) == previous
+    print("Verified graceful shutdown releases pending diary writes without applying them")
 
 
 def run(binary):
@@ -762,10 +824,13 @@ def run(binary):
                     compare_system_updates(python, native, engine)
                     compare_linked_episode_edits(python, native, engine)
                     compare_undo(python, native, engine)
-                    compare_concurrent_retries(python, native, engine)
+                    compare_concurrent_writes(python, native, engine)
+                    verify_queue_byte_limit(native, engine)
+                    verify_shutdown_with_pending_write(native, engine, process)
             finally:
-                process.terminate()
-                process.wait(timeout=5)
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
     finally:
         engine.dispose()
     print(

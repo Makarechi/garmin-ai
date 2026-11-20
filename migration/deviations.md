@@ -33,11 +33,12 @@ change has a documented decision.
   is reproducible with [the native setup comparison](check_native_setup.py).
   This affects failed installation attempts only. The existing data and settings
   can be used when reverting to Python. Approval is pending for PAR-01.
-- During concurrent diary writes, the pinned Python HTTP application waits
-  for the shared write lock. Native HTTP returns a retryable `503` with
-  `Retry-After: 1`. Retrying the same request with the same idempotency key
-  returns the canonical record without duplicating the event or audit.
-  [The paired HTTP fixture](check_diary_http.py) holds the lock in a
-  disposable database and compares both clients, then verifies recovery.
-  The database and audit remain readable when reverting to Python. Approval
-  is pending for PAR-10.
+- Both HTTP runtimes wait for the shared diary write lock for admitted requests.
+  Native HTTP admits up to 16 concurrent diary mutations and 2 MiB of request
+  bodies across those writes. A request exceeding either limit receives `503`
+  with `Retry-After: 1` before any mutation. The pinned Python application
+  continues admitting requests under contention.
+  [The paired HTTP fixture](check_diary_http.py) verifies the queue limit,
+  read access during contention, and a single canonical event and audit
+  after the queued requests complete. The overload behavior still needs a
+  release decision for PAR-10.
