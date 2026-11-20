@@ -1513,7 +1513,13 @@
         "migration/check_tracker_checkins.py",
         "migration/check_web_tracker_checkins.py",
         "migration/check_notification_budget.py",
-        "migration/check_context_question_generation.py"
+        "migration/check_context_question_generation.py",
+        "migration/check_notification_policy.py",
+        "migration/check_proactive_control.py",
+        "migration/check_tracker_fallback.py",
+        "migration/check_trend_insight_worker.py",
+        "migration/check_trend_insight_delivery.py",
+        "migration/evidence/native-initiatives-linux-arm64.json"
       ],
       "data_contracts": [
         "Daily budget, time window and pause/snooze, priority and cooldown, delivery revalidation, stale reminder recovery."
@@ -1522,12 +1528,10 @@
         "Only configured primary or authorized fallback destination; mode and capability checked before claim and send."
       ],
       "resource_scenario": "Overlapping periodic jobs and notification backlog",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R30",
-      "known_limits": [
-        "Complete persisted trend generation and delivery on the final native worker and verify repeat suppression and shared budgets under load."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {

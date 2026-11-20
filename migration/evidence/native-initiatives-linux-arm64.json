@@ -1,0 +1,61 @@
+{
+  "scope": "PAR-22",
+  "verification": "e2e_synthetic",
+  "reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_initiative_rules.py": 82,
+      "tests/test_notification_policy.py": 8,
+      "tests/test_proactive.py": 128
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "test_source_commit": "ed4614ed96bbd64d57321d961f01278e932a149a",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "database_cases": {
+    "quiet_hours_and_delivery_policy": {
+      "trace_sha256": "954047e30d7cae2f6174ea93e8e8cd1a1f327a1d7d4a5bdf66eae835a12027f7",
+      "test_executable_sha256": "046f4ba9a2ff095cc3a514c4fe2af6e0f68905775ccd3a017a1e54f6b32a38c2",
+      "matched_decisions": 18
+    },
+    "owner_controls_and_restart": {
+      "trace_sha256": "67605f590fa51ac53a19b24fcfc208e22c2a5712552bfe46d08ce25c602849b5",
+      "test_executable_sha256": "47e8362efe9490f6d7f7278f9f0e356c11fa3aced604ac3de10e11361a8a55e4",
+      "matched_snapshots": 14
+    },
+    "shared_budget_and_history_pressure": {
+      "trace_sha256": "4cfabceaac2872411d00b022ca2688dbf884d11b1044ab879c02f741f3cc35b2",
+      "test_executable_sha256": "cf5b993f979ff1d89792b16d211c6eb2f62c3cd7c19a69832df635362bf792fb",
+      "matched_budget_cases": 11,
+      "historical_reminders": 12000,
+      "historical_receipts": 12000
+    },
+    "context_questions_and_dispatch": {
+      "trace_sha256": "f2ff20a029fb9197a7d1f44d3aa7575045dd29df095d0ee2986ed3b9b70ab9d4",
+      "test_executable_sha256": "fb4315ac4019caccd1618c6f826a42072e4dd2cb45c77e2bad9dc6d3dc1229c0"
+    },
+    "schedule_and_consent": {
+      "trace_sha256": "ae5317b47b86553bdca5761b480b376db8620e0d96f2f115d0a7e56e08f606b1",
+      "test_executable_sha256": "7c2349df68c4f17e48d75b2e8717e4028f977042cadf576ce47789f35c17cca2"
+    }
+  },
+  "normal_runtime_cases": {
+    "weekly_trend_generation": {
+      "trace_sha256": "73b75f387dd3677384b4758600031c507679092b4bf0fb1a8816741d547fc50e"
+    },
+    "paused_and_uncertain_delivery": {
+      "trace_sha256": "a534d8c7c19f7f872c4b5c68e0c84d8ff021fb9e138482fd2d0195f177454709"
+    },
+    "primary_and_authorized_fallback": {
+      "trace_sha256": "0fec49ad8d19385e2148fb65cab097d88c9357756eb2462443dd095ce45eb482"
+    },
+    "web_display_and_receipt": {
+      "trace_sha256": "8dd1a97fd41b3cc123de991a9618d8c3fcaf7401f163f10ca54de5af47b6dfd0"
+    }
+  },
+  "release_scope": "The separate release-level unattended observation remains pending."
+}
