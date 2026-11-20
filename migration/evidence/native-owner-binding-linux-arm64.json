@@ -1,0 +1,60 @@
+{
+  "scope": "PAR-02",
+  "verification": "e2e_synthetic",
+  "reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "cases_by_suite": {
+      "tests/test_account_binding.py": 44,
+      "tests/test_owner_identity.py": 29,
+      "tests/test_pairing.py": 25
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "test_source_commit": "ed4614ed96bbd64d57321d961f01278e932a149a",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "isolated_cases": {
+    "local_terminal": {
+      "trace_sha256": "ab41d342e9a1ec2cf3912606eeebc09ffd141cdb59bba81c031829f36b15fc0a",
+      "observed": "The sign-in command hid the input, restored terminal echo at cancellation and required local confirmation of retained data."
+    },
+    "mini_app_authentication": {
+      "trace_sha256": "088d2aa86cce62c7dd0f3511b8ab4adbc798f25deff64649c302a115761d6d01",
+      "observed": "The Mini App and ten signed synthetic owner request outcomes matched the reference."
+    },
+    "owner_without_integrations": {
+      "trace_sha256": "7c7e8af42435fbe174f9472b5389606db24a9f4a4898720abc70029a18caf4f0",
+      "observed": "Setup without Garmin, source replacement, revocation, preserved tracker identity, and rollback matched the reference."
+    },
+    "private_channel_pairing": {
+      "trace_sha256": "5c08bb5794557fe77a172c92949a4ecb6f91307e3027d346c72a1c4877af84dd",
+      "observed": "First pairing used the private owner proof, acknowledged the exact update, rolled back on a concurrent edit, refused a different owner and repaired a missing local binding idempotently."
+    },
+    "current_binding_webhook": {
+      "trace_sha256": "eab1aef1b068bcdc46de95d6ce6029c83f79bd0037d2b65e0541dbb8deb15f04",
+      "observed": "The native webhook refused delivery before pairing and after binding replacement, retaining exactly one row after duplicate submission."
+    },
+    "existing_garmin_owner": {
+      "trace_sha256": "0c88ef12f749f8d8c33e70610c376cd198147ef81d36eac939d331e6f556523c",
+      "observed": "Garmin fingerprint validation was read only and failed closed for conflicting or malformed identity."
+    }
+  },
+  "historical_binding_and_history": {
+    "matched_cases": 4,
+    "trace_sha256": "9e366f924f4ea72e79777b9bb1d6101e051b565a95cd42530302c8b510af71ba",
+    "physical_install_upgrades": {
+      "amd64": {
+        "release_source_commit": "eecd7cdfd767d9ab0720be868d98f08f9fbc1f85",
+        "report_sha256": "c810385b466e2a4d07da83a7e881190884a84ca2d491df8c2825761bdd9c72e2"
+      },
+      "arm64": {
+        "release_source_commit": "eecd7cdfd767d9ab0720be868d98f08f9fbc1f85",
+        "report_sha256": "e175ca55ec573b61f1059ee12f05e12eb6b4b3f8c3eecf2f59917c54ab2f6138"
+      }
+    }
+  },
+  "release_scope": "Authorized live Garmin and Telegram provider checks remain open under PAR-03, PAR-04 and PAR-18."
+}
