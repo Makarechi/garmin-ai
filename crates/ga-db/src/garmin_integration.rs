@@ -7,6 +7,7 @@ use std::{error::Error, fmt, time::Duration};
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
 use sqlx::{Executor, Postgres, Transaction};
+use tokio::time::{Instant, sleep};
 
 use crate::{
     Database, ReadinessError, check_readiness,
@@ -133,6 +134,24 @@ impl Database {
 
     /// Persist the outcome of a single authorized Garmin transport operation.
     pub async fn record_garmin_transport(
+        &self,
+        expected_fingerprint: &str,
+        at: StoredInstant,
+        outcome: GarminTransportOutcome,
+    ) -> Result<RecordedGarminTransport, GarminIntegrationError> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let result = self
+                .record_garmin_transport_once(expected_fingerprint, at, outcome)
+                .await;
+            if !matches!(result, Err(GarminIntegrationError::Busy)) || Instant::now() >= deadline {
+                return result;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn record_garmin_transport_once(
         &self,
         expected_fingerprint: &str,
         at: StoredInstant,

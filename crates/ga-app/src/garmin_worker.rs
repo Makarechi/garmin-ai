@@ -233,11 +233,26 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
             })
             .await?;
         if matches!(result, EndpointPublication::Published(_)) {
-            self.database
-                .record_garmin_transport(account, at, GarminTransportOutcome::Reachable)
-                .await?;
+            self.note_reachable(account, at).await?;
         }
         Ok(EndpointWork::Publication(result))
+    }
+
+    async fn note_reachable(
+        &self,
+        account: &str,
+        at: StoredInstant,
+    ) -> Result<(), EndpointWorkerError> {
+        match self
+            .database
+            .record_garmin_transport(account, at, GarminTransportOutcome::Reachable)
+            .await
+        {
+            // Publication already committed. A later successful request refreshes
+            // the connection state if the queue lock stays busy beyond its budget.
+            Ok(_) | Err(GarminIntegrationError::Busy) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn defer_if_paused(

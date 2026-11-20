@@ -287,6 +287,39 @@ async fn retains_download_during_short_capture_contention() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
+async fn reports_durable_endpoint_publication_when_transport_status_is_busy()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, _root) = setup().await?;
+    let lease = fixture.queue(20).await?;
+    let source = Source::new(
+        Ok(Some(serde_json::to_vec(&json!({
+            "heartRateValues":[[fixture.start.unix_timestamp() * 1_000,77]]
+        }))?)),
+        Duration::ZERO,
+    );
+    let mut blocker = fixture.inspect.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104624::bigint)")
+        .execute(&mut *blocker)
+        .await?;
+    let result = fixture.worker(&source).run(&lease).await;
+    assert_eq!(fixture.job(&lease).await?, ("done".into(), 1));
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM measurements)",
+    )
+    .fetch_one(&fixture.inspect)
+    .await?;
+    assert_eq!(counts, (1, 1));
+    assert_eq!(source.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        result?,
+        EndpointWork::Publication(EndpointPublication::Published(DocumentStatus::Normalized)),
+    );
+    blocker.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
 async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), Box<dyn Error>> {
     let (fixture, _root) = setup().await?;
     // Each statement fits the database's 750ms limit, but together they need more than the lease.
@@ -885,6 +918,16 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
             .await?;
         Ok::<_, Box<dyn Error>>(StoredInstant::try_from(now)?)
     };
+    let mut onboarding = fixture.inspect.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104621::bigint)")
+        .execute(&mut *onboarding)
+        .await?;
+    assert_eq!(
+        worker.process_one(now().await?).await?,
+        GarminQueueStep::Idle
+    );
+    assert_eq!(source.calls.load(Ordering::Relaxed), 0);
+    onboarding.commit().await?;
     assert!(matches!(
         worker.plan(now().await?).await?,
         GarminSyncSchedule::Scheduled{ activity_pages:1, periodic, .. } if periodic > 0,

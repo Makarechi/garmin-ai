@@ -3,7 +3,6 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 use ga_archive::{ArchiveError, PutLimits};
 use ga_db::{
     fit_ingest::{FitIngestError, FitIngestOutcome, LeasedFitLimits, LegacyFitCapture},
-    garmin_integration::GarminTransportOutcome,
     jobs::{FailureReason, GarminJobKind, GarminJobLease, JobOutcome, RecordedJobStatus},
     raw_capture::CaptureError,
 };
@@ -146,12 +145,7 @@ impl<S: ActivityExportSource> EndpointWorker<'_, S> {
                         | FitIngestOutcome::Unchanged
                         | FitIngestOutcome::Empty
                 ) {
-                    self.database
-                        .record_garmin_transport(
-                            self.source.fingerprint(),
-                            requested_at,
-                            GarminTransportOutcome::Reachable,
-                        )
+                    self.note_reachable(self.source.fingerprint(), requested_at)
                         .await?;
                 }
                 Ok(ActivityFitWork::Publication(outcome))
