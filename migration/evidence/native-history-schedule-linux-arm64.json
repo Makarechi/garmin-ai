@@ -1,0 +1,246 @@
+{
+  "scope": "PAR-05",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "version": "3.15.2",
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_backfill.py": 22,
+      "tests/test_activity_generations.py": 7,
+      "tests/test_schedule_coalescing.py": 6,
+      "tests/test_partial_reconciliation.py": 64
+    }
+  },
+  "candidate": {
+    "application_platform": "linux/arm64",
+    "page_contract_platform": "darwin/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94",
+    "history_test_executable_sha256": "6b675313c6507d85bc45729317237c3fe5191bb8176b2d253f59ec09868b1c37"
+  },
+  "paired_workloads": {
+    "year": {
+      "trace_sha256": "4cf6d2d4f4a37ccef6c3ec52e629a12921f954d064cc32ca1dd98d49c1983e7a",
+      "verified_raw_objects": 7300,
+      "stored_projection": {
+        "raw": {
+          "rows": 7300,
+          "sha256": "aceab6f5fbbdc9a9524c419285fd92ed8d9b504422c95b6279b53d3c1df1cdd5"
+        },
+        "daily": {
+          "rows": 365,
+          "sha256": "3fea83fd928ae553a5e2dbb1ee38837ba2e755f432a1e521800109685e9a9d8a"
+        },
+        "samples": {
+          "rows": 52560,
+          "sha256": "32c0d3248049987644ea3ad53901a7b9eb1c78c2da67acdf93e657803965c0ea"
+        },
+        "revisions": {
+          "rows": 52560,
+          "sha256": "7a0788683cac1f558f09f4bb87e35ee5802ec70008e38702dd248bf1980ef5c4"
+        },
+        "plans": {
+          "rows": 1,
+          "sha256": "66781e83739a5cc4d7f1910cbde8613bafb8abeb54e67091f0472f77b0eece8c"
+        },
+        "jobs": {
+          "rows": 7300,
+          "sha256": "e6bf0a547c4e42d4b57c7ae5acff16674c85781a586b5c3265c8bf13b84ed4a9"
+        }
+      },
+      "constraints": {
+        "shared_cpu_affinity": "3",
+        "database_memory_mib": 320,
+        "api_memory_mib": 192,
+        "worker_memory_mib": 384,
+        "migration_memory_mib": 256
+      },
+      "python_seconds": 534.817,
+      "rust_seconds": 69.659298157,
+      "history_queue": "drained between scheduler passes"
+    },
+    "weekly": {
+      "trace_sha256": "a6c6a70e5d2090a6b78bb2b06ece0d9462e6daca498ad2003c118cbfe2eeb268",
+      "verified_raw_objects": 741,
+      "stored_projection": {
+        "raw": {
+          "rows": 741,
+          "sha256": "0a41f5ce6e409ea719b6120173f484657fd2b01c90604978b5d32afcfffa24fd"
+        },
+        "daily": {
+          "rows": 37,
+          "sha256": "5d8204eaafb7d589534b65641f2913a9405aef6ec07a90cecfc80a2d1743ae4b"
+        },
+        "samples": {
+          "rows": 5328,
+          "sha256": "5719ecaf80cf096fa8a41f50e3c41c658972174f3746094cd18db232d81c7c10"
+        },
+        "revisions": {
+          "rows": 5328,
+          "sha256": "f7ee3d98e4d3f251be530e14b3bfb58d3cce0074c348dc3af139b5a0505890b1"
+        },
+        "plans": {
+          "rows": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "jobs": {
+          "rows": 1202,
+          "sha256": "5e47a28f788b7cf5a1c3ab568686158735050e9a5f50cf410d4b58365a012165"
+        }
+      },
+      "constraints": {
+        "shared_cpu_affinity": "4",
+        "database_memory_mib": 320,
+        "api_memory_mib": 192,
+        "worker_memory_mib": 384,
+        "migration_memory_mib": 256
+      },
+      "same_bytes_reused": 461,
+      "passes": [
+        {
+          "jobs": 601,
+          "python_seconds": 28.947,
+          "rust_seconds": 7.854523295
+        },
+        {
+          "jobs": 601,
+          "python_seconds": 17.347,
+          "rust_seconds": 5.676860211
+        }
+      ]
+    },
+    "evening": {
+      "trace_sha256": "cf5ad2056ed9db8116d1576933f556b9b81531e6b96f3eb130891bc025309dd1",
+      "verified_raw_objects": 29,
+      "stored_projection": {
+        "raw": {
+          "rows": 29,
+          "sha256": "86a33a716e9b2449eee50d39cf72ece9e6a6978d7888f8a80acc72176703bd24"
+        },
+        "daily": {
+          "rows": 1,
+          "sha256": "850dc989902634b10d446dc9597ef7523bbf2b54916cfbe424389cf8842e6274"
+        },
+        "samples": {
+          "rows": 144,
+          "sha256": "484b80e0f842aa2ad292c463328ab421f4dfad5b61fe0a9c325157bc7bfbc856"
+        },
+        "revisions": {
+          "rows": 144,
+          "sha256": "1ea1c214aeeb2112c9d7ded3af225d6bee5b62cef5eeb008cdac208074b4d7c0"
+        },
+        "plans": {
+          "rows": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "jobs": {
+          "rows": 35,
+          "sha256": "0a23926ecd7622f7c941a51fb5d3ca3db6bf6140fdff55a10f15f7b08753f96d"
+        },
+        "activity": {
+          "rows": 1,
+          "sha256": "7044de66d3a4a7de25e5d6e2f04e40cb7eeb406db0d4cddb7cd060b07883805e"
+        },
+        "activity_parts": {
+          "rows": 125,
+          "sha256": "26b8efd9ff49adc125b590a98aa8aa727858e4a66dcc68b5bf916d9e73fecb51"
+        }
+      },
+      "constraints": {
+        "shared_cpu_affinity": "3",
+        "database_memory_mib": 320,
+        "api_memory_mib": 192,
+        "worker_memory_mib": 384,
+        "migration_memory_mib": 256
+      },
+      "python_seconds": 2.4628651680031908,
+      "rust_seconds": 0.341115417,
+      "completed_jobs": 29,
+      "delayed_followups": 6
+    },
+    "nightly": {
+      "trace_sha256": "920b5a1e428af1475098b6f379b104138e2dbab88404edf816a62e81001ec36b",
+      "verified_raw_objects": 161,
+      "stored_projection": {
+        "raw": {
+          "rows": 161,
+          "sha256": "86ae854cfc8bdf24f761be2701b5aeba1d0e4bf1b8acb497332340d1456a10ee"
+        },
+        "daily": {
+          "rows": 8,
+          "sha256": "f21116b087be9327fde789e59fcb82237e0fa552178ef2685bcedd75111d8e2b"
+        },
+        "samples": {
+          "rows": 1152,
+          "sha256": "24b50b6af95daff1c54c017de96a538c4637c3558ad0a3dce200a2f3fd89b7c6"
+        },
+        "revisions": {
+          "rows": 1152,
+          "sha256": "c813f78f79387cb950e3159daa78205b9bf64beb4ebcc0d7649c5265ee282e59"
+        },
+        "plans": {
+          "rows": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "jobs": {
+          "rows": 282,
+          "sha256": "525665ab75a891537dcc9812158db1543876297ae206e5b307a8c9e3fd04be2d"
+        }
+      },
+      "constraints": {
+        "shared_cpu_affinity": "4",
+        "database_memory_mib": 320,
+        "api_memory_mib": 192,
+        "worker_memory_mib": 384,
+        "migration_memory_mib": 256
+      },
+      "same_bytes_reused": 121,
+      "passes": [
+        {
+          "jobs": 141,
+          "python_seconds": 11.144,
+          "rust_seconds": 1.009598418
+        },
+        {
+          "jobs": 141,
+          "python_seconds": 3.937,
+          "rust_seconds": 0.628600167
+        }
+      ]
+    }
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_garmin_periodic.py",
+      "result": "passed",
+      "trace_sha256": "0757ea89cba8f4530e29cb14c2934049c6dd73df008c31087fc53574b09a5b3f"
+    },
+    {
+      "comparison": "migration/check_history_sync_status.py",
+      "result": "passed",
+      "trace_sha256": "632853c0dcb26cda6e1a83ef5fb00578757f6e63f8cf985747eb7d9663fcbc9f"
+    },
+    {
+      "comparison": "migration/check_activity_scan_schedule.py",
+      "result": "passed",
+      "trace_sha256": "cddae4188f5a7016de9365793c62dda19673b70fbbf2db1028950b1957ad5270"
+    },
+    {
+      "comparison": "migration/check_activity_scan_page.py",
+      "result": "passed",
+      "trace_sha256": "fdcc445c4a8a8e7727ad21eb1de204b131cdf7c31c3de5198198b04679009328"
+    },
+    {
+      "comparison": "crates/ga-app/tests/endpoint_worker.rs",
+      "result": "passed",
+      "trace_sha256": "bbd88da10669c7c1fb4898e35cab4a8bd6963d2bd7a6c34083d826f0b6cbc082"
+    }
+  ],
+  "release_scope": [
+    "Synthetic persisted scheduling and endpoint writes for a full year, normal evening scheduling, seven-day and thirty-day reconciliation, mutable page transitions, and retained work across an interrupted page.",
+    "Real unattended duration and live provider authentication use the applicable release conditions."
+  ]
+}

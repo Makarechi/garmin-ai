@@ -291,7 +291,10 @@
       "rust_tests": [
         "migration/check_garmin_periodic.py",
         "migration/check_activity_scan_page.py",
-        "migration/check_history_sync_status.py"
+        "migration/check_history_sync_status.py",
+        "migration/check_activity_scan_schedule.py",
+        "crates/ga-app/tests/endpoint_worker.rs",
+        "migration/evidence/native-history-schedule-linux-arm64.json"
       ],
       "data_contracts": [
         "Durable backfill windows, activity generations and overlap, bounded scheduling and partial or empty responses."
@@ -300,12 +303,10 @@
         "Only scheduled, selected Garmin sources can enqueue collection."
       ],
       "resource_scenario": "Initial history backfill, repeated nightly and weekly reconcile",
-      "status": "implemented",
-      "verification": "db",
+      "status": "verified",
+      "verification": "e2e_synthetic",
       "owner_task": "R16",
-      "known_limits": [
-        "Periodic scheduling, activity scans and history windows matched synthetic Python cases. Full unattended recovery and sustained backlog acceptance remain pending."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
