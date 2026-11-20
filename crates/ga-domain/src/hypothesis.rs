@@ -3,11 +3,12 @@
 use std::{error::Error, fmt};
 
 use serde_json::{Value, json};
-use speedate::{DateTime, DateTimeConfig, MicrosecondsPrecisionOverflowBehavior, TimeConfig};
-use time::{Date, Month};
+use time::Date;
 use uuid::Uuid;
 
 use crate::timestamp::python_timezone;
+
+mod validation;
 
 pub struct HypothesisSpec {
     document: Value,
@@ -19,8 +20,22 @@ pub struct HypothesisSpec {
     expires: Date,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct InvalidHypothesisSpec;
+pub struct InvalidHypothesisSpec(Vec<Value>);
+
+impl InvalidHypothesisSpec {
+    pub fn details(self) -> Vec<Value> {
+        self.0
+    }
+}
+
+impl fmt::Debug for InvalidHypothesisSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvalidHypothesisSpec")
+            .field("issues", &self.0.len())
+            .finish()
+    }
+}
 
 impl fmt::Display for InvalidHypothesisSpec {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -30,73 +45,83 @@ impl fmt::Display for InvalidHypothesisSpec {
 impl Error for InvalidHypothesisSpec {}
 
 impl HypothesisSpec {
+    pub fn parse_path_identity(value: &str) -> Result<Uuid, InvalidHypothesisSpec> {
+        validation::path_id(value)
+    }
+
     pub fn from_json(value: &Value) -> Result<Self, InvalidHypothesisSpec> {
-        let fields = value.as_object().ok_or(InvalidHypothesisSpec)?;
-        if fields.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "id" | "question"
-                    | "discovery_start"
-                    | "discovery_end"
-                    | "validation_start"
-                    | "validation_end"
-                    | "expires"
-                    | "timezone"
-                    | "outcome"
-                    | "late_hours"
-                    | "direction"
-            )
-        }) {
-            return Err(InvalidHypothesisSpec);
+        let mut body = validation::Body::new(value)?;
+        let id = body.required("id", validation::id);
+        let question = body.required("question", validation::question);
+        let discovery_start = body.required("discovery_start", validation::date);
+        let discovery_end = body.required("discovery_end", validation::date);
+        let validation_start = body.required("validation_start", validation::date);
+        let validation_end = body.required("validation_end", validation::date);
+        let expires = body.required("expires", validation::date);
+        let timezone = body.required("timezone", validation::text);
+        let outcome = body.optional("outcome", "sleep_score", |input| {
+            validation::literal(input, ["sleep_score", "sleep_seconds"])
+        });
+        let hours = body.optional("late_hours", 6.0, validation::hours);
+        let direction = body.required("direction", |input| {
+            validation::literal(input, ["lower", "higher"])
+        });
+        body.check_fields()?;
+        let (
+            Some(id),
+            Some(question),
+            Some(discovery_start),
+            Some(discovery_end),
+            Some(validation_start),
+            Some(validation_end),
+            Some(expires),
+            Some(timezone),
+            Some(outcome),
+            Some(hours),
+            Some(direction),
+        ) = (
+            id,
+            question,
+            discovery_start,
+            discovery_end,
+            validation_start,
+            validation_end,
+            expires,
+            timezone,
+            outcome,
+            hours,
+            direction,
+        )
+        else {
+            return Err(InvalidHypothesisSpec(Vec::new()));
+        };
+
+        let invalid = |reason| validation::invalid_protocol(reason, value);
+        if python_timezone(timezone).is_none() {
+            return Err(invalid("Unknown timezone"));
         }
-        let id = value["id"]
-            .as_str()
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or(InvalidHypothesisSpec)?;
-        let question = value["question"].as_str().ok_or(InvalidHypothesisSpec)?;
-        let question_length = question.chars().count();
-        if !(1..=1000).contains(&question_length)
+        let discovery_days = (discovery_end - discovery_start).whole_days();
+        let validation_days = (validation_end - validation_start).whole_days();
+        if !(0..=30).contains(&discovery_days) || !(0..=30).contains(&validation_days) {
+            return Err(invalid("Date range must be ordered and at most 30 days"));
+        }
+        if validation_days < 27 {
+            return Err(invalid(
+                "Directional validation requires at least 28 inclusive dates",
+            ));
+        }
+        if discovery_end >= validation_start || validation_end >= expires {
+            return Err(invalid(
+                "Discovery, prospective validation and expiry must be ordered",
+            ));
+        }
+        let expiry_days = (expires - validation_end).whole_days();
+        if !(2..=31).contains(&expiry_days)
             || question
                 .chars()
                 .all(|value| value.is_whitespace() || matches!(value, '\u{1c}'..='\u{1f}'))
         {
-            return Err(InvalidHypothesisSpec);
-        }
-        let timezone = value["timezone"]
-            .as_str()
-            .filter(|zone| python_timezone(zone).is_some())
-            .ok_or(InvalidHypothesisSpec)?;
-        let outcome = fields
-            .get("outcome")
-            .map_or(Some("sleep_score"), Value::as_str)
-            .filter(|outcome| matches!(*outcome, "sleep_score" | "sleep_seconds"))
-            .ok_or(InvalidHypothesisSpec)?;
-        let direction = value["direction"]
-            .as_str()
-            .filter(|direction| matches!(*direction, "lower" | "higher"))
-            .ok_or(InvalidHypothesisSpec)?;
-        let hours = fields
-            .get("late_hours")
-            .map_or(Some(6.0), float_argument)
-            .filter(|hours| hours.is_finite() && *hours > 0.0 && *hours <= 24.0)
-            .ok_or(InvalidHypothesisSpec)?;
-        let discovery_start =
-            date_argument(&value["discovery_start"]).ok_or(InvalidHypothesisSpec)?;
-        let discovery_end = date_argument(&value["discovery_end"]).ok_or(InvalidHypothesisSpec)?;
-        let validation_start =
-            date_argument(&value["validation_start"]).ok_or(InvalidHypothesisSpec)?;
-        let validation_end =
-            date_argument(&value["validation_end"]).ok_or(InvalidHypothesisSpec)?;
-        let expires = date_argument(&value["expires"]).ok_or(InvalidHypothesisSpec)?;
-        let discovery_days = (discovery_end - discovery_start).whole_days();
-        let validation_days = (validation_end - validation_start).whole_days();
-        let expiry_days = (expires - validation_end).whole_days();
-        if !(0..=30).contains(&discovery_days)
-            || !(27..=30).contains(&validation_days)
-            || !(2..=31).contains(&expiry_days)
-            || discovery_end >= validation_start
-        {
-            return Err(InvalidHypothesisSpec);
+            return Err(invalid("Expiry must be 2 to 31 days after validation end"));
         }
         let document = json!({
             "id":id.to_string(),"question":question,
@@ -216,39 +241,6 @@ fn float_argument(value: &Value) -> Option<f64> {
         }
         value => value.as_f64(),
     }
-}
-
-fn date_argument(value: &Value) -> Option<Date> {
-    let bytes = match value {
-        Value::String(value) => value.as_bytes(),
-        Value::Number(value) => value.as_str().as_bytes(),
-        _ => return None,
-    };
-    let parsed = speedate::Date::parse_bytes(bytes).ok().or_else(|| {
-        let config = DateTimeConfig {
-            time_config: TimeConfig {
-                microseconds_precision_overflow_behavior:
-                    MicrosecondsPrecisionOverflowBehavior::Truncate,
-                ..TimeConfig::default()
-            },
-            ..DateTimeConfig::default()
-        };
-        let stamp = DateTime::parse_bytes_with_config(bytes, &config).ok()?;
-        (stamp.time.hour == 0
-            && stamp.time.minute == 0
-            && stamp.time.second == 0
-            && stamp.time.microsecond == 0)
-            .then_some(stamp.date)
-    })?;
-    if parsed.year == 0 {
-        return None;
-    }
-    Date::from_calendar_date(
-        i32::from(parsed.year),
-        Month::try_from(parsed.month).ok()?,
-        parsed.day,
-    )
-    .ok()
 }
 
 #[cfg(test)]

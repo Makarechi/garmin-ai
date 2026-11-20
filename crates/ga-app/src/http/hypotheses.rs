@@ -6,9 +6,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use ga_db::health_analysis::HypothesisError;
-use ga_domain::{access::Scope, hypothesis::HypothesisSpec, timestamp::StoredInstant};
+use ga_domain::{
+    access::Scope,
+    hypothesis::{HypothesisSpec, InvalidHypothesisSpec},
+    timestamp::StoredInstant,
+};
+use serde_json::{Value, json};
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use super::{
     AppState, diary, method_not_allowed, private_cache,
@@ -36,25 +40,36 @@ pub(super) async fn collection(State(state): State<AppState>, request: Request) 
         {
             Err(status) => diary::access_failure(status),
             Ok((database, owner)) => {
-                let result = async {
-                    let bytes = to_bytes(body, MAX_REQUEST_BYTES)
-                        .await
-                        .map_err(|_| HypothesisError::Spec)?;
+                let input = async {
+                    let bytes = to_bytes(body, MAX_REQUEST_BYTES).await.ok()?;
                     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-                    let value = serde_json::from_slice(bytes).map_err(|_| HypothesisError::Spec)?;
-                    let spec =
-                        HypothesisSpec::from_json(&value).map_err(|_| HypothesisError::Spec)?;
-                    database
-                        .register_hypothesis(
-                            owner,
-                            &spec,
-                            now().ok_or(HypothesisError::Calendar)?,
-                            &state.configured_timezone,
-                        )
-                        .await
+                    if bytes.is_empty() {
+                        Some(Value::Null)
+                    } else {
+                        serde_json::from_slice(bytes).ok()
+                    }
                 }
                 .await;
-                result_response(result)
+                match input.as_ref().map(HypothesisSpec::from_json) {
+                    Some(Ok(spec)) => {
+                        let stored = match now() {
+                            Some(at) => {
+                                database
+                                    .register_hypothesis(
+                                        owner,
+                                        &spec,
+                                        at,
+                                        &state.configured_timezone,
+                                    )
+                                    .await
+                            }
+                            None => Err(HypothesisError::Calendar),
+                        };
+                        result_response(stored)
+                    }
+                    Some(Err(error)) => validation_response(error),
+                    None => invalid_arguments(),
+                }
             }
         }
     };
@@ -77,9 +92,9 @@ pub(super) async fn item(
         .await
         {
             Err(status) => diary::access_failure(status),
-            Ok((database, _)) => match Uuid::parse_str(&identity) {
+            Ok((database, _)) => match HypothesisSpec::parse_path_identity(&identity) {
                 Ok(identity) => result_response(database.hypothesis(identity).await),
-                Err(_) => invalid_arguments(),
+                Err(error) => validation_response(error),
             },
         }
     };
@@ -114,23 +129,38 @@ async fn mutate(state: AppState, identity: String, request: Request, recheck: bo
         .await
         {
             Err(status) => diary::access_failure(status),
-            Ok((database, owner)) => match (Uuid::parse_str(&identity), now()) {
-                (Ok(identity), Some(now)) => {
-                    let result = if recheck {
-                        database
-                            .recheck_hypothesis(owner, identity, now, &state.configured_timezone)
-                            .await
-                    } else {
-                        database.stop_hypothesis(owner, identity, now).await
-                    };
-                    result_response(result)
+            Ok((database, owner)) => {
+                match (HypothesisSpec::parse_path_identity(&identity), now()) {
+                    (Ok(identity), Some(now)) => {
+                        let result = if recheck {
+                            database
+                                .recheck_hypothesis(
+                                    owner,
+                                    identity,
+                                    now,
+                                    &state.configured_timezone,
+                                )
+                                .await
+                        } else {
+                            database.stop_hypothesis(owner, identity, now).await
+                        };
+                        result_response(result)
+                    }
+                    (Err(error), _) => validation_response(error),
+                    _ => storage_unavailable(),
                 }
-                (Err(_), _) => invalid_arguments(),
-                _ => storage_unavailable(),
-            },
+            }
         }
     };
     private_cache(response, request.headers())
+}
+
+fn validation_response(error: InvalidHypothesisSpec) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"detail":error.details()})),
+    )
+        .into_response()
 }
 
 fn result_response(result: Result<serde_json::Value, HypothesisError>) -> Response {

@@ -64,6 +64,74 @@ def protocol(identity, today):
     }
 
 
+def validation_requests(today):
+    good = protocol(UUID(int=7400100), today)
+    variants = [
+        ("missing-body", None),
+        ("list", []),
+        ("raw-text", "synthetic"),
+        ("empty", {}),
+        ("uuid-length", good | {"id": "bad"}),
+        ("uuid-characters", good | {"id": "g" * 32}),
+        ("uuid-type", good | {"id": 4}),
+        ("uuid-groups", good | {"id": "f" * 36}),
+        ("uuid-group-width", good | {"id": "000000000-000-0000-0000-000000000000"}),
+        ("uuid-unicode", good | {"id": "ü" + "0" * 31}),
+        ("uuid-braced", good | {"id": "{g0000000-0000-0000-0000-000000000000}"}),
+        ("question-empty", good | {"question": ""}),
+        ("question-long", good | {"question": "a" * 1001}),
+        ("question-type", good | {"question": ["synthetic"]}),
+        ("question-blank", good | {"question": " "}),
+        ("date-bad", good | {"discovery_start": "invalid"}),
+        ("date-month", good | {"discovery_start": "2026-13-07"}),
+        ("date-time", good | {"validation_end": "2026-10-19T03:30:00Z"}),
+        ("date-number-plus-time", good | {"discovery_end": 100}),
+        ("date-null", good | {"discovery_start": None}),
+        ("date-year-zero", good | {"discovery_start": "0000-01-01"}),
+        ("date-timestamp-overflow", good | {"discovery_start": 10**20}),
+        ("timezone-invalid", good | {"timezone": "Unknown/Synthetic"}),
+        ("timezone-type", good | {"timezone": 0}),
+        ("outcome", good | {"outcome": "invalid"}),
+        ("direction", good | {"direction": None}),
+        ("late-hours-positive", good | {"late_hours": 0}),
+        ("late-hours-upper", good | {"late_hours": 25}),
+        ("late-hours-parsing", good | {"late_hours": "abc"}),
+        ("late-hours-type", good | {"late_hours": None}),
+        ("extra", good | {"x_extra": False, "unrecognized": "synthetic"}),
+        ("field-order", good | {"id": "bad", "question": "", "late_hours": 25, "direction": "bad"}),
+        ("discovery-inverted", good | {"discovery_start": good["validation_start"]}),
+        ("discovery-long", good | {"discovery_start": str(today - timedelta(days=40))}),
+        ("validation-short", good | {"validation_end": good["validation_start"]}),
+        ("order", good | {"discovery_end": good["validation_start"]}),
+        ("expiry", good | {"expires": str(today + timedelta(days=31))}),
+    ]
+    yield from ((name, "POST", "/hypotheses", {"json": payload}) for name, payload in variants)
+    for bad in ("bad", "g" * 32):
+        for method, suffix in (("GET", ""), ("POST", "/recheck"), ("POST", "/stop")):
+            yield (method + suffix + bad, method, f"/hypotheses/{bad}{suffix}", {})
+
+
+def exercise_validation(python, native, today):
+    headers = {"Authorization": "Bearer " + WRITER}
+    mismatches = []
+    count = 0
+    for name, method, route, options in validation_requests(today):
+        before, after = (
+            client.request(method, route, headers=headers, **options) for client in (python, native)
+        )
+        assert before.status_code == 422, (name, before.status_code)
+        if after.status_code != 422 or before.json() != after.json():
+            detail = before.json()["detail"]
+            expected = [dict(row, input="<synthetic>") for row in detail]
+            actual = after.json()["detail"]
+            if isinstance(actual, list):
+                actual = [dict(row, input="<synthetic>") for row in actual]
+            mismatches.append((name, expected, after.status_code, actual))
+        count += 1
+    assert not mismatches, mismatches
+    print("Matched typed hypothesis HTTP validation cases", count, flush=True)
+
+
 def exercise(engine, python, native, today):
     count = 0
     clients = [python, native]
@@ -239,6 +307,7 @@ def run(binary):
                 url = server.stdout.readline().strip().removeprefix("Listening on ")
                 assert url.startswith("http://127.0.0.1:")
                 with httpx.Client(base_url=url, timeout=120, trust_env=False) as native:
+                    exercise_validation(python, native, today)
                     exercise(engine, python, native, today)
             finally:
                 server.terminate()
