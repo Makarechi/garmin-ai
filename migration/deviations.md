@@ -15,8 +15,10 @@ change has a documented decision.
   limit can still differ by shape and environment. See [the file JSON comparison](rust-file-json.md).
 - Native intraday publication keeps a newer current measurement when an
   older overlapping response is applied while retaining both revisions.
-  Verify that ordering through replay, analytics and migration of legacy
-  histories before declaring the temporal contract complete.
+  [The paired recovery fixture](check_intraday_recovery.py) checks the
+  published value through the measurement-series API, encrypted backup and
+  restore, the Python reader on the restored native data, and replay of the
+  older response. Approval for the current-value ordering is pending for PAR-06.
 - Bare `NaN` and `Infinity` tokens are outside the JSON number grammar.
   The pinned Python MCP transport passes those frames to tool validation and
   returns a tool error. Native MCP discards the malformed frame, then accepts

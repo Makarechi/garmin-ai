@@ -344,8 +344,10 @@
         "crates/ga-archive/tests/archive.rs",
         "migration/check_authoritative_replacement.py",
         "migration/check_health_publication.py",
+        "migration/check_intraday_recovery.py",
         "migration/check_archived_backup_and_replay.py",
-        "migration/evidence/native-archive-recovery-linux-arm64.json"
+        "migration/evidence/native-archive-recovery-linux-arm64.json",
+        "migration/evidence/native-intraday-recovery-linux-arm64.json"
       ],
       "data_contracts": [
         "Legacy serialized JSON and untouched binary, immutable identity bytes, A\u2013B\u2013A revisions, timestamp order."
