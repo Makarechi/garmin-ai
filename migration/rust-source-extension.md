@@ -27,6 +27,8 @@ Run trusted adapters in a separately isolated environment when they need lower p
 The Linux ARM64 native check matched the pinned Python example's two pages and three records.
 `check_source_extension.py` also exercised malformed envelopes, version and request mismatches,
 undeclared capabilities, a repeated cursor, an out-of-window record, deadlines and cancellation.
+The probe verifies separate public errors for a refused request and temporary unavailability,
+and checks that child diagnostics stay private.
 The independent executable and native check ran together with networking disabled at 32 MiB.
 
 ## Reading a configured source
