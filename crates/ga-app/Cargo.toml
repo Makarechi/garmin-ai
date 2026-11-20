@@ -5,10 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+default-run = "garmin-ai-rust"
 
 [[bin]]
 name = "garmin-ai-rust"
 path = "src/main.rs"
+
+[[bin]]
+name = "garmin-ai-release-cleanup"
+path = "src/release_cleanup/main.rs"
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
@@ -43,6 +48,7 @@ subtle = { version = "2.6.1", default-features = false }
 uuid = { version = "1.29.3", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 tempfile = "3.27.0"
+tar = { version = "0.4.46", default-features = false }
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 rmcp = { version = "=3.11.0", default-features = false, features = ["server", "transport-io"] }
 

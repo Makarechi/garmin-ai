@@ -70,6 +70,8 @@ docker buildx build --load --platform "$platform" -f "$root/$dockerfile" -t "$im
 }
 image_ref=
 if [[ "$runtime" == rust ]]; then
+    docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
+        --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_tag" --help >/dev/null
     image_ref=$(docker image inspect "$image_tag" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}')
 fi
 if [[ -z "$image_ref" ]] || ! docker image inspect "$image_ref" >/dev/null 2>&1; then

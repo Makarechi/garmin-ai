@@ -10,8 +10,9 @@ COPY src/garmin_ai/static/garmin_auth ./src/garmin_ai/static/garmin_auth
 COPY src/garmin_ai/static/web_chat ./src/garmin_ai/static/web_chat
 COPY migration/contracts ./migration/contracts
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --locked --release -p ga-app --bin garmin-ai-rust \
-    && install -m 0555 target/release/garmin-ai-rust /garmin-ai-rust
+    cargo build --locked --release -p ga-app --bin garmin-ai-rust --bin garmin-ai-release-cleanup \
+    && install -m 0555 target/release/garmin-ai-rust /garmin-ai-rust \
+    && install -m 0555 target/release/garmin-ai-release-cleanup /garmin-ai-release-cleanup
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN apt-get update \
@@ -22,6 +23,7 @@ RUN apt-get update \
     && chmod 0700 /app/data \
     && chmod 0755 /app/tokens
 COPY --from=builder /garmin-ai-rust /usr/local/bin/garmin-ai-rust
+COPY --from=builder /garmin-ai-release-cleanup /usr/local/bin/garmin-ai-release-cleanup
 COPY LICENSE /usr/share/doc/garmin-ai/LICENSE
 COPY crates/ga-domain/src/statistics/LICENSE-scipy.txt /usr/share/doc/garmin-ai/LICENSE-scipy.txt
 COPY crates/ga-domain/src/timestamp/LICENSE-python.txt /usr/share/doc/garmin-ai/LICENSE-python.txt
