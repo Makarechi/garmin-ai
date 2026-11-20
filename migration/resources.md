@@ -205,6 +205,22 @@ committed all 409,600 rows. The Python client timed out waiting for all three re
 pause and Telegram ingress were recorded later, and that worker hit its memory limit during
 replay. These are observed latencies for one concurrent burst.
 
+Add `--mixed-controls-during-fit` to repeat the ceiling comparison and include a native
+archive-only replay, a concurrent authenticated calculation, and a competing backup.
+The Python run uses the shared FIT input and control probes. The Rust run adds those three
+requests to verify admission while the worker is holding the maximum FIT replay lease.
+
+In the [mixed Linux ARM64 trial](evidence/python-rust-fit-mixed-controls-linux-arm64.json.gz),
+the pause, operations read and Telegram ingress responded in 252, 160 and 166 ms.
+The worker renewed the same lease three times, committed 409,600 FIT rows and processed
+the second archive exactly once. The backup reported storage busy and left no destination.
+During replay, the calculation responded in 247 ms with the documented retry interval.
+After replay, the same request returned all 122 seeded observations. The app's sampled
+combined API and worker cgroup memory peaked at 34.49 MiB with no app swap or OOM events.
+Database swap peaked at 41.88 MiB across the trial and verification. The Python ceiling
+trial exited 137 with no FIT projection. This single concurrent burst does not replace the
+unattended stability run.
+
 ## Daily source sync and historical jobs
 
 Use `--sync-days 1` to pass synthetic responses through the actual Garmin job dispatcher for

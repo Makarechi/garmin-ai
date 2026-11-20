@@ -32,7 +32,7 @@ from garmin_ai.replay import PARSER_VERSION
 ACCOUNT = "a" * 64
 
 
-def prepare(engine, archive, size, with_controls):
+def prepare(engine, archive, size, with_controls, with_mixed_controls=False):
     if size == "developer":
         data, fit_size = archive_input(50_000, with_developer=True)
         records = 50_006
@@ -42,6 +42,19 @@ def prepare(engine, archive, size, with_controls):
     key = archive.put_bytes(data, "zip")
     digest = hashlib.sha256(data).hexdigest()
     with transaction(engine) as session:
+        if with_mixed_controls:
+            from analytics_workload import START as ANALYSIS_START
+            from analytics_workload import seed, utc
+
+            metric = seed(session)
+            analysis = {
+                "operation": "aggregate_metric",
+                "metric_key": metric,
+                "start": utc(ANALYSIS_START).isoformat(),
+                "end": utc(ANALYSIS_START + timedelta(days=365)).isoformat(),
+                "method": "distribution",
+                "knowledge_cutoff": datetime.now(UTC).isoformat(),
+            }
         if with_controls:
             owner = session.scalar(select(Person.id).where(Person.singleton))
             configured = session.scalar(
@@ -112,6 +125,37 @@ def prepare(engine, archive, size, with_controls):
             f"raw-replay:{source.id}:{PARSER_VERSION}",
             datetime.now(UTC),
         )
+        mixed = {}
+        if with_mixed_controls:
+            payload = {"fixture": "synthetic archive replay"}
+            replay_key = archive.put_json(payload)
+            replay_source = SourcePayload(
+                endpoint="body_battery_events",
+                source_key="2026-10-25",
+                payload_hash=hashlib.sha256(archive.read(replay_key)).hexdigest(),
+                archive_key=replay_key,
+                fetched_at=START,
+                status="error",
+                parser_version=PARSER_VERSION - 1,
+            )
+            session.add(replay_source)
+            session.flush()
+            replay_job = enqueue(
+                session,
+                "raw_replay",
+                {
+                    "raw_ref": str(replay_source.id),
+                    "target_version": PARSER_VERSION,
+                    "account": ACCOUNT,
+                },
+                f"raw-replay:{replay_source.id}:{PARSER_VERSION}",
+                datetime.now(UTC) + timedelta(seconds=3),
+            )
+            mixed = {
+                "analysis": analysis,
+                "replay_source": str(replay_source.id),
+                "replay_job": str(replay_job),
+            }
         return {
             "source": str(source.id),
             "job": str(job),
@@ -120,6 +164,7 @@ def prepare(engine, archive, size, with_controls):
             "compressed_bytes": len(data),
             "archive_sha256": digest,
             "with_controls": with_controls,
+            **mixed,
         }
 
 
@@ -145,7 +190,12 @@ def wait(engine, fixture):
     while time.monotonic() < deadline:
         with transaction(engine) as session:
             result = session.get(AppState, f"replay:{fixture['source']}:{PARSER_VERSION}")
-            if result is not None:
+            replay = (
+                session.get(AppState, f"replay:{fixture['replay_source']}:{PARSER_VERSION}")
+                if "replay_source" in fixture
+                else None
+            )
+            if result is not None and ("replay_source" not in fixture or replay is not None):
                 return {
                     "status": result.value["status"],
                     "rows": result.value.get("rows", 0),
@@ -215,6 +265,18 @@ def verify(engine, archive, fixture):
                 and web_count == 1,
                 "telegram_ingress_persisted": telegram_count == 1,
             }
+        if "replay_source" in fixture:
+            replay = session.get(SourcePayload, UUID(fixture["replay_source"]))
+            outcome = session.get(AppState, f"replay:{replay.id}:{PARSER_VERSION}")
+            replay_job = session.get(Job, UUID(fixture["replay_job"]))
+            controls["ordinary_replay_completed"] = (
+                replay.parser_version == PARSER_VERSION
+                and outcome.value["status"] == "archived"
+                and replay_job.status == "done"
+                and replay_job.attempts == 1
+                and hashlib.sha256(archive.read(replay.archive_key)).hexdigest()
+                == replay.payload_hash
+            )
 
         return {
             **controls,
@@ -232,6 +294,7 @@ def main():
     args.add_argument("mode", choices=("prepare", "running", "wait", "verify"))
     args.add_argument("value")
     args.add_argument("--with-controls", action="store_true")
+    args.add_argument("--with-mixed-controls", action="store_true")
     options = args.parse_args()
     settings = Settings(_env_file=None)
     engine = make_engine(settings)
@@ -242,7 +305,9 @@ def main():
     try:
         archive = LocalArchive(settings.data_dir / "raw")
         if options.mode == "prepare":
-            result = prepare(engine, archive, options.value, options.with_controls)
+            result = prepare(
+                engine, archive, options.value, options.with_controls, options.with_mixed_controls
+            )
         elif options.mode == "running":
             result = lease_snapshot(engine, UUID(options.value))
         elif options.mode == "wait":
