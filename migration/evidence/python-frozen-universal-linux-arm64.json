@@ -1,0 +1,288 @@
+{
+  "baseline_sha": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+  "database_revision": "c54f8a72d130",
+  "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+  "expected_cases": 4369,
+  "missing_cases": 0,
+  "unexpected_cases": 0,
+  "passed_cases": 4342,
+  "failed_cases": 0,
+  "errored_cases": 0,
+  "skipped_cases": 27,
+  "skipped_by_module": {
+    "tests.test_anthropic_live": 1,
+    "tests.test_deployment": 3,
+    "tests.test_gemini_live": 21,
+    "tests.test_openai_live": 1,
+    "tests.test_release_bundle": 1
+  },
+  "unverified_universal_scenarios": [],
+  "universal_scenarios": {
+    "UT-01": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-02": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-03": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-04": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-05": {
+      "expected_cases": 3,
+      "passed_cases": 3,
+      "missing_references": []
+    },
+    "UT-06": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-07": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-08": {
+      "expected_cases": 3,
+      "passed_cases": 3,
+      "missing_references": []
+    },
+    "UT-09": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-10": {
+      "expected_cases": 3,
+      "passed_cases": 3,
+      "missing_references": []
+    },
+    "UT-11": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-12": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-13": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-14": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-15": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-16": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-17": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-18": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-19": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-20": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-21": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-22": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-23": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-24": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-25": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-26": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-27": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-28": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-29": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-30": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-31": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-32": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-33": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-34": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-35": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-36": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-37": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-38": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-39": {
+      "expected_cases": 15,
+      "passed_cases": 15,
+      "missing_references": []
+    },
+    "UT-40": {
+      "expected_cases": 4,
+      "passed_cases": 4,
+      "missing_references": []
+    },
+    "UT-41": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-42": {
+      "expected_cases": 3,
+      "passed_cases": 3,
+      "missing_references": []
+    },
+    "UT-43": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-44": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-45": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-46": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-47": {
+      "expected_cases": 3,
+      "passed_cases": 3,
+      "missing_references": []
+    },
+    "UT-48": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-49": {
+      "expected_cases": 2,
+      "passed_cases": 2,
+      "missing_references": []
+    },
+    "UT-50": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-51": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-52": {
+      "expected_cases": 1,
+      "passed_cases": 1,
+      "missing_references": []
+    },
+    "UT-53": {
+      "expected_cases": 8,
+      "passed_cases": 8,
+      "missing_references": []
+    }
+  },
+  "errors": []
+}
