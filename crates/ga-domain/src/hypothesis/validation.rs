@@ -1,10 +1,10 @@
 use serde_json::{Map, Value, json};
 use speedate::{DateTime, DateTimeConfig, MicrosecondsPrecisionOverflowBehavior, TimeConfig};
-use strum::EnumMessage;
 use time::{Date, Month};
 use uuid::Uuid;
 
 use super::{InvalidHypothesisSpec, float_argument};
+use crate::event_time::speedate_error_reason;
 
 const FIELDS: &[&str] = &[
     "id",
@@ -304,7 +304,7 @@ pub(super) fn date(input: &Value) -> Result<Date, FieldError> {
                 "Datetimes provided to dates should have zero time - e.g. be exact dates",
             );
         }
-        let description = error.get_documentation().unwrap_or("invalid date");
+        let description = speedate_error_reason(&error);
         FieldError::new(
             "date_from_datetime_parsing",
             format!("Input should be a valid date or datetime, {description}"),
