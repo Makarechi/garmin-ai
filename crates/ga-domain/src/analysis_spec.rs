@@ -1,5 +1,6 @@
 mod derived;
 mod source;
+mod validation;
 
 pub use derived::DerivedAnalysisSpec;
 
@@ -75,30 +76,15 @@ pub struct AnalysisSpec {
 }
 
 impl AnalysisSpec {
+    /// Describe typed field errors for the legacy HTTP validation response.
+    pub fn field_errors(input: &Value) -> Vec<Value> {
+        validation::field_errors(input)
+    }
+
     /// Normalize the frozen typed specification before resolving any stored contracts.
     pub fn from_json(input: &Value) -> Result<Self, InvalidAnalysisSpec> {
         let fields = input.as_object().ok_or(InvalidAnalysisSpec::Validation)?;
-        if fields.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "operation"
-                    | "metric_key"
-                    | "definition_key"
-                    | "start"
-                    | "end"
-                    | "comparison_start"
-                    | "comparison_end"
-                    | "method"
-                    | "metric_version"
-                    | "source"
-                    | "limit"
-                    | "knowledge_cutoff"
-                    | "time_relation"
-                    | "threshold"
-                    | "threshold_operator"
-                    | "timezone"
-            )
-        }) {
+        if fields.keys().any(|key| !validation::known_field(key)) {
             return Err(InvalidAnalysisSpec::Validation);
         }
         let name = fields
@@ -116,13 +102,7 @@ impl AnalysisSpec {
             return Err(InvalidAnalysisSpec::Validation);
         }
         let method = text(fields, "method")?;
-        if method.is_some_and(|method| {
-            method.is_empty()
-                || method.len() > 32
-                || !method
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        }) {
+        if method.is_some_and(|method| !valid_method(method)) {
             return Err(InvalidAnalysisSpec::Validation);
         }
         let raw_source = text(fields, "source")?;
@@ -355,6 +335,14 @@ fn text<'a>(
         Some(Value::String(value)) => Ok(Some(value)),
         _ => Err(InvalidAnalysisSpec::Validation),
     }
+}
+
+fn valid_method(method: &str) -> bool {
+    !method.is_empty()
+        && method.len() <= 32
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
 }
 
 fn valid_key(key: &str) -> bool {

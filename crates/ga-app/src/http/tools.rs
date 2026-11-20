@@ -92,13 +92,7 @@ async fn execute_read_tool(
         use ga_db::health_analysis::generic::GenericAudience;
         let spec = match generic_input(&arguments) {
             Ok(spec) => spec,
-            Err(ga_domain::analysis_spec::InvalidAnalysisSpec::Validation) => {
-                return invalid_arguments();
-            }
-            Err(ga_domain::analysis_spec::InvalidAnalysisSpec::CalendarOverflow) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
-                    .into_response();
-            }
+            Err(error) => return generic_reads::validation_failure(&arguments, error),
         };
         if !scopes.permits_tool(
             tool.name(),

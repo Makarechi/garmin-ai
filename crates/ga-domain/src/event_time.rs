@@ -7,7 +7,7 @@ use speedate::{
 use crate::timestamp::StoredInstant;
 
 // Match the parser and configuration used by the pinned Python event model.
-const LEGACY_TIME: DateTimeConfig = DateTimeConfig {
+pub(crate) const LEGACY_TIME: DateTimeConfig = DateTimeConfig {
     timestamp_unit: TimestampUnit::Infer,
     time_config: TimeConfig {
         microseconds_precision_overflow_behavior: MicrosecondsPrecisionOverflowBehavior::Truncate,
