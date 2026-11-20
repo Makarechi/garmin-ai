@@ -1,0 +1,56 @@
+{
+  "scope": "PAR-12",
+  "verification": "e2e_synthetic",
+  "platform": "linux/arm64",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "passed": {
+      "tests/test_natural_language.py": 168,
+      "tests/test_tracker_chat_form.py": 197,
+      "tests/test_tracker_chat_setup.py": 80,
+      "tests/test_tracker_discovery.py": 13,
+      "tests/test_tracker_temporal_safety.py": 147
+    }
+  },
+  "reference_candidate": {
+    "source_revision": "ed4614ed96bbd64d57321d961f01278e932a149a",
+    "packaged_app_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "http": {
+    "offline_requests": 65,
+    "offline_log_sha256": "c855474025c1d9237ee3bc58ab1c9be6293a65ff34469ae5f127ffb2f70a1de1",
+    "model_requests": 70,
+    "model_native_synthetic_https_calls": 20,
+    "model_reference_synthetic_calls": 19,
+    "model_log_sha256": "ebfd1c31d6558d08345b4ee27f7b6a519edbcddb6f66df290ef2b6e66ed595ff",
+    "channel_fallback_log_sha256": "0fec49ad8d19385e2148fb65cab097d88c9357756eb2462443dd095ce45eb482"
+  },
+  "telegram": {
+    "setup_steps": 106,
+    "setup_log_sha256": "e532bedf9ed98a2fc5242550eacc11db6d378ec8b0ca4d245a5964dc1fb1d9f9",
+    "bounded_tracker_definitions": 1000,
+    "bounded_log_sha256": "5b48d91384a28e58dda0a8e81e6dddd81e2ef0f88cd9d75d1afd755a1059ce5e",
+    "guided_steps_per_locale": 98,
+    "guided_log_sha256": {
+      "en": "7c8293583d5b7df64cdfa00b7727b0b7e79461bc7db02397a922217f17415b82",
+      "ru": "c970f1b1161af62b3ebbb279e264b9d6da3289eed92d14f2992f28f7bcc4ef93"
+    },
+    "old_model_steps_per_locale": 12,
+    "old_model_log_sha256": {
+      "en": "f1942dfbc5fa9d2c148fcd61e68bbc4d4d188c0478f6a3cec393e8df3e1906a0",
+      "ru": "dc12135621142ff7783a65b5b5fa3fc98d8bb725b6af9d2f36816063d5c6ea02"
+    },
+    "local_voice_log_sha256": "99acb89eee2dcf16c4dfd3335de3d7731219e2fd834ba70b385fbad2cdd5d157",
+    "maximum_audio_bytes": 20971520,
+    "voice_ceiling_log_sha256": "21ab167f2bba1f0a544c5fea50aa213d03659d5c7a7d30754653ca9a1157a6ec",
+    "locale_and_old_state": {
+      "steps": 13,
+      "test_source_tree": "05631dddc1a862059485555ff256187313193fd9",
+      "test_executable_sha256": "f3d38b0d9304c6f81836e70bad96e9c7a478ba0c3da87c0e2731a073f7a338c5",
+      "trace_sha256": "8627a6f74c2def7cb4e70e26a77d4db7ca9da48abaac28e00d0c655c7509edb5"
+    }
+  },
+  "release_validation": "Live model and Telegram behavior and the unattended release observation remain separate."
+}

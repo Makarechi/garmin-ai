@@ -194,6 +194,16 @@ async fn wire(
         .await?;
         assert_eq!(changed.rows_affected(), 1);
     }
+    if case["chat_form_patch"].is_object() {
+        let changed = sqlx::query(
+            "UPDATE app_state SET value=jsonb_set(value,'{chat_form}',value->'chat_form'||$1::jsonb)
+             WHERE key='conversation:pending'",
+        )
+        .bind(case["chat_form_patch"].to_string())
+        .execute(pool)
+        .await?;
+        assert_eq!(changed.rows_affected(), 1);
+    }
     let callback = if let Some(name) = case["create"].as_str() {
         let version:Uuid=sqlx::query_scalar("SELECT v.id FROM event_definitions d JOIN event_definition_versions v ON v.definition_id=d.id AND v.version=d.current_version WHERE d.key=$1").bind(format!("user.synthetic_chat_{name}")).fetch_one(pool).await?;
         Some(format!("create:{version}"))
@@ -232,11 +242,8 @@ async fn wire(
     }
 }
 
-#[tokio::test]
-#[ignore = "compares native tracker entry forms with the frozen Python conversation on disposable TimescaleDB"]
-async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box<dyn Error>> {
+async fn fixture_database() -> Result<(Database, PgPool), Box<dyn Error>> {
     let url = env::var("GA_TEST_DATABASE_URL")?;
-    let locale = env::var("GA_TEST_TRACKER_CHAT_LOCALE").unwrap_or_else(|_| "en".to_owned());
     let address = url
         .strip_prefix("postgresql+psycopg://")
         .ok_or("Expected fixture URL")?;
@@ -254,6 +261,14 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         expected
     );
     let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    Ok((database, pool))
+}
+
+#[tokio::test]
+#[ignore = "compares native tracker entry forms with the frozen Python conversation on disposable TimescaleDB"]
+async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box<dyn Error>> {
+    let locale = env::var("GA_TEST_TRACKER_CHAT_LOCALE").unwrap_or_else(|_| "en".to_owned());
+    let (database, pool) = fixture_database().await?;
     let mut runtime = database.acquire_runtime_lease().await?;
     let owner: Uuid = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
         .fetch_one(&pool)
@@ -535,6 +550,79 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
             println!("{name}\n{value}");
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "compares language changes and old pending tracker state on disposable TimescaleDB"]
+async fn native_tracker_forms_match_frozen_locale_transitions() -> Result<(), Box<dyn Error>> {
+    let (database, pool) = fixture_database().await?;
+    let mut runtime = database.acquire_runtime_lease().await?;
+    let owner: Uuid = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+        .fetch_one(&pool)
+        .await?;
+    let binding = TelegramBinding {
+        owner_id: owner,
+        external_owner_id: 42,
+        instance_id: "primary",
+    };
+    let target = TelegramInboundTarget {
+        owner_id: owner,
+        instance_id: "primary",
+    };
+    let cases: Vec<Value> =
+        serde_json::from_slice(&fs::read(env::var("GA_TEST_TRACKER_CHAT_ENTRIES")?)?)?;
+    for (index, case) in cases.iter().enumerate() {
+        let locale = case["locale"].as_str().ok_or("Expected locale")?;
+        let now = clock(&pool).await?;
+        let update = wire(&pool, &database, case, 71001 + index as i64, now).await?;
+        let receipt = receive(&mut runtime, binding, &update, now, true)
+            .await?
+            .inbound
+            .ok_or("Expected tracker update")?;
+        if case["message"].is_object() {
+            let screen = database
+                .claim_telegram_local_screen(target, clock(&pool).await?, 10)
+                .await?
+                .ok_or("Expected local screening")?;
+            database
+                .apply_local_telegram_text(
+                    &screen,
+                    LocalTelegramText::Safety(TelegramSafetyDecision::Clear),
+                    locale,
+                )
+                .await?;
+            let lease = database
+                .claim_telegram_model_text(target, clock(&pool).await?, 10)
+                .await?
+                .ok_or_else(|| format!("Expected screened tracker work at step {index}"))?;
+            assert!(matches!(
+                admission(&database, &lease, locale).await?,
+                TelegramModelAdmission::Replied
+            ));
+        } else {
+            let lease = database
+                .claim_telegram_tracker_form(target, clock(&pool).await?, 10, false)
+                .await?
+                .ok_or_else(|| format!("Expected tracker callback at step {index}"))?;
+            database
+                .apply_telegram_tracker_form(&lease, "UTC", locale, false)
+                .await?;
+        }
+        let reply: String = sqlx::query_scalar(
+            "SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE inbound_message_id=$1",
+        )
+        .bind(receipt.message_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(json!(reply), case["reply"], "Reply at step {index}");
+        assert_eq!(
+            snapshot(&pool, &cases).await?,
+            case["snapshot"],
+            "Stored tracker state at step {index}"
+        );
+    }
+    println!("Matched {} locale-change and old-state steps", cases.len());
     Ok(())
 }
 
