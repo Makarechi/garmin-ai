@@ -1,0 +1,89 @@
+{
+  "scope": "PAR-13",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_scenario_packs.py": 55,
+      "tests/test_community_packs.py": 23,
+      "tests/test_extension_tck.py": 27,
+      "tests/test_integrations.py": 25,
+      "tests/test_synthetic_plugin.py": 8
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "example_binaries_sha256": {
+    "source": "619e1aa7e2c156d9fb9cd48f97a9bda7e820dac2ef23309b8a202fef384c2c70",
+    "channel": "1981a1e2e8a1c88f855c3affa4ad143f64a8abfb562db472f203af5cbc861418",
+    "model": "58420d56e5608ee9f96514cedcac46d42d69a596d399e80d493cfec2aeef0e30"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_scenario_packs_http.py",
+      "result": "passed",
+      "trace_sha256": "c0ab105cadcf64b86aa7036c3b64a33504fe02a0ea72531c2777ddd8c07f424a"
+    },
+    {
+      "comparison": "migration/check_community_packs.py",
+      "result": "passed",
+      "trace_sha256": "4a3a5be39a52a70514aa068c976063ffac8a899bde14459e98a048a04227382b"
+    },
+    {
+      "comparison": "migration/check_tracker_pack_export.py",
+      "result": "passed",
+      "trace_sha256": "9e8d2b348cd835bce49bb5be455fb2a2b01bfe6befd3b5b97c56ad1da6dd221f"
+    },
+    {
+      "comparison": "migration/check_source_metric_mappings.py",
+      "result": "passed",
+      "trace_sha256": "59ffa4f3a1e523b5e035c91f6ca7c06764ea14700a2e3c09bf13e663625f3728"
+    },
+    {
+      "comparison": "migration/check_source_extension.py",
+      "result": "passed",
+      "trace_sha256": "6b425e62055a74c020d4711eb28e0e5216606414beb293175f1de4401888f784"
+    },
+    {
+      "comparison": "migration/check_source_extension_poll.py",
+      "result": "passed",
+      "trace_sha256": "bf5a357811bcdd5b62e70b5938ae8829d7a83d46a87ebd2024d09396a007b51f"
+    },
+    {
+      "comparison": "migration/check_scheduled_source_extension.py",
+      "result": "passed",
+      "trace_sha256": "c0a561ab4152661bba9ba2eb9486db22df7a2e9194627513efcf3f7caa1ae729"
+    },
+    {
+      "comparison": "migration/check_channel_extension.py",
+      "result": "passed",
+      "trace_sha256": "b09093a7160854ee3e46139efe1664b30ff09821379af6e3b8e9ae46b42e5298"
+    },
+    {
+      "comparison": "migration/check_channel_extension_runtime.py",
+      "result": "passed",
+      "trace_sha256": "ecab28fe07c18fbafeaf9c99ba626f9a8f76d0cd55520e25b5bd2ae29a628ada"
+    },
+    {
+      "comparison": "migration/check_model_extension.py",
+      "result": "passed",
+      "trace_sha256": "6d8c3883a35f133e8a70dcfbbfa3ca33d35d2a5345faf31febf6b9412aac17f8"
+    },
+    {
+      "comparison": "migration/check_model_extension_runtime.py",
+      "result": "passed",
+      "trace_sha256": "704a9cb6488439d250f61fc8a6cdcfdcfef135af05462611564d14aed543cc20"
+    }
+  ],
+  "release_scope": [
+    "System and declarative tracker packs, and every source, channel and model example in the parity inventory.",
+    "Both runtimes used synthetic facts in separate test stores and independent extension executables. The ordinary native worker and API exercised restart, access boundaries, saved cursors, and durable receipts."
+  ]
+}
