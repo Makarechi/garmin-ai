@@ -245,3 +245,59 @@ fn token_parts(token: &str) -> Option<(&str, [u8; SIGNATURE_BYTES])> {
 fn token_key(token: &str) -> String {
     format!("action-token:{}", sha256_hex(token.as_bytes()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{NONCE_BYTES, SIGNATURE_BYTES, TOKEN_LENGTH, token_parts};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    #[test]
+    fn accepts_the_full_range_of_encoded_nonce_and_signature_bytes() {
+        for byte in u8::MIN..=u8::MAX {
+            let nonce = URL_SAFE_NO_PAD.encode([byte; NONCE_BYTES]);
+            let signature = [!byte; SIGNATURE_BYTES];
+            let token = format!("{nonce}.{}", URL_SAFE_NO_PAD.encode(signature));
+            assert_eq!(token.len(), TOKEN_LENGTH);
+            assert_eq!(token_parts(&token), Some((nonce.as_str(), signature)));
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_url_safe_alphabet_and_one_delimiter_at_fixed_offsets()
+    -> Result<(), std::str::Utf8Error> {
+        let nonce = URL_SAFE_NO_PAD.encode([0; NONCE_BYTES]);
+        let signed = URL_SAFE_NO_PAD.encode([0; SIGNATURE_BYTES]);
+        let valid = format!("{nonce}.{signed}");
+        let delimiter = nonce.len();
+        let mut bytes = valid.as_bytes().to_vec();
+        for (index, original) in valid.bytes().enumerate() {
+            for replacement in 0..=127 {
+                bytes[index] = replacement;
+                let text = str::from_utf8(&bytes)?;
+                let expected = if index == delimiter {
+                    replacement == b'.'
+                } else {
+                    replacement.is_ascii_alphanumeric() || matches!(replacement, b'-' | b'_')
+                };
+                assert_eq!(
+                    token_parts(text).is_some(),
+                    expected,
+                    "{index}, {replacement}"
+                );
+            }
+            bytes[index] = original;
+        }
+
+        for replacement in ["é", "\u{a0}", "中", "🧪"] {
+            let mut unicode = valid.clone();
+            unicode.replace_range(..replacement.len(), replacement);
+            assert_eq!(unicode.len(), TOKEN_LENGTH);
+            assert!(token_parts(&unicode).is_none());
+        }
+        for removed in 1..=TOKEN_LENGTH {
+            assert!(token_parts(&valid[..TOKEN_LENGTH - removed]).is_none());
+        }
+        assert!(token_parts(&(valid + "A")).is_none());
+        Ok(())
+    }
+}
