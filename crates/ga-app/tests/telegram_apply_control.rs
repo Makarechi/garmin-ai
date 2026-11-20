@@ -3,6 +3,7 @@ use std::{env, error::Error, future::ready, str::FromStr};
 use ga_app::telegram_input::TelegramBinding;
 use ga_db::{
     Database,
+    channel_ingress::telegram_poll::TelegramPollError,
     delivery::DeliveryState,
     jobs::{
         JobStoreError,
@@ -10,12 +11,17 @@ use ga_db::{
     },
     outbox_claims::{ReplyDestination, ReplyDispatchResult, ReplyObservation, ReplySendOutcome},
     personal_goals::{GoalSelection, PersonalGoal},
+    telegram_cursor::TelegramCursorError,
 };
 use ga_domain::timestamp::StoredInstant;
 use serde_json::json;
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+
+#[path = "support/telegram_ingress.rs"]
+mod telegram_ingress;
+use telegram_ingress::receive;
 
 #[tokio::test]
 #[ignore = "runs authenticated Telegram controls in a disposable TimescaleDB"]
@@ -62,6 +68,26 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
                 "from":{"id":42},"chat":{"id":42,"type":"private"},"text":message},
         })
     };
+    let mut ingress = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104623)")
+        .execute(&mut *ingress)
+        .await?;
+    assert!(matches!(
+        binding
+            .accept_polled_update(
+                &mut runtime,
+                &wire(1, "Synthetic diary message"),
+                now,
+                false
+            )
+            .await,
+        Err(TelegramPollError::Cursor(TelegramCursorError::Busy))
+    ));
+    let before_retry: i64 = sqlx::query_scalar("SELECT count(*) FROM inbound_messages")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(before_retry, 0);
+    ingress.rollback().await?;
     for (update, message) in [
         (1, "Synthetic diary message"),
         (20, "/forget_conversation"),
@@ -69,9 +95,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         (22, "/resume"),
         (23, "/today"),
     ] {
-        let written = binding
-            .accept_polled_update(&mut runtime, &wire(update, message), now, false)
-            .await?;
+        let written = receive(&mut runtime, binding, &wire(update, message), now, false).await?;
         assert!(written.inbound.is_some_and(|row| row.created));
     }
     let diary = database
@@ -150,9 +174,14 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             .fetch_one(&pool)
             .await?;
     assert_eq!(retired, "forgotten");
-    let duplicate = binding
-        .accept_polled_update(&mut runtime, &wire(20, "/forget_conversation"), now, false)
-        .await?;
+    let duplicate = receive(
+        &mut runtime,
+        binding,
+        &wire(20, "/forget_conversation"),
+        now,
+        false,
+    )
+    .await?;
     assert!(duplicate.inbound.is_some_and(|row| !row.created));
 
     let pause = database
@@ -302,9 +331,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
                  VALUES(gen_random_uuid(),'garmin_connect','daily_summary','synthetic-day','fixture','synthetic/archive',1,'normalized')",
             ).execute(&pool).await?;
         }
-        let accepted = binding
-            .accept_polled_update(&mut runtime, &wire(update, "/today"), now, false)
-            .await?;
+        let accepted = receive(&mut runtime, binding, &wire(update, "/today"), now, false).await?;
         assert!(accepted.inbound.is_some_and(|row| row.created));
         let lease = database
             .claim_telegram_control(target, now, 60)
@@ -370,9 +397,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             .await?
             .is_none()
     );
-    binding
-        .accept_polled_update(&mut runtime, &wire(27, "/debug on"), now, false)
-        .await?;
+    receive(&mut runtime, binding, &wire(27, "/debug on"), now, false).await?;
     let enable = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -391,9 +416,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .ok_or("Missing first diagnostic reply")?;
     assert_eq!(old.outbox_id, enabled.outbox_id);
 
-    binding
-        .accept_polled_update(&mut runtime, &wire(28, "/debug  off"), now, false)
-        .await?;
+    receive(&mut runtime, binding, &wire(28, "/debug  off"), now, false).await?;
     let disable = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -412,9 +435,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
 
     let mut late = wire(29, "/debug on");
     late["message"]["date"] = json!(clock.unix_timestamp() - 1);
-    binding
-        .accept_polled_update(&mut runtime, &late, now, false)
-        .await?;
+    receive(&mut runtime, binding, &late, now, false).await?;
     let late = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -452,9 +473,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
          VALUES(gen_random_uuid(),$1,'telegram','secondary','42','fixture')",
     ).bind(owner).execute(&pool).await?;
-    binding
-        .accept_polled_update(&mut runtime, &wire(30, "/debug on"), now, false)
-        .await?;
+    receive(&mut runtime, binding, &wire(30, "/debug on"), now, false).await?;
     let primary = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -488,9 +507,14 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         instance_id: "secondary",
         ..binding
     };
-    alternate
-        .accept_polled_update(&mut runtime, &wire(30, "/debug off"), after, false)
-        .await?;
+    receive(
+        &mut runtime,
+        alternate,
+        &wire(30, "/debug off"),
+        after,
+        false,
+    )
+    .await?;
     let alternate_target = TelegramInboundTarget {
         instance_id: "secondary",
         ..target
@@ -548,9 +572,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         "Покрытие дня без заполнения пропусков: 0%.\nНочной HRV: нет данных.",
     );
     for (update, stale) in [(31, false), (32, true)] {
-        binding
-            .accept_polled_update(&mut runtime, &wire(update, "/status"), now, false)
-            .await?;
+        receive(&mut runtime, binding, &wire(update, "/status"), now, false).await?;
         let command = database
             .claim_local_telegram_control(target, now, 60)
             .await?
@@ -607,9 +629,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
             2,
         ),
     ] {
-        binding
-            .accept_polled_update(&mut runtime, &wire(update, command), now, false)
-            .await?;
+        receive(&mut runtime, binding, &wire(update, command), now, false).await?;
         let lease = database
             .claim_local_telegram_control(target, now, 60)
             .await?
@@ -645,9 +665,14 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
     let goals = database.personal_goals(owner).await?;
     assert_eq!(goals.revision, 2);
     assert!(goals.configured && goals.goals.is_empty());
-    binding
-        .accept_polled_update(&mut runtime, &wire(36, "/goals сон сон"), now, false)
-        .await?;
+    receive(
+        &mut runtime,
+        binding,
+        &wire(36, "/goals сон сон"),
+        now,
+        false,
+    )
+    .await?;
     let invalid = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -675,29 +700,23 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         "voice".into(),
         json!({"file_id":"synthetic_voice","duration":1}),
     );
-    let accepted = binding
-        .accept_polled_update(&mut runtime, &voice, now, false)
-        .await?;
+    let accepted = receive(&mut runtime, binding, &voice, now, false).await?;
     assert!(accepted.inbound.is_some_and(|receipt| receipt.created));
     let original = wire(38, "Synthetic unsent diary text");
-    binding
-        .accept_polled_update(&mut runtime, &original, now, false)
-        .await?;
+    receive(&mut runtime, binding, &original, now, false).await?;
     let mut edited = original["message"].clone();
     edited["text"] = json!("/goals сон");
     edited["edit_date"] = json!(clock.unix_timestamp() + 1);
-    let accepted = binding
-        .accept_polled_update(
-            &mut runtime,
-            &json!({"update_id":39,"edited_message":edited}),
-            now,
-            false,
-        )
-        .await?;
+    let accepted = receive(
+        &mut runtime,
+        binding,
+        &json!({"update_id":39,"edited_message":edited}),
+        now,
+        false,
+    )
+    .await?;
     assert!(accepted.inbound.is_some_and(|receipt| receipt.created));
-    binding
-        .accept_polled_update(&mut runtime, &wire(40, "/goals"), now, false)
-        .await?;
+    receive(&mut runtime, binding, &wire(40, "/goals"), now, false).await?;
     let menu = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -721,9 +740,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .await?;
     let mut earlier = wire(41, "/goals бег");
     earlier["message"]["date"] = json!(clock.unix_timestamp() - 60);
-    binding
-        .accept_polled_update(&mut runtime, &earlier, now, false)
-        .await?;
+    receive(&mut runtime, binding, &earlier, now, false).await?;
     let delayed = database
         .claim_local_telegram_control(target, now, 60)
         .await?
@@ -733,9 +750,7 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .await?;
     assert_eq!(database.personal_goals(owner).await?, saved);
     for (update, text) in [(99, "/goals сон"), (100, "/goals нет")] {
-        binding
-            .accept_polled_update(&mut runtime, &wire(update, text), now, false)
-            .await?;
+        receive(&mut runtime, binding, &wire(update, text), now, false).await?;
     }
     for expected in [vec![PersonalGoal::Sleep], Vec::new()] {
         let next = database

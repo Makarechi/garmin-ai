@@ -1,16 +1,13 @@
 use std::{env, error::Error, fs, str::FromStr, time::Duration};
 
-use ga_app::telegram_input::TelegramBinding;
 use ga_app::{telegram_settings::TelegramIngressSettings, telegram_transport::TelegramTransport};
 use ga_db::{
     Database,
-    channel_ingress::telegram_poll::{TelegramPollError, TelegramPollReceipt},
     jobs::telegram_inbound::{
         LocalTelegramText, TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundTarget,
         TelegramModelAdmission, TelegramSafetyDecision,
     },
     runtime_lease::RuntimeLease,
-    telegram_cursor::TelegramCursorError,
 };
 use ga_domain::timestamp::StoredInstant;
 use serde_json::{Value, json};
@@ -28,29 +25,9 @@ async fn clock(pool: &PgPool) -> Result<StoredInstant, Box<dyn Error>> {
     )?)
 }
 
-async fn accept(
-    runtime: &mut RuntimeLease,
-    binding: TelegramBinding<'_>,
-    wire: &Value,
-    received: StoredInstant,
-) -> Result<TelegramPollReceipt, Box<dyn Error>> {
-    Ok(timeout(Duration::from_secs(3), async {
-        loop {
-            match binding
-                .accept_polled_update(runtime, wire, received, true)
-                .await
-            {
-                Err(
-                    TelegramPollError::Busy | TelegramPollError::Cursor(TelegramCursorError::Busy),
-                ) => {
-                    sleep(Duration::from_millis(5)).await;
-                }
-                result => return result,
-            }
-        }
-    })
-    .await??)
-}
+#[path = "support/telegram_ingress.rs"]
+mod telegram_ingress;
+use telegram_ingress::receive as accept;
 
 async fn before(pool: &PgPool, case: &Value) -> Result<(), Box<dyn Error>> {
     if case["pending"] == true {
@@ -166,7 +143,7 @@ async fn exercise(
         } else {
             json!({"update_id":id,"message":message})
         };
-        let received = accept(runtime, binding, &wire, now).await?;
+        let received = accept(runtime, binding, &wire, now, true).await?;
         assert!(received.inbound.is_some(), "{id}");
         let response = timeout(Duration::from_secs(8),async {
             loop {
@@ -193,7 +170,7 @@ async fn exercise(
             FROM inbound_messages i JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id)
             WHERE i.external_event_id=$1").bind(id.to_string()).fetch_one(pool).await?;
         assert!(processed, "Atomic inbox completion {id}");
-        let repeated = accept(runtime, binding, &wire, clock(pool).await?).await?;
+        let repeated = accept(runtime, binding, &wire, clock(pool).await?, true).await?;
         assert!(
             repeated.inbound.is_some_and(|row| !row.created),
             "Duplicate update {id}"
@@ -257,7 +234,7 @@ async fn resume_local_setup_before_model(
     let now = clock(pool).await?;
     accept(runtime,binding,&json!({"update_id":60101,"message":{"message_id":60101,
         "from":{"id":42},"chat":{"id":42,"type":"private"},
-        "date":OffsetDateTime::from(now).unix_timestamp(),"text":"Synthetic recovered model draft"}}),now).await?;
+        "date":OffsetDateTime::from(now).unix_timestamp(),"text":"Synthetic recovered model draft"}}),now,true).await?;
     let screen = database
         .claim_telegram_local_screen(target, clock(pool).await?, 10)
         .await?

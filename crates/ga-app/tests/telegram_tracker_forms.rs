@@ -14,16 +14,13 @@ use ga_app::{
 };
 use ga_db::{
     Database,
-    channel_ingress::telegram_poll::{TelegramPollError, TelegramPollReceipt},
     jobs::telegram_inbound::{
         LocalTelegramText, TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundTarget,
         TelegramModelAdmission, TelegramSafetyDecision,
     },
-    runtime_lease::RuntimeLease,
     share_policy::{
         DestinationKind, ShareCategory, ShareDestination, SharePolicyError, TrackerShareGrant,
     },
-    telegram_cursor::TelegramCursorError,
 };
 use ga_domain::{
     access::{Scope, Scopes},
@@ -45,27 +42,9 @@ async fn clock(pool: &PgPool) -> Result<StoredInstant, Box<dyn Error>> {
     )?)
 }
 
-async fn receive(
-    runtime: &mut RuntimeLease,
-    binding: TelegramBinding<'_>,
-    wire: &Value,
-    received: StoredInstant,
-) -> Result<TelegramPollReceipt, Box<dyn Error>> {
-    Ok(timeout(Duration::from_secs(3), async {
-        loop {
-            match binding
-                .accept_polled_update(runtime, wire, received, true)
-                .await
-            {
-                Err(
-                    TelegramPollError::Busy | TelegramPollError::Cursor(TelegramCursorError::Busy),
-                ) => sleep(Duration::from_millis(5)).await,
-                result => return result,
-            }
-        }
-    })
-    .await??)
-}
+#[path = "support/telegram_ingress.rs"]
+mod telegram_ingress;
+use telegram_ingress::receive;
 
 #[path = "support/tracker_snapshot.rs"]
 mod tracker_snapshot;
@@ -295,7 +274,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
     };
     let at = clock(&pool).await?;
     let probe=wire(&pool,&database,&json!({"message":{"caption":"Explain the unrelated synthetic topic","voice":{"file_id":"synthetic-probe","file_unique_id":"synthetic-probe","duration":1,"file_size":128,"mime_type":"audio/ogg"}}}),70000,at).await?;
-    let probe = receive(&mut runtime, binding, &probe, at)
+    let probe = receive(&mut runtime, binding, &probe, at, true)
         .await?
         .inbound
         .ok_or("Expected caption probe")?;
@@ -337,7 +316,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         at,
     )
     .await?;
-    let urgent = receive(&mut runtime, binding, &urgent, at)
+    let urgent = receive(&mut runtime, binding, &urgent, at, true)
         .await?
         .inbound
         .ok_or("Expected urgent receipt")?;
@@ -424,7 +403,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
             let id = 71001 + index as i64;
             let at = clock(&pool).await?;
             let update = wire(&pool, &database, case, id, at).await?;
-            let receipt = receive(&mut runtime, binding, &update, at)
+            let receipt = receive(&mut runtime, binding, &update, at, true)
                 .await?
                 .inbound
                 .ok_or("Missing form receipt")?;
@@ -444,7 +423,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
             );
             let status:(String,String)=sqlx::query_as("SELECT i.status,j.status FROM inbound_messages i JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id) WHERE i.id=$1").bind(receipt.message_id).fetch_one(&pool).await?;
             assert_eq!(status, ("processed".into(), "done".into()));
-            let duplicate = receive(&mut runtime, binding, &update, at)
+            let duplicate = receive(&mut runtime, binding, &update, at, true)
                 .await?
                 .inbound
                 .ok_or("Missing duplicate receipt")?;
@@ -479,7 +458,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
     let at = clock(&pool).await?;
     let id = 71001 + cases.len() as i64 - 1;
     let update = wire(&pool, &database, final_case, id, at).await?;
-    let receipt = receive(&mut runtime, binding, &update, at)
+    let receipt = receive(&mut runtime, binding, &update, at, true)
         .await?
         .inbound
         .ok_or("Expected recovery receipt")?;
@@ -534,7 +513,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         ))
     ));
     assert_eq!(snapshot(&pool, &cases).await?, final_case["snapshot"]);
-    let duplicate = receive(&mut runtime, binding, &update, at)
+    let duplicate = receive(&mut runtime, binding, &update, at, true)
         .await?
         .inbound
         .ok_or("Expected duplicate recovery receipt")?;
