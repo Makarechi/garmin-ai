@@ -1,5 +1,6 @@
 use std::{io::Read, time::Duration};
 
+use ga_archive::json_spool::JsonDocument;
 use ga_domain::{
     legacy_json::{Utf8Layout, encode, encode_ascii},
     model_consent::ModelCategories,
@@ -22,6 +23,7 @@ use super::{
     device_history::{device_history_in, device_range},
     event_windows::{event_windows_in, permits_model_event_kind_in},
     freshness_report::model_freshness_in,
+    insights::insights_in,
     lagged::lagged_association_in,
     main_sleep_timing_in,
     migraine::migraine_comparison_in,
@@ -63,6 +65,10 @@ pub const WELLBEING_OBSERVATIONS: &str = "wellbeing_observations";
 pub const DEVICE_HISTORY: &str = "device_history";
 pub const ACTIVITIES: &str = "activities";
 pub const ACTIVITY_DETAILS: &str = "activity_details";
+pub const INSIGHTS_LIST: &str = "insights_list";
+const MODEL_INSIGHT_PACKS: &[&str] = &["sleep", "wellbeing", "migraine"];
+const MAX_MODEL_RESULT_CHARS: usize = 24_000;
+const MAX_MODEL_RESULT_BYTES: usize = MAX_MODEL_RESULT_CHARS * 4;
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "tool", content = "arguments", deny_unknown_fields)]
@@ -175,6 +181,12 @@ pub enum DailyAnalysisQuery {
         offset: u32,
         #[serde(default = "default_activity_limit")]
         limit: u16,
+    },
+    #[serde(rename = "insights_list")]
+    Insights {
+        #[serde(default = "default_insight_limit")]
+        limit: u16,
+        cursor: Option<String>,
     },
     #[serde(rename = "analysis_migraine_windows")]
     Migraine {
@@ -338,26 +350,7 @@ impl DailyAnalysisQuery {
                 let output = event_windows_in(txn, kind, metric, parse(start)?, parse(end)?)
                     .await
                     .map_err(model_series_error)?;
-                const MAX_RESULT_CHARS: usize = 24_000;
-                if output.byte_len() > (MAX_RESULT_CHARS * 4) as u64 {
-                    return Ok(Some(oversized_model_result()));
-                }
-                let mut bytes = Vec::with_capacity(output.byte_len() as usize);
-                output
-                    .reader()
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| HealthAnalysisError::Database)?;
-                let encoded = encode(&bytes, Utf8Layout::Ordered, MAX_RESULT_CHARS * 4)
-                    .map_err(|_| HealthAnalysisError::Database)?;
-                if std::str::from_utf8(&encoded)
-                    .map_err(|_| HealthAnalysisError::Database)?
-                    .chars()
-                    .count()
-                    > MAX_RESULT_CHARS
-                {
-                    return Ok(Some(oversized_model_result()));
-                }
-                serde_json::from_slice(&bytes).map_err(|_| HealthAnalysisError::Database)?
+                compact_document(output)?
             }
             Self::CoffeeSleep {
                 start,
@@ -481,6 +474,22 @@ impl DailyAnalysisQuery {
                 model_activity_details_in(txn, activity_id, *include_samples, *offset, *limit)
                     .await,
             )?,
+            Self::Insights { limit, cursor } => {
+                if !onboarding_allows_model(txn, ModelCategories::DIARY).await?
+                    || !model_packs_allowed(txn, context.binding().owner_id, MODEL_INSIGHT_PACKS)
+                        .await?
+                {
+                    return Ok(None);
+                }
+                if let Some(document) =
+                    insights_in(txn, *limit, cursor.as_deref(), Some(MAX_MODEL_RESULT_BYTES))
+                        .await?
+                {
+                    compact_document(document)?
+                } else {
+                    oversized_model_result()
+                }
+            }
             Self::Migraine {
                 metric,
                 start,
@@ -556,6 +565,7 @@ impl DailyAnalysisEvidence {
                 | DEVICE_HISTORY
                 | ACTIVITIES
                 | ACTIVITY_DETAILS
+                | INSIGHTS_LIST
         )
     }
 
@@ -655,6 +665,7 @@ pub struct DailyAnalysisAccess {
     pub summaries: bool,
     pub coffee_sleep: bool,
     pub training: bool,
+    pub insights: bool,
 }
 
 impl Database {
@@ -695,6 +706,9 @@ impl Database {
             let coffee_sleep = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?
                 && model_packs_allowed(&mut txn, context.binding().owner_id, COFFEE_MODEL_PACKS)
                     .await?;
+            let insights = migraine
+                && wellbeing
+                && model_packs_allowed(&mut txn, context.binding().owner_id, &["sleep"]).await?;
             txn.commit().await?;
             Ok(Some(DailyAnalysisAccess {
                 migraine,
@@ -703,6 +717,7 @@ impl Database {
                 summaries,
                 coffee_sleep,
                 training,
+                insights,
             }))
         })
         .await
@@ -817,6 +832,32 @@ fn model_activity_result(
 fn oversized_model_result() -> Value {
     json!({"error":"result_too_large",
         "instruction":"Narrow the date range or use an analysis tool. Do not treat this as empty data."})
+}
+
+fn compact_document(document: JsonDocument) -> Result<Value, HealthAnalysisError> {
+    if document.byte_len() > MAX_MODEL_RESULT_BYTES as u64 {
+        return Ok(oversized_model_result());
+    }
+    let mut bytes = Vec::with_capacity(document.byte_len() as usize);
+    document
+        .reader()
+        .read_to_end(&mut bytes)
+        .map_err(|_| HealthAnalysisError::Database)?;
+    let encoded = encode(&bytes, Utf8Layout::Ordered, MAX_MODEL_RESULT_BYTES)
+        .map_err(|_| HealthAnalysisError::Database)?;
+    if std::str::from_utf8(&encoded)
+        .map_err(|_| HealthAnalysisError::Database)?
+        .chars()
+        .count()
+        > MAX_MODEL_RESULT_CHARS
+    {
+        return Ok(oversized_model_result());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| HealthAnalysisError::Database)
+}
+
+fn default_insight_limit() -> u16 {
+    30
 }
 
 fn default_activity_limit() -> u16 {

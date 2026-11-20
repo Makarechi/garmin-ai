@@ -40,6 +40,7 @@ from garmin_ai.models import (
     ActivityPart,
     Event,
     HealthDay,
+    Insight,
     Measurement,
     MetricObservation,
     Person,
@@ -100,6 +101,9 @@ ACTIVITIES_QUESTION = "Show the synthetic run summary and its saved activity par
 ACTIVITIES_ANSWER = "The saved lap and explicitly requested sample are available."
 ACTIVITY_START = datetime(2026, 6, 24, 10, tzinfo=UTC)
 ACTIVITY_ID = "synthetic-chat-activity"
+INSIGHTS_QUESTION = "Which saved synthetic insights are accepted and which are candidates?"
+INSIGHTS_ANSWER = "The stored results distinguish acceptance from candidacy."
+INSIGHTS_START = datetime(2026, 6, 27, 12, tzinfo=UTC)
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -142,6 +146,8 @@ def output(prompt):
             return devices_output(prompt)
         if prompt["question"].startswith(ACTIVITIES_QUESTION):
             return activities_output(prompt)
+        if prompt["question"].startswith(INSIGHTS_QUESTION):
+            return insights_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -191,6 +197,7 @@ def output(prompt):
             WELLBEING_QUESTION,
             DEVICES_QUESTION,
             ACTIVITIES_QUESTION,
+            INSIGHTS_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -535,6 +542,39 @@ def activities_output(prompt):
     return AgentStep(
         calls=[{"name": tool, "arguments_json": json.dumps(args)} for tool, args in arguments],
         response_language="en",
+    )
+
+
+def insights_output(prompt):
+    name = "insights_list"
+    tools = {tool["name"] for tool in prompt["tools"]}
+    evidence = prompt["evidence"]
+    if prompt["question"].endswith(" without sleep access"):
+        assert name not in tools and not evidence
+        return AgentStep(response_language="en")
+    arguments = {"limit": 1}
+    if evidence:
+        first = evidence[0]
+        assert first["tool"] == name
+        if prompt["question"].endswith(" with an oversized statement"):
+            assert first["result"]["error"] == "result_too_large"
+            return AgentStep(response_language="en")
+        [accepted] = first["result"]["rows"]
+        assert accepted["status"] == "accepted" and accepted["evidence"] == {"sample_count": 17}
+        assert first["result"]["truncated"] and first["result"]["next_cursor"]
+        if len(evidence) == 2:
+            second = evidence[1]
+            assert second["tool"] == name
+            [candidate] = second["result"]["rows"]
+            assert candidate["status"] == "candidate" and candidate["evidence"] == {
+                "sample_count": 9
+            }
+            assert not second["result"]["truncated"] and second["result"]["next_cursor"] is None
+            return AgentStep(answer=INSIGHTS_ANSWER, evidence_ids=[1, 2], response_language="en")
+        arguments["cursor"] = first["result"]["next_cursor"]
+    assert name in tools
+    return AgentStep(
+        calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
     )
 
 
@@ -899,6 +939,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_wellbeing(engine, python, native)
     exercise_devices(engine, python, native)
     exercise_activities(engine, python, native)
+    exercise_insights(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1898,6 +1939,63 @@ def exercise_activities(engine, python, native):
     assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
     print(
         "Matched filtered activities, default sample omission, pagination and bounded model output"
+    )
+
+
+def exercise_insights(engine, python, native):
+    def insight(key, status, count, generation):
+        return Insight(
+            category="synthetic",
+            statement=f"Synthetic {status} result",
+            status=status,
+            evidence={"sample_count": count},
+            sample_size=count,
+            effect_size=0.25,
+            dedup_key=key,
+            generated_at=generation,
+        )
+
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for name in ("sleep", "wellbeing", "migraine"):
+            packs[name].tracking_enabled = True
+            packs[name].llm_enabled = True
+        accepted = insight("synthetic-accepted", "accepted", 17, INSIGHTS_START)
+        session.add_all(
+            [
+                accepted,
+                insight(
+                    "synthetic-candidate", "candidate", 9, INSIGHTS_START - timedelta(seconds=1)
+                ),
+            ]
+        )
+        session.flush()
+        identity = accepted.id
+    old, new = [submit(client, INSIGHTS_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert INSIGHTS_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved Garmin and diary data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    with Session(engine) as session, session.begin():
+        session.get(Insight, identity).status = "candidate"
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with Session(engine) as session, session.begin():
+        session.get(Insight, identity).status = "accepted"
+        ensure_scenario_packs(session)["sleep"].llm_enabled = False
+    question = INSIGHTS_QUESTION + " without sleep access"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and INSIGHTS_ANSWER not in denied[1], denied
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["sleep"].llm_enabled = True
+        huge = insight("synthetic-large", "candidate", 9, INSIGHTS_START + timedelta(seconds=1))
+        huge.statement = "x" * 100_000
+        session.add(huge)
+    question = INSIGHTS_QUESTION + " with an oversized statement"
+    oversized = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert oversized[0] == oversized[1] and INSIGHTS_ANSWER not in oversized[1], oversized
+    print(
+        "Matched insight pages, statuses and evidence bounds, withholding changed or disallowed results"
     )
 
 
