@@ -151,15 +151,41 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
         source = Path(__file__).with_name(filename)
         docker("cp", str(source), f"{observer}:/tmp/{filename}")
     command = ["docker", "exec", observer, "python", "/tmp/fit_replay_workload.py"]
-    fixture = json.loads(docker(*command[1:], "prepare", args.fit_replay, timeout=300).stdout)
+    extra = ("--with-controls",) if args.controls_during_fit else ()
+    fixture = json.loads(
+        docker(*command[1:], "prepare", args.fit_replay, *extra, timeout=300).stdout
+    )
     start = time.monotonic()
+    controls = {}
+    if args.controls_during_fit:
+        script = Path(__file__).with_name("control_overlap.py").read_text(encoding="utf-8")
+        before = json.loads(docker(*command[1:], "running", fixture["job"]).stdout)
+        response = docker(
+            "exec", observer, "python", "-c", script, f"http://{api}:8080", "--paired-fit"
+        )
+        after = json.loads(docker(*command[1:], "running", fixture["job"]).stdout)
+        controls = {
+            "control_overlap": {**json.loads(response.stdout), "before": before, "after": after}
+        }
     result = collect_client_workload(
-        [*command, "wait", fixture["source"]], args.interval, db, api, worker, elapsed, probe=probe
+        [*command, "wait", json.dumps(fixture)],
+        args.interval,
+        db,
+        api,
+        worker,
+        elapsed,
+        probe=probe,
     )
     processing = round(time.monotonic() - start, 3)
     validated = json.loads(docker(*command[1:], "verify", json.dumps(fixture), timeout=600).stdout)
     public_fixture = {key: value for key, value in fixture.items() if key not in {"source", "job"}}
-    return {**public_fixture, **result, **validated, "observed_queue_seconds": processing}
+    return {
+        **public_fixture,
+        **result,
+        **validated,
+        **controls,
+        "observed_queue_seconds": processing,
+    }
 
 
 def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=None, probe=None):
@@ -681,6 +707,30 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
         }
 
 
+def check_fit_controls(result):
+    observed = result["control_overlap"]
+    if (
+        observed["failures"]
+        or not {"authenticated_web_pause_ms", "operations_response_ms", "webhook_ingress_ms"}
+        <= observed["latencies_ms"].keys()
+    ):
+        raise RuntimeError(
+            f"Native control probes failed during FIT replay: {observed['failures']}"
+        )
+    if max(observed["latencies_ms"].values()) > 2000:
+        raise RuntimeError("Native control latency exceeded two seconds during FIT replay")
+    if not observed["before"]["active"] or observed["after"] != observed["before"]:
+        raise RuntimeError("The native control probes did not run during the same FIT lease")
+    if (
+        not result["owner_pause_persisted"]
+        or not result["telegram_ingress_persisted"]
+        or not result["observed_lease_renewals"]
+    ):
+        raise RuntimeError(
+            "Native FIT replay did not preserve its control writes and renew its lease"
+        )
+
+
 def check_fit_replay(size, before, after):
     fixture = ("records", "uncompressed_bytes", "compressed_bytes", "archive_sha256")
     if any(before[key] != after[key] for key in fixture):
@@ -764,8 +814,8 @@ def main():
         parser.error("--preload-history requires --sync-days 7, 30 or 365")
     if args.fit_developer and not args.fit_records:
         parser.error("--fit-developer requires --fit-records")
-    if args.controls_during_fit and args.fit_records != 50000:
-        parser.error("--controls-during-fit requires --fit-records 50000")
+    if args.controls_during_fit and args.fit_records != 50000 and args.fit_replay != "ceiling":
+        parser.error("--controls-during-fit requires --fit-records 50000 or --fit-replay ceiling")
     if bool(args.candidate_image) != bool(args.candidate_sha):
         parser.error("--candidate-image and --candidate-sha must be supplied together")
     if args.candidate_image and any(
@@ -805,6 +855,8 @@ def main():
                     baseline["fit_replay_workload"],
                     candidate["fit_replay_workload"],
                 )
+                if args.controls_during_fit:
+                    check_fit_controls(candidate["fit_replay_workload"])
             except RuntimeError:
                 print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
                 raise

@@ -190,6 +190,21 @@ frozen Python worker a 4 GiB limit and replayed the same file. It committed 409,
 the same complete projection and archive digests as Rust. The tables above use only the
 matched resource limits. The mixed-workload and release soak checks remain separate.
 
+#### Owner controls during maximum-size replay
+
+Add `--controls-during-fit` to `--fit-replay ceiling` for a simultaneous authenticated
+web pause, operations read and private Telegram webhook delivery while the worker holds
+its active replay lease. Only retry a recognized temporary 503 within two seconds, keeping
+the original request identity. The fixture verifies one persisted control and one persisted
+Telegram ingress.
+
+In the [Linux ARM64 trial](evidence/python-rust-fit-control-overlap-linux-arm64.json.gz), Rust
+replied to the pause in 105.651 ms, to the operations read in 79.975 ms, and accepted the
+webhook in 198.047 ms including one retry. The worker renewed the same lease three times and
+committed all 409,600 rows. The Python client timed out waiting for all three responses. The
+pause and Telegram ingress were recorded later, and that worker hit its memory limit during
+replay. These are observed latencies for one concurrent burst.
+
 ## Daily source sync and historical jobs
 
 Use `--sync-days 1` to pass synthetic responses through the actual Garmin job dispatcher for
