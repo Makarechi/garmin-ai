@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import httpx
 from capture_reference import isolated_engine
+from check_stress_hours import seed_stress
 from check_tracker_extraction_http import certificates
 from fastapi.testclient import TestClient
 from sqlalchemy import text, update
@@ -69,6 +70,8 @@ GENERIC_DETAIL = "Synthetic historical analysis entry"
 AGGREGATE_QUESTION = "Show the synthetic step aggregate."
 MEASUREMENT_START = datetime(2026, 10, 10, 14, tzinfo=UTC)
 MEASUREMENT_SOURCE = "synthetic-historical-aggregate"
+STRESS_QUESTION = "Which synthetic hours rank highest by measured stress?"
+STRESS_ANSWER = "The first ranked hour has complete observed coverage."
 STATISTICS_QUESTION = "Compare the synthetic lags and matched controls."
 STATISTICS_START = date(2026, 11, 2)
 STATISTICS_END = STATISTICS_START + timedelta(days=13)
@@ -94,6 +97,8 @@ def output(prompt):
             return generic_output(prompt)
         if prompt["question"].startswith(AGGREGATE_QUESTION):
             return aggregate_output(prompt)
+        if prompt["question"].startswith(STRESS_QUESTION):
+            return stress_output(prompt)
         if prompt["question"].startswith(STATISTICS_QUESTION):
             return statistics_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
@@ -129,6 +134,7 @@ def output(prompt):
             GENERIC_QUESTION,
             AGGREGATE_QUESTION,
             STATISTICS_QUESTION,
+            STRESS_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -290,6 +296,32 @@ def aggregate_output(prompt):
         answer="The synthetic step aggregate is available.",
         evidence_ids=[1],
         numeric_claims=[{"evidence_id": 1, "path": ["value"], "value": result["value"]}],
+        response_language="en",
+    )
+
+
+def stress_output(prompt):
+    name = "analysis_stress_by_hour"
+    if prompt["evidence"]:
+        item = prompt["evidence"][0]
+        assert item["tool"] == name and item["id"] == 1
+        result = item["result"]
+        assert result["ranked_hours"][0]["hour"] == 9
+        assert result["ranked_hours"][0]["elevated_share"] == 1
+        assert result["hours"][11]["elevated_share"] is None
+        return AgentStep(answer=STRESS_ANSWER, evidence_ids=[1], response_language="en")
+    tools = {tool["name"] for tool in prompt["tools"]}
+    if prompt["question"].endswith(" without wellbeing"):
+        assert name not in tools
+        return AgentStep(response_language="en")
+    assert name in tools
+    return AgentStep(
+        calls=[
+            {
+                "name": name,
+                "arguments_json": json.dumps({"start": "2026-09-01", "end": "2026-09-03"}),
+            }
+        ],
         response_language="en",
     )
 
@@ -547,6 +579,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_legacy_aggregate(engine, python, native)
     exercise_current_freshness(engine, python, native)
     exercise_statistics(engine, python, native)
+    exercise_stress(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1150,6 +1183,40 @@ def exercise_statistics(engine, python, native):
     denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
     assert denied[0] == denied[1] and "The analysis could not be completed" in denied[1]
     print("Matched paired lag and migraine analysis and withheld sources after a pack was disabled")
+
+
+def exercise_stress(engine, python, native):
+    seed_stress(engine)
+    with Session(engine) as session, session.begin():
+        wellbeing = ensure_scenario_packs(session)["wellbeing"]
+        wellbeing.tracking_enabled = True
+        wellbeing.llm_enabled = True
+    old, new = [submit(client, STRESS_QUESTION)["reply"] for client in (python, native)]
+    assert old["text"] == new["text"] and STRESS_ANSWER in new["text"], (old, new)
+    sample = datetime(2026, 9, 1, 9, tzinfo=UTC)
+    sample_filter = (
+        Measurement.ts == sample,
+        Measurement.metric == "stress_score",
+        Measurement.source == "garmin_connect",
+    )
+    with engine.begin() as connection:
+        result = connection.execute(update(Measurement).where(*sample_filter).values(value=20))
+        assert result.rowcount == 1
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with engine.begin() as connection:
+        connection.execute(update(Measurement).where(*sample_filter).values(value=80))
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["wellbeing"].llm_enabled = False
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert new["id"] not in {row["id"] for row in history.json()["replies"]}
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    question = STRESS_QUESTION + " without wellbeing"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and STRESS_ANSWER not in denied[1], denied
+    print(
+        "Matched paired stress-hour analysis and withheld it after the wellbeing grant was revoked"
+    )
 
 
 def main():
