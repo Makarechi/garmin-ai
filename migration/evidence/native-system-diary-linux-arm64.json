@@ -86,9 +86,9 @@
   "coverage_http_rejections": {
     "cases": 24,
     "platform": "linux/arm64",
-    "source_revision": "c685f9395523dc8906ac60144041517244a8bfa2",
-    "source_tree": "68aea79f771da4b24b82d3ff90db7184cffd783b",
-    "app_sha256": "2d272e05187ed0886337d76918d514172aeacd16f960cf96c3ca084e9185c3e8",
+    "source_revision": "ddd97cd5b7b7089366c040c0b4576c72f648aa9b",
+    "source_tree": "358ec37c58eb3c3f83e465efbdc66376ad909ba2",
+    "app_sha256": "dd653710dad725f5a9cbe7172254f8ce05b2e66f02d1aa096ef969ec962bef1b",
     "trace_sha256": "8c75f514a4ab544842f804f210800ca7005be9c0eaf318cb72f11c3bdb30418a"
   }
 }
