@@ -1,0 +1,157 @@
+{
+  "scope": "PAR-15",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_generic_analytics.py": 33,
+      "tests/test_coffee_sleep.py": 31,
+      "tests/test_running_comparability.py": 3,
+      "tests/test_sleep_analysis.py": 12,
+      "tests/test_stress_analysis.py": 6,
+      "tests/test_hypotheses.py": 26,
+      "tests/test_migraine_controls.py": 19,
+      "tests/test_threshold_segments.py": 18
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94",
+    "named_fixture_source_tree": "73d0f6e7c831af192d1a90b345ffbbfc4ccea2e0"
+  },
+  "generic_interface_cases": {
+    "http": 5114,
+    "mcp": 6475
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_mcp_analytics.py",
+      "result": "passed",
+      "trace_sha256": "f99b1d06f156766f3a70f00103dbabd9c2be43e6acf7ed1875efce1e90840526"
+    },
+    {
+      "comparison": "migration/check_running_efficiency.py",
+      "result": "passed",
+      "trace_sha256": "3c2b3e7c053d0151d33855ec8efb6f86d95dcda91ed48356b9fd627963323c6b"
+    },
+    {
+      "comparison": "migration/check_stress_hours.py",
+      "result": "passed",
+      "trace_sha256": "690418f2feb63ed2105e1feefcaf1e8854482a024c9d75e183e4d34d7b66a1de"
+    },
+    {
+      "comparison": "migration/check_lagged_association.py",
+      "result": "passed",
+      "trace_sha256": "c00dcb5eec58aec61d854bf899a18b9f082d395ff4345646cc480b2fd8b6e233"
+    },
+    {
+      "comparison": "migration/check_migraine_windows.py",
+      "result": "passed",
+      "trace_sha256": "76a9cd6f2e930f6d7c333cbea474e35bb7661a9e59a955bc33655e322d86d61c"
+    },
+    {
+      "comparison": "migration/check_coffee_sleep.py",
+      "result": "passed",
+      "trace_sha256": "a64dd35b47e2b61d2106dd091401ceb2929af707fa6921004f0d7e3eb02e75b6"
+    },
+    {
+      "comparison": "migration/check_generic_interfaces.py",
+      "result": "passed",
+      "trace_sha256": "5e7d40bc65dd7d2684d44aff27051bdc666acc008bc1ecb20ffcbc0fd40d7006"
+    },
+    {
+      "comparison": "migration/check_hypotheses_http.py",
+      "result": "passed",
+      "trace_sha256": "98c2d7434b628adfd67aa04fe64459f278bfa39829b16ad19448adee6d4aa191"
+    },
+    {
+      "comparison": "migration/check_mcp_generic_nonfinite.py",
+      "result": "passed",
+      "trace_sha256": "9d91afce49ac9182374b89cfe79b0052d3002ad037359be853fe5dcab92d7e08"
+    },
+    {
+      "comparison": "migration/check_temporal_features.py",
+      "result": "passed",
+      "trace_sha256": "8e1302f6c674796392c07725f64818563cd63cdce97f64d15a208fb857067f91"
+    },
+    {
+      "comparison": "migration/check_temporal_displays.py",
+      "result": "passed",
+      "trace_sha256": "3e5688948384c2538bc6cd70f8a127157d19b0382e0d049f1b9697ace2c1c7a2"
+    },
+    {
+      "comparison": "migration/check_health_analysis.py",
+      "result": "passed",
+      "trace_sha256": "14911f7e0aeab2a32bd1bee7b87b06cc59394c54e7d6015d02fdb4a55c27b500"
+    },
+    {
+      "comparison": "migration/check_hypothesis_history.py",
+      "result": "passed",
+      "trace_sha256": "a4a395843cf994d9c732edaae06ab7562f221f0872ada01012a03fc9bd42ad68"
+    },
+    {
+      "comparison": "migration/check_generic_entry_history.py",
+      "result": "passed",
+      "trace_sha256": "dd0ea70290328960f169331b92b447e19231eb0d2feb7a8cf0d14d470eddc418"
+    },
+    {
+      "comparison": "migration/check_generic_observation_history.py",
+      "result": "passed",
+      "trace_sha256": "e11bad1f5d2187d0649beb0c4ef9d10c6ab451b45b10a2deb01cf4da8ff58e4b"
+    },
+    {
+      "comparison": "migration/check_generic_aggregate_history.py",
+      "result": "passed",
+      "trace_sha256": "10cb7cd953d1a20012b503ff0911214c39a6b7972638acddc0fd1b434d0471c8"
+    },
+    {
+      "comparison": "migration/check_generic_compositions.py",
+      "result": "passed",
+      "trace_sha256": "49434e6bb2a296255880a8bc551aa13112c23066b7968d6ef8c93fbd98aee148"
+    },
+    {
+      "comparison": "migration/check_generic_thresholds.py",
+      "result": "passed",
+      "trace_sha256": "1a2692efd285d1772a6e9d26f2d67bab83f9c4df80c5e848cbc6b11f0fccfa43"
+    }
+  ],
+  "paired_analytics_workload": {
+    "health_days": 730,
+    "rounds": 10,
+    "constraints": {
+      "shared_cpu_affinity": "4",
+      "database_memory_mib": 320,
+      "api_memory_mib": 192,
+      "worker_memory_mib": 384,
+      "migration_memory_mib": 256
+    },
+    "matching_results": true,
+    "observations": {
+      "python": {
+        "query_seconds": 3.584,
+        "peak_observed_app_memory_bytes": 288808960,
+        "memory_limit_events": 0,
+        "oom_kills": 0,
+        "swap_observed": false
+      },
+      "rust": {
+        "query_seconds": 0.512,
+        "peak_observed_app_memory_bytes": 26460160,
+        "memory_limit_events": 0,
+        "oom_kills": 0,
+        "swap_observed": false
+      }
+    },
+    "trace_sha256": "b1161bf4e77d5c1ac3ae960270c144e7b176445db028a7c5eaaf7662c6dd6c6a"
+  },
+  "release_scope": [
+    "Synthetic health and diary values, typed HTTP and MCP, historical time zones, numerical methods and durable hypotheses.",
+    "Malformed stdio frames containing NaN or Infinity have a documented compatibility difference.",
+    "Whole-runtime sustained resource acceptance remains a separate gate."
+  ]
+}
