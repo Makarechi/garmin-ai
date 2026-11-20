@@ -100,7 +100,7 @@
       "crates/ga-app/src/http/diary.rs": "5aa2f0cb0ed418b770d44150937f67da2cf98bf55bdf45e425b044f3e803c7f7",
       "crates/ga-app/src/http/demo.rs": "be598b31b8b614a8a2c06d3ee91473252fb22842b89a9b7da5950750157d618f"
     },
-    "check_source_sha256": "83cd2e9d4f45b82b93e97e79f55d46efb26be3be557452642a112557c485775e",
+    "check_source_sha256": "c2150bf4fe3141fee083ab316f6c376fe2b22ff94f714577b951cc849448e7a0",
     "candidate_app_binary_sha256": "74ab5899be8f622f5e4b6b60ead0ec6346c431f93b69e1c058583753ece36de2",
     "reference_check": "migration/check_diary_http.py",
     "prior_candidate_failed_trace_sha256": "6582c69b072d9874bda3261dbca0448e9d04b951224089a4e9c0b74da50b4d05",
@@ -117,6 +117,7 @@
     "count_only_queue_failed_trace_sha256": "773868a500045b788de548f7878ebfeab9cba76aceeb153d1d235e10af55b943",
     "maximum_queued_body_bytes": 2097152,
     "near_limit_body_requests": 3,
-    "near_limit_bodies_admitted": 2
+    "near_limit_bodies_admitted": 2,
+    "formatted_check_passed_trace_sha256": "737d278b0e8210dc6e5fc67360c79de60b7edf71965649e956bf316bbca32e89"
   }
 }

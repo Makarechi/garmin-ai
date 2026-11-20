@@ -740,7 +740,7 @@ def verify_queue_byte_limit(native, engine):
         {"definition_key": "user.synthetic_byte_budget", "start": NOTE["start"], "timezone": "UTC"}
     )[:-1].encode()
     prefix += b',"values":{"load":['
-    suffix = b'0]}}'
+    suffix = b"0]}}"
     body = prefix + b"0," * ((1024 * 1024 - len(prefix) - len(suffix)) // 2) + suffix
     assert (1024 * 1024) - 1 <= len(body) <= 1024 * 1024
     request_headers = {**headers("both"), "Content-Type": "application/json"}
