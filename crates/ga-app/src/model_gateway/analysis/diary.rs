@@ -151,10 +151,6 @@ impl<'a> DiaryAnalysisTools<'a> {
                     description: &COMPARISON,
                 },
                 OfferedReadTool {
-                    name: SLEEP_ANALYSIS,
-                    description: &SLEEP,
-                },
-                OfferedReadTool {
                     name: DATA_FRESHNESS,
                     description: &FRESHNESS,
                 },
@@ -188,6 +184,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                         description: &TIMELINE_TOOL,
                     },
                 ]);
+            }
+            if access.sleep {
+                offered.push(OfferedReadTool {
+                    name: SLEEP_ANALYSIS,
+                    description: &SLEEP,
+                });
             }
             if access.coffee_sleep {
                 offered.push(OfferedReadTool {
@@ -236,6 +238,11 @@ impl<'a> DiaryAnalysisTools<'a> {
                 });
             }
         }
+        offered.sort_by_key(|tool| {
+            ReadTool::IMPLEMENTED
+                .iter()
+                .position(|registered| registered.name() == tool.name)
+        });
         offered
     }
 }

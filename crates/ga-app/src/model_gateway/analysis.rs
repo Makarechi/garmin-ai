@@ -7,10 +7,8 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::{DefinitionReadFence, EVENT_DEFINITIONS, TimelineReadFence},
     health_analysis::{
-        ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
-        DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST,
-        LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
-        STRESS_HOURS, TIMELINE, WELLBEING_OBSERVATIONS,
+        COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisEvidence, EVENT_WINDOWS, INSIGHTS_LIST,
+        MIGRAINE_WINDOWS, SLEEP_ANALYSIS, TIMELINE, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     resource_catalog::{CatalogEvidence, RESOURCE_CATALOG},
@@ -339,34 +337,20 @@ where
         };
         let rounds = budget.remaining_tool_rounds(turn);
         let answer_only = rounds == 0;
+        let can_offer = |name| {
+            !replaying
+                || matches!(
+                    name,
+                    "events" | EVENT_DEFINITIONS | DATA_FRESHNESS | WELLBEING_OBSERVATIONS
+                )
+        };
         let descriptions: Vec<_> = if answer_only {
             vec![]
         } else {
             question
                 .tools
                 .iter()
-                .filter(|tool| {
-                    !replaying
-                        || !matches!(
-                            tool.name,
-                            GENERIC_ANALYSIS
-                                | RESOURCE_CATALOG
-                                | LAGGED_ASSOCIATION
-                                | MIGRAINE_WINDOWS
-                                | RUNNING_EFFICIENCY
-                                | STRESS_HOURS
-                                | HEALTH_SNAPSHOT
-                                | HEALTH_RANGE
-                                | METRIC_SERIES
-                                | COFFEE_SLEEP
-                                | EVENT_WINDOWS
-                                | DEVICE_HISTORY
-                                | ACTIVITIES
-                                | ACTIVITY_DETAILS
-                                | INSIGHTS_LIST
-                                | TIMELINE
-                        )
-                })
+                .filter(|tool| can_offer(tool.name))
                 .map(|tool| tool.description)
                 .collect()
         };
@@ -544,7 +528,8 @@ where
                     };
                     let result = match arguments.as_ref() {
                         Some(args)
-                            if question.tools.iter().any(|tool| tool.name == request.name) =>
+                            if can_offer(request.name)
+                                && question.tools.iter().any(|tool| tool.name == request.name) =>
                         {
                             tokio::time::timeout(
                                 budget.remaining(Instant::now())?,

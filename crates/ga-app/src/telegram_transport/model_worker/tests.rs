@@ -74,7 +74,11 @@ impl Sender for SyntheticProvider {
                     "What about the previous entry?"
                 };
                 assert_eq!(prompt["question"], question);
-                assert_eq!(prompt["tools"][0]["name"], "events");
+                assert!(
+                    prompt["tools"]
+                        .as_array()
+                        .is_some_and(|tools| { tools.iter().any(|tool| tool["name"] == "events") })
+                );
                 assert_eq!(prompt["evidence"], json!([]));
                 if call == 5 {
                     assert!(

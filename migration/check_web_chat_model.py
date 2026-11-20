@@ -137,6 +137,7 @@ CATALOG_SHARED = "z_synthetic_catalog"
 CATALOG_HIDDEN = "y_synthetic_private"
 CATALOG_LOOKAHEAD = "zz_synthetic_catalog_lookahead"
 CATALOG_LABEL = "Synthetic catalog tracker"
+MENU_QUESTION = "Check the synthetic tool menu"
 HEALTH_READS = {
     "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
     "analysis_compare_periods": {
@@ -185,6 +186,13 @@ def output(prompt):
             return statistics_output(prompt)
         if prompt["question"].startswith(CATALOG_QUESTION):
             return catalog_output(prompt)
+        if prompt["question"].startswith(MENU_QUESTION):
+            if prompt["evidence"]:
+                return AgentStep(response_language="en")
+            return AgentStep(
+                calls=[{"name": "data_freshness", "arguments_json": "{}"}],
+                response_language="en",
+            )
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -230,6 +238,7 @@ def output(prompt):
             TIMELINE_QUESTION,
             DEFINITIONS_QUESTION,
             CATALOG_QUESTION,
+            MENU_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -1062,6 +1071,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_timeline(engine, python, native)
     exercise_definitions(engine, python, native, source_calls, native_calls)
     exercise_catalog_analysis(engine, python, native, source_calls, native_calls)
+    exercise_model_menu(engine, python, native, source_calls, native_calls)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -2352,6 +2362,87 @@ def exercise_catalog_analysis(engine, python, native, source_calls, native_calls
     print(
         "Matched catalog pagination, schema and facts, and withheld the reply after consent changed"
     )
+
+
+def exercise_model_menu(engine, python, native, source_calls, native_calls):
+    def menu(client, calls, question):
+        start = len(calls)
+        submit(client, question)
+        matching = [
+            request["tools"]
+            for request in calls[start:]
+            if request.get("question") == question and not request.get("planning_only")
+        ]
+        assert len(matching) == 1, (question, len(matching))
+        return matching[0]
+
+    def compare(suffix, *, missing=(), exact=None):
+        question = MENU_QUESTION + suffix
+        before = menu(python, source_calls, question)
+        after = menu(native, native_calls, question)
+        first = [item["name"] for item in before]
+        second = [item["name"] for item in after]
+        assert not set(missing).intersection(first), (question, first)
+        if exact is not None:
+            assert set(first) == exact, (question, first)
+        assert set(first) == set(second), (
+            question,
+            set(first) - set(second),
+            set(second) - set(first),
+        )
+        assert before == after, (question, first, second)
+        return first
+
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        original = {key: pack.llm_enabled for key, pack in packs.items()}
+        for key, pack in packs.items():
+            pack.llm_enabled = key != "sleep"
+    source_id = uuid4()
+    try:
+        compare(" with sleep withheld", missing=("analysis_sleep", "analysis_running_efficiency"))
+        with Session(engine) as session, session.begin():
+            ensure_scenario_packs(session)["sleep"].llm_enabled = True
+        assert len(compare(" with all grants")) == 23
+        with Session(engine) as session, session.begin():
+            ensure_scenario_packs(session)["training"].llm_enabled = False
+        compare(
+            " with training withheld", missing=("activities", "activity_details", "device_history")
+        )
+        with Session(engine) as session, session.begin():
+            ensure_scenario_packs(session)["training"].llm_enabled = True
+            at = datetime.now(UTC)
+            session.add(
+                SourcePayload(
+                    id=source_id,
+                    source="garmin_connect",
+                    endpoint="stress",
+                    source_key=at.date().isoformat(),
+                    payload_hash="b" * 64,
+                    archive_key="synthetic/menu-replay-pending.json",
+                    payload={},
+                    fetched_at=at,
+                    parser_version=1,
+                    status="normalized",
+                )
+            )
+        compare(
+            " during replay",
+            exact={
+                "events",
+                "event_definitions",
+                "data_freshness",
+                "wellbeing_observations",
+            },
+        )
+    finally:
+        with Session(engine) as session, session.begin():
+            for key, pack in ensure_scenario_packs(session).items():
+                pack.llm_enabled = original[key]
+            row = session.get(SourcePayload, source_id)
+            if row is not None:
+                session.delete(row)
+    print("Matched the complete model tool menu and its pack and replay restrictions")
 
 
 def main():
