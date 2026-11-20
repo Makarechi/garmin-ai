@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -125,7 +126,7 @@ def collect_web_chat_workload(args, observer, db, api, worker, elapsed):
     ]
     if args.web_chat_multibyte:
         command.append("--multibyte")
-    return collect_http_workload(command, args.interval, db, api, worker, elapsed)
+    return collect_client_workload(command, args.interval, db, api, worker, elapsed)
 
 
 def collect_http_analytics(args, observer, db, api, worker, elapsed):
@@ -142,17 +143,20 @@ def collect_http_analytics(args, observer, db, api, worker, elapsed):
         "--http-base",
         f"http://{api}:8080",
     ]
-    return collect_http_workload(command, args.interval, db, api, worker, elapsed)
+    return collect_client_workload(command, args.interval, db, api, worker, elapsed)
 
 
-def collect_http_workload(command, interval, db, api, worker, elapsed):
+def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=None):
     def capture():
-        return {
+        resources = {
             "elapsed_seconds": elapsed(),
             "database": sample(db, user="postgres"),
             "api": sample(api),
             "worker": sample(worker),
         }
+        if mcp:
+            resources["mcp"] = sample(mcp)
+        return resources
 
     samples = []
     deadline = time.monotonic() + 900
@@ -162,13 +166,15 @@ def collect_http_workload(command, interval, db, api, worker, elapsed):
         try:
             while process.poll() is None:
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("Synthetic HTTP workload exceeded the measurement deadline")
+                    raise RuntimeError(
+                        "Synthetic client workload exceeded the measurement deadline"
+                    )
                 samples.append(capture())
                 time.sleep(interval)
             stdout, _stderr = process.communicate(timeout=5)
             if process.returncode:
                 raise RuntimeError(
-                    f"Synthetic HTTP workload failed with status {process.returncode}"
+                    f"Synthetic client workload failed with status {process.returncode}"
                 )
         finally:
             if process.poll() is None:
@@ -253,6 +259,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
     api_env = dict(app_env)
     control_env = {}
     paired_analytics = args.candidate_image is not None and args.analytics_rounds is not None
+    paired_mcp = args.candidate_image is not None and args.mcp_idle_seconds is not None
     if args.web_chat_messages or paired_analytics:
         control_env["GA_API_KEY"] = secrets.token_urlsafe(32)
         api_env.update(control_env)
@@ -450,6 +457,27 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             workload_result["http_analytics_workload"] = collect_http_analytics(
                 args, observer, db, api, worker, elapsed
             )
+        if paired_mcp:
+            launch(
+                workload,
+                image,
+                "sleep",
+                "infinity",
+                limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
+                env=app_env,
+            )
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("mcp_workload.py")),
+                str(args.mcp_idle_seconds),
+                "--container",
+                workload,
+            ]
+            if native:
+                command.append("--native")
+            workload_result["mcp_workload"] = collect_client_workload(
+                command, args.interval, db, api, worker, elapsed, mcp=workload
+            )
         workload_modes = (
             ("fit", args.fit_records),
             ("fitlimit", args.fit_limit_mib),
@@ -457,7 +485,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             ("reconcile", args.reconcile_days),
             ("backup", args.backup_mib),
             ("analytics", None if paired_analytics else args.analytics_rounds),
-            ("mcp", args.mcp_idle_seconds),
+            ("mcp", None if paired_mcp else args.mcp_idle_seconds),
             ("voice", args.voice_rounds),
             ("replay", args.replay_days),
         )
@@ -581,6 +609,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "api_memory_mib": 192,
                 "worker_memory_mib": 384,
                 "migration_memory_mib": 256,
+                **({"mcp_memory_mib": 384} if paired_mcp else {}),
             },
             "config": POSTGRES_CONFIG,
             "lifecycle": lifecycle,
@@ -634,14 +663,11 @@ def main():
             "sync_days",
             "reconcile_days",
             "backup_mib",
-            "mcp_idle_seconds",
             "voice_rounds",
             "replay_days",
         )
     ):
-        parser.error(
-            "The paired comparison supports startup, idle, --web-chat-messages and --analytics-rounds"
-        )
+        parser.error("The paired comparison supports startup, web chat, HTTP analytics and MCP")
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
@@ -676,6 +702,10 @@ def main():
             after = candidate["http_analytics_workload"]["result"]
             if before != after:
                 raise RuntimeError("The paired HTTP analytics workloads produced different results")
+        if args.mcp_idle_seconds:
+            before, after = baseline["mcp_workload"], candidate["mcp_workload"]
+            if any(before[key] != after[key] for key in ("tool_names", "read_result")):
+                raise RuntimeError("The paired MCP sessions produced different results")
         print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
         return 0
     report = report_run(args, baseline_image, platform)

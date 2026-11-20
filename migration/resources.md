@@ -224,6 +224,33 @@ seeding, the query phase and the final reading. No sample showed swap use,
 a memory-limit event or an OOM kill. The Rust query phases yielded few overlapping
 probes. Sustained query concurrency and small-host operation still need measurement.
 
+### Paired stdio MCP sessions
+
+With both images supplied, `--mcp-idle-seconds 5` and `--mcp-idle-seconds 10`
+start the normal read-only MCP command in a separate 384 MiB container. Run the
+measurement with the locked Python environment to supply the MCP client. The
+client uses Docker stdio and runs outside the measured containers. The API and
+worker remain running under their usual limits on the shared Docker CPU.
+
+The [five-second](evidence/python-rust-mcp-idle-5-linux-arm64.json.gz) and
+[ten-second](evidence/python-rust-mcp-idle-10-linux-arm64.json.gz) trials used
+MCP SDK 1.30.0, the pinned Python runtime and the same native ARM64 preview from
+tree `7c541990c34458de4a1ddba5188300555f776512`. Each session listed the same
+23 read-only tools before and after idle. Ten warm listings and a catalog request
+also completed. On each fresh database the catalog returned an empty page for
+the absent raw-only source.
+
+| Observed MCP workload | Python, 5 s | Rust, 5 s | Python, 10 s | Rust, 10 s |
+| --- | ---: | ---: | ---: | ---: |
+| Initialization and first list | 1.013 s | 0.041 s | 0.992 s | 0.044 s |
+| Ten warm listings | 0.105 s | 0.029 s | 0.104 s | 0.031 s |
+| Catalog read after idle | 0.052 s | 0.039 s | 0.051 s | 0.032 s |
+| Highest sampled MCP container charge | 130.14 MiB | 11.00 MiB | 127.12 MiB | 11.12 MiB |
+
+The startup timings include the Docker stdio connection. Memory includes
+the service, its container's idle process and the sampling commands. The
+observations showed no swap use, memory-limit event or out-of-memory kill.
+
 
 ## Recovery, provider timeout and controls
 
