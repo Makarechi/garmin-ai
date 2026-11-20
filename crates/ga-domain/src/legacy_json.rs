@@ -5,6 +5,24 @@ use jiter::JsonValue;
 mod numbers;
 pub use numbers::{integer_argument, multiply_numbers, sum_numbers};
 
+/// Match the Python API boolean argument conversion.
+pub fn boolean_argument(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::Number(_) => match value.as_f64()? {
+            0.0 => Some(false),
+            1.0 => Some(true),
+            _ => None,
+        },
+        serde_json::Value::String(value) => match value.to_ascii_lowercase().as_str() {
+            "0" | "off" | "f" | "false" | "n" | "no" => Some(false),
+            "1" | "on" | "t" | "true" | "y" | "yes" => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Utf8Layout {
     /// The archive contract uses the default Python separator spacing.

@@ -12,6 +12,7 @@ use ga_db::{
         SLEEP_ANALYSIS, STRESS_HOURS, TIMELINE, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
+    resource_catalog::{CatalogError, RESOURCE_CATALOG, ResourcePage},
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
 };
 use ga_domain::{
@@ -49,6 +50,7 @@ static STRESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::St
 static WELLBEING: LazyLock<Value> =
     LazyLock::new(|| model_description(ReadTool::WellbeingObservations));
 static MIGRAINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MigraineWindows));
+static CATALOG: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ResourceCatalog));
 
 fn model_description(tool: ReadTool) -> Value {
     let entry = tool.catalog_entry();
@@ -126,6 +128,10 @@ impl<'a> DiaryAnalysisTools<'a> {
             OfferedReadTool {
                 name: EVENT_DEFINITIONS,
                 description: &DEFINITIONS,
+            },
+            OfferedReadTool {
+                name: RESOURCE_CATALOG,
+                description: &CATALOG,
             },
         ];
         if self.wellbeing_read.is_some() {
@@ -270,6 +276,28 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
                 schema_versions: result.schema_versions,
                 ..Default::default()
             });
+        }
+        if name == RESOURCE_CATALOG {
+            let page = ResourcePage::parse(args).ok()?;
+            return match self
+                .database
+                .read_model_resource_catalog(self.context, self.model, self.categories(), page)
+                .await
+            {
+                Ok(read) => Some(AnalysisToolRead {
+                    value: read.value,
+                    schema_versions: read.schema_versions,
+                    ..Default::default()
+                }),
+                Err(CatalogError::ResultTooLarge) => Some(AnalysisToolRead {
+                    value: json!({
+                        "error": "result_too_large",
+                        "instruction": "Request a smaller page or one resource. Do not treat this as empty data.",
+                    }),
+                    ..Default::default()
+                }),
+                Err(_) => None,
+            };
         }
         if name == GENERIC_ANALYSIS {
             let spec = GenericAnalysisEvidence::input(args)?;

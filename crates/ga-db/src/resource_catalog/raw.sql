@@ -1,6 +1,9 @@
             ) IS TRUE
         )) AS permitted
     FROM event_definition_versions AS version CROSS JOIN destinations AS destination
+    GROUP BY version.id,destination.categories
+), schema_refs AS (
+    SELECT NULL::uuid AS id WHERE FALSE
 ), rows AS (
     SELECT 'source.raw_only'::text AS key,jsonb_build_object(
         'id','source.raw_only','kind','source','availability','raw_only','operations','[]'::jsonb
