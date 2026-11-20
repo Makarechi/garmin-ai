@@ -734,6 +734,33 @@ def compare_concurrent_writes(python, native, engine):
     print("Verified shared lock waiting, bounded admission, and reads during queued writes")
 
 
+def verify_queue_byte_limit(native, engine):
+    previous = counts(engine)
+    prefix = json.dumps(
+        {"definition_key": "user.synthetic_byte_budget", "start": NOTE["start"], "timezone": "UTC"}
+    )[:-1].encode()
+    prefix += b',"values":{"load":['
+    suffix = b'0]}}'
+    body = prefix + b"0," * ((1024 * 1024 - len(prefix) - len(suffix)) // 2) + suffix
+    assert (1024 * 1024) - 1 <= len(body) <= 1024 * 1024
+    request_headers = {**headers("both"), "Content-Type": "application/json"}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        with engine.begin() as connection:
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            waiting = [
+                pool.submit(native.post, "/entries", headers=request_headers, content=body)
+                for _ in range(3)
+            ]
+            excess, admitted = wait(waiting, timeout=3, return_when=FIRST_COMPLETED)
+            assert len(excess) == 1 and len(admitted) == 2
+            verify_busy_response(excess.pop().result())
+            assert native.get("/health/ready").status_code == 200
+        for request in admitted:
+            assert request.result(timeout=5).status_code == 404
+    assert counts(engine) == previous
+    print("Verified diary write admission bounds the total size of waiting request bodies")
+
+
 def verify_shutdown_with_pending_write(native, engine, process):
     previous = counts(engine)
     request_headers = headers("both", "synthetic-shutdown-diary")
@@ -798,6 +825,7 @@ def run(binary):
                     compare_linked_episode_edits(python, native, engine)
                     compare_undo(python, native, engine)
                     compare_concurrent_writes(python, native, engine)
+                    verify_queue_byte_limit(native, engine)
                     verify_shutdown_with_pending_write(native, engine, process)
             finally:
                 if process.poll() is None:

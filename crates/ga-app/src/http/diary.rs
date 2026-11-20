@@ -21,7 +21,7 @@ use ga_domain::{
     event_replay::{ReplayConflict, check_idempotency_key},
     event_schema::CustomEntry,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
 use super::{
@@ -39,10 +39,12 @@ enum EntryKind {
 }
 
 const DIARY_WRITE_CAPACITY: usize = 16;
+const DIARY_QUEUE_BODY_BYTES: usize = 2 * MAX_REQUEST_BYTES;
 const DIARY_LOCK_RETRY: Duration = Duration::from_millis(50);
 
 pub(super) struct WriteQueue {
     slots: Semaphore,
+    body_bytes: Semaphore,
     active: Mutex<()>,
 }
 
@@ -50,12 +52,21 @@ impl WriteQueue {
     pub(super) fn new() -> Self {
         Self {
             slots: Semaphore::new(DIARY_WRITE_CAPACITY),
+            // Bound request data retained while writes wait for the database lock.
+            body_bytes: Semaphore::new(DIARY_QUEUE_BODY_BYTES),
             active: Mutex::new(()),
         }
     }
 
     pub(super) fn close(&self) {
         self.slots.close();
+        self.body_bytes.close();
+    }
+
+    fn reserve_body(&self, bytes: usize) -> Option<SemaphorePermit<'_>> {
+        self.body_bytes
+            .try_acquire_many(bytes.try_into().ok()?)
+            .ok()
     }
 
     async fn submit<T, F>(&self, mut write: impl FnMut() -> F + Send) -> Result<T, DiaryWriteError>
@@ -123,6 +134,9 @@ async fn update_tracker_entry(
 ) -> Response {
     let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
         return report_too_large();
+    };
+    let Some(_body_permit) = writes.reserve_body(bytes.len()) else {
+        return write_failure(DiaryWriteError::Busy);
     };
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
     let Ok(serde_json::Value::Object(mut body)) = serde_json::from_slice(bytes) else {
@@ -258,6 +272,9 @@ async fn update_entry(
     let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
         return report_too_large();
     };
+    let Some(_body_permit) = writes.reserve_body(bytes.len()) else {
+        return write_failure(DiaryWriteError::Busy);
+    };
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
     let Ok(serde_json::Value::Object(mut body)) = serde_json::from_slice(bytes) else {
         return invalid_arguments();
@@ -373,6 +390,9 @@ async fn create_entry(
     let body = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(data) => data,
         Err(_) => return report_too_large(),
+    };
+    let Some(_body_permit) = writes.reserve_body(body.len()) else {
+        return write_failure(DiaryWriteError::Busy);
     };
     let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&body);
     let written = match kind {

@@ -34,9 +34,10 @@ change has a documented decision.
   This affects failed installation attempts only. The existing data and settings
   can be used when reverting to Python. Approval is pending for PAR-01.
 - Both HTTP runtimes wait for the shared diary write lock for admitted requests.
-  Native HTTP admits up to 16 concurrent diary mutations. An additional
-  request receives `503` with `Retry-After: 1` before any mutation. The pinned
-  Python application continues admitting requests under contention.
+  Native HTTP admits up to 16 concurrent diary mutations and 2 MiB of request
+  bodies across those writes. A request exceeding either limit receives `503`
+  with `Retry-After: 1` before any mutation. The pinned Python application
+  continues admitting requests under contention.
   [The paired HTTP fixture](check_diary_http.py) verifies the queue limit,
   read access during contention, and a single canonical event and audit
   after the queued requests complete. The overload behavior still needs a
