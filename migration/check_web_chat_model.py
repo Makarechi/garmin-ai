@@ -835,6 +835,47 @@ def exercise_generic_analysis(engine, python, native):
             == "The stored synthetic note is present.\n\nBased on saved Garmin and diary data."
         ), fresh
 
+        def history_ids():
+            result = native.get("/web-chat/messages", headers=HEADERS)
+            assert result.status_code == 200, result.text
+            return {row["id"] for row in result.json()["replies"]}
+
+        legacy_id = expected["id"]
+        legacy_path = f"/web-chat/messages/{legacy_id}/read"
+        assert legacy_id in history_ids()
+        with engine.begin() as lock:
+            lock.execute(text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+            assert legacy_id not in history_ids()
+            deferred = native.post(legacy_path, headers=HEADERS)
+            assert deferred.status_code == 503, deferred.text
+            assert (
+                lock.scalar(
+                    text(
+                        "SELECT count(*) FROM message_delivery_receipts "
+                        "WHERE outbox_message_id=CAST(:id AS uuid)"
+                    ),
+                    {"id": legacy_id},
+                )
+                == 0
+            )
+        for _ in range(2):
+            assert native.post(legacy_path, headers=HEADERS).status_code == 200
+        with engine.connect() as connection:
+            confirmations = (
+                connection.execute(
+                    text(
+                        "SELECT state FROM message_delivery_receipts "
+                        "WHERE outbox_message_id=CAST(:id AS uuid)"
+                    ),
+                    {"id": legacy_id},
+                )
+                .scalars()
+                .all()
+            )
+        assert confirmations == ["read"], confirmations
+        stale_legacy = submit(python, GENERIC_QUESTION + " before a correction")["reply"]["id"]
+        assert stale_legacy in history_ids()
+
         with Session(engine) as session, session.begin():
             update_event(
                 session,
@@ -851,6 +892,11 @@ def exercise_generic_analysis(engine, python, native):
             native.post(f"/web-chat/messages/{fresh['id']}/read", headers=HEADERS).status_code
             == 409
         )
+        assert stale_legacy not in history_ids()
+        assert (
+            native.post(f"/web-chat/messages/{stale_legacy}/read", headers=HEADERS).status_code
+            == 409
+        )
         assert submit(native, GENERIC_QUESTION, request_id)["reply"] is None
         with Session(engine) as session, session.begin():
             ensure_scenario_packs(session)["general_diary"].llm_enabled = False
@@ -861,6 +907,7 @@ def exercise_generic_analysis(engine, python, native):
     finally:
         set_model_categories(engine, ["health", "diary"])
     print("Matched generic diary reads and withheld stale or disallowed generic evidence")
+    print("Verified legacy generic query history, replay protection and one read receipt")
 
 
 def main():

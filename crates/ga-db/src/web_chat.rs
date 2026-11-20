@@ -16,7 +16,9 @@ use ga_domain::timestamp::StoredInstant;
 use initiative::can_show_checkin;
 use serde::Serialize;
 use serde_json::Value;
-use sleep_history::{DEPENDENT_REFERENCE, SLEEP_REFERENCE, can_show_timing, evidence_refs};
+use sleep_history::{
+    DEPENDENT_REFERENCE, SLEEP_REFERENCE, can_show_legacy_analysis, evidence_refs,
+};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -367,7 +369,7 @@ async fn can_show(
         let current = if reference == NATIVE_TIMING_REFERENCE {
             current_web_analysis(txn, conversation, outbox, reference).await?
         } else {
-            can_show_timing(txn, conversation, reference).await?
+            can_show_legacy_analysis(txn, conversation, reference).await?
         };
         if !current {
             return Ok(false);
