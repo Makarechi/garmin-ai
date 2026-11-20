@@ -1,9 +1,11 @@
 use std::{error::Error, fmt, time::Duration};
 
-use sqlx::{Postgres, Transaction};
+use sqlx::{Connection, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{Database, ReadinessError, check_readiness};
+use crate::{
+    Database, OWNER_ENROLLMENT_LOCK, ReadinessError, check_readiness, runtime_lease::RuntimeLease,
+};
 
 pub(crate) const CHANNEL_BINDING_LOCK: i64 = 72_104_627;
 
@@ -12,6 +14,8 @@ pub enum TelegramBindingError {
     Missing,
     Mismatch,
     Busy,
+    AlreadyBound,
+    Publication(&'static str),
     Storage(ReadinessError),
     Database,
 }
@@ -22,6 +26,8 @@ impl fmt::Display for TelegramBindingError {
             Self::Missing => "Telegram owner pairing is required",
             Self::Mismatch => "Telegram account does not match its recorded pairing",
             Self::Busy => "Telegram ownership is being updated",
+            Self::AlreadyBound => "Telegram owner is already bound in the database; restore the matching local configuration",
+            Self::Publication(error) => error,
             Self::Storage(_) => "Telegram ownership storage is unavailable",
             Self::Database => "Telegram owner pairing could not be read",
         })
@@ -61,6 +67,84 @@ impl Database {
         })
         .await
         .map_err(|_| TelegramBindingError::Database)?
+    }
+}
+
+impl RuntimeLease {
+    pub async fn require_unpaired_telegram(&mut self) -> Result<(), TelegramBindingError> {
+        let mut txn = self.connection.begin_with("BEGIN READ ONLY").await?;
+        sqlx::query("SET LOCAL statement_timeout='750ms'")
+            .execute(&mut *txn)
+            .await?;
+        let existing: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM channel_bindings
+              WHERE channel='telegram' AND channel_instance_id='primary')",
+        )
+        .fetch_one(&mut *txn)
+        .await?;
+        txn.rollback().await?;
+        if existing {
+            Err(TelegramBindingError::AlreadyBound)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Publish the local owner before commit so a retry reconciles an interrupted pairing.
+    pub async fn reserve_telegram_owner(
+        &mut self,
+        chat: i64,
+        publish: impl FnOnce() -> Result<(), &'static str>,
+    ) -> Result<(), TelegramBindingError> {
+        if !(1..(1_i64 << 52)).contains(&chat) {
+            return Err(TelegramBindingError::Mismatch);
+        }
+        let mut txn = self.connection.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='750ms'")
+            .execute(&mut *txn)
+            .await?;
+        check_readiness(&mut txn)
+            .await
+            .map_err(TelegramBindingError::Storage)?;
+        for lock in [OWNER_ENROLLMENT_LOCK, CHANNEL_BINDING_LOCK] {
+            let stable: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(lock)
+                .fetch_one(&mut *txn)
+                .await?;
+            if !stable {
+                return Err(TelegramBindingError::Busy);
+            }
+        }
+        let owner: Uuid = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+            .fetch_optional(&mut *txn)
+            .await?
+            .ok_or(TelegramBindingError::Missing)?;
+        let existing: Option<(Uuid, String, bool)> = sqlx::query_as(
+            "SELECT owner_id,external_id,confirmed_at IS NOT NULL FROM channel_bindings
+             WHERE channel='telegram' AND channel_instance_id='primary'",
+        )
+        .fetch_optional(&mut *txn)
+        .await?;
+        let chat = chat.to_string();
+        if let Some((current_owner, current_chat, confirmed)) = existing {
+            if !confirmed || current_owner != owner || current_chat != chat {
+                return Err(TelegramBindingError::Mismatch);
+            }
+        } else {
+            sqlx::query(
+                "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,
+                     external_id,confirmation_method,confirmed_at)
+                 VALUES($1,$2,'telegram','primary',$3,'local_pairing_code',clock_timestamp())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(owner)
+            .bind(&chat)
+            .execute(&mut *txn)
+            .await?;
+        }
+        publish().map_err(TelegramBindingError::Publication)?;
+        txn.commit().await?;
+        Ok(())
     }
 }
 

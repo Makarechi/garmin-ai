@@ -5,6 +5,8 @@ GA_TELEGRAM_USER_ID absent or zero. Stop the worker, then run
 `uv run garmin-ai pair-telegram --env-file .env` on the host using the instance's
 configured database access. The local console prints a fresh three-minute code
 and the bot username. Send that command in a private chat with that bot.
+Native installations use `garmin-ai-rust pair-telegram --env-file .env` and
+`garmin-ai-rust migrate`.
 The database must already be migrated (`uv run garmin-ai migrate`); pairing refuses
 an unmigrated database so two local configurations cannot both claim the first owner.
 

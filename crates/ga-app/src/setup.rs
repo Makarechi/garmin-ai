@@ -2,7 +2,10 @@ mod database;
 mod dotenv;
 mod integrations;
 mod mounts;
+mod pairing;
 mod preferences;
+
+pub(crate) use pairing::pair_telegram;
 
 use std::{
     collections::BTreeMap,
@@ -89,17 +92,22 @@ pub(crate) fn run(options: Options) -> Result<(), &'static str> {
     database::prepare(&mut values, db_port)?;
     validate_runtime(&values)?;
     prepare_directories(&mut values, &root)?;
-    let mut prepared = tempfile::NamedTempFile::new_in(&root).map_err(|_| FILE_ERROR)?;
-    prepared
-        .write_all(file.render(&values).as_bytes())
-        .and_then(|()| prepared.as_file().sync_all())
-        .map_err(|_| FILE_ERROR)?;
-    prepared.persist(path).map_err(|_| FILE_ERROR)?;
-    directory.sync_all().map_err(|_| FILE_ERROR)?;
+    publish_settings(&directory, &path, &file.render(&values))?;
     println!(
         "Local settings prepared. Existing configured secrets preserved; placeholders replaced."
     );
     Ok(())
+}
+
+fn publish_settings(parent: &fs::File, path: &Path, content: &str) -> Result<(), &'static str> {
+    let directory = path.parent().ok_or(FILE_ERROR)?;
+    let mut prepared = tempfile::NamedTempFile::new_in(directory).map_err(|_| FILE_ERROR)?;
+    prepared
+        .write_all(content.as_bytes())
+        .and_then(|()| prepared.as_file().sync_all())
+        .map_err(|_| FILE_ERROR)?;
+    prepared.persist(path).map_err(|_| FILE_ERROR)?;
+    parent.sync_all().map_err(|_| FILE_ERROR)
 }
 
 fn read_settings(path: &Path) -> Result<String, &'static str> {
