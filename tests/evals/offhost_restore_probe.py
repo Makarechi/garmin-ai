@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from uuid import UUID, uuid4
 
 from alembic import command
@@ -18,6 +20,7 @@ from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.definitions import (
     CustomEntryInput,
@@ -36,8 +39,10 @@ from garmin_ai.models import (
     MetricDefinitionVersion,
     MetricObservation,
     Person,
+    SourcePayload,
 )
 from garmin_ai.operations import create_backup, restore_database, unpack_backup
+from garmin_ai.replay import PARSER_VERSION
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share, version_sharing_allowed
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -77,6 +82,7 @@ def settings(root, key):
         data_dir=root / "data",
         token_dir=root / "tokens",
         backup_dir=root / "backups",
+        lock_dir=root / "locks",
         backup_key=key,
     )
 
@@ -85,13 +91,64 @@ def boot_id():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def make_backup(root, sha):
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def native_command(binary, paths, *arguments, succeeds=True):
+    result = subprocess.run(
+        [binary, *map(str, arguments)],
+        env={
+            "GA_DATABASE_URL": os.environ["GA_TEST_DATABASE_URL"],
+            "GA_DATA_DIR": str(paths.data_dir),
+            "GA_TOKEN_DIR": str(paths.token_dir),
+            "GA_LOCK_DIR": str(paths.lock_dir),
+            "GA_BACKUP_DIR": str(paths.backup_dir),
+            "GA_BACKUP_KEY": paths.backup_key.get_secret_value(),
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if succeeds and result.returncode != 0:
+        raise RuntimeError(f"Native {arguments[0]} failed for the synthetic backup")
+    if not succeeds and result.returncode != 1:
+        raise RuntimeError("Native unpack did not reject the altered synthetic backup")
+    return result.stdout
+
+
+def make_backup(root, sha, *, native=None):
     engine = engine_for_empty_test_database()
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     key = base64.urlsafe_b64encode(os.urandom(32)).decode()
+    paths = settings(root, key)
+    payload = {"totalSteps": 1420}
+    raw = LocalArchive(paths.data_dir / "raw")
+    archive_key = raw.put_json(payload)
+    versioned_file = f"raw/{archive_key}"
+    raw_hash = hashlib.sha256(raw.read(archive_key)).hexdigest()
+    paths.token_dir.mkdir(mode=0o700)
+    token = paths.token_dir / "synthetic-token.json"
+    token.write_bytes(b'{"fixture":"synthetic token placeholder"}')
+    coverage = paths.data_dir / "coverage-report.json"
+    coverage.write_bytes(b'{"source":"synthetic fixture"}')
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
         assert session.scalar(select(Person)).singleton
+        archived = SourcePayload(
+            source="garmin_connect",
+            endpoint="daily",
+            source_key="2026-10-10",
+            payload=payload,
+            payload_hash=raw_hash,
+            archive_key=archive_key,
+            parser_version=PARSER_VERSION,
+            status="normalized",
+            fetched_at=now,
+        )
+        session.add(archived)
+        session.flush()
         spec = DefinitionSpec(
             key="user.synthetic_offhost",
             labels={"en": "Synthetic restore check"},
@@ -186,10 +243,14 @@ def make_backup(root, sha):
             "observation_id": str(observation.id),
             "observed_at": observation.observed_at.isoformat(),
             "ingested_at": observation.ingested_at.isoformat(),
+            "source_id": str(archived.id),
         }
-    paths = settings(root, key)
     backup = root / "synthetic-backup.enc"
-    counts = create_backup(engine, paths, backup)
+    counts = (
+        create_backup(engine, paths, backup)
+        if native is None
+        else json.loads(native_command(native, paths, "backup", backup))
+    )
     descriptor = os.open(root / "synthetic-key.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as stream:
         stream.write(key)
@@ -198,9 +259,16 @@ def make_backup(root, sha):
             {
                 "commit": sha,
                 "source_boot_id": boot_id(),
+                "source_runtime": "python" if native is None else "rust",
+                "source_binary_sha256": digest(native) if native is not None else None,
                 "counts": counts,
                 "identity": identity,
-                "backup_sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+                "files": {
+                    versioned_file: raw_hash,
+                    "tokens/synthetic-token.json": digest(token),
+                    "coverage-report.json": digest(coverage),
+                },
+                "backup_sha256": digest(backup),
             }
         )
     )
@@ -208,14 +276,14 @@ def make_backup(root, sha):
     print("Synthetic encrypted backup created.")
 
 
-def verify_backup(root, work, sha, *, require_distinct_host=True):
+def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, evidence=None):
     manifest = json.loads((root / "synthetic-manifest.json").read_text())
     if manifest["commit"] != sha:
         raise ValueError("Backup and restore must use the same source revision")
     if require_distinct_host and manifest["source_boot_id"] == boot_id():
         raise ValueError("Restore must run on a different host")
     backup = root / "synthetic-backup.enc"
-    if hashlib.sha256(backup.read_bytes()).hexdigest() != manifest["backup_sha256"]:
+    if digest(backup) != manifest["backup_sha256"]:
         raise ValueError("Synthetic backup checksum mismatch")
     key = (root / "synthetic-key.txt").read_text()
     paths = settings(work, key)
@@ -225,30 +293,55 @@ def verify_backup(root, work, sha, *, require_distinct_host=True):
     damaged[-1] ^= 1
     tampered.write_bytes(damaged)
     try:
-        unpack_backup(paths, tampered, work / "tampered-output")
-    except InvalidTag:
-        pass
-    else:
-        raise ValueError("Tampered synthetic backup was accepted")
+        destination = work / "tampered-output"
+        if native is not None:
+            native_command(native, paths, "unpack-backup", tampered, destination, succeeds=False)
+        else:
+            try:
+                unpack_backup(paths, tampered, destination)
+            except InvalidTag:
+                pass
+            else:
+                raise ValueError("Tampered synthetic backup was accepted")
+        if destination.exists():
+            raise ValueError("Altered backup left a published recovery directory")
     finally:
         tampered.unlink(missing_ok=True)
     engine = engine_for_empty_test_database()
     restored = work / "unpacked"
-    unpack_backup(paths, backup, restored)
-    counts = restore_database(engine, restored / "database.jsonl.gz")
+    started = monotonic()
+    if native is None:
+        unpack_backup(paths, backup, restored)
+        counts = restore_database(engine, restored / "database.jsonl.gz")
+    else:
+        native_command(native, paths, "unpack-backup", backup, restored)
+        counts = json.loads(
+            native_command(native, paths, "restore-db", restored / "database.jsonl.gz")
+        )
     if counts != manifest["counts"]:
         raise ValueError("Restored table counts differ")
+    for filename, expected_hash in manifest["files"].items():
+        path = (restored / filename).resolve(strict=True)
+        if not path.is_relative_to(restored) or digest(path) != expected_hash:
+            raise ValueError("A synthetic archive, token or configuration file changed")
+    shutil.copytree(restored / "raw", paths.data_dir / "raw")
+    shutil.copytree(restored / "tokens", paths.token_dir)
+    shutil.copy2(restored / "coverage-report.json", paths.data_dir / "coverage-report.json")
+    archive = LocalArchive(paths.data_dir / "raw")
     with Session(engine) as session, session.begin():
         ids = manifest["identity"]
         definition = session.get(EventDefinition, UUID(ids["definition_id"]))
         event = session.get(Event, UUID(ids["event_id"]))
         observation = session.get(MetricObservation, UUID(ids["observation_id"]))
+        source = session.get(SourcePayload, UUID(ids["source_id"]))
         assert str(session.scalar(select(Person)).id) == ids["owner_id"]
         assert definition.key == "user.synthetic_offhost"
         assert str(event.definition_version_id) == ids["version_id"]
         assert event.payload["note"] == "synthetic" and event.status == "needs_confirmation"
         assert str(observation.metric_definition_version_id) == ids["metric_version_id"]
         assert observation.value == 15 and observation.valid
+        assert source.payload_hash == manifest["files"][f"raw/{source.archive_key}"]
+        assert hashlib.sha256(archive.read(source.archive_key)).hexdigest() == source.payload_hash
         observed = datetime.fromisoformat(ids["observed_at"])
         ingested = datetime.fromisoformat(ids["ingested_at"])
         start, end = observed - timedelta(hours=1), observed + timedelta(hours=1)
@@ -300,7 +393,26 @@ def verify_backup(root, work, sha, *, require_distinct_host=True):
         assert restarted.get(Event, new_event_id).payload["note"] == "synthetic after restore"
         assert restarted.get(Event, UUID(ids["event_id"])).payload["note"] == "synthetic"
     engine.dispose()
-    print("Synthetic backup restored; source and destination boot IDs differ.")
+    if evidence is not None:
+        evidence.write_text(
+            json.dumps(
+                {
+                    "commit": sha,
+                    "source_runtime": manifest["source_runtime"],
+                    "restore_runtime": "python" if native is None else "rust",
+                    "source_binary_sha256": manifest["source_binary_sha256"],
+                    "restore_binary_sha256": digest(native) if native is not None else None,
+                    "distinct_host": manifest["source_boot_id"] != boot_id(),
+                    "backup_sha256": manifest["backup_sha256"],
+                    "verified_table_count": len(counts),
+                    "verified_file_count": len(manifest["files"]),
+                    "verified_restore_seconds": round(monotonic() - started, 3),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+    print("Synthetic backup restored with identical retained records and file digests.")
 
 
 def main():
@@ -308,6 +420,8 @@ def main():
     parser.add_argument("mode", choices=("create", "restore"))
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--work", type=Path)
+    parser.add_argument("--native-binary", type=Path)
+    parser.add_argument("--evidence", type=Path)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
     if (
@@ -315,12 +429,19 @@ def main():
         or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != args.commit
     ):
         parser.error("commit must identify the checked-out source revision")
+    native = args.native_binary.resolve(strict=True) if args.native_binary is not None else None
     if args.mode == "create":
-        make_backup(args.artifact.resolve(), args.commit)
+        make_backup(args.artifact.resolve(), args.commit, native=native)
     else:
         if args.work is None:
             parser.error("restore needs --work")
-        verify_backup(args.artifact.resolve(), args.work.resolve(), args.commit)
+        verify_backup(
+            args.artifact.resolve(),
+            args.work.resolve(),
+            args.commit,
+            native=native,
+            evidence=args.evidence,
+        )
 
 
 if __name__ == "__main__":
