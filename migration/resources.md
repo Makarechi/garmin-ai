@@ -254,6 +254,23 @@ The highest sampled API liveness times during the year were 52.13 ms for Python 
 The workload peak includes charged file cache. These trials used generated
 data and durable test storage.
 
+### Paired evening Garmin sync
+
+With both images supplied, use `--sync-days 1 --native-history-test PATH` to
+measure the ordinary evening scheduler on the same generated day and activity.
+The fixture supplies the app's 29 acquisition responses, including the activity
+page, six follow-up requests, and the original two-member FIT ZIP. Both versions
+finish 29 jobs and leave six scheduled retries queued for the later activity
+refresh. The worker receives saved synthetic replies at its source adapter.
+
+The [Linux ARM64 report](evidence/python-rust-garmin-evening-linux-arm64.json.gz)
+records the same 29 verified archive objects, 144 measurements and revisions,
+one activity, 125 activity parts, and 35 job rows. The stored activity's FIT
+reference is compared through the archived source identity. With one CPU and
+identical PostgreSQL and workload limits, Python took 2.374 seconds and peaked
+at 127.14 MiB of charged workload memory. Rust took 0.532 seconds and peaked at
+14.50 MiB. Both finished with zero swap and no out-of-memory events.
+
 ### Paired nightly and weekly reconciliation
 
 Add \`--reconcile-days 7\` or \`--reconcile-days 30\` and point
