@@ -2,9 +2,12 @@
 
 import argparse
 import json
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
+from threading import Event
 
 from sqlalchemy import insert, select
 
@@ -167,8 +170,127 @@ def run(repetitions):
         engine.dispose()
 
 
+def run_http(repetitions, base):
+    from web_chat_workload import call, controls
+
+    engine = make_engine(Settings(_env_file=None))
+    if not (engine.url.database or "").endswith("_test") or engine.url.query:
+        raise ValueError("The analytical workload requires a dedicated synthetic test database")
+    seed_started = time.monotonic()
+    try:
+        with transaction(engine) as session:
+            metric = seed(session)
+    finally:
+        engine.dispose()
+    seed_seconds = round(time.monotonic() - seed_started, 3)
+    midpoint = START + timedelta(days=365)
+    cutoff = datetime.now(UTC).isoformat()
+    cases = [
+        (
+            "analysis_compare_periods",
+            {
+                "metric": "sleep_score",
+                "a_start": START.isoformat(),
+                "a_end": (midpoint - timedelta(days=1)).isoformat(),
+                "b_start": midpoint.isoformat(),
+                "b_end": END.isoformat(),
+            },
+        ),
+        (
+            "analysis_lagged_association",
+            {
+                "metric_a": "steps",
+                "metric_b": "sleep_score",
+                "start": START.isoformat(),
+                "end": END.isoformat(),
+                "lags": list(range(-7, 8)),
+            },
+        ),
+        (
+            "analysis_migraine_windows",
+            {
+                "metric": "sleep_score",
+                "start": START.isoformat(),
+                "end": (midpoint - timedelta(days=1)).isoformat(),
+                "timezone": "UTC",
+            },
+        ),
+        (
+            "generic_analysis",
+            {
+                "spec": {
+                    "operation": "aggregate_metric",
+                    "metric_key": metric,
+                    "start": utc(START).isoformat(),
+                    "end": utc(midpoint).isoformat(),
+                    "method": "distribution",
+                    "knowledge_cutoff": cutoff,
+                }
+            },
+        ),
+    ]
+    token = os.environ["GA_API_KEY"]
+    started = time.monotonic()
+    finished = Event()
+    timings = {name: [] for name, _ in cases}
+    previous = None
+    with ThreadPoolExecutor(max_workers=1) as observer:
+        probes = observer.submit(controls, base, token, finished)
+        try:
+            for _ in range(repetitions):
+                responses = []
+                for name, arguments in cases:
+                    value, latency = call(
+                        base,
+                        f"/tools/{name}",
+                        token=token,
+                        body={"arguments": arguments},
+                        timeout=60,
+                    )
+                    responses.append(value)
+                    timings[name].append(latency)
+                periods, lags, migraine, generic = responses
+                result = {
+                    "period_interval": periods["ci95"],
+                    "period_difference": periods["difference"],
+                    "lag_pairs": [row["n"] for row in lags["results"]],
+                    "matched_controls": migraine["matched_pairs"],
+                    "generic_distribution": generic["value"],
+                }
+                if previous is not None and result != previous:
+                    raise RuntimeError("Repeated analytical queries changed the synthetic result")
+                previous = result
+        finally:
+            finished.set()
+        overlap = probes.result()
+    if (
+        not result["period_interval"]
+        or len(result["lag_pairs"]) != 15
+        or not result["matched_controls"]
+        or sum(result["generic_distribution"].values()) != 122
+    ):
+        raise RuntimeError("The HTTP analytical workload did not return the expected evidence")
+    return {
+        "health_days": 730,
+        "custom_entries": 122,
+        "headache_days": 365,
+        "repetitions": repetitions,
+        "result": result,
+        "seed_seconds": seed_seconds,
+        "queries_seconds": round(time.monotonic() - started, 3),
+        "tool_latency_ms": timings,
+        "overlap": overlap,
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repetitions", type=int, choices=(1, 10))
+    parser.add_argument("--http-base")
     options = parser.parse_args()
-    print(json.dumps(run(options.repetitions), default=str))
+    outcome = (
+        run_http(options.repetitions, options.http_base)
+        if options.http_base
+        else run(options.repetitions)
+    )
+    print(json.dumps(outcome, default=str))
