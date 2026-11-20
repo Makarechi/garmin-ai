@@ -9,11 +9,10 @@ change has a documented decision.
 
 ## Candidate differences to resolve before release
 
-- The JSON import candidate stops at 1,000 nested containers. Pinned
-  CPython 3.15.2 accepted a 1,200-level synthetic input. The native
-  validation, serialization and disposal paths need a compatible verified
-  bound, or an explicit decision about the observable limit, before
-  replacing the Python file importer.
+- File imports use platform-specific nesting budgets based on measurements of
+  pinned CPython 3.15.2. The accepted and rejected synthetic cases match on Linux
+  ARM64 and emulated AMD64. Values immediately around the reference stack
+  limit can still differ by shape and environment. See [the file JSON comparison](rust-file-json.md).
 - Native intraday publication keeps a newer current measurement when an
   older overlapping response is applied while retaining both revisions.
   Verify that ordering through replay, analytics and migration of legacy

@@ -9,9 +9,23 @@ use serde_json::{Map, Value};
 use super::{ImportFileError, MAX_FILE_ROWS, read_text};
 
 const CHAT_NESTING: usize = 1_000;
-// The frozen file decoder accepts substantially deeper input than the chat parser.
-// Keep a bounded, shape-aware budget below the measured Linux ARM64 stack limit.
+// Match the relative stack cost of array and object decoding in the pinned
+// Python release. The file reader itself uses a bounded heap-backed stack.
+// On Linux AMD64 the reference uses roughly 160 bytes for an array frame and
+// 272 bytes for an object frame.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FILE_CONTAINER_BUDGET: usize = 521_900;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FILE_ARRAY_COST: usize = 10;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const FILE_OBJECT_COST: usize = 17;
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 const FILE_CONTAINER_BUDGET: usize = 86_900;
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+const FILE_ARRAY_COST: usize = 2;
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+const FILE_OBJECT_COST: usize = 3;
 
 #[derive(Clone, Copy)]
 enum ContainerLimit {
@@ -29,8 +43,8 @@ impl ContainerLimit {
 
     fn cost(self, peek: Peek) -> usize {
         match self {
-            Self::File if peek == Peek::Object => 3,
-            Self::File => 2,
+            Self::File if peek == Peek::Object => FILE_OBJECT_COST,
+            Self::File => FILE_ARRAY_COST,
             Self::Chat => 1,
         }
     }

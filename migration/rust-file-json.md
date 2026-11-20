@@ -15,11 +15,11 @@ out-of-memory events. Cases include a whole file at the byte ceiling,
 zero, exact decimals and 4,300-digit integers.
 
 The file reader now parses, serializes and disposes of nested objects and
-arrays iteratively. It retains the 512,000-byte and 500-row limits. Its
-container budget is below the measured Linux ARM64 reference limits for
-the tested array, object and mixed shapes. Values very close to the
-reference runtime's stack limit can still differ by shape and platform.
-The chat JSON parser keeps its existing separate depth limit.
+arrays iteratively. It retains the 512,000-byte and 500-row limits. The
+container budgets reflect the relative cost of nesting arrays and objects
+in the pinned Python release on each Linux architecture. Values very
+close to the reference runtime's stack limit can still differ by shape
+and environment. The chat JSON parser has its own depth limit.
 
 The extended fixture has 270 matching outcomes on macOS and Linux ARM64
 with the pinned Python reference. It covers accepted 42,000-level array
@@ -27,6 +27,14 @@ chains, 28,000-level object chains and mixed container chains, including
 matching canonical row digests, and rejected excessive or malformed
 documents. The Linux fixture ran in a network-isolated 48 MiB container with
 a 46,362,624-byte peak, zero swap and zero OOM events.
+
+The expanded 276-outcome fixture matched on Linux ARM64 and emulated Linux
+AMD64. On AMD64 the prior native reader rejected 44,000 nested arrays accepted
+by Python. The updated reader matched the Python digests at 52,000 nested arrays,
+30,600 nested objects and 19,300 alternating array and object pairs. It also
+matched the rejected inputs for all three shapes. The emulated AMD64 test peaked
+at 63,516,672 bytes with zero swap or out-of-memory events in a 128 MiB container.
+A 48 MiB emulated run was killed before finishing the same suite.
 
 The normal import command now matches the frozen preview and confirmation
 of a 1,200-level JSON row. Rust applied the confirmed file, and Python
