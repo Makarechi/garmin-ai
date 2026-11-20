@@ -129,6 +129,17 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, r
     assert all("build" not in services[name] for name in ("migrate", "api", "worker"))
     assert services["db"]["image"].startswith("timescale/timescaledb:")
     if runtime == "rust":
+        # The temporary initialization server only accepts Unix socket connections.
+        assert services["db"]["healthcheck"]["test"] == [
+            "CMD",
+            "pg_isready",
+            "-h",
+            "127.0.0.1",
+            "-U",
+            "garmin",
+            "-d",
+            "garmin_ai",
+        ]
         assert "GA_APP_RUNTIME=rust\n" in (root / "release.env").read_text()
         assert json.loads((root / "release-manifest.json").read_text())["runtime"] == "rust"
         assert not list(root.rglob("*.py"))
