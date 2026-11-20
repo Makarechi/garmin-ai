@@ -14,7 +14,7 @@ from check_fit_replay import BAD_CRC, export_zip
 from check_garmin_probe import OWNER, fake_garmin, stores
 from sqlalchemy import text
 
-from garmin_ai.accounts import ensure_account, profile_fingerprint
+from garmin_ai.accounts import AccountError, ensure_account, profile_fingerprint
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.sync import import_probe
@@ -154,6 +154,28 @@ def verify(binary, root, python, native):
     with fake_garmin(root) as (ca, seen, _state):
         token_env, token_file = stores(root, ca)
         token_bytes = token_file.read_bytes()
+        for invalid_provenance in (None, "", 0, False, "f" * 63, "g" * 64):
+            wrong.write_text(json.dumps(report | {"account_fingerprint": invalid_provenance}))
+            try:
+                import_probe(
+                    python,
+                    archive,
+                    Settings(_env_file=None, timezone=ZONE),
+                    wrong,
+                    confirmed_legacy_fingerprint=fingerprint,
+                )
+            except AccountError:
+                pass
+            else:
+                raise AssertionError("Frozen import accepted invalid report provenance")
+            malformed = invoke(
+                new, native, root, token_env, "--report", str(wrong), "--confirm-legacy-owner"
+            )
+            assert malformed.returncode == 1 and not malformed.stdout, invalid_provenance
+            assert snapshot(python) == snapshot(native) == existing
+            assert token_file.read_bytes() == token_bytes
+        seen.clear()
+        wrong.write_text(json.dumps(legacy_report))
         confirmed = invoke(
             new, native, root, token_env, "--report", str(wrong), "--confirm-legacy-owner"
         )
@@ -169,6 +191,7 @@ def verify(binary, root, python, native):
     )
     assert expected == {"imported": 7, "errors": []} and existing == snapshot(native)
     print("Matched coverage import, durable FIT/JSON data, retries and original-owner confirmation")
+    print("Rejected all six invalid explicit owner fields and accepted a confirmed legacy omission")
 
     fit = archive.put_bytes(BAD_CRC, "zip")
     damaged = {

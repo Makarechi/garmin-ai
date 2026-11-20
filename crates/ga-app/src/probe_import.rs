@@ -42,10 +42,18 @@ const FIT_ARCHIVE_LIMITS: PutLimits = PutLimits {
 
 #[derive(Deserialize)]
 struct ProbeReport {
+    #[serde(default, deserialize_with = "provided_fingerprint")]
     account_fingerprint: Option<String>,
     activity_list_archive: Option<String>,
     #[serde(deserialize_with = "bounded_requests")]
     requests: Vec<ProbeRequest>,
+}
+
+fn provided_fingerprint<'de, D>(parser: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(parser).map(Some)
 }
 
 fn bounded_requests<'de, D>(parser: D) -> Result<Vec<ProbeRequest>, D::Error>
