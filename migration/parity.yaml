@@ -1418,7 +1418,13 @@
         "migration/check_mcp_custom_diary.py",
         "migration/check_mcp_write_recovery.py",
         "migration/check_activity_reads.py",
-        "migration/check_wearable_http.py"
+        "migration/check_wearable_http.py",
+        "migration/check_mcp_catalog.py",
+        "migration/check_mcp_protocol.py",
+        "migration/check_http_health_tools.py",
+        "migration/check_http_json_requests.py",
+        "crates/ga-app/tests/http.rs::scope_matrix_matches_reference_at_http_boundary",
+        "migration/evidence/native-http-mcp-wearable-linux-arm64.json"
       ],
       "data_contracts": [
         "Route and tool validation, JSON shapes, stdio protocol, opt-in MCP writes and wearable identity."
@@ -1427,13 +1433,11 @@
         "Bearer scopes, read-only MCP by default, narrow wearable write keys and cancellation before transaction commit."
       ],
       "resource_scenario": "Core API/MCP cold startup and control requests under load",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R29",
       "known_limits": [
-        "Pinned Python client initialization and diary reads, HTTP health reads, and bidirectional wearable upload retries have synthetic evidence.",
-        "All four MCP writes have cancellation-before-commit and bidirectional lost-response recovery evidence. Recovery checks creation IDs, current revision or deletion, and the exact audit sequence.",
-        "The complete MCP catalog and HTTP contract comparison remain pending."
+        "The HTTP and MCP comparisons use local synthetic accounts and isolated TimescaleDB. Resource and unattended release acceptance have separate requirements."
       ],
       "approved_deviations": []
     },
