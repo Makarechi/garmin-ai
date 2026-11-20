@@ -1563,7 +1563,13 @@
         "migration/check_model_diary_policy.py",
         "migration/check_analysis_diary_tool.py",
         "migration/check_wearable_http.py",
-        "crates/ga-app/tests/telegram_reply.rs"
+        "crates/ga-app/tests/telegram_reply.rs",
+        "crates/ga-app/tests/telegram_model_context.rs",
+        "migration/check_calendar_context_http.py",
+        "migration/check_tracker_consent_http.py",
+        "migration/check_tracker_share_policy.py",
+        "migration/check_tracker_consent_writes.py",
+        "migration/evidence/native-privacy-consent-linux-arm64.json"
       ],
       "data_contracts": [
         "Distinct write/management/read scopes, category consent, destination-scoped share, redaction and revocation fences."
@@ -1572,12 +1578,10 @@
         "Owner control of export/share and provider selection, default deny for private metadata or unsupported actions."
       ],
       "resource_scenario": "Revocation during concurrent send and malicious schema input",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R23",
-      "known_limits": [
-        "These synthetic cases cover model diary policy, write-only wearable intake and blocked delivery after replacement of the Telegram pairing. Full cross-channel consent, role and revocation acceptance remains pending."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
