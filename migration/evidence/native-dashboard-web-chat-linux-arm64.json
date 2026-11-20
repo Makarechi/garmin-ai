@@ -1,0 +1,64 @@
+{
+  "scope": "PAR-20",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "version": "3.15.2",
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_dashboard.py": 5,
+      "tests/test_dashboard_demo_browser.py": 9,
+      "tests/test_web_chat.py": 16,
+      "tests/test_web_chat_browser.py": 1
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "interface_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_live_web_shells.py",
+      "result": "passed",
+      "trace_sha256": "fb768997f48992a3825f2c4917eb4961c0d5026c68ad1955fc7c4670a3bd0820"
+    },
+    {
+      "comparison": "migration/check_web_chat_model.py",
+      "result": "passed",
+      "trace_sha256": "0c70689aa1546653633fbb49045a1b70bad6ddb049a73b08fa4d85b595484b55"
+    },
+    {
+      "comparison": "migration/check_web_chat_read.py",
+      "result": "passed",
+      "trace_sha256": "53d832ff9c17ec92cac00a5dad86cd347aeebb852b3ff380bfbef591ff773840"
+    },
+    {
+      "comparison": "migration/check_web_sleep_history.py",
+      "result": "passed",
+      "trace_sha256": "37da8ac3bdbe4ec4e4423dbceabb522fd408ad85a0021a8259edea6912bdcdda"
+    },
+    {
+      "comparison": "migration/check_web_tracker_checkins.py",
+      "result": "passed",
+      "trace_sha256": "8dd1a97fd41b3cc123de991a9618d8c3fcaf7401f163f10ca54de5af47b6dfd0"
+    }
+  ],
+  "chromium": {
+    "python": {
+      "passed": 11,
+      "trace_sha256": "9462be843a9eb603eb3df9abf0d1837980d6a752b99a469a7d2a228e76d3bf1f"
+    },
+    "rust": {
+      "passed": 11,
+      "trace_sha256": "b152072d98c7958b06c0454da125d2f8d07c64b27220470d854b877bfeba21d7"
+    }
+  },
+  "release_scope": [
+    "Local dashboards, demo playback, and authenticated browser chat with synthetic histories.",
+    "Normal model job processing, provider failure and unavailable responses, explicit read acknowledgements, and history changes.",
+    "Disposable TimescaleDB and local provider fixtures."
+  ]
+}

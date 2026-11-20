@@ -1360,7 +1360,10 @@
         "migration/check_web_chat_model.py",
         "migration/check_web_chat_read.py",
         "migration/check_web_sleep_history.py",
-        "migration/check_web_tracker_checkins.py"
+        "migration/check_web_tracker_checkins.py",
+        "tests/test_web_chat_browser.py",
+        "tests/test_dashboard_demo_browser.py",
+        "migration/evidence/native-dashboard-web-chat-linux-arm64.json"
       ],
       "data_contracts": [
         "Local dashboard and demo assets, web command behavior, client message IDs and observed read receipts."
@@ -1369,11 +1372,11 @@
         "Authenticated owner chat; assets and synthetic demo are independently available."
       ],
       "resource_scenario": "Browser startup, concurrent chat and refresh/receipt",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R28",
       "known_limits": [
-        "Run the full browser and dashboard acceptance including combined historical answers, playback and unavailable providers."
+        "Browser verification uses synthetic histories, local provider fixtures, and isolated TimescaleDB."
       ],
       "approved_deviations": []
     },
