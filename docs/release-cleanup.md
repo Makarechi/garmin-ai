@@ -31,6 +31,12 @@ enables the same daily timer. It uses the existing lock and state file, includin
 the image identities recorded by the earlier installer. For an existing state
 file, pass the upload directory already recorded on the host.
 
+When both application services use the same pinned image from a registry,
+cleanup can also release that registry's digest references for obsolete,
+locally tagged `garmin-ai` releases. It preserves images with other registry
+references or repository tags. Use the same release repository for successive
+deployments on this host.
+
 Use the installed command for subsequent previews and rollout recording:
 
 ```sh

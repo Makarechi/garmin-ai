@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env::{self, VarError};
 use std::path::Path;
 use std::process::Stdio;
@@ -14,17 +14,21 @@ use crate::{Failure, Result};
 const OUTPUT_LIMIT: u64 = 8 * 1024 * 1024;
 const CONTAINER_FORMAT: &str = concat!(
     r#"{"id":{{json .Id}},"image":{{json .Image}},"#,
+    r#""reference":{{json .Config.Image}},"#,
     r#""service":{{json (index .Config.Labels "com.docker.compose.service")}},"#,
     r#""status":{{json .State.Status}},"exit_code":{{json .State.ExitCode}},"#,
     r#""health":{{if index .State "Health"}}{{json .State.Health.Status}}{{else}}null{{end}}}"#,
 );
 const IMAGE_FORMAT: &str =
     r#"{"id":{{json .ID}},"repository":{{json .Repository}},"tag":{{json .Tag}}}"#;
+const REFERENCES_FORMAT: &str =
+    r#"{"id":{{json .Id}},"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}}}"#;
 
 #[derive(Deserialize)]
 pub(crate) struct Container {
     pub id: String,
     pub image: String,
+    reference: Option<String>,
     service: Option<String>,
     status: String,
     exit_code: i64,
@@ -46,6 +50,79 @@ pub(crate) struct ImageRow {
     id: String,
     pub repository: String,
     pub tag: String,
+}
+
+#[derive(Deserialize)]
+struct ImageReferences {
+    id: String,
+    tags: Option<Vec<String>>,
+    digests: Option<Vec<String>>,
+}
+
+fn repository_name(repository: &str) -> &str {
+    let repository = repository.strip_prefix("docker.io/").unwrap_or(repository);
+    repository.strip_prefix("library/").unwrap_or(repository)
+}
+
+pub(crate) fn release_repository(project: &[Container]) -> Option<&str> {
+    let mut references = project
+        .iter()
+        .filter(|item| item.serves("api") || item.serves("worker"))
+        .map(|item| item.reference.as_deref());
+    let reference = references.next().flatten()?;
+    // Only both running services' shared, immutable release reference
+    // identifies the registry used by this installation.
+    if references.next().flatten() != Some(reference) {
+        return None;
+    }
+    let (repository, digest) = reference.split_once('@')?;
+    (image_identity(digest)
+        && !repository.is_empty()
+        && repository.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+        }))
+    .then(|| repository_name(repository))
+}
+
+pub(crate) async fn removal_references(
+    id: &str,
+    tags: &[String],
+    release_repository: Option<&str>,
+) -> Result<Option<Vec<String>>> {
+    let output = command(&["image", "inspect", "--format", REFERENCES_FORMAT, id]).await?;
+    let actual: ImageReferences = serde_json::from_str(&output)?;
+    if actual.id != id {
+        return Err(Failure::message("Docker image inventory changed"));
+    }
+    let actual_tags = actual.tags.as_deref().unwrap_or_default();
+    if !tags.iter().all(|tag| actual_tags.contains(tag)) {
+        return Ok(None);
+    }
+    let mut digests = BTreeSet::new();
+    // Some image stores also report digest-only references as RepoTags.
+    for reference in actual_tags.iter().chain(actual.digests.iter().flatten()) {
+        if let Some((repository, digest)) = reference.split_once('@') {
+            let repository = repository_name(repository);
+            if !image_identity(digest) {
+                return Ok(None);
+            }
+            if repository == "garmin-ai" {
+                continue;
+            }
+            if Some(repository) != release_repository {
+                return Ok(None);
+            }
+            digests.insert(reference.clone());
+        } else if !tags.contains(reference) {
+            return Ok(None);
+        }
+    }
+    // Keep the local tag available for retries until the registry pin is gone.
+    Ok(Some(
+        digests.into_iter().chain(tags.iter().cloned()).collect(),
+    ))
 }
 
 pub(crate) async fn command(args: &[&str]) -> Result<String> {

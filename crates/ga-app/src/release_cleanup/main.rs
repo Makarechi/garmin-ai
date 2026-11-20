@@ -202,8 +202,14 @@ async fn verify_current(
     Ok(containers)
 }
 
-async fn recheck(state: &Retention) -> Result<Vec<docker::Container>> {
+async fn recheck(
+    state: &Retention,
+    release_repository: Option<&str>,
+) -> Result<Vec<docker::Container>> {
     let project = verify_current(state, false).await?;
+    if docker::release_repository(&project) != release_repository {
+        return Err(Failure::message("Deployment changed during cleanup"));
+    }
     if !retained_images(state, &docker::images().await?) {
         return Err(Failure::message(
             "A retained image disappeared; refusing cleanup",
@@ -225,12 +231,18 @@ fn removable_tags(rows: &[docker::ImageRow]) -> Option<Vec<String>> {
     Some(tags)
 }
 
+struct ImageRemoval {
+    tags: Vec<String>,
+    references: Vec<String>,
+}
+
 async fn cleanup<'a>(
     state: &'a Retention,
     options: &Options,
     project: &[docker::Container],
     images: BTreeMap<String, Vec<docker::ImageRow>>,
 ) -> Result<Report<'a>> {
+    let release_repository = docker::release_repository(project);
     let mut obsolete = BTreeMap::new();
     for (image, rows) in images {
         if image != state.current
@@ -251,11 +263,21 @@ async fn cleanup<'a>(
             obsolete.remove(&container.image);
         }
     }
+    let mut removals = BTreeMap::new();
+    for (id, tags) in obsolete {
+        if let Some(references) = docker::removal_references(&id, &tags, release_repository).await?
+        {
+            removals.insert(id, ImageRemoval { tags, references });
+        }
+    }
     let mut report = Report {
         apply: options.apply,
         current: &state.current,
         rollback: &state.rollback,
-        images: obsolete.values().cloned().collect(),
+        images: removals
+            .values()
+            .map(|image| image.references.clone())
+            .collect(),
         archives: Vec::new(),
         archive_bytes: 0,
     };
@@ -265,9 +287,9 @@ async fn cleanup<'a>(
 
     if options.apply {
         for migration in project.iter().filter(|item| {
-            migrations.contains(item.id.as_str()) && obsolete.contains_key(&item.image)
+            migrations.contains(item.id.as_str()) && removals.contains_key(&item.image)
         }) {
-            let current = recheck(state).await?;
+            let current = recheck(state, release_repository).await?;
             if !current.iter().any(|item| {
                 item.id == migration.id
                     && item.image == migration.image
@@ -280,27 +302,31 @@ async fn cleanup<'a>(
             // Omitting -v preserves every volume attached to the one-shot container.
             docker::command(&["container", "rm", &migration.id]).await?;
         }
-        for (id, tags) in &obsolete {
-            recheck(state).await?;
+        for (id, image) in &removals {
+            recheck(state, release_repository).await?;
             let current_tags = docker::images()
                 .await?
                 .get(id)
                 .and_then(|rows| removable_tags(rows));
-            if current_tags.as_ref() != Some(tags)
+            if current_tags.as_ref() != Some(&image.tags)
                 || docker::containers(false)
                     .await?
                     .iter()
                     .any(|item| &item.image == id)
+                || docker::removal_references(id, &image.tags, release_repository)
+                    .await?
+                    .as_ref()
+                    != Some(&image.references)
             {
                 return Err(Failure::message("Image references changed during cleanup"));
             }
-            for tag in tags {
-                if docker::inspect_image(tag).await? != *id {
+            for reference in &image.references {
+                if docker::inspect_image(reference).await? != *id {
                     return Err(Failure::message("Image tag changed during cleanup"));
                 }
             }
             let mut args = vec!["image", "rm", "--no-prune"];
-            args.extend(tags.iter().map(String::as_str));
+            args.extend(image.references.iter().map(String::as_str));
             docker::command(&args).await?;
         }
     }
@@ -315,7 +341,7 @@ async fn cleanup<'a>(
                 .checked_add(candidate.bytes)
                 .ok_or_else(|| Failure::message("Archive inventory size exceeded its limit"))?;
             if options.apply {
-                recheck(state).await?;
+                recheck(state, release_repository).await?;
                 archives::remove(&directory, root, &candidate)?;
             }
         }
