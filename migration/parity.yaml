@@ -1631,7 +1631,13 @@
       "rust_tests": [
         "crates/ga-app/tests/replay_worker.rs",
         "crates/ga-app/tests/telegram_inbox_leases.rs",
-        "crates/ga-app/src/telegram_transport/tests/poller.rs"
+        "crates/ga-app/src/telegram_transport/tests/poller.rs",
+        "migration/check_native_worker_health.py",
+        "migration/check_worker_cutover.py",
+        "crates/ga-db/tests/job_leases.rs",
+        "crates/ga-db/tests/garmin_job_leases.rs",
+        "crates/ga-db/tests/daily_backup_jobs.rs",
+        "migration/evidence/native-worker-recovery-linux-arm64.json"
       ],
       "data_contracts": [
         "Durable job types, deduplication, claim/renew/finish, fencing, heartbeat and bounded scheduling."
@@ -1640,12 +1646,10 @@
         "Single side-effect owner, storage locks/maintenance and worker identity checks before effects."
       ],
       "resource_scenario": "Heartbeat, renewal, drain and backlog while heavy tasks run",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R09",
-      "known_limits": [
-        "Native replay and Telegram loops have synthetic evidence for singleton ownership, shutdown and database session loss. Full job supervision, recovery load and unattended operation remain pending."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {

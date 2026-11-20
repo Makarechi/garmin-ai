@@ -1,0 +1,59 @@
+{
+  "scope": "PAR-24",
+  "verification": "e2e_synthetic",
+  "reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_agent_telegram.py": 153,
+      "tests/test_operation_recovery.py": 16,
+      "tests/test_release_gate.py": 8,
+      "tests/test_schedule_coalescing.py": 6
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "test_source_commit": "ed4614ed96bbd64d57321d961f01278e932a149a",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "database_cases": {
+    "initiative_dead_process_and_stale_publication": {
+      "trace_sha256": "77634427f23d95e6266ed5ef4755c5779fbcedf6a8c67d059378491cc41cc555",
+      "test_executable_sha256": "3770472f9b3e3861e7b0ffc1cc00300d6c0634d37fe486e3dfc09e23e25e2809"
+    },
+    "garmin_priority_and_cooldown": {
+      "trace_sha256": "f8fddc8494a1ad8efee7c1b2b86110b3b7ca46f97f3fe68c7fcce47f3a823244",
+      "test_executable_sha256": "c822cbdea7e24572fd5933f8e8a158b2666b9cea95d4c27d8c80fa7b61920cc4"
+    },
+    "telegram_epoch_and_stale_work": {
+      "trace_sha256": "7fbd0469c62e22937fb36e5cb4a8fa7d49dc83bc6809f538fadae8ded9439d3d",
+      "test_executable_sha256": "1ce8841230ab07b88e8aecff4fb3dc8c807c49d156e0ad7167412a8e744507e7"
+    },
+    "backup_schedule_and_recovery": {
+      "trace_sha256": "8456b9b46930b6278cfe8bb0983055e8d1f604a6d0a3a1c923ab975086fa8ed6",
+      "test_executable_sha256": "d69bd07e6ccd0b17a78da95f62cbcdf8b9e962cef23aee906f5ccc84c645ee67"
+    }
+  },
+  "installed_worker_probe": {
+    "trace_sha256": "d50132300e88bf6b117e6230e4ac8ff342644151fda47d797714abc45e99c536"
+  },
+  "cutover_with_live_and_expired_claims": {
+    "trace_sha256": "e59a9b8622154eafc3a09c417d6120861d637b808c7f04d0bc55d98c7c490a65"
+  },
+  "mixed_worker_load": {
+    "trace_sha256": "6c6d2189415bcd2eea179aec8094c9cde5397aa3b704dcecca5c29b58fa16333",
+    "fit_rows_published": 409600,
+    "lease_renewals": 4,
+    "operations_pause_and_webhook_ms": {
+      "authenticated_web_pause_ms": 281.367,
+      "operations_response_ms": 265.988,
+      "webhook_ingress_ms": 429.857
+    },
+    "webhook_retries": 2,
+    "analysis_deferred_with_retry_after_seconds": 60,
+    "competing_backup_refused": true,
+    "ordinary_replay_completed": true
+  },
+  "release_scope": "The separate release-level unattended observation remains pending."
+}
