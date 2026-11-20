@@ -15,7 +15,7 @@ use ga_db::{
 };
 use ga_domain::{
     access::Scope,
-    event_input::{EventInput, ValidationMode},
+    event_input::{EventInput, InvalidEvent, ValidationMode},
     event_replay::{ReplayConflict, check_idempotency_key},
     event_schema::CustomEntry,
 };
@@ -203,9 +203,9 @@ async fn update_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) ->
     let Ok(input) = serde_json::to_vec(&event) else {
         return invalid_arguments();
     };
-    let Ok(report) = EventInput::from_json(&input, MAX_REQUEST_BYTES, ValidationMode::NewReport)
-    else {
-        return invalid_arguments();
+    let report = match system_event_input(&input, &["body", "event"]) {
+        Ok(report) => report,
+        Err(rejection) => return rejection,
     };
     let result = database
         .update_system_event(UpdateSystemEvent {
@@ -294,10 +294,9 @@ async fn create_entry(
     let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&body);
     let written = match kind {
         EntryKind::System => {
-            let Ok(report) =
-                EventInput::from_json(body, MAX_REQUEST_BYTES, ValidationMode::NewReport)
-            else {
-                return invalid_arguments();
+            let report = match system_event_input(body, &["body"]) {
+                Ok(report) => report,
+                Err(rejection) => return rejection,
             };
             database
                 .create_system_event(CreateSystemEvent {
@@ -328,6 +327,33 @@ async fn create_entry(
     match written {
         Ok(entry) => event_response(entry.snapshot),
         Err(error) => write_failure(error),
+    }
+}
+
+fn system_event_input(input: &[u8], location: &[&str]) -> Result<EventInput, Response> {
+    match EventInput::from_json(input, MAX_REQUEST_BYTES, ValidationMode::NewReport) {
+        Ok(report) => Ok(report),
+        Err(InvalidEvent::CoverageRequired) => {
+            let Ok(submitted) = serde_json::from_slice::<serde_json::Value>(input) else {
+                return Err(invalid_arguments());
+            };
+            let message = if submitted["payload"]["type"] == "caffeine_absence" {
+                "Value error, Caffeine absence requires an end after its start"
+            } else {
+                "Value error, Coverage observation requires a nonempty covered interval"
+            };
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "detail": [{
+                        "type": "value_error", "loc": location, "msg": message,
+                        "input": submitted, "ctx": {"error": {}},
+                    }]
+                })),
+            )
+                .into_response())
+        }
+        Err(_) => Err(invalid_arguments()),
     }
 }
 
