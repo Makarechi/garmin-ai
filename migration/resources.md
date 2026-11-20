@@ -254,6 +254,34 @@ The highest sampled API liveness times during the year were 52.13 ms for Python 
 The workload peak includes charged file cache. These trials used generated
 data and durable test storage.
 
+### Paired nightly and weekly reconciliation
+
+Add \`--reconcile-days 7\` or \`--reconcile-days 30\` and point
+\`--native-history-test\` at the Linux \`endpoint_worker\` test executable. Each
+run schedules the same slot twice and leases the endpoint jobs normally.
+The next slot repeats part of the date window so the result also verifies
+reuse of identical input. The independent activity scans stay queued while
+the test measures the endpoint workload.
+
+The [nightly](evidence/python-rust-reconcile-7-linux-arm64.json.gz) and
+[weekly](evidence/python-rust-reconcile-30-linux-arm64.json.gz) trials used
+the same PostgreSQL and application limits as the paired history tests, on
+one shared Linux ARM64 CPU. The native executable and image came from tree
+\`9f0b6e071afbab797949fd02fb87ff058fc42957\`.
+
+| Scheduled period | Jobs in each pass | Unique and reused archive objects | Python passes | Rust passes |
+| --- | ---: | ---: | ---: | ---: |
+| Nightly, 7 days | 141 | 161 unique, 121 reused | 8.332 s and 4.061 s | 1.049 s and 0.615 s |
+| Weekly, 30 days | 601 | 741 unique, 461 reused | 35.139 s and 24.657 s | 6.082 s and 4.925 s |
+
+Both runtimes fetched the same configured endpoints, saved the same archive
+bytes and retained matching job outcomes, measurements, revisions, and source
+links. The paired jobs completed all 1,152 measurement rows in the nightly
+trial and all 5,328 in the weekly trial. Peak workload charges were 118.41
+and 127.29 MiB in Python and 16.93 and 25.46 MiB in Rust. Final workload swap
+usage was zero. The observer captured successful liveness checks during both
+synthetic trials.
+
 ## Analytical queries, MCP and backup
 
 | Mode | Workload | Observation |
