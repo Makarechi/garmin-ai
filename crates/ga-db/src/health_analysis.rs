@@ -39,7 +39,8 @@ pub(crate) use trend_insights::stored_trend_current;
 
 pub(crate) use temporal::PRE_EVENT_FEATURE_VERSION;
 pub use temporal::{TemporalFeatures, TemporalOffsetFeatures, TemporalPurpose};
-pub use timeline::TimelineError;
+pub(crate) use timeline::analysis_timeline_in;
+pub use timeline::{AnalysisTimelineQuery, ModelTimelineResult, TIMELINE, TimelineError};
 
 use std::{error::Error, fmt};
 
