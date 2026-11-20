@@ -60,7 +60,8 @@
       "rust_tests": [
         "migration/check_native_compose.py",
         "migration/check_native_setup.py",
-        "migration/check_native_worker_health.py"
+        "migration/check_native_worker_health.py",
+        "migration/evidence/native-install-recovery-linux.json"
       ],
       "data_contracts": [
         "Environment and config precedence, instance isolation, owner locale/time zone/units, repeatable onboarding."
@@ -73,7 +74,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R34",
       "known_limits": [
-        "Verify the source-free installer, preserved configuration and owner onboarding together on both Linux architectures."
+        "Source-free installation, historical upgrade and owner onboarding passed on both physical Linux architectures. The documented setup and settings differences still need release decisions."
       ],
       "approved_deviations": []
     },
@@ -1761,7 +1762,10 @@
         "migration/check_backup_volume_failure.py",
         "migration/check_native_schema.py",
         "migration/check_backup_space.py",
-        "migration/check_postgres_readiness.py"
+        "migration/check_postgres_readiness.py",
+        "migration/check_cutover_restore.py",
+        "migration/check_erasure_live_writers.py",
+        "migration/evidence/native-install-recovery-linux.json"
       ],
       "data_contracts": [
         "Readiness and metrics, backup/export/restore, erasure and resume, migration chain, storage alerts, installation."
@@ -1774,7 +1778,7 @@
       "verification": "operational",
       "owner_task": "R32",
       "known_limits": [
-        "Native backup and recovery matched Python across 30 synthetic database tables and preserved interrupted backups. Linux arm64 exercised a full destination before and during encryption, retained the prior authenticated archive, rejected a damaged tag, and recovered after freeing space. Historical migrations and readiness have disposable database evidence. Packaging, erasure, retention, and cutover acceptance remain pending."
+        "Packaged installation, independent-host recoveries, erasure, retention and rollback rehearsals passed in synthetic environments. Sustained release and authorized production pilot evidence remain pending."
       ],
       "approved_deviations": []
     }
