@@ -85,6 +85,9 @@ MEASUREMENT_SOURCE = "synthetic-historical-aggregate"
 COFFEE_QUESTION = "Compare the fictional diary and measured sleep cohorts."
 COFFEE_ANSWER = "Both cohorts have explicitly covered sleep observations."
 COFFEE_DAY = date(2026, 7, 1)
+WINDOWS_QUESTION = "Compare synthetic physiology around the saved diary note."
+WINDOWS_ANSWER = "The diary anchor has five measured windows with separate sources."
+WINDOWS_START = datetime(2026, 9, 1, 9, tzinfo=UTC)
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -119,6 +122,8 @@ def output(prompt):
             return aggregate_output(prompt)
         if prompt["question"].startswith(COFFEE_QUESTION):
             return coffee_output(prompt)
+        if prompt["question"].startswith(WINDOWS_QUESTION):
+            return windows_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -164,6 +169,7 @@ def output(prompt):
             RUNNING_QUESTION,
             SUMMARIES_QUESTION,
             COFFEE_QUESTION,
+            WINDOWS_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -351,6 +357,49 @@ def coffee_output(prompt):
     }
     if fractional:
         arguments["late_hours"] = 6.5
+    return AgentStep(
+        calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
+    )
+
+
+def windows_output(prompt):
+    name = "analysis_event_windows"
+    restricted = prompt["question"].endswith(" without wellbeing access")
+    oversized = prompt["question"].endswith(" across many diary anchors")
+    if prompt["evidence"]:
+        [item] = prompt["evidence"]
+        assert item["tool"] == name
+        result = item["result"]
+        if restricted or oversized:
+            assert result["error"] == (
+                "result_too_large"
+                if oversized
+                else "Invalid tool arguments; inspect schema and retry"
+            ), result
+            return AgentStep(response_language="en")
+        assert result["episodes"] == 1 and result["event_type"] == "note", result
+        [row] = result["rows"]
+        assert row["start"] == WINDOWS_START.isoformat()
+        assert [window["relative_hours"] for window in row["windows"]] == [
+            [-48, -24],
+            [-24, -12],
+            [-12, -6],
+            [-6, 0],
+            [0, 24],
+        ]
+        assert not row["windows"][0]["sources"]
+        assert {source["source"] for source in row["windows"][-1]["sources"]} == {
+            "garmin_connect",
+            "synthetic-other-provider",
+        }
+        return AgentStep(answer=WINDOWS_ANSWER, evidence_ids=[1], response_language="en")
+    assert name in {tool["name"] for tool in prompt["tools"]}
+    arguments = {
+        "event_type": "system.note",
+        "metric": "stress_score",
+        "start": WINDOWS_START.isoformat(),
+        "end": (WINDOWS_START + timedelta(minutes=1)).isoformat(),
+    }
     return AgentStep(
         calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
     )
@@ -713,6 +762,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_running(engine, python, native)
     exercise_health_summaries(engine, python, native)
     exercise_coffee_sleep(engine, python, native)
+    exercise_event_windows(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1487,6 +1537,60 @@ def exercise_coffee_sleep(engine, python, native):
     assert denied[0] == denied[1] and COFFEE_ANSWER not in denied[1], denied
     print(
         "Matched explicitly covered caffeine and sleep cohorts and withheld changed or disallowed evidence"
+    )
+
+
+def exercise_event_windows(engine, python, native):
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for name in ("general_diary", "wellbeing"):
+            packs[name].tracking_enabled = True
+            packs[name].llm_enabled = True
+        entry = create_event(
+            session,
+            EventInput(
+                start=WINDOWS_START,
+                timezone="UTC",
+                payload={"type": "note", "description": "Synthetic physiology anchor"},
+            ),
+            actor="synthetic-fixture",
+        )
+        identity, definition, topology = entry.id, entry.definition_version_id, entry.topology
+    old, new = [submit(client, WINDOWS_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert WINDOWS_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved Garmin and diary data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    with Session(engine) as session, session.begin():
+        session.get(Event, identity).start += timedelta(seconds=2)
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["wellbeing"].llm_enabled = False
+    question = WINDOWS_QUESTION + " without wellbeing access"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and WINDOWS_ANSWER not in denied[1], denied
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["wellbeing"].llm_enabled = True
+        session.add_all(
+            Event(
+                definition_version_id=definition,
+                topology=topology,
+                kind="note",
+                start=WINDOWS_START + timedelta(microseconds=index),
+                timezone="UTC",
+                source="manual",
+                status="confirmed",
+                deleted=False,
+                payload={"type": "note", "description": "Synthetic physiology anchor"},
+            )
+            for index in range(45)
+        )
+    question = WINDOWS_QUESTION + " across many diary anchors"
+    oversized = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert oversized[0] == oversized[1] and WINDOWS_ANSWER not in oversized[1], oversized
+    print(
+        "Matched five source-separated event windows, stale anchors, pack denial and output bounds"
     )
 
 

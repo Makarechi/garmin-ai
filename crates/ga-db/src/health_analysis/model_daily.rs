@@ -1,7 +1,7 @@
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 use ga_domain::{
-    legacy_json::{Utf8Layout, encode_ascii},
+    legacy_json::{Utf8Layout, encode, encode_ascii},
     model_consent::ModelCategories,
     sha256_hex,
     statistics::describe,
@@ -17,6 +17,7 @@ use super::{
     SeriesReadError, begin_daily_analysis,
     coffee::coffee_sleep_in,
     daily_metric,
+    event_windows::{event_windows_in, permits_model_event_kind_in},
     freshness_report::model_freshness_in,
     lagged::lagged_association_in,
     main_sleep_timing_in,
@@ -43,6 +44,7 @@ pub const DATA_FRESHNESS: &str = "data_freshness";
 pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
 pub const HEALTH_SNAPSHOT: &str = "health_snapshot";
 pub const HEALTH_RANGE: &str = "health_range";
+pub const EVENT_WINDOWS: &str = "analysis_event_windows";
 pub const COFFEE_SLEEP: &str = "analysis_coffee_sleep";
 const COFFEE_MODEL_PACKS: &[&str] = &["caffeine", "sleep"];
 pub const METRIC_SERIES: &str = "metric_series";
@@ -86,6 +88,13 @@ pub enum DailyAnalysisQuery {
         start: String,
         end: String,
         lags: Vec<i64>,
+    },
+    #[serde(rename = "analysis_event_windows")]
+    EventWindows {
+        event_type: String,
+        metric: String,
+        start: String,
+        end: String,
     },
     #[serde(rename = "analysis_coffee_sleep")]
     CoffeeSleep {
@@ -240,6 +249,55 @@ impl DailyAnalysisQuery {
                     return Ok(None);
                 }
                 lagged_association_in(txn, metric_a, metric_b, period(start, end)?, lags).await?
+            }
+            Self::EventWindows {
+                event_type,
+                metric,
+                start,
+                end,
+            } => {
+                let kind = event_type.strip_prefix("system.").unwrap_or(event_type);
+                if !permits_model_event_kind_in(txn, kind).await?
+                    || !model_packs_allowed(
+                        txn,
+                        context.binding().owner_id,
+                        model_metric_packs(metric),
+                    )
+                    .await?
+                {
+                    return Ok(None);
+                }
+                let parse = |value: &str| {
+                    StoredInstant::legacy_input_with_offset(&json!(value))
+                        .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
+                };
+                let output = event_windows_in(txn, kind, metric, parse(start)?, parse(end)?)
+                    .await
+                    .map_err(model_series_error)?;
+                const MAX_RESULT_CHARS: usize = 24_000;
+                let too_large = || {
+                    Ok(Some(json!({"error":"result_too_large",
+                        "instruction":"Narrow the date range or use an analysis tool. Do not treat this as empty data."})))
+                };
+                if output.byte_len() > (MAX_RESULT_CHARS * 4) as u64 {
+                    return too_large();
+                }
+                let mut bytes = Vec::with_capacity(output.byte_len() as usize);
+                output
+                    .reader()
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| HealthAnalysisError::Database)?;
+                let encoded = encode(&bytes, Utf8Layout::Ordered, MAX_RESULT_CHARS * 4)
+                    .map_err(|_| HealthAnalysisError::Database)?;
+                if std::str::from_utf8(&encoded)
+                    .map_err(|_| HealthAnalysisError::Database)?
+                    .chars()
+                    .count()
+                    > MAX_RESULT_CHARS
+                {
+                    return too_large();
+                }
+                serde_json::from_slice(&bytes).map_err(|_| HealthAnalysisError::Database)?
             }
             Self::CoffeeSleep {
                 start,
@@ -404,6 +462,7 @@ impl DailyAnalysisEvidence {
                 | HEALTH_RANGE
                 | METRIC_SERIES
                 | COFFEE_SLEEP
+                | EVENT_WINDOWS
         )
     }
 
