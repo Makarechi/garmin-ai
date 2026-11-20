@@ -337,7 +337,9 @@
       "rust_tests": [
         "crates/ga-archive/tests/archive.rs",
         "migration/check_authoritative_replacement.py",
-        "migration/check_health_publication.py"
+        "migration/check_health_publication.py",
+        "migration/check_archived_backup_and_replay.py",
+        "migration/evidence/native-archive-recovery-linux-arm64.json"
       ],
       "data_contracts": [
         "Legacy serialized JSON and untouched binary, immutable identity bytes, A\u2013B\u2013A revisions, timestamp order."
@@ -347,10 +349,10 @@
       ],
       "resource_scenario": "Streaming ingest plus archive write and staging",
       "status": "implemented",
-      "verification": "db",
+      "verification": "e2e_synthetic",
       "owner_task": "R08",
       "known_limits": [
-        "Verify the final mixed acquisition, backup and replay run with the versioned archive and recovery comparison."
+        "The mixed acquisition, backup and replay matched across both runtimes. The newer overlapping measurement ordering in the deviations register still needs a release decision."
       ],
       "approved_deviations": []
     },

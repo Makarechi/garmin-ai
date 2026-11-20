@@ -31,10 +31,12 @@ def prepare(engine, archive, settings, days):
     }
 
 
-def wait(engine, fixture):
+def wait(engine, fixture, *, worker=None):
     deadline = time.monotonic() + 1800
     count = fixture["archive_objects"]
     while time.monotonic() < deadline:
+        if worker is not None and worker.poll() is not None:
+            raise RuntimeError(f"Replay worker exited with status {worker.returncode}")
         with transaction(engine) as session:
             statuses = replay_status(session)
             outcomes = statuses["outcomes"]
