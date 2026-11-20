@@ -74,7 +74,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R34",
       "known_limits": [
-        "Source-free installation, historical upgrade and owner onboarding passed on both physical Linux architectures. The documented setup and settings differences still need release decisions."
+        "Source-free installation, historical upgrade and owner onboarding passed on both physical Linux architectures. The case-insensitive storage setup difference still needs a release decision."
       ],
       "approved_deviations": []
     },

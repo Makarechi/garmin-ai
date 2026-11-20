@@ -23,11 +23,6 @@ change has a documented decision.
   fields. Native HTTP returns a short invalid-arguments message.
   [The paired system diary fixture](check_system_diary_types.py) records this
   response difference. Approval is pending for PAR-09.
-- The established native onboarding and tracker settings routes accept valid JSON
-  objects from authenticated clients that omit the content type. Frozen FastAPI
-  requires the header. Both runtimes reject explicit non-JSON media types and
-  preserve the same malformed-request errors in the comparison.
-  See the five settings and export requests in `check_http_json_requests.py`.
 - Bare `NaN` and `Infinity` tokens are outside the JSON number grammar.
   The pinned Python MCP transport passes those frames to tool validation and
   returns a tool error. Native MCP discards the malformed frame, then accepts
