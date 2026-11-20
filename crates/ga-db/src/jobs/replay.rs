@@ -12,6 +12,7 @@ use crate::{
     Database,
     activity_documents::{ActivityDocument, ActivitySummaryKind},
     fit_ingest::ENDPOINT as FIT_ENDPOINT,
+    history_windows::DAY_ENDPOINTS,
     replay::{GARMIN_PARSER_VERSION, HEALTH_CALENDAR_ENDPOINTS, HEALTH_INTRADAY_ENDPOINTS},
 };
 
@@ -97,7 +98,10 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<ReplayJobLease>, JobStoreError> {
-        let endpoints = health_endpoints()
+        let endpoints = DAY_ENDPOINTS
+            .iter()
+            .copied()
+            .chain(["devices"])
             .chain(
                 ActivityDocument::ALL
                     .into_iter()
