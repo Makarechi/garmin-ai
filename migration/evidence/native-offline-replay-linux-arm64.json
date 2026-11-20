@@ -137,5 +137,5 @@
       "observed": "Across 7,300 older archive revisions and 52,560 measurements, a newly retained stale revision fenced analytical reads until it was brought current. Readiness and outcome counts matched the reference."
     }
   ],
-  "remaining_release_validation": "The release-level unattended observation remains pending."
+  "remaining_release_validation": "Native import-probe and projection-audit, and the release-level unattended observation, remain pending."
 }

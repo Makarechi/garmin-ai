@@ -451,10 +451,12 @@
         "Replay only approved local archive and associated owner; fenced partial outputs remain unavailable."
       ],
       "resource_scenario": "Full offline replay, corruption and restart",
-      "status": "verified",
+      "status": "implemented",
       "verification": "e2e_synthetic",
       "owner_task": "R16",
-      "known_limits": [],
+      "known_limits": [
+        "The scheduled offline replay, corruption handling, and synthetic rollback match. The native import-probe and projection-audit commands are still pending."
+      ],
       "approved_deviations": []
     },
     {
