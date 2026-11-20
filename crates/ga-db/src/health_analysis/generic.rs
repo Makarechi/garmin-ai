@@ -4,7 +4,7 @@ mod evidence;
 mod observations;
 mod source;
 
-pub(crate) use evidence::LegacyGenericQueryDependency;
+pub(crate) use evidence::LegacyGenericDependency;
 pub use evidence::{GENERIC_ANALYSIS, GenericAnalysisEvidence};
 
 use std::{collections::BTreeSet, error::Error, fmt, io::Read};

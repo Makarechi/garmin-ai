@@ -29,7 +29,8 @@ from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import HealthDay, Person, SourcePayload
+from garmin_ai.metric_definitions import ensure_system_metric_definitions
+from garmin_ai.models import Event, HealthDay, Measurement, MetricObservation, Person, SourcePayload
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
@@ -65,6 +66,9 @@ FRESHNESS_QUESTION = "How recent are the synthetic Garmin measurements?"
 GENERIC_QUESTION = "Read the synthetic note through generic analysis."
 GENERIC_START = datetime(2026, 10, 9, 16, tzinfo=UTC)
 GENERIC_DETAIL = "Synthetic historical analysis entry"
+AGGREGATE_QUESTION = "Show the synthetic step aggregate."
+MEASUREMENT_START = datetime(2026, 10, 10, 14, tzinfo=UTC)
+MEASUREMENT_SOURCE = "synthetic-historical-aggregate"
 HEALTH_READS = {
     "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
     "analysis_compare_periods": {
@@ -85,6 +89,8 @@ def output(prompt):
             return freshness_output(prompt)
         if prompt["question"].startswith(GENERIC_QUESTION):
             return generic_output(prompt)
+        if prompt["question"].startswith(AGGREGATE_QUESTION):
+            return aggregate_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -110,7 +116,9 @@ def output(prompt):
     if sentence.startswith("Undo"):
         confidence = 0.84 if "synthetic low confidence" in sentence else 1
         return Interpretation(intent="undo", confidence=confidence, response_language="en")
-    if sentence.startswith((DIARY_QUESTION, HEALTH_QUESTION, FRESHNESS_QUESTION, GENERIC_QUESTION)):
+    if sentence.startswith(
+        (DIARY_QUESTION, HEALTH_QUESTION, FRESHNESS_QUESTION, GENERIC_QUESTION, AGGREGATE_QUESTION)
+    ):
         return Interpretation(intent="question", confidence=1, response_language="en")
     if sentence.startswith("Correct the synthetic note "):
         target = sentence.split()[4]
@@ -243,6 +251,33 @@ def generic_output(prompt):
     }
     return AgentStep(
         calls=[{"name": "generic_analysis", "arguments_json": json.dumps({"spec": spec})}],
+        response_language="en",
+    )
+
+
+def aggregate_output(prompt):
+    from_event = prompt["question"].endswith(" through a saved event")
+    if not prompt["evidence"]:
+        spec = {
+            "operation": "aggregate_metric",
+            "metric_key": "system.steps_bucket",
+            "source": "event" if from_event else f"measurement:{MEASUREMENT_SOURCE}",
+            "start": MEASUREMENT_START.isoformat(),
+            "end": (MEASUREMENT_START + timedelta(hours=1)).isoformat(),
+            "knowledge_cutoff": prompt["now"],
+            "limit": 20,
+        }
+        return AgentStep(
+            calls=[{"name": "generic_analysis", "arguments_json": json.dumps({"spec": spec})}],
+            response_language="en",
+        )
+    result = prompt["evidence"][0]["result"]
+    assert "error" not in result and result["value"] is not None, result
+    assert len(result["input_revisions"]) == (1 if from_event else 2), result
+    return AgentStep(
+        answer="The synthetic step aggregate is available.",
+        evidence_ids=[1],
+        numeric_claims=[{"evidence_id": 1, "path": ["value"], "value": result["value"]}],
         response_language="en",
     )
 
@@ -448,6 +483,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_analysis(engine, python, native, native_calls)
     exercise_health_analysis(engine, python, native)
     exercise_generic_analysis(engine, python, native)
+    exercise_legacy_aggregate(engine, python, native)
     exercise_current_freshness(engine, python, native)
 
     calls_before = len(native_calls)
@@ -908,6 +944,98 @@ def exercise_generic_analysis(engine, python, native):
         set_model_categories(engine, ["health", "diary"])
     print("Matched generic diary reads and withheld stale or disallowed generic evidence")
     print("Verified legacy generic query history, replay protection and one read receipt")
+
+
+def exercise_legacy_aggregate(engine, python, native):
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["training"].llm_enabled = True
+        contract = ensure_system_metric_definitions(session)["steps_bucket"]
+        for minute, value in ((0, 20), (5, 30)):
+            at = MEASUREMENT_START + timedelta(minutes=minute)
+            session.add(
+                Measurement(
+                    ts=at,
+                    metric="steps_bucket",
+                    source=MEASUREMENT_SOURCE,
+                    local_date=at.date(),
+                    value=value,
+                    unit=contract.unit,
+                    metric_definition_version_id=contract.id,
+                    quality="observed",
+                    details={},
+                    ingested_at=MEASUREMENT_START - timedelta(days=1),
+                )
+            )
+
+    def shown(identity):
+        result = native.get("/web-chat/messages", headers=HEADERS)
+        assert result.status_code == 200, result.text
+        return identity in {row["id"] for row in result.json()["replies"]}
+
+    answer = submit(python, AGGREGATE_QUESTION)["reply"]
+    assert "/value: 50" in answer["text"], answer
+    assert shown(answer["id"])
+    assert (
+        native.post(f"/web-chat/messages/{answer['id']}/read", headers=HEADERS).status_code == 200
+    )
+    pending = submit(python, AGGREGATE_QUESTION + " before correction")["reply"]
+    assert shown(pending["id"])
+    with engine.begin() as connection:
+        connection.execute(
+            update(Measurement)
+            .where(Measurement.ts == MEASUREMENT_START, Measurement.source == MEASUREMENT_SOURCE)
+            .values(value=35)
+        )
+    assert not shown(pending["id"])
+    assert (
+        native.post(f"/web-chat/messages/{pending['id']}/read", headers=HEADERS).status_code == 409
+    )
+    with Session(engine) as session, session.begin():
+        entry = create_event(
+            session,
+            EventInput(
+                start=MEASUREMENT_START,
+                timezone="UTC",
+                payload={"type": "note", "description": "Synthetic source event"},
+            ),
+            actor="synthetic-fixture",
+        )
+        event_id = entry.id
+        contract = ensure_system_metric_definitions(session)["steps_bucket"]
+        recorded = datetime.now(UTC) - timedelta(seconds=1)
+        session.add(
+            MetricObservation(
+                source_entry_id=event_id,
+                metric="steps_bucket",
+                metric_definition_version_id=contract.id,
+                value=40,
+                unit=contract.unit,
+                observed_at=MEASUREMENT_START,
+                effective_start=MEASUREMENT_START,
+                effective_end=MEASUREMENT_START + timedelta(minutes=5),
+                recorded_at=recorded,
+                ingested_at=recorded,
+                fetched_at=recorded,
+                source_calendar_date=MEASUREMENT_START.date(),
+                source_ref=event_id,
+                timezone="UTC",
+                quality="observed",
+                valid=True,
+                sequence=0,
+                projection_version=1,
+                feature_version="synthetic-event-projection",
+            )
+        )
+    event_answer = submit(python, AGGREGATE_QUESTION + " through a saved event")["reply"]
+    assert "/value: 40" in event_answer["text"] and shown(event_answer["id"]), event_answer
+    with engine.begin() as connection:
+        connection.execute(update(Event).where(Event.id == event_id).values(deleted=True))
+    assert not shown(event_answer["id"])
+    assert (
+        native.post(f"/web-chat/messages/{event_answer['id']}/read", headers=HEADERS).status_code
+        == 409
+    )
+    print("Verified historical aggregates and withheld changed measurement and event evidence")
 
 
 def main():
