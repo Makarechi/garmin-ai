@@ -8,7 +8,7 @@ use ga_db::{
     health_analysis::{
         COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE,
         HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY,
-        SLEEP_ANALYSIS, STRESS_HOURS,
+        SLEEP_ANALYSIS, STRESS_HOURS, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -623,6 +623,7 @@ pub(crate) fn format_analysis_answer(
     let mut sources = Vec::new();
     if evidence.iter().any(|item| {
         item["implicit"] != true
+            && item["tool"] != WELLBEING_OBSERVATIONS
             && (item["tool"]
                 .as_str()
                 .is_some_and(DailyAnalysisEvidence::is_daily_tool)
@@ -632,6 +633,7 @@ pub(crate) fn format_analysis_answer(
     }
     if evidence.iter().any(|item| {
         item["tool"] == "events"
+            || item["tool"] == WELLBEING_OBSERVATIONS
             || item["tool"] == GENERIC_ANALYSIS
             || item["tool"] == MIGRAINE_WINDOWS
             || item["tool"] == COFFEE_SLEEP

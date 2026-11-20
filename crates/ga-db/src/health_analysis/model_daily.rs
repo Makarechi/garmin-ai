@@ -34,6 +34,10 @@ use super::{
 use crate::{
     Database,
     conversation_memory::{AnalysisSubject, analysis_channel_in},
+    diary::{
+        DiaryReadError,
+        wellbeing::{require_model_wellbeing_in, wellbeing_observations_in},
+    },
     model_gate::onboarding::onboarding_allows_model,
 };
 
@@ -52,6 +56,7 @@ pub const RUNNING_EFFICIENCY: &str = "analysis_running_efficiency";
 const RUNNING_MODEL_PACKS: &[&str] = &["training", "sleep", "wellbeing"];
 pub const STRESS_HOURS: &str = "analysis_stress_by_hour";
 pub const MIGRAINE_WINDOWS: &str = "analysis_migraine_windows";
+pub const WELLBEING_OBSERVATIONS: &str = "wellbeing_observations";
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "tool", content = "arguments", deny_unknown_fields)]
@@ -136,6 +141,12 @@ pub enum DailyAnalysisQuery {
         end: String,
         timezone: Option<String>,
     },
+    #[serde(rename = "wellbeing_observations")]
+    Wellbeing {
+        start: Value,
+        end: Value,
+        cursor: Option<String>,
+    },
     #[serde(rename = "analysis_migraine_windows")]
     Migraine {
         metric: String,
@@ -157,6 +168,22 @@ impl DailyAnalysisQuery {
         configured_timezone: &str,
         checked_at: Option<StoredInstant>,
     ) -> Result<Option<Value>, HealthAnalysisError> {
+        if let Self::Wellbeing { start, end, cursor } = self {
+            if !wellbeing_allowed(txn, context).await? {
+                return Ok(None);
+            }
+            let parse = |value: &Value| {
+                StoredInstant::from_legacy_input(value)
+                    .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
+            };
+            return wellbeing_observations_in(txn, parse(start)?, parse(end)?, cursor.as_deref())
+                .await
+                .map(Some)
+                .map_err(|error| match error {
+                    DiaryReadError::Database => HealthAnalysisError::Database,
+                    _ => HealthAnalysisError::DateRange,
+                });
+        }
         if !health_allowed(txn, context).await? {
             return Ok(None);
         }
@@ -416,7 +443,7 @@ impl DailyAnalysisQuery {
                 .await?
             }
             Self::Sleep { .. } => return Err(HealthAnalysisError::SleepRange),
-            Self::Freshness {} => return Ok(None),
+            Self::Freshness {} | Self::Wellbeing { .. } => return Ok(None),
         };
         Ok(Some(result))
     }
@@ -463,6 +490,7 @@ impl DailyAnalysisEvidence {
                 | METRIC_SERIES
                 | COFFEE_SLEEP
                 | EVENT_WINDOWS
+                | WELLBEING_OBSERVATIONS
         )
     }
 
@@ -564,6 +592,19 @@ pub struct DailyAnalysisAccess {
 }
 
 impl Database {
+    pub async fn analysis_wellbeing_access(&self, context: AnalysisSubject<'_>) -> bool {
+        matches!(
+            timeout_read(async {
+                let mut txn = begin_daily_analysis(&self.work).await?;
+                let allowed = wellbeing_allowed(&mut txn, context).await?;
+                txn.commit().await?;
+                Ok(allowed)
+            })
+            .await,
+            Ok(true)
+        )
+    }
+
     pub async fn analysis_health_access(
         &self,
         context: AnalysisSubject<'_>,
@@ -654,6 +695,23 @@ async fn health_allowed(
         .await
         .map_err(|_| HealthAnalysisError::Database)?;
     Ok(channel.is_some() && onboarding_allows_model(txn, ModelCategories::HEALTH).await?)
+}
+
+async fn wellbeing_allowed(
+    txn: &mut Transaction<'_, Postgres>,
+    context: AnalysisSubject<'_>,
+) -> Result<bool, HealthAnalysisError> {
+    let channel = analysis_channel_in(txn, context)
+        .await
+        .map_err(|_| HealthAnalysisError::Database)?;
+    if channel.is_none() {
+        return Ok(false);
+    }
+    match require_model_wellbeing_in(txn, context.binding().owner_id).await {
+        Ok(()) => Ok(true),
+        Err(DiaryReadError::Database) => Err(HealthAnalysisError::Database),
+        Err(_) => Ok(false),
+    }
 }
 
 fn parse_day(value: &str) -> Result<Date, HealthAnalysisError> {

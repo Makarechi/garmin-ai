@@ -29,7 +29,7 @@ mod revisions;
 pub(crate) use revisions::{corrected_report, lock_update_target, update_system_event_in};
 pub(crate) mod undo;
 mod wearable;
-mod wellbeing;
+pub(crate) mod wellbeing;
 
 pub(crate) use proactive_answers::context as question_context;
 pub(crate) use reads::interpretation_context_in;

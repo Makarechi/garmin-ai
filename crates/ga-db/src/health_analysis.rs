@@ -23,7 +23,7 @@ pub use model_daily::{
     COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
     EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES,
     MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
-    STRESS_HOURS,
+    STRESS_HOURS, WELLBEING_OBSERVATIONS,
 };
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;
