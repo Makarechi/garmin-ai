@@ -779,7 +779,10 @@
         "migration/contracts/tracker-legacy/tracker-chat-legacy-reference.json",
         "migration/capture_tracker_safety_cache.py",
         "migration/contracts/tracker-safety-cache.json",
-        "crates/ga-app/src/telegram_transport/model_worker/tests/tracker/recovery.rs::assert_safety_recovery"
+        "crates/ga-app/src/telegram_transport/model_worker/tests/tracker/recovery.rs::assert_safety_recovery",
+        "crates/ga-app/tests/telegram_tracker_forms.rs::native_tracker_forms_match_frozen_locale_transitions",
+        "crates/ga-app/src/telegram_transport/model_worker/tests/voice.rs",
+        "migration/evidence/native-tracker-language-linux-arm64.json"
       ],
       "data_contracts": [
         "Preview and confirmation, exact evidence text and offsets, ambiguity/clarification, deterministic fallbacks."
@@ -788,20 +791,21 @@
         "Protect tracker schema and facts by destination; untrusted extraction may only propose or invoke validated commands."
       ],
       "resource_scenario": "Bounded tracker setup, permitted local tracker selection, guided entry/edit/close forms, ambiguous local clocks and oversized entry recovery",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R19",
       "known_limits": [
         "Explicit local Telegram tracker setup matches 324 frozen field cases and 106 durable conversation steps, including delayed updates, privacy, preview confirmation, duplicate ingress and expired-lease recovery. A dedicated final-build scenario passed within 32 MiB with zero swap and zero memory-limit events.",
         "Local guided tracker creation, historical editing and interval closing match frozen typed-answer, prompt and calendar contracts. Dedicated conversations cover schema-only sensitive access, denied fact editing, consent revocation, oversized entry reset, duplicate ingress and expired-lease final submission.",
-        "Local tracker selection matches 9,741 frozen ranking/cue/proposal cases and 162 durable conversation steps per locale, including schema consent, tied choices, stale prompts, retired versions, analysis replies, duplicate ingress and recovered admission. Natural-language proposal/extraction across all channels and combined R19/R25 acceptance remain pending. Full voice transcription, other Telegram handlers and transport recovery remain part of R27 acceptance.",
+        "Local tracker selection matches 9,741 frozen ranking/cue/proposal cases and 162 durable conversation steps per locale, including schema consent, tied choices, stale prompts, retired versions, analysis replies, duplicate ingress and recovered admission.",
         "Offline POST /natural-language/trackers fallback matches request normalization, relevance scores, scoped form discovery, selected active definitions and historical entries, legacy receipt replay and pinned message context. Paired HTTP scenarios also submit returned forms through either runtime. Provider-backed tracker HTTP extraction has dedicated synthetic comparisons. Exact general HTTP validation envelopes remain part of R36 acceptance.",
-        "Tracker HTTP proposals/extraction match 360 frozen typed-model contracts and 1,178 evidence calls and ten calendar-bound cases captured while all 168 source natural-language tests passed. A paired HTTP proof compares created/corrected facts and provenance, refusals, proposals, privacy, permissions and cross-runtime receipts against an actual native synthetic HTTPS provider. Matching concurrent model requests return the same atomic receipt and use one provider call. Complete channel integration, broader malformed legacy state and combined R19/R25 acceptance remain pending.",
+        "Tracker HTTP proposals/extraction match 360 frozen typed-model contracts and 1,178 evidence calls and ten calendar-bound cases captured while all 168 source natural-language tests passed. A paired HTTP proof compares created/corrected facts and provenance, refusals, proposals, privacy, permissions and cross-runtime receipts against an actual native synthetic HTTPS provider. Matching concurrent model requests return the same atomic receipt and use one provider call.",
         "The calendar boundary matrix uses the exact frozen TZif bytes for 598 source timezone keys. Operating-system historical timezone data vary, and deployment timezone-data alignment remains part of R34/R36 verification.",
-        "Callback notices after configuration-locale changes, malformed legacy state and complete R36 validation/transport behavior still require broader combined checks.",
+        "Thirteen paired steps verified callback text after a locale change, the original form language, invalid legacy ordering metadata, and refusing a form whose stored schema changed.",
         "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending.",
-        "Legacy selected Telegram tracker prompts match 33 frozen offline and 12 model-backed steps per locale, including complete operation contexts and receipts. Native proofs also cover atomic rollback after an outbox failure, resumed final writes, denied sensitive model disclosure and analysis replies bypassing local tracker state. Complete voice, malformed legacy state, channel integration and combined release workloads remain pending.",
-        "Persisted legacy tracker safety statuses match 24 frozen metadata contracts over 72 repeated calls. Native workers recover checked, urgent and unavailable statuses after expired claims without repeating the safety SDK, and recheck current tracker/model sharing before cache reuse. Fresh positive, urgent and failed safety sends persist the corresponding status. Complete R25/R27 and combined release acceptance remain pending."
+        "Legacy selected Telegram tracker prompts match 33 frozen offline and 12 model-backed steps per locale, including complete operation contexts and receipts. Native proofs also cover atomic rollback after an outbox failure, resumed final writes, denied sensitive model disclosure and analysis replies bypassing local tracker state.",
+        "Persisted legacy tracker safety statuses match 24 frozen metadata contracts over 72 repeated calls. Native workers recover checked, urgent and unavailable statuses after expired claims without repeating the safety SDK, and recheck current tracker/model sharing before cache reuse. Fresh positive, urgent and failed safety sends persist the corresponding status.",
+        "Synthetic native Telegram voice verified caption handoff, transcript reuse, revocation, rate limiting, and the audio byte limit. Authorized live channel and provider validation remain in PAR-17 and PAR-18."
       ],
       "approved_deviations": []
     },

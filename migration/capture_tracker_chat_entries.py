@@ -212,6 +212,32 @@ def cases():
     return rows
 
 
+def locale_transition_cases():
+    return [
+        {"create": "text", "locale": "en"},
+        {"create": "integer", "locale": "ru", "patch": {"prompt_order": [0, 999999]}},
+        {"message": {"text": "bad time"}, "locale": "ru", "patch": {"prompt_order": [0, 0]}},
+        {
+            "message": {"text": "2026-11-18 10:00Z"},
+            "locale": "ru",
+            "patch": {"prompt_order": ["unusable", None], "prompt_advanced_at": "invalid"},
+        },
+        {"message": {"text": "Synthetic entry after language change"}, "locale": "ru"},
+        {"create": "sensitive", "locale": "ru"},
+        {"create": "sensitive", "locale": "en"},
+        {"create": "integer", "locale": "ru"},
+        {"message": {"text": "2026-11-18 11:00Z"}, "locale": "en"},
+        {"message": {"text": "invalid number"}, "locale": "en"},
+        {"message": {"text": "3"}, "locale": "en"},
+        {"create": "text", "locale": "en"},
+        {
+            "message": {"text": "2026-11-18 12:00Z"},
+            "locale": "ru",
+            "chat_form_patch": {"schema_hash": "malformed legacy hash"},
+        },
+    ]
+
+
 def versions(session):
     return {
         str(row.id): session.get(EventDefinition, row.definition_id).key
@@ -358,6 +384,13 @@ def capture(
                 pending = session.get(AppState, PENDING)
                 assert pending
                 pending.value = {**pending.value, **case["patch"]}
+            if "chat_form_patch" in case:
+                pending = session.get(AppState, PENDING)
+                assert pending
+                pending.value = {
+                    **pending.value,
+                    "chat_form": {**pending.value["chat_form"], **case["chat_form_patch"]},
+                }
             if "create" in case:
                 version = session.scalar(
                     select(EventDefinitionVersion)
@@ -418,7 +451,12 @@ def capture(
         reply = process_message(
             engine,
             provider,
-            Settings(_env_file=None, telegram_user_id=42, locale=locale, timezone="UTC"),
+            Settings(
+                _env_file=None,
+                telegram_user_id=42,
+                locale=case.get("locale", locale),
+                timezone="UTC",
+            ),
             update_id,
             transcript="" if case.get("message", {}).get("voice") else None,
         )
