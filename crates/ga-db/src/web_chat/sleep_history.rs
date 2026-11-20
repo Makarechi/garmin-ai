@@ -8,7 +8,7 @@ use super::{Conversation, DESTINATION, WebChatError};
 use crate::{
     conversation_memory::CONTEXT_DELIVERY_LOCK,
     health_analysis::{
-        generic::{GenericAnalysisError, LegacyGenericQueryDependency},
+        generic::{GenericAnalysisError, LegacyGenericDependency},
         main_sleep_timing_in, permits_timing_in, sleep_timing_result_hash,
     },
     personal_goals::{self, GOAL_POLICY_LOCK},
@@ -213,7 +213,7 @@ async fn generic_snapshots_current(
     let channel = ShareDestination::new(DestinationKind::Channel, DESTINATION)
         .map_err(|_| WebChatError::Database)?;
     for evidence in dependencies {
-        let Ok(evidence) = LegacyGenericQueryDependency::deserialize(evidence) else {
+        let Ok(evidence) = LegacyGenericDependency::deserialize(evidence) else {
             return Ok(false);
         };
         match evidence.current(txn, owner, model, channel).await {

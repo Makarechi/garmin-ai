@@ -9,11 +9,11 @@ use ga_domain::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Acquire, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{GenericAnalysisError, model_read_in};
+use super::{GenericAnalysisError, GenericAnalysisReader, GenericAudience, model_read_in};
 use crate::share_policy::ShareDestination;
 
 pub const GENERIC_ANALYSIS: &str = "generic_analysis";
@@ -31,11 +31,19 @@ pub struct GenericAnalysisEvidence {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LegacyGenericQueryDependency {
+pub(crate) struct LegacyGenericDependency {
     arguments: Map<String, Value>,
     request_time: String,
     result_hash: String,
-    snapshots: Vec<Value>,
+    snapshots: Vec<GenericMetricSnapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenericMetricSnapshot {
+    metric: String,
+    metric_version: i64,
+    input_revisions: Map<String, Value>,
 }
 
 impl GenericAnalysisEvidence {
@@ -78,7 +86,7 @@ impl GenericAnalysisEvidence {
         channel: ShareDestination<'_>,
         categories: ModelCategories,
     ) -> Result<Option<BTreeSet<Uuid>>, GenericAnalysisError> {
-        let Some(spec) = refreshed_spec(&self.generic_arguments, &self.request_time) else {
+        let Some((spec, _)) = refreshed_spec(&self.generic_arguments, &self.request_time) else {
             return Ok(None);
         };
         let read = model_read_in(txn, owner, model, channel, categories, &spec).await?;
@@ -89,7 +97,7 @@ impl GenericAnalysisEvidence {
     }
 }
 
-impl LegacyGenericQueryDependency {
+impl LegacyGenericDependency {
     pub(crate) async fn current(
         &self,
         txn: &mut Transaction<'_, Postgres>,
@@ -97,17 +105,19 @@ impl LegacyGenericQueryDependency {
         model: ShareDestination<'_>,
         channel: ShareDestination<'_>,
     ) -> Result<bool, GenericAnalysisError> {
-        let Some(spec) = refreshed_spec(&self.arguments, &self.request_time) else {
+        let Some((spec, now)) = refreshed_spec(&self.arguments, &self.request_time) else {
             return Ok(false);
         };
-        if !self.snapshots.is_empty()
-            || !matches!(
-                spec.operation(),
-                AnalysisOperation::QueryEntries
-                    | AnalysisOperation::QueryObservations
-                    | AnalysisOperation::QueryCompleteness
-            )
-        {
+        let expected = match spec.operation() {
+            AnalysisOperation::QueryEntries
+            | AnalysisOperation::QueryObservations
+            | AnalysisOperation::QueryCompleteness => 0,
+            AnalysisOperation::ComparePeriods => 2,
+            AnalysisOperation::AggregateMetric
+            | AnalysisOperation::ThresholdSegments
+            | AnalysisOperation::ThresholdByLocalHour => 1,
+        };
+        if self.snapshots.len() != expected {
             return Ok(false);
         }
         let read = model_read_in(
@@ -119,26 +129,66 @@ impl LegacyGenericQueryDependency {
             &spec,
         )
         .await?;
-        Ok(digest(&read.value).as_deref() == Some(&self.result_hash))
+        if digest(&read.value).as_deref() != Some(&self.result_hash) {
+            return Ok(false);
+        }
+        let single = [&read.value];
+        let pair = [&read.value["first"], &read.value["second"]];
+        let observations: &[&Value] = match expected {
+            0 => &[],
+            1 => &single,
+            _ => &pair,
+        };
+        if !self.snapshots.iter().zip(observations).all(|(proof, row)| {
+            row["metric"] == proof.metric
+                && row["metric_version"] == proof.metric_version
+                && row["input_revisions"].as_object() == Some(&proof.input_revisions)
+        }) {
+            return Ok(false);
+        }
+        if let Some(now) = now.filter(|_| !self.snapshots.is_empty()) {
+            let mut reader = GenericAnalysisReader {
+                txn: txn.begin().await?,
+                audience: GenericAudience::Owner { read_health: true },
+            };
+            for proof in &self.snapshots {
+                if !reader
+                    .aggregate_revisions_current(
+                        &proof.metric,
+                        proof.metric_version,
+                        &proof.input_revisions,
+                        now,
+                    )
+                    .await?
+                {
+                    return Ok(false);
+                }
+            }
+            reader.txn.rollback().await?;
+        }
+        Ok(true)
     }
 }
 
-fn refreshed_spec(arguments: &Map<String, Value>, request_time: &str) -> Option<AnalysisSpec> {
+fn refreshed_spec(
+    arguments: &Map<String, Value>,
+    request_time: &str,
+) -> Option<(AnalysisSpec, Option<StoredInstant>)> {
     let at = StoredInstant::from_python_isoformat(request_time)?;
     let spec = GenericAnalysisEvidence::input(arguments)?;
     if spec.knowledge_cutoff_microseconds() < at.unix_microseconds() - FIVE_MINUTES_MICROSECONDS {
-        return Some(spec);
+        return Some((spec, None));
     }
     let now = OffsetDateTime::now_utc()
         .unix_timestamp_nanos()
         .div_euclid(1_000);
     let now = StoredInstant::from_unix_microseconds(i64::try_from(now).ok()?).ok()?;
     if now.unix_microseconds() <= spec.knowledge_cutoff_microseconds() {
-        return Some(spec);
+        return Some((spec, Some(now)));
     }
     let mut updated = spec.document().clone();
     updated["knowledge_cutoff"] = json!(now.to_string());
-    AnalysisSpec::from_json(&updated).ok()
+    Some((AnalysisSpec::from_json(&updated).ok()?, Some(now)))
 }
 
 fn digest(value: &Value) -> Option<String> {
