@@ -91,6 +91,27 @@
   },
   "release_scope": [
     "Synthetic diary mutations through scoped HTTP and opt-in MCP, grouped undo, and native Telegram command ingress.",
-    "The documented native retryable response while a write is busy needs a release decision."
-  ]
+    "Admitted HTTP writes wait on the shared lock. The documented queue saturation behavior still needs a release decision."
+  ],
+  "queued_http": {
+    "base_commit": "547d93aac8a395069aa9f6deba95d7849ec97618",
+    "rust_sources_sha256": {
+      "crates/ga-app/src/http.rs": "55a5c9703a5f8ea8ce4d4c80917998b694df464045f2eaf5ec239511379cf1a2",
+      "crates/ga-app/src/http/diary.rs": "9d8414ee79599d13a5aed2ca23fea03111dae08700d2ceee656e68361c39a2fa",
+      "crates/ga-app/src/http/demo.rs": "be598b31b8b614a8a2c06d3ee91473252fb22842b89a9b7da5950750157d618f"
+    },
+    "check_source_sha256": "6126df169f77efd321b82a5673d16e0741e9faa097fac1bba48281a3741cd43f",
+    "candidate_app_binary_sha256": "dc9db80636968a14168653400a68ea9f9988e6284291c3526a6cb7abdcb42151",
+    "reference_check": "migration/check_diary_http.py",
+    "prior_candidate_failed_trace_sha256": "6582c69b072d9874bda3261dbca0448e9d04b951224089a4e9c0b74da50b4d05",
+    "updated_candidate_passed_trace_sha256": "f1a5193f07d6554fc91505ba486c7ee55d6010be99d923c0df7140e670b50172",
+    "concurrent_same_key_requests": 10,
+    "canonical_events": 1,
+    "creation_audit_entries": 1,
+    "requests_admitted_during_saturation": 16,
+    "excess_status": 503,
+    "excess_retry_after_seconds": 1,
+    "readiness_and_entry_read_succeeded_during_wait": true,
+    "shutdown_released_waiters_without_applying_write": true
+  }
 }

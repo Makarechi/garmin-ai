@@ -1,3 +1,5 @@
+use std::{future::Future, time::Duration};
+
 use axum::{
     Json,
     body::{Body, to_bytes},
@@ -19,6 +21,7 @@ use ga_domain::{
     event_replay::{ReplayConflict, check_idempotency_key},
     event_schema::CustomEntry,
 };
+use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
 use super::{
@@ -33,6 +36,46 @@ use super::{
 enum EntryKind {
     System,
     Tracker,
+}
+
+const DIARY_WRITE_CAPACITY: usize = 16;
+const DIARY_LOCK_RETRY: Duration = Duration::from_millis(50);
+
+pub(super) struct WriteQueue {
+    slots: Semaphore,
+    active: Mutex<()>,
+}
+
+impl WriteQueue {
+    pub(super) fn new() -> Self {
+        Self {
+            slots: Semaphore::new(DIARY_WRITE_CAPACITY),
+            active: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn close(&self) {
+        self.slots.close();
+    }
+
+    async fn submit<T, F>(&self, mut write: impl FnMut() -> F + Send) -> Result<T, DiaryWriteError>
+    where
+        F: Future<Output = Result<T, DiaryWriteError>> + Send,
+    {
+        let _slot = self
+            .slots
+            .try_acquire()
+            .map_err(|_| DiaryWriteError::Busy)?;
+        let _active = self.active.lock().await;
+        while !self.slots.is_closed() {
+            match write().await {
+                // The database rolls back the attempt before reporting lock contention.
+                Err(DiaryWriteError::Busy) => tokio::time::sleep(DIARY_LOCK_RETRY).await,
+                result => return result,
+            }
+        }
+        Err(DiaryWriteError::Busy)
+    }
 }
 
 pub(super) async fn create(State(state): State<AppState>, request: Request) -> Response {
@@ -58,7 +101,9 @@ pub(super) async fn edit_custom(
         .await
         {
             Ok((database, owner)) => match id.parse() {
-                Ok(id) => update_tracker_entry(database, owner, id, body).await,
+                Ok(id) => {
+                    update_tracker_entry(&state.diary_writes, database, owner, id, body).await
+                }
                 Err(_) => invalid_arguments(),
             },
             Err(status) => access_failure(status),
@@ -69,7 +114,13 @@ pub(super) async fn edit_custom(
     private_cache(response, &parts.headers)
 }
 
-async fn update_tracker_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) -> Response {
+async fn update_tracker_entry(
+    writes: &WriteQueue,
+    database: &Database,
+    owner: Uuid,
+    id: Uuid,
+    body: Body,
+) -> Response {
     let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
         return report_too_large();
     };
@@ -90,14 +141,16 @@ async fn update_tracker_entry(database: &Database, owner: Uuid, id: Uuid, body: 
     else {
         return invalid_arguments();
     };
-    match database
-        .update_custom_entry_document(UpdateCustomEntry {
-            owner_id: owner,
-            actor: "api",
-            id,
-            expected_revision: i32::try_from(revision).unwrap_or(0),
-            entry: &entry,
-            evidence_refs: &[],
+    match writes
+        .submit(|| {
+            database.update_custom_entry_document(UpdateCustomEntry {
+                owner_id: owner,
+                actor: "api",
+                id,
+                expected_revision: i32::try_from(revision).unwrap_or(0),
+                entry: &entry,
+                evidence_refs: &[],
+            })
         })
         .await
     {
@@ -118,7 +171,15 @@ async fn create_request(state: &AppState, request: Request, kind: EntryKind) -> 
             .await
             {
                 Ok((database, owner)) => {
-                    create_entry(database, owner, &parts.headers, body, kind).await
+                    create_entry(
+                        &state.diary_writes,
+                        database,
+                        owner,
+                        &parts.headers,
+                        body,
+                        kind,
+                    )
+                    .await
                 }
                 Err(status) => access_failure(status),
             }
@@ -136,8 +197,11 @@ pub(super) async fn undo(
     let response = if method == Method::POST {
         match authorized(&state, &headers, &[Scope::ReadDiary, Scope::WriteDiary]).await {
             Ok((database, owner)) => match idempotency_key(&headers) {
-                Ok(key) => match database
-                    .undo_api_diary(owner, key.as_deref(), &state.configured_timezone)
+                Ok(key) => match state
+                    .diary_writes
+                    .submit(|| {
+                        database.undo_api_diary(owner, key.as_deref(), &state.configured_timezone)
+                    })
                     .await
                 {
                     Ok(receipt) => Json(receipt).into_response(),
@@ -166,9 +230,11 @@ pub(super) async fn entry(
     };
     let response = match authorized(&state, &parts.headers, required).await {
         Ok((database, owner)) => match id.parse() {
-            Ok(id) if parts.method == Method::PUT => update_entry(database, owner, id, body).await,
+            Ok(id) if parts.method == Method::PUT => {
+                update_entry(&state.diary_writes, database, owner, id, body).await
+            }
             Ok(id) if parts.method == Method::DELETE => {
-                delete_entry(database, owner, id, parts.uri.query()).await
+                delete_entry(&state.diary_writes, database, owner, id, parts.uri.query()).await
             }
             Ok(id) => match database.owner_event(owner, id).await {
                 Ok(Some(value)) => Json(value).into_response(),
@@ -182,7 +248,13 @@ pub(super) async fn entry(
     private_cache(response, &parts.headers)
 }
 
-async fn update_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) -> Response {
+async fn update_entry(
+    writes: &WriteQueue,
+    database: &Database,
+    owner: Uuid,
+    id: Uuid,
+    body: Body,
+) -> Response {
     let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
         return report_too_large();
     };
@@ -207,14 +279,16 @@ async fn update_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) ->
         Ok(report) => report,
         Err(error) => return system_event_rejection(error, &input, &["body", "event"]),
     };
-    let result = database
-        .update_system_event(UpdateSystemEvent {
-            owner_id: owner,
-            authenticated_actor: "api",
-            event_id: id,
-            expected_revision: i32::try_from(revision).unwrap_or(0),
-            report: &report,
-            operation_id: None,
+    let result = writes
+        .submit(|| {
+            database.update_system_event(UpdateSystemEvent {
+                owner_id: owner,
+                authenticated_actor: "api",
+                event_id: id,
+                expected_revision: i32::try_from(revision).unwrap_or(0),
+                report: &report,
+                operation_id: None,
+            })
         })
         .await;
     match result {
@@ -223,7 +297,13 @@ async fn update_entry(database: &Database, owner: Uuid, id: Uuid, body: Body) ->
     }
 }
 
-async fn delete_entry(database: &Database, owner: Uuid, id: Uuid, query: Option<&str>) -> Response {
+async fn delete_entry(
+    writes: &WriteQueue,
+    database: &Database,
+    owner: Uuid,
+    id: Uuid,
+    query: Option<&str>,
+) -> Response {
     let expected = query.and_then(|raw| {
         form_urlencoded::parse(raw.as_bytes())
             .filter_map(|(key, value)| (key == "revision").then_some(value))
@@ -236,12 +316,14 @@ async fn delete_entry(database: &Database, owner: Uuid, id: Uuid, query: Option<
     let Some(expected_revision) = expected else {
         return invalid_arguments();
     };
-    match database
-        .delete_event(DeleteEvent {
-            owner_id: owner,
-            authenticated_actor: "api",
-            event_id: id,
-            expected_revision,
+    match writes
+        .submit(|| {
+            database.delete_event(DeleteEvent {
+                owner_id: owner,
+                authenticated_actor: "api",
+                event_id: id,
+                expected_revision,
+            })
         })
         .await
     {
@@ -278,6 +360,7 @@ pub(super) fn event_response(snapshot: serde_json::Value) -> Response {
 }
 
 async fn create_entry(
+    writes: &WriteQueue,
     database: &Database,
     owner: Uuid,
     headers: &HeaderMap,
@@ -299,14 +382,16 @@ async fn create_entry(
                     Ok(report) => report,
                     Err(error) => return system_event_rejection(error, body, &["body"]),
                 };
-            database
-                .create_system_event(CreateSystemEvent {
-                    owner_id: owner,
-                    authenticated_actor: "api",
-                    report: &report,
-                    idempotency_key: idempotency.as_deref(),
-                    operation_id: None,
-                    clock_uncertainty_seconds: None,
+            writes
+                .submit(|| {
+                    database.create_system_event(CreateSystemEvent {
+                        owner_id: owner,
+                        authenticated_actor: "api",
+                        report: &report,
+                        idempotency_key: idempotency.as_deref(),
+                        operation_id: None,
+                        clock_uncertainty_seconds: None,
+                    })
                 })
                 .await
         }
@@ -314,13 +399,15 @@ async fn create_entry(
             let Ok(entry) = CustomEntry::from_json(body, MAX_REQUEST_BYTES) else {
                 return invalid_arguments();
             };
-            database
-                .create_custom_entry(CreateCustomEntry {
-                    owner_id: owner,
-                    actor: "api",
-                    entry: &entry,
-                    idempotency_key: idempotency.as_deref(),
-                    evidence_refs: &[],
+            writes
+                .submit(|| {
+                    database.create_custom_entry(CreateCustomEntry {
+                        owner_id: owner,
+                        actor: "api",
+                        entry: &entry,
+                        idempotency_key: idempotency.as_deref(),
+                        evidence_refs: &[],
+                    })
                 })
                 .await
         }

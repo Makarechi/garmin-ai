@@ -24,7 +24,7 @@ pub(crate) async fn serve(host: &str, port: u16) -> io::Result<()> {
     );
     let app = Router::new().fallback(asset).with_state(Bytes::from(doc));
     println!("Open http://{}/dashboard", listener.local_addr()?);
-    super::accept(listener, app).await
+    super::accept(listener, app, || {}).await
 }
 
 async fn asset(State(page): State<Bytes>, method: Method, uri: Uri) -> Response {

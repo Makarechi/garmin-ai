@@ -45,6 +45,7 @@ struct AppState {
     authorization: Authorization,
     configured_timezone: Arc<str>,
     configured_locale: Arc<str>,
+    diary_writes: Arc<diary::WriteQueue>,
 }
 
 fn router(state: AppState) -> Router {
@@ -232,6 +233,7 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
         .unwrap_or_else(|| "ru".into());
     let webhook = TelegramWebhook::configured(database.clone()).router();
     let garmin_auth = garmin_auth::router(database.clone());
+    let diary_writes = Arc::new(diary::WriteQueue::new());
     println!("Listening on http://{}", listener.local_addr()?);
     accept(
         listener,
@@ -240,14 +242,20 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
             authorization,
             configured_timezone: configured_timezone.into(),
             configured_locale: configured_locale.into(),
+            diary_writes: diary_writes.clone(),
         })
         .merge(webhook)
         .merge(garmin_auth),
+        move || diary_writes.close(),
     )
     .await
 }
 
-async fn accept(listener: TcpListener, app: Router) -> io::Result<()> {
+async fn accept(
+    listener: TcpListener,
+    app: Router,
+    on_shutdown: impl FnOnce() + Send + 'static,
+) -> io::Result<()> {
     #[cfg(unix)]
     let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
 
@@ -259,6 +267,7 @@ async fn accept(listener: TcpListener, app: Router) -> io::Result<()> {
         }
         #[cfg(not(unix))]
         let _ = signal::ctrl_c().await;
+        on_shutdown();
     };
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
