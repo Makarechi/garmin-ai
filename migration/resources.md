@@ -225,6 +225,34 @@ all 7,300 jobs completed in 297.779 s. TimescaleDB reached 320 MiB charged memor
 measurements. All 55 sampled HTTP liveness probes succeeded while the work ran.
 
 
+### Paired weekly and yearly history imports
+
+Add \`--sync-days 7\` or \`--sync-days 365\` and \`--native-history-test\` to the paired
+image command. Point \`--native-history-test\` at the Linux \`endpoint_worker\` test
+executable from the same candidate tree as the runtime image. For example,
+\`cargo test --locked --release -p ga-app --test endpoint_worker --no-run\` prints
+the executable path.
+
+Both runs use the normal history scheduler and endpoint writer. A local fixture
+provides the same synthetic input for each of the 20 endpoints. The fixture uses
+one shared CPU with 320 MiB for PostgreSQL, 192 MiB for the API, and 384 MiB each
+for the worker and the history workload. Both runtimes used schema \`c54f8a72d130\`.
+The Rust image and test executable were built from tree
+\`b1ab1949bca40e71813afcbe78519bf29215502b\`.
+
+| Synthetic history | Identical results | Python time | Rust time | Workload peak, Python / Rust |
+| --- | --- | ---: | ---: | ---: |
+| [7 days](evidence/python-rust-history-7-linux-arm64.json.gz) | 140 jobs and archive objects, 7 daily rows, 1,008 measurement rows and their revisions | 5.332 s | 0.755 s | 117.36 / 16.61 MiB |
+| [365 days](evidence/python-rust-history-365-linux-arm64.json.gz) | 7,300 jobs and archive objects, 365 daily rows, 52,560 measurement rows and their revisions | 311.308 s | 50.994 s | 190.15 / 78.45 MiB |
+
+The comparison checked every archived object's bytes, source links, cursor
+values, endpoint fetch counts and final job outcomes. The timed stage includes
+the history scheduler and endpoint processing. PostgreSQL reached its 320 MiB
+ceiling in both year runs. The highest sampled liveness response time during
+the year run was 23.96 ms with Python and 21.51 ms with Rust. The workload peak
+includes charged file cache. These local trials model historical backfill with
+synthetic data. The sustained soak and live Garmin remain separate release checks.
+
 ## Analytical queries, MCP and backup
 
 | Mode | Workload | Observation |
