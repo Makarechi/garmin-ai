@@ -1,4 +1,4 @@
-"""Exercise a fictional tracker through an isolated release-bundle API."""
+"""Exercise owner onboarding and a fictional tracker through an isolated release API."""
 
 import argparse
 import json
@@ -8,15 +8,57 @@ from urllib.request import Request, urlopen
 from dotenv import dotenv_values
 
 
-def request(url: str, path: str, key: str, body=None):
+def request(url: str, path: str, key: str, body=None, *, method=None):
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Authorization": f"Bearer {key}"}
     if data is not None:
         headers["Content-Type"] = "application/json"
-    with urlopen(Request(url + path, data=data, headers=headers), timeout=20) as response:
+    with urlopen(
+        Request(url + path, data=data, headers=headers, method=method), timeout=20
+    ) as response:
         if response.status != 200:
             raise RuntimeError(f"Unexpected HTTP status {response.status} for {path}")
         return json.load(response)
+
+
+def onboard(url: str, key: str, profile: dict):
+    result = request(
+        url,
+        "/onboarding",
+        key,
+        {
+            **profile,
+            "selected_packs": ["general_diary"],
+            "source_instance_ids": [],
+            "model_categories": [],
+        },
+        method="PUT",
+    )
+    preferences = result["preferences"]
+    if any(preferences[field] != value for field, value in profile.items()):
+        raise RuntimeError("Onboarding did not save the requested owner preferences")
+    if preferences["source_instance_ids"] or preferences["model_categories"]:
+        raise RuntimeError("Onboarding enabled an unrequested integration")
+    return preferences["revision"]
+
+
+def tracker_entry(url: str, key: str, action_id: str):
+    form = request(url, f"/forms/{action_id}", key)
+    result = request(
+        url,
+        f"/forms/{action_id}/submit",
+        key,
+        {
+            "action_id": action_id,
+            "schema_hash": form["schema_hash"],
+            "submission_id": form["submission_id"],
+            "start": "2026-05-15T15:00:00+00:00",
+            "timezone": "UTC",
+            "values": {"quality": 4},
+            "units": {"quality": "score_1-5"},
+        },
+    )
+    return request(url, f"/events/{result['id']}", key)
 
 
 def main() -> None:
@@ -30,7 +72,15 @@ def main() -> None:
     if not key:
         raise RuntimeError("Release bundle API key is unavailable")
     request(args.url, "/health/ready", key)
+    capabilities = request(args.url, "/capabilities", key)
+    if capabilities != {"read_diary": True, "write_diary": True, "manage_definitions": True}:
+        raise RuntimeError("Release bundle did not expose local owner capabilities")
+    profile = {"locale": "ru", "timezone": "Europe/Bratislava", "units": "imperial"}
     if args.phase == "create":
+        initial = request(args.url, "/onboarding", key)
+        if initial["complete"] or not initial["can_finish_without_sources"]:
+            raise RuntimeError("Fresh owner onboarding requires external sources")
+        revision = onboard(args.url, key, {"locale": "en", "timezone": "UTC", "units": "metric"})
         draft = {
             "key": "ci_focus",
             "name": "CI focus",
@@ -52,10 +102,24 @@ def main() -> None:
     matches = [action for action in actions if action["definition_key"] == "user.ci_focus"]
     if len(matches) != 1:
         raise RuntimeError("Fictional tracker action is missing or duplicated")
+    action_id = matches[0]["id"]
     if args.phase == "create":
-        args.state_file.write_text(json.dumps({"action_id": matches[0]["id"]}) + "\n")
-    elif matches[0]["id"] != json.loads(args.state_file.read_text())["action_id"]:
-        raise RuntimeError("Fictional tracker changed identity after restart")
+        saved_entry = tracker_entry(args.url, key, action_id)
+        if onboard(args.url, key, profile) != revision + 1:
+            raise RuntimeError("Updating the owner preferences did not advance their revision")
+        args.state_file.write_text(
+            json.dumps({"action_id": action_id, "entry": saved_entry}) + "\n"
+        )
+    else:
+        stored = json.loads(args.state_file.read_text())
+        if action_id != stored["action_id"]:
+            raise RuntimeError("Fictional tracker changed identity after restart")
+        saved_entry = stored["entry"]
+    status = request(args.url, "/onboarding", key)
+    if not status["complete"] or any(status[field] != value for field, value in profile.items()):
+        raise RuntimeError("Saved onboarding preferences did not survive startup configuration")
+    if request(args.url, f"/events/{saved_entry['id']}", key) != saved_entry:
+        raise RuntimeError("Updating onboarding or restarting changed the saved tracker entry")
     print(f"Release API {args.phase} phase passed")
 
 
