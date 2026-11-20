@@ -8,17 +8,17 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Number, Value, json};
 use sqlx::{Postgres, Transaction};
 use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
-    HealthAnalysisError, HealthPeriod, NapPolicy, SeriesReadError, begin_daily_analysis,
-    daily_metric, freshness_report::model_freshness_in, lagged::lagged_association_in,
-    main_sleep_timing_in, migraine::migraine_comparison_in, model_metric_packs, observed_values,
-    owner_timezone, period_comparison, period_document, permits_timing_in,
-    read_daily::model_packs_allowed, require_current_projection, sleep_analysis::sleep_analysis_in,
-    stress::stress_hours_in,
+    ActivityReadError, HealthAnalysisError, HealthPeriod, NapPolicy, SeriesReadError,
+    begin_daily_analysis, daily_metric, freshness_report::model_freshness_in,
+    lagged::lagged_association_in, main_sleep_timing_in, migraine::migraine_comparison_in,
+    model_metric_packs, observed_values, owner_timezone, period_comparison, period_document,
+    permits_timing_in, read_daily::model_packs_allowed, require_current_projection,
+    running::running_efficiency_in, sleep_analysis::sleep_analysis_in, stress::stress_hours_in,
 };
 use crate::{
     Database,
@@ -31,6 +31,8 @@ pub const PERIOD_COMPARISON: &str = "analysis_compare_periods";
 pub const SLEEP_ANALYSIS: &str = "analysis_sleep";
 pub const DATA_FRESHNESS: &str = "data_freshness";
 pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
+pub const RUNNING_EFFICIENCY: &str = "analysis_running_efficiency";
+const RUNNING_MODEL_PACKS: &[&str] = &["training", "sleep", "wellbeing"];
 pub const STRESS_HOURS: &str = "analysis_stress_by_hour";
 pub const MIGRAINE_WINDOWS: &str = "analysis_migraine_windows";
 
@@ -69,6 +71,15 @@ pub enum DailyAnalysisQuery {
         start: String,
         end: String,
         lags: Vec<i64>,
+    },
+    #[serde(rename = "analysis_running_efficiency")]
+    RunningEfficiency {
+        start: String,
+        end: String,
+        #[serde(default = "default_hr_min")]
+        hr_min: Number,
+        #[serde(default = "default_hr_max")]
+        hr_max: Number,
     },
     #[serde(rename = "analysis_stress_by_hour")]
     StressHours {
@@ -190,6 +201,30 @@ impl DailyAnalysisQuery {
                 }
                 lagged_association_in(txn, metric_a, metric_b, period(start, end)?, lags).await?
             }
+            Self::RunningEfficiency {
+                start,
+                end,
+                hr_min,
+                hr_max,
+            } => {
+                if !model_packs_allowed(txn, context.binding().owner_id, RUNNING_MODEL_PACKS)
+                    .await?
+                {
+                    return Ok(None);
+                }
+                let parse = |value: &str| {
+                    StoredInstant::from_python_isoformat(value)
+                        .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
+                };
+                let min = hr_min.as_f64().ok_or(HealthAnalysisError::DateRange)?;
+                let max = hr_max.as_f64().ok_or(HealthAnalysisError::DateRange)?;
+                running_efficiency_in(txn, parse(start)?, parse(end)?, min, max)
+                    .await
+                    .map_err(|error| match error {
+                        ActivityReadError::Analysis(error) => error,
+                        _ => HealthAnalysisError::DateRange,
+                    })?
+            }
             Self::StressHours {
                 start,
                 end,
@@ -241,6 +276,20 @@ impl DailyAnalysisQuery {
         };
         Ok(Some(result))
     }
+    fn result_hash(&self, value: &Value) -> Option<String> {
+        if !matches!(self, Self::RunningEfficiency { .. }) {
+            return result_hash(value);
+        }
+        let mut snapshot = value.clone();
+        // Keep all selected observation identities and values. The query clock labels
+        // when the read happened and will differ even when those observations still match.
+        for row in snapshot["rows"].as_array_mut()? {
+            for feature in row["context"].as_object_mut()?.values_mut() {
+                feature.as_object_mut()?.remove("knowledge_cutoff");
+            }
+        }
+        result_hash(&snapshot)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -264,6 +313,7 @@ impl DailyAnalysisEvidence {
                 | LAGGED_ASSOCIATION
                 | MIGRAINE_WINDOWS
                 | STRESS_HOURS
+                | RUNNING_EFFICIENCY
         )
     }
 
@@ -296,9 +346,10 @@ impl DailyAnalysisEvidence {
             }
             _ => (None, None),
         };
+        let result_hash = query.result_hash(result)?;
         Some(Self {
             query,
-            result_hash: result_hash(result)?,
+            result_hash,
             timezone,
             checked_at,
         })
@@ -332,7 +383,11 @@ impl DailyAnalysisEvidence {
                 checked_at,
             )
             .await?;
-        Ok(value.as_ref().and_then(result_hash).as_deref() == Some(&self.result_hash))
+        Ok(value
+            .as_ref()
+            .and_then(|value| self.query.result_hash(value))
+            .as_deref()
+            == Some(&self.result_hash))
     }
 
     pub(crate) fn specification(&self) -> Value {
@@ -354,6 +409,7 @@ fn result_hash(value: &Value) -> Option<String> {
 pub struct DailyAnalysisAccess {
     pub migraine: bool,
     pub wellbeing: bool,
+    pub running: bool,
 }
 
 impl Database {
@@ -370,10 +426,14 @@ impl Database {
                 && model_packs_allowed(&mut txn, context.binding().owner_id, &["migraine"]).await?;
             let wellbeing =
                 model_packs_allowed(&mut txn, context.binding().owner_id, &["wellbeing"]).await?;
+            let running = wellbeing
+                && model_packs_allowed(&mut txn, context.binding().owner_id, RUNNING_MODEL_PACKS)
+                    .await?;
             txn.commit().await?;
             Ok(Some(DailyAnalysisAccess {
                 migraine,
                 wellbeing,
+                running,
             }))
         })
         .await
@@ -443,4 +503,12 @@ fn parse_day(value: &str) -> Result<Date, HealthAnalysisError> {
         return Err(HealthAnalysisError::DateRange);
     }
     Ok(day)
+}
+
+fn default_hr_min() -> Number {
+    0.into()
+}
+
+fn default_hr_max() -> Number {
+    250.into()
 }

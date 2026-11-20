@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use ga_domain::timestamp::StoredInstant;
 use serde_json::{Value, json};
-use sqlx::{FromRow, Row, postgres::PgRow};
+use sqlx::{FromRow, Postgres, Row, Transaction, postgres::PgRow};
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use super::{
@@ -93,77 +93,88 @@ impl DailyHealthReader {
         min: f64,
         max: f64,
     ) -> Result<Value, ActivityReadError> {
-        let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
-        check_calendar_bounds(start.date(), end.date())?;
-        if end <= start || end - start > Duration::days(MAX_RANGE_DAYS) {
-            return Err(ActivityReadError::Range);
-        }
-        if !(0.0 <= min && min < max && max <= 300.0) {
-            return Err(ActivityReadError::HeartRateRange);
-        }
-        restore_clock_timezone(&mut self.0).await?;
-        let runs = sqlx::query_as::<_,Run>("SELECT id,start,extract(timezone FROM start)::integer AS start_offset,kind,distance_m,moving_seconds,duration_seconds,avg_hr,ascent_m
-            FROM activities WHERE start >= $1 AND start < $2 AND kind IN ('running','trail_running','treadmill_running',
-                'track_running','indoor_running','ultra_run','virtual_run','obstacle_run') ORDER BY start LIMIT $3")
-            .bind(start).bind(end).bind(MAX_RUNS as i64+1).fetch_all(&mut *self.0).await?;
-        let total = runs.len();
-        if total > MAX_RUNS {
-            return Err(ActivityReadError::ActivityAnalysisLimit);
-        }
-        let times: Vec<_> = runs.iter().map(|run| run.start).collect();
-        let cutoff: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *self.0)
-            .await?;
-        let context_clocks = local_event_clocks(&times);
-        let contexts = temporal_features_in(
-            &mut self.0,
-            &METRICS,
-            &times,
-            cutoff,
-            TemporalPurpose::Retrospective,
-            TemporalClock::DatabaseTimezone,
-        )
-        .await?;
+        let result = running_efficiency_in(&mut self.0, start, end, min, max).await?;
         self.0.commit().await?;
-        let kept = runs
-            .into_iter()
-            .filter_map(|run| run.with_evidence(min, max))
-            .collect::<Vec<_>>();
-        let mut groups = BTreeMap::<String, Vec<String>>::new();
-        let mut rows = Vec::with_capacity(kept.len());
-        for entry in kept {
-            let run = entry.run;
-            let clock = context_clocks
-                .get(&run.start.date().with_time(run.start.time()))
-                .map(|(clock, _)| clock)
-                .ok_or(HealthAnalysisError::Database)?;
-            let context = contexts
-                .get(clock)
-                .cloned()
-                .ok_or(HealthAnalysisError::Database)?;
-            rows.push(json!({"activity_id":run.id,"start":isoformat(run.start),"kind":run.kind,
-                "distance_m":entry.distance,"avg_hr":entry.hr,"pace_seconds_per_km":entry.seconds/entry.distance*1000.0,
-                "meters_per_heartbeat":entry.distance/entry.seconds*60.0/entry.hr,
-                "ascent_m_per_km":run.ascent_m.map(|ascent|ascent/entry.distance*1000.0),
-                "sleep_score":context.get("sleep_score").and_then(|row|row.get("value")),
-                "hrv_nightly_avg":context.get("hrv_nightly_avg").and_then(|row|row.get("value")),
-                "readiness":context.get("training_readiness_score").and_then(|row|row.get("value")),
-                "context":context,"comparison_group":run.kind,"physiologically_comparable":false,"comparison_missing":MISSING,
-            }));
-            groups.entry(run.kind).or_default().push(run.id);
-        }
-        let mixed = groups.len() > 1;
-        let groups=groups.into_iter().map(|(kind,ids)|json!({"activity_type":kind,"activity_ids":ids,"n":ids.len(),"status":"descriptive_only"})).collect::<Vec<_>>();
-        let mut document = json!({"n":rows.len(),"excluded":total-rows.len(),"hr_range":[min,max],
-            "ordering":"chronological; no cross-condition performance ranking","comparison_groups":groups,
-            "mixed_activity_types":mixed,"method_version":"running-summary-comparability-v1",
-            "method":"distance / moving duration * 60 / average HR; minimum 20 minutes",
-            "limitations":["Chronological descriptive summaries; no global ranking or claim of physiological progress",
-                "Compare similar terrain and activity type; mixed conditions are shown explicitly",
-                "Whole-activity means do not establish steady-state cardiac efficiency",
-                "Pre-event context requires source time; calendar-only HRV is unknown"],
-        });
-        document["rows"] = Value::Array(rows);
-        Ok(document)
+        Ok(result)
     }
+}
+
+pub(super) async fn running_efficiency_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: StoredInstant,
+    end: StoredInstant,
+    min: f64,
+    max: f64,
+) -> Result<Value, ActivityReadError> {
+    let (start, end) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
+    check_calendar_bounds(start.date(), end.date())?;
+    if end <= start || end - start > Duration::days(MAX_RANGE_DAYS) {
+        return Err(ActivityReadError::Range);
+    }
+    if !(0.0 <= min && min < max && max <= 300.0) {
+        return Err(ActivityReadError::HeartRateRange);
+    }
+    restore_clock_timezone(txn).await?;
+    let runs = sqlx::query_as::<_,Run>("SELECT id,start,extract(timezone FROM start)::integer AS start_offset,kind,distance_m,moving_seconds,duration_seconds,avg_hr,ascent_m
+        FROM activities WHERE start >= $1 AND start < $2 AND kind IN ('running','trail_running','treadmill_running',
+            'track_running','indoor_running','ultra_run','virtual_run','obstacle_run') ORDER BY start LIMIT $3")
+        .bind(start).bind(end).bind(MAX_RUNS as i64+1).fetch_all(&mut **txn).await?;
+    let total = runs.len();
+    if total > MAX_RUNS {
+        return Err(ActivityReadError::ActivityAnalysisLimit);
+    }
+    let times: Vec<_> = runs.iter().map(|run| run.start).collect();
+    let cutoff: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **txn)
+        .await?;
+    let context_clocks = local_event_clocks(&times);
+    let contexts = temporal_features_in(
+        txn,
+        &METRICS,
+        &times,
+        cutoff,
+        TemporalPurpose::Retrospective,
+        TemporalClock::DatabaseTimezone,
+    )
+    .await?;
+    let kept = runs
+        .into_iter()
+        .filter_map(|run| run.with_evidence(min, max))
+        .collect::<Vec<_>>();
+    let mut groups = BTreeMap::<String, Vec<String>>::new();
+    let mut rows = Vec::with_capacity(kept.len());
+    for entry in kept {
+        let run = entry.run;
+        let clock = context_clocks
+            .get(&run.start.date().with_time(run.start.time()))
+            .map(|(clock, _)| clock)
+            .ok_or(HealthAnalysisError::Database)?;
+        let context = contexts
+            .get(clock)
+            .cloned()
+            .ok_or(HealthAnalysisError::Database)?;
+        rows.push(json!({"activity_id":run.id,"start":isoformat(run.start),"kind":run.kind,
+            "distance_m":entry.distance,"avg_hr":entry.hr,"pace_seconds_per_km":entry.seconds/entry.distance*1000.0,
+            "meters_per_heartbeat":entry.distance/entry.seconds*60.0/entry.hr,
+            "ascent_m_per_km":run.ascent_m.map(|ascent|ascent/entry.distance*1000.0),
+            "sleep_score":context.get("sleep_score").and_then(|row|row.get("value")),
+            "hrv_nightly_avg":context.get("hrv_nightly_avg").and_then(|row|row.get("value")),
+            "readiness":context.get("training_readiness_score").and_then(|row|row.get("value")),
+            "context":context,"comparison_group":run.kind,"physiologically_comparable":false,"comparison_missing":MISSING,
+        }));
+        groups.entry(run.kind).or_default().push(run.id);
+    }
+    let mixed = groups.len() > 1;
+    let groups=groups.into_iter().map(|(kind,ids)|json!({"activity_type":kind,"activity_ids":ids,"n":ids.len(),"status":"descriptive_only"})).collect::<Vec<_>>();
+    let mut document = json!({"n":rows.len(),"excluded":total-rows.len(),"hr_range":[min,max],
+        "ordering":"chronological; no cross-condition performance ranking","comparison_groups":groups,
+        "mixed_activity_types":mixed,"method_version":"running-summary-comparability-v1",
+        "method":"distance / moving duration * 60 / average HR; minimum 20 minutes",
+        "limitations":["Chronological descriptive summaries; no global ranking or claim of physiological progress",
+            "Compare similar terrain and activity type; mixed conditions are shown explicitly",
+            "Whole-activity means do not establish steady-state cardiac efficiency",
+            "Pre-event context requires source time; calendar-only HRV is unknown"],
+    });
+    document["rows"] = Value::Array(rows);
+    Ok(document)
 }

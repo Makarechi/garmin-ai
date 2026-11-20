@@ -19,6 +19,9 @@ from uuid import uuid4
 
 import httpx
 from capture_reference import isolated_engine
+from check_running_efficiency import END as RUNNING_END
+from check_running_efficiency import START as RUNNING_START
+from check_running_efficiency import seed_activities
 from check_stress_hours import seed_stress
 from check_tracker_extraction_http import certificates
 from fastapi.testclient import TestClient
@@ -31,7 +34,15 @@ from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
-from garmin_ai.models import Event, HealthDay, Measurement, MetricObservation, Person, SourcePayload
+from garmin_ai.models import (
+    Activity,
+    Event,
+    HealthDay,
+    Measurement,
+    MetricObservation,
+    Person,
+    SourcePayload,
+)
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
@@ -70,6 +81,8 @@ GENERIC_DETAIL = "Synthetic historical analysis entry"
 AGGREGATE_QUESTION = "Show the synthetic step aggregate."
 MEASUREMENT_START = datetime(2026, 10, 10, 14, tzinfo=UTC)
 MEASUREMENT_SOURCE = "synthetic-historical-aggregate"
+RUNNING_QUESTION = "How do the synthetic running summaries compare?"
+RUNNING_ANSWER = "The saved runs are grouped by activity type."
 STRESS_QUESTION = "Which synthetic hours rank highest by measured stress?"
 STRESS_ANSWER = "The first ranked hour has complete observed coverage."
 STATISTICS_QUESTION = "Compare the synthetic lags and matched controls."
@@ -97,6 +110,8 @@ def output(prompt):
             return generic_output(prompt)
         if prompt["question"].startswith(AGGREGATE_QUESTION):
             return aggregate_output(prompt)
+        if prompt["question"].startswith(RUNNING_QUESTION):
+            return running_output(prompt)
         if prompt["question"].startswith(STRESS_QUESTION):
             return stress_output(prompt)
         if prompt["question"].startswith(STATISTICS_QUESTION):
@@ -135,6 +150,7 @@ def output(prompt):
             AGGREGATE_QUESTION,
             STATISTICS_QUESTION,
             STRESS_QUESTION,
+            RUNNING_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -296,6 +312,40 @@ def aggregate_output(prompt):
         answer="The synthetic step aggregate is available.",
         evidence_ids=[1],
         numeric_claims=[{"evidence_id": 1, "path": ["value"], "value": result["value"]}],
+        response_language="en",
+    )
+
+
+def running_output(prompt):
+    name = "analysis_running_efficiency"
+    if prompt["evidence"]:
+        item = prompt["evidence"][0]
+        assert item["tool"] == name and item["id"] == 1
+        result = item["result"]
+        assert result["n"] == 4 and result["excluded"] == 3
+        assert result["mixed_activity_types"]
+        assert result["rows"][0]["readiness"] == 90
+        assert all(not row["physiologically_comparable"] for row in result["rows"])
+        return AgentStep(answer=RUNNING_ANSWER, evidence_ids=[1], response_language="en")
+    tools = {tool["name"] for tool in prompt["tools"]}
+    if prompt["question"].endswith(" during replay"):
+        assert not prompt["evidence"]
+        if not prompt.get("planning_only"):
+            assert name not in tools
+        return AgentStep(response_language="en")
+    if prompt["question"].endswith(" without training"):
+        assert name not in tools
+        return AgentStep(response_language="en")
+    assert name in tools
+    return AgentStep(
+        calls=[
+            {
+                "name": name,
+                "arguments_json": json.dumps(
+                    {"start": RUNNING_START, "end": RUNNING_END, "hr_min": 134.5, "hr_max": 249.5}
+                ),
+            }
+        ],
         response_language="en",
     )
 
@@ -580,6 +630,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_current_freshness(engine, python, native)
     exercise_statistics(engine, python, native)
     exercise_stress(engine, python, native)
+    exercise_running(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1217,6 +1268,58 @@ def exercise_stress(engine, python, native):
     print(
         "Matched paired stress-hour analysis and withheld it after the wellbeing grant was revoked"
     )
+
+
+def exercise_running(engine, python, native):
+    seed_activities(engine)
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for name in ("training", "sleep", "wellbeing"):
+            packs[name].tracking_enabled = True
+            packs[name].llm_enabled = True
+    old, new = [submit(client, RUNNING_QUESTION)["reply"] for client in (python, native)]
+    assert old["text"] == new["text"] and RUNNING_ANSWER in new["text"], (old, new)
+    saved = native.get("/web-chat/messages", headers=HEADERS)
+    assert new["id"] in {row["id"] for row in saved.json()["replies"]}
+    with engine.begin() as connection:
+        changed = connection.execute(
+            update(Activity).where(Activity.id == "road").values(distance_m=5100)
+        )
+        assert changed.rowcount == 1
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with Session(engine) as session, session.begin():
+        session.get(Activity, "road").distance_m = 5000
+        ensure_scenario_packs(session)["training"].llm_enabled = False
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert new["id"] not in {row["id"] for row in history.json()["replies"]}
+    question = RUNNING_QUESTION + " without training"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and RUNNING_ANSWER not in denied[1], denied
+    identity = uuid4()
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["training"].llm_enabled = True
+        session.add(
+            SourcePayload(
+                id=identity,
+                source="garmin_connect",
+                endpoint="stress",
+                source_key="2026-10-25",
+                payload_hash="a" * 64,
+                archive_key="synthetic/running-replay-pending.json",
+                payload={},
+                fetched_at=datetime.now(UTC),
+                parser_version=1,
+                status="normalized",
+            )
+        )
+    question = RUNNING_QUESTION + " during replay"
+    for client in (python, native):
+        reply = submit(client, question)["reply"]
+        assert reply is not None and RUNNING_ANSWER not in reply["text"]
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM source_payloads WHERE id=:id"), {"id": identity})
+    print("Matched running summaries and withheld stale, disallowed and replay-dependent evidence")
 
 
 def main():
