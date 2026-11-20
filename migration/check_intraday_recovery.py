@@ -14,11 +14,13 @@ from check_cutover_restore import native_api, previous_api
 from check_database_export import table_values
 from check_diary_http import headers
 from check_health_publication import run as compare_publications
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.replay import PARSER_VERSION
+from garmin_ai.models import Job
+from garmin_ai.replay import PARSER_VERSION, schedule_replay
 
 OVERLAP = datetime.fromtimestamp(1792888380, UTC)
 HEART_RATE = "heart_rate_bpm"
@@ -98,6 +100,12 @@ def restore_snapshot(binary, fixture, root, source, target, origin, recovered):
 
 
 def replay_overlap(binary, root, recovered, config, source):
+    # Preserve the legacy queue order when the older sample becomes eligible.
+    with Session(recovered) as session, session.begin():
+        assert schedule_replay(session, datetime.now(UTC) - timedelta(minutes=1)) == 1
+        queued = session.execute(select(Job.id, Job.payload).where(Job.kind == "raw_replay")).one()
+        assert queued.payload["raw_ref"] != str(source)
+
     with recovered.begin() as connection:
         current = connection.scalar(
             text("SELECT parser_version FROM source_payloads WHERE id=:id"), {"id": source}
@@ -107,6 +115,19 @@ def replay_overlap(binary, root, recovered, config, source):
             text("UPDATE source_payloads SET parser_version=:previous WHERE id=:id"),
             {"id": source, "previous": PARSER_VERSION - 1},
         )
+    result = run_cli(binary, root, config, "replay", "--once")
+    assert "Archive replay completed" in result.splitlines()
+    with recovered.connect() as connection:
+        assert connection.execute(
+            text("SELECT status, attempts FROM jobs WHERE id=:id"), {"id": queued.id}
+        ).one() == ("done", 1)
+        assert (
+            connection.scalar(
+                text("SELECT parser_version FROM source_payloads WHERE id=:id"), {"id": source}
+            )
+            == PARSER_VERSION - 1
+        )
+
     result = run_cli(binary, root, config, "replay", "--once")
     assert "Archive replay completed" in result.splitlines()
     with recovered.connect() as connection:
@@ -172,6 +193,7 @@ def verify(publication, binary, fixture):
                 "restored_tables": tables,
                 "restored_archive_files": files,
                 "replay_outcome": outcome,
+                "preceding_replay_jobs_completed": 1,
                 "replay_attempts": 1,
             }
         )

@@ -25,9 +25,10 @@ The [recovery check](check_intraday_recovery.py) follows this overlap through th
 measurement-series API and the native encrypted backup and restore commands.
 It checks every restored table and the hash of every original archive file.
 It then reads the retained native sample through the frozen Python API.
-The restored fixture marks the older archive record with a prior parser version
-and runs the native replay command once. The current measurement, both revision
-identities and the native measurement-series response remain the same.
+The restored fixture places a legacy replay job ahead of the older archive
+record, marks that record with a prior parser version, and runs the native
+replay command for each job. The current measurement, both revision identities
+and the native measurement-series response remain the same.
 
 Run it in the frozen Python environment with three distinct, empty PostgreSQL
 databases on the same isolated server. Pass their addresses in

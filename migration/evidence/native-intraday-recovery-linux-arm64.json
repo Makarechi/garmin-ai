@@ -1,7 +1,7 @@
 {
   "scope": "Synthetic late overlapping sample on isolated Linux ARM64 databases",
   "comparison": "migration/check_intraday_recovery.py",
-  "comparison_sha256": "47939278c1eb9fbadda4b4a73f9c33f311eee8496014066ddaebda1c90b75006",
+  "comparison_sha256": "3e8e8fc3fe7b57cfc0ddc795e8531a7b546a770b5c06cb346599500e98b657cb",
   "publication_test_sha256": "288d77eb5d63db58461029ad12f4d6df017f97a75512e1e7c5520c8e3a84e0ff",
   "fixture_sha256": "edcf576a22e053ee0facf7860cc32e8a8e96f7f631992f74bde6e8e3fad49e14",
   "python_commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
@@ -10,13 +10,13 @@
     "source_commit": "547d93aac8a395069aa9f6deba95d7849ec97618",
     "source_tree": "58f4b8431633f7c63e568223bcbf8be2ebe1f286",
     "binary_sha256": "4ef48fbf3e55093c2ee53f4a37308a153a04f28312dc5e2dc90d4c31dc7789e5",
-    "trace_sha256": "0cda7f13fe9c983a70aa58f6d6ae3ed27fb58affe02b562416e60717b112ec8f"
+    "trace_sha256": "bf0e7634e87ca52a2ce750951d32c62ebbc1e526bc326a4ff4a4821fbaf7e734"
   },
   "packaged_candidate": {
     "source_commit": "b631a5a7a1039da44845f14191515a9740bc56b5",
     "image_id": "sha256:69fdbb58a8e3f5518b1fd911b9ff4d175254b2ecda8667ac48d43596d8320b26",
     "binary_sha256": "25b330d6fc87c244f5fcdd82cde48c02a55a5485054fddcae8120d6fa46edef3",
-    "trace_sha256": "5cb0687259a4be03717139a62e111cc385b7d4a41530ba5ea2e2f4ac0afb74e6"
+    "trace_sha256": "1801e54dec0264888ca09495ce972983507358b3aa7ce87b0a44ead49868b31d"
   },
   "result": {
     "python_published_value": 39,
@@ -29,7 +29,9 @@
     "restored_tables": 30,
     "restored_archive_files": 9,
     "replay_outcome": "normalized",
+    "preceding_replay_jobs_completed": 1,
     "replay_attempts": 1
   },
-  "release_decision": "pending"
+  "release_decision": "pending",
+  "prior_fixture_queue_order_failure_sha256": "3bba45790a3b0f21cbaffd315f6757bfeb6c2cc325e592e86303196f26019988"
 }
