@@ -206,9 +206,10 @@ pause and Telegram ingress were recorded later, and that worker hit its memory l
 replay. These are observed latencies for one concurrent burst.
 
 Add `--mixed-controls-during-fit` to repeat the ceiling comparison and include a native
-archive-only replay, a concurrent authenticated calculation, and a competing backup.
-The Python run uses the shared FIT input and control probes. The Rust run adds those three
-requests to verify admission while the worker is holding the maximum FIT replay lease.
+archive-only replay, a concurrent authenticated calculation, a competing backup, and the
+packaged inventory command. The Python run uses the shared FIT input and HTTP control probes.
+The native run checks the additional operations while the same maximum FIT replay attempt
+is active. The command latency includes the container invocation.
 
 In the [mixed Linux ARM64 trial](evidence/python-rust-fit-mixed-controls-linux-arm64.json.gz),
 the pause, operations read and Telegram ingress responded in 252, 160 and 166 ms.
@@ -220,6 +221,27 @@ combined API and worker cgroup memory peaked at 34.49 MiB with no app swap or OO
 Database swap peaked at 41.88 MiB across the trial and verification. The Python ceiling
 trial exited 137 with no FIT projection. This single concurrent burst does not replace the
 unattended stability run.
+
+The [packaged Linux ARM64 repeat](evidence/python-rust-packaged-fit-ceiling-mixed-linux-arm64.json.gz)
+used the native image built from `b631a5a7a1039da44845f14191515a9740bc56b5`.
+It published 409,600 rows in 124.994 seconds of observed queue time. The archive
+and complete projection digests match the separate Python run with a 4 GiB
+worker limit. At the paired 384 MiB worker limit, Python was killed for lack
+of memory and published zero rows.
+
+During the same native replay attempt, web pause took 311.122 ms, the
+operations read 174.042 ms, Telegram ingress 192.473 ms, and the packaged
+inventory command 91.224 ms. The worker renewed the lease three times and
+also processed the second archive. The competing backup left no destination.
+The analysis returned its retry interval during replay and all 122 observations
+afterwards. The sampled combined API and worker charge peaked at 35.92 MiB,
+with no application swap or OOM events. PostgreSQL reached its 320 MiB limit
+and about 28.02 MiB of sampled swap.
+
+In the [paired one-byte-over trial](evidence/python-rust-packaged-fit-over-limit-linux-arm64.json.gz),
+both packaged runtimes retained the same source archive and rejected publication
+with zero rows and no projection pointer. These are scoped synthetic measurements.
+The seven-day release observation remains pending.
 
 ## Daily source sync and historical jobs
 

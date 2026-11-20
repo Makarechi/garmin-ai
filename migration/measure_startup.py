@@ -180,17 +180,22 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe, *, nativ
             f"http://{api}:8080",
             "--paired-fit",
         )
+        cli_latencies = {}
         if mixed:
             probe_command += ("--analysis-spec", json.dumps(fixture["analysis"]))
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 backup = executor.submit(probe_competing_backup, worker)
+                inventory = executor.submit(probe_packaged_inventory, worker)
                 response = docker(*probe_command)
                 controls["competing_backup_refused"] = backup.result()
+                cli_latencies["cli_inventory_ms"] = inventory.result()
         else:
             response = docker(*probe_command)
         after = json.loads(docker(*command[1:], "running", fixture["job"]).stdout)
+        responses = json.loads(response.stdout)
+        responses["latencies_ms"].update(cli_latencies)
         controls["control_overlap"] = {
-            **json.loads(response.stdout),
+            **responses,
             "before": before,
             "after": after,
         }
@@ -249,6 +254,14 @@ def probe_competing_backup(worker):
         and "Backup database storage is busy" in result.stderr
         and left_destination.returncode == 1
     )
+
+
+def probe_packaged_inventory(worker):
+    started = time.monotonic()
+    result = docker("exec", worker, "garmin-ai-rust", "inventory", timeout=5)
+    if len(result.stdout.splitlines()) != 29:
+        raise RuntimeError("Packaged CLI inventory returned incomplete results")
+    return round((time.monotonic() - started) * 1000, 3)
 
 
 def prepare_paired_replay(args, observer, archive):
@@ -1217,6 +1230,7 @@ def main():
                     if not (
                         result["competing_backup_refused"]
                         and result["ordinary_replay_completed"]
+                        and "cli_inventory_ms" in result["control_overlap"]["latencies_ms"]
                         and result["control_overlap"]["analysis"]["retry_after_seconds"] == 60
                         and result["control_overlap"]["analysis"]["latency_ms"] <= 2000
                         and result["analysis_after_replay"]["observations"] == 122
