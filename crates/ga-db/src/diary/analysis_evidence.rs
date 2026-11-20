@@ -42,7 +42,7 @@ enum AnalysisReadFence {
 }
 
 #[derive(Deserialize, Serialize)]
-struct TimelineReadFence {
+pub struct TimelineReadFence {
     timeline_query: AnalysisTimelineQuery,
     timeline_result_hash: String,
 }
@@ -84,7 +84,7 @@ impl DiaryAnalysisFence {
                         )
                         .map(AnalysisReadFence::Generic)
                     } else if read["tool"] == TIMELINE {
-                        TimelineReadFence::from_evidence(read).map(AnalysisReadFence::Timeline)
+                        TimelineReadFence::from_read(read).map(AnalysisReadFence::Timeline)
                     } else if read["tool"]
                         .as_str()
                         .is_some_and(DailyAnalysisEvidence::is_daily_tool)
@@ -178,10 +178,8 @@ impl DiaryAnalysisFence {
             let read = match read {
                 AnalysisReadFence::Diary(read) => read,
                 AnalysisReadFence::Timeline(read) => {
-                    let page = match analysis_timeline_in(txn, context, model, &read.timeline_query)
-                        .await
-                    {
-                        Ok(page) => page,
+                    match read.current(txn, context, model).await {
+                        Ok(Some(current)) => versions.extend(current),
                         Err(
                             TimelineError::Database
                             | TimelineError::Health(HealthAnalysisError::Database)
@@ -191,12 +189,8 @@ impl DiaryAnalysisFence {
                                 "Could not validate timeline evidence".into(),
                             ));
                         }
-                        Err(_) => return Ok(None),
-                    };
-                    if evidence_digest(&page.value).as_deref() != Some(&read.timeline_result_hash) {
-                        return Ok(None);
+                        Ok(None) | Err(_) => return Ok(None),
                     }
-                    versions.extend(page.tracker_versions);
                     continue;
                 }
                 AnalysisReadFence::Generic(read) => match read
@@ -252,8 +246,8 @@ impl DiaryAnalysisFence {
 }
 
 impl TimelineReadFence {
-    fn from_evidence(evidence: &Value) -> Option<Self> {
-        if evidence["result"].get("error").is_some() {
+    pub fn from_read(evidence: &Value) -> Option<Self> {
+        if evidence["tool"] != TIMELINE || evidence["result"].get("error").is_some() {
             return None;
         }
         Some(Self {
@@ -262,6 +256,19 @@ impl TimelineReadFence {
             )?,
             timeline_result_hash: evidence_digest(&evidence["result"])?,
         })
+    }
+
+    pub(crate) async fn current(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        context: AnalysisSubject<'_>,
+        model: ShareDestination<'_>,
+    ) -> Result<Option<BTreeSet<Uuid>>, TimelineError> {
+        let page = analysis_timeline_in(txn, context, model, &self.timeline_query).await?;
+        Ok(
+            (evidence_digest(&page.value).as_deref() == Some(&self.timeline_result_hash))
+                .then_some(page.tracker_versions),
+        )
     }
 
     fn specification(&self) -> Value {

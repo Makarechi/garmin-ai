@@ -1,13 +1,18 @@
-use std::{env, error::Error, fs, io, str::FromStr};
+use std::{env, error::Error, fs, future::ready, io, str::FromStr};
 
 use ga_db::{
     Database,
-    health_analysis::{HealthAnalysisError, TimelineError},
+    conversation_memory::{AnalysisSubject, ConversationBinding, MemoryFence},
+    diary::TimelineReadFence,
+    health_analysis::{AnalysisTimelineQuery, HealthAnalysisError, TimelineError},
+    share_policy::{DestinationKind, ModelChannelSharing, ModelConversation, ShareDestination},
 };
+use ga_domain::model_consent::ModelCategories;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 struct Case {
@@ -66,20 +71,127 @@ async fn compares_layered_timelines() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    sqlx::query(
-        "INSERT INTO source_payloads
-         (id,source,endpoint,source_key,payload_hash,archive_key,fetched_at,parser_version,status,payload)
-         VALUES(gen_random_uuid(),'garmin_connect','daily','2026-10-25',repeat('a',64),
-                'synthetic',clock_timestamp(),0,'pending','{}')",
-    )
-    .execute(&pool)
-    .await?;
+    check_timeline_before_model_delivery(&database, &pool).await?;
     let start = OffsetDateTime::parse("2026-10-25T09:00:00Z", &Rfc3339)?;
     let end = OffsetDateTime::parse("2026-10-25T10:00:00Z", &Rfc3339)?;
     assert!(matches!(
         database.read_owner_timeline(start, end).await,
         Err(TimelineError::Health(HealthAnalysisError::ReplayPending))
     ));
+    Ok(())
+}
+
+async fn check_timeline_before_model_delivery(
+    database: &Database,
+    pool: &PgPool,
+) -> Result<(), Box<dyn Error>> {
+    let owner_id = sqlx::query_scalar("SELECT id FROM people WHERE singleton")
+        .fetch_one(pool)
+        .await?;
+    let conversation_id = Uuid::new_v4();
+    let epoch = sqlx::query_scalar(
+        "INSERT INTO conversations(id,owner_id,channel,channel_instance_id,memory_epoch)
+         VALUES($1,$2,'web','local',gen_random_uuid()) RETURNING memory_epoch",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .fetch_one(pool)
+    .await?;
+    let memory = MemoryFence {
+        target_epoch: epoch,
+        source_epochs: Default::default(),
+    };
+    let subject = AnalysisSubject::Web {
+        binding: ConversationBinding {
+            owner_id,
+            conversation_id,
+        },
+        memory: &memory,
+        goals_revision: database.personal_goals(owner_id).await?.revision,
+    };
+    let model = ShareDestination::new(DestinationKind::Model, "model:openai:timeline-fixture")?;
+    let arguments = json!({"start": "2026-10-25T09:00:00Z", "end": "2026-10-25T10:00:00Z"});
+    let query =
+        AnalysisTimelineQuery::from_arguments(arguments.as_object().ok_or("Expected object")?)
+            .ok_or("Expected timeline query")?;
+    let result = database
+        .read_analysis_timeline(subject, model, &query)
+        .await?;
+    assert!(result.tracker_versions.is_empty());
+    assert!(
+        result.value["segments"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+    );
+    let timeline = [TimelineReadFence::from_read(&json!({
+        "tool": "timeline", "arguments": arguments, "result": result.value,
+    }))
+    .ok_or("Expected saved timeline evidence")?];
+    let channel = ModelChannelSharing {
+        destination: ShareDestination::new(DestinationKind::Channel, "web:local")?,
+        requirements: &[],
+        conversation: Some(ModelConversation::Analysis {
+            subject,
+            daily: &[],
+            generic: &[],
+            timeline: &timeline,
+        }),
+    };
+    let categories = ModelCategories::HEALTH_AND_DIARY;
+    let send = || database.with_model_delivery(model, categories, &[], Some(channel), || ready(()));
+    assert_eq!(
+        send().await?,
+        Some(()),
+        "Current timeline should reach the sender"
+    );
+    assert_eq!(
+        sqlx::query(
+            "UPDATE module_configs SET llm_enabled=false WHERE owner_id=$1 AND pack_key='training'"
+        )
+        .bind(owner_id)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+        1
+    );
+    assert_eq!(
+        send().await?,
+        None,
+        "A revoked pack must block the next model request"
+    );
+    sqlx::query(
+        "UPDATE module_configs SET llm_enabled=true WHERE owner_id=$1 AND pack_key='training'",
+    )
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    assert_eq!(send().await?, Some(()));
+    sqlx::query("UPDATE timeline_intervals SET label='changed calendar label' WHERE id='plan'")
+        .execute(pool)
+        .await?;
+    assert_eq!(
+        send().await?,
+        None,
+        "Changed timeline data must block the next model request"
+    );
+    sqlx::query("UPDATE timeline_intervals SET label='meeting' WHERE id='plan'")
+        .execute(pool)
+        .await?;
+    assert_eq!(send().await?, Some(()));
+    sqlx::query(
+        "INSERT INTO source_payloads
+         (id,source,endpoint,source_key,payload_hash,archive_key,fetched_at,parser_version,status,payload)
+         VALUES(gen_random_uuid(),'garmin_connect','daily','2026-10-25',repeat('a',64),
+                'synthetic',clock_timestamp(),0,'pending','{}')",
+    )
+    .execute(pool)
+    .await?;
+    assert_eq!(
+        send().await?,
+        None,
+        "Replay must block the next model request"
+    );
+    println!("Blocked model sends after timeline pack revocation, changed data and pending replay");
     Ok(())
 }
 

@@ -20,8 +20,9 @@ use crate::{
         MemoryError, MemoryFence, analysis_channel_in, current_conversation_channel,
         current_web_conversation,
     },
+    diary::{DiaryReadError, TimelineReadFence},
     health_analysis::{
-        DailyAnalysisEvidence, HealthAnalysisError,
+        DailyAnalysisEvidence, HealthAnalysisError, TimelineError,
         generic::{GenericAnalysisError, GenericAnalysisEvidence},
     },
     model_gate::onboarding::onboarding_allows_model,
@@ -127,6 +128,7 @@ pub enum ModelConversation<'a> {
         subject: AnalysisSubject<'a>,
         daily: &'a [DailyAnalysisEvidence],
         generic: &'a [GenericAnalysisEvidence],
+        timeline: &'a [TimelineReadFence],
     },
 }
 
@@ -310,6 +312,7 @@ impl Database {
                         subject,
                         daily,
                         generic,
+                        timeline,
                     } => {
                         let current =
                             analysis_channel_in(&mut txn, subject)
@@ -351,6 +354,20 @@ impl Database {
                                 Err(GenericAnalysisError::Database) => {
                                     return Err(SharePolicyError::Database);
                                 }
+                                _ => return Ok(None),
+                            }
+                        }
+                        for read in timeline {
+                            match read.current(&mut txn, subject, destination).await {
+                                Ok(Some(_)) => {}
+                                Err(TimelineError::Health(HealthAnalysisError::Storage(
+                                    ReadinessError::Unavailable,
+                                ))) => return Err(SharePolicyError::Busy),
+                                Err(
+                                    TimelineError::Database
+                                    | TimelineError::Health(HealthAnalysisError::Database)
+                                    | TimelineError::Diary(DiaryReadError::Database),
+                                ) => return Err(SharePolicyError::Database),
                                 _ => return Ok(None),
                             }
                         }
