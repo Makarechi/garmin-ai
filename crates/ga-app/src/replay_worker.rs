@@ -21,8 +21,9 @@ use ga_app::{
 use ga_archive::Archive;
 use ga_db::{
     Database,
+    fit_ingest::FitReplayError,
     jobs::{JobStoreError, RecordedJobStatus},
-    replay::{ReplaySelectionError, RunReplayJob},
+    replay::{CalendarReplayError, ReplaySelectionError, ReplayWorkerError, RunReplayJob},
     runtime_lease::RuntimeLeaseError,
 };
 use ga_domain::{event_input::known_timezone, timestamp::StoredInstant};
@@ -35,6 +36,7 @@ use crate::{
 };
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
+const REPLAY_BUSY_RETRY_MICROSECONDS: i64 = 2_000_000;
 const PLAN_BUSY: Duration = Duration::from_secs(30);
 const PLAN_IDLE: Duration = Duration::from_secs(15 * 60);
 const LEASE_SECONDS: u32 = 120;
@@ -451,11 +453,26 @@ async fn process_archive(
                 .await;
             let status = match outcome {
                 Ok(result) => Some(result.job),
-                Err(_) => match database.fail_replay_job(&lease).await {
-                    Ok(status) => Some(status),
-                    Err(JobStoreError::LeaseLost) => None,
-                    Err(error) => return Err(ReplayServiceError::Jobs(error)),
-                },
+                Err(error) => {
+                    let busy_until = if matches!(
+                        error,
+                        ReplayWorkerError::Json(CalendarReplayError::Busy)
+                            | ReplayWorkerError::Fit(FitReplayError::Busy)
+                    ) {
+                        let retry = clock()?.unix_microseconds() + REPLAY_BUSY_RETRY_MICROSECONDS;
+                        Some(
+                            StoredInstant::from_unix_microseconds(retry)
+                                .map_err(|_| ReplayServiceError::Clock)?,
+                        )
+                    } else {
+                        None
+                    };
+                    match database.fail_replay_job(&lease, busy_until).await {
+                        Ok(status) => Some(status),
+                        Err(JobStoreError::LeaseLost) => None,
+                        Err(error) => return Err(ReplayServiceError::Jobs(error)),
+                    }
+                }
             };
             println!(
                 "{}",

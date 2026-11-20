@@ -81,6 +81,7 @@ pub enum FailureReason {
     DiaryDeferred,
     ProviderCooldown,
     RuntimeError,
+    ReplayBusy,
     ProviderRequestInvalid,
     TelegramPairingChanged,
     TelegramPolicyBusy,
@@ -95,6 +96,7 @@ impl FailureReason {
             Self::DiaryDeferred => "DiaryDeferred",
             Self::ProviderCooldown => "ProviderCooldown",
             Self::RuntimeError => "RuntimeError",
+            Self::ReplayBusy => "ReplayBusy",
             Self::ProviderRequestInvalid => "ProviderRequestInvalid",
             Self::TelegramPairingChanged => "TelegramPairingChanged",
             Self::TelegramPolicyBusy => "TelegramPolicyBusy",
@@ -107,7 +109,10 @@ impl FailureReason {
     fn refund(self) -> i32 {
         i32::from(matches!(
             self,
-            Self::DiaryDeferred | Self::ProviderCooldown | Self::TelegramPolicyBusy
+            Self::DiaryDeferred
+                | Self::ProviderCooldown
+                | Self::TelegramPolicyBusy
+                | Self::ReplayBusy
         ))
     }
 }

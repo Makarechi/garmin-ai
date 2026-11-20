@@ -165,18 +165,23 @@ impl Database {
             .await
     }
 
-    /// Release a failed attempt using the same lease and backoff as atomic replay publication.
+    /// Release a failed attempt, or refund it when another writer held the replay fence.
     pub async fn fail_replay_job(
         &self,
         lease: &ReplayJobLease,
+        busy_until: Option<StoredInstant>,
     ) -> Result<RecordedJobStatus, JobStoreError> {
         let mut txn = begin(&self.work).await?;
         let result = lease
             .finish_in(
                 &mut txn,
                 JobOutcome::Failed {
-                    reason: FailureReason::RuntimeError,
-                    retry_at: None,
+                    reason: if busy_until.is_some() {
+                        FailureReason::ReplayBusy
+                    } else {
+                        FailureReason::RuntimeError
+                    },
+                    retry_at: busy_until,
                 },
             )
             .await?;
