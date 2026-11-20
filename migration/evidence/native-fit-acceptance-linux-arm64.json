@@ -1,0 +1,115 @@
+{
+  "scope": "PAR-07",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_fit_provenance.py": 12,
+      "tests/test_device_history.py": 7,
+      "tests/test_activity_generations.py": 7
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "fit_codec": {
+    "passed": 26,
+    "trace_sha256": "046e1be85534354ae8379eef20fabe937984aa439d3e4f41f3ff969451dd9f63"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_fit_replay.py",
+      "matching_cases": 8,
+      "trace_sha256": "20a4b890ec0d5fbefad2b0dab61a29bde158ba609e8fe4ce3cd4575dc46d35b0"
+    },
+    {
+      "comparison": "migration/check_device_history.py",
+      "matching_cases": 14,
+      "trace_sha256": "eef5875a9eb46643de0d537160739379e309ae689c8dd85e9d41d21028f22b53"
+    }
+  ],
+  "packaged_worker": {
+    "exact_ceiling": {
+      "trace_sha256": "50ebea2ade192f17faee0086423ea6c7011dbb9122c753adf42096ab0056c442",
+      "records": 409600,
+      "uncompressed_bytes": 104857600,
+      "archive_sha256": "a182ed98122c41ae1e275cfb9765a285d324a2c1c8cc229b180c955a60cacc71",
+      "projection_sha256": "fdc981447141e8cd99c4f8303a0c131915f5db7a22c288647d26d78aa0637179",
+      "reference_at_four_gib": {
+        "status": "normalized",
+        "stored_rows": 409600,
+        "source_parser_version": 9,
+        "archive_sha256": "a182ed98122c41ae1e275cfb9765a285d324a2c1c8cc229b180c955a60cacc71",
+        "projection_sha256": "fdc981447141e8cd99c4f8303a0c131915f5db7a22c288647d26d78aa0637179"
+      },
+      "constrained_python_oom_no_partial_publication": true,
+      "rust": {
+        "worker_peak_bytes": 19394560,
+        "sampled_app_peak_bytes": 36462592,
+        "retained_control_latencies_ms": {
+          "authenticated_web_pause_ms": 351.841,
+          "operations_response_ms": 238.704,
+          "webhook_ingress_ms": 272.755
+        },
+        "replay_lease_renewals": 4,
+        "competing_backup_refused": true,
+        "oom_kills": 0,
+        "application_swap_observed": false,
+        "database_sampled_peak_swap_bytes": 38121472,
+        "database_memory_limit_events": 18903
+      },
+      "limits": {
+        "shared_cpu_affinity": "6",
+        "database_memory_mib": 320,
+        "api_memory_mib": 192,
+        "worker_memory_mib": 384,
+        "migration_memory_mib": 256
+      },
+      "cgroups_with_no_swap": {
+        "trace_sha256": "6c6d2189415bcd2eea179aec8094c9cde5397aa3b704dcecca5c29b58fa16333",
+        "matched_projection": true,
+        "published_records": 409600,
+        "replay_lease_renewals": 4,
+        "limits": {
+          "shared_cpu_affinity": "6",
+          "database_memory_mib": 320,
+          "api_memory_mib": 192,
+          "worker_memory_mib": 384,
+          "migration_memory_mib": 256
+        },
+        "database_peak_bytes": 335544320,
+        "database_memory_limit_events": 11550,
+        "native_control_latencies_ms": {
+          "authenticated_web_pause_ms": 281.367,
+          "operations_response_ms": 265.988,
+          "webhook_ingress_ms": 429.857
+        },
+        "oom_kills": 0,
+        "swap_observed": false,
+        "python_memory_cap_no_partial_publication": true
+      }
+    },
+    "developer_fields": {
+      "trace_sha256": "836ed044e297df3435bca0bf66d8483e52f2de617e315093d14b5c12a59447bb",
+      "records": 50006,
+      "archive_sha256": "f2c404d47da6a35e71b83f2e7140e8249dad6dc19340c83bb6aff7bda3975474",
+      "projection_sha256": "b8ccd7615a28d07b538cfd149f25dad06915cff25baa53f4f54b02d5f5dff2d7"
+    },
+    "one_byte_above_ceiling": {
+      "trace_sha256": "a03e209fed50b952eef7ed4796ffbaa4b6302f8a1741ad1a50bd4a286783363c",
+      "uncompressed_bytes": 104857601,
+      "archive_sha256": "47683f35d891026835214247f4fad9c78170043140a12b10a3fbb9cb69ac5aa2",
+      "partial_publication": false
+    }
+  },
+  "release_scope": [
+    "Generated historical-format exports with developer and unknown fields, multi-member and chained inputs, device history, malformed CRC and retained prior projections.",
+    "The pinned Python worker with sufficient memory produces the same exact-ceiling archive and projection digests. Under the shared small-host limits Python was killed and Rust completed."
+  ]
+}

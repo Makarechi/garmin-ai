@@ -381,7 +381,9 @@
       "rust_tests": [
         "migration/check_fit_projection.py",
         "migration/check_fit_replay.py",
-        "migration/check_device_history.py"
+        "migration/check_device_history.py",
+        "migration/fit_replay_workload.py",
+        "migration/evidence/native-fit-acceptance-linux-arm64.json"
       ],
       "data_contracts": [
         "FIT/ZIP message order, original bytes, developer and unknown fields, CRC and atomic replacement."
@@ -390,12 +392,10 @@
         "Only private files and approved Garmin/wearable ingress; bounded archive decoding."
       ],
       "resource_scenario": "Large multi-member FIT ZIP plus 10x larger record count",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R15",
-      "known_limits": [
-        "Run the final resource ceiling and historical FIT corpus comparison on the release artifact."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
