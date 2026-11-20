@@ -35,6 +35,7 @@ The runtime code at the recorded baseline is the reference for comparisons.
    rg '^tests/[^:]+::' test-results/collection.txt |
      sed -E 's#(postgresql(\+psycopg)?://[^:/[:space:]]+:)[^@/[:space:]]+(@)#\1<redacted>\3#g' \
      > test-results/baseline-test-nodeids.txt
+   uv run --no-sync python scripts/release_metadata.py > test-results/release-metadata.json
    uv run --no-sync pytest -q -ra --junitxml=test-results/pytest.xml
    ```
 
@@ -60,6 +61,19 @@ new SHA. Use pinned revisions for comparisons rather than comparing to whichever
 currently at the tip of `main`.
 
 ## Check parity evidence
+
+Run the execution checker from the migration checkout with the JUnit report and metadata from
+one frozen Python reference run.
+
+```sh
+python3 migration/check_baseline_execution.py pytest.xml release-metadata.json
+```
+
+It matches the complete frozen case inventory, checks every case cited by UT-01 through UT-53,
+and reports the suite's skipped tests by module. Keep the JUnit file private and retain the JSON
+summary and its report checksum. The [Linux ARM64 reference result](evidence/python-frozen-universal-linux-arm64.json)
+records 4,342 passing tests and 27 skips. Every referenced universal test case passed. Native
+execution still needs its own evidence.
 
 Run `python3 migration/check_parity.py` to validate ownership of the baseline inventory and the
 references to collected Python tests and native comparison cases. An `implemented` area has
