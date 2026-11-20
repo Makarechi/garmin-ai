@@ -997,7 +997,9 @@
         "migration/check_hypothesis_history.py",
         "migration/check_hypotheses_http.py",
         "crates/ga-domain/src/hypothesis.rs::tests",
-        "crates/ga-db/tests/hypotheses.rs::compares_hypothesis_history"
+        "crates/ga-db/tests/hypotheses.rs::compares_hypothesis_history",
+        "migration/check_mcp_generic_nonfinite.py",
+        "migration/evidence/native-analytics-linux-arm64.json"
       ],
       "data_contracts": [
         "Unit/source comparability, period and bootstrap results, migraine controls, sampling/gaps and association boundaries."
@@ -1010,9 +1012,8 @@
       "verification": "e2e_synthetic",
       "owner_task": "R21",
       "known_limits": [
-        "Native read analytics, all seven generic operations and durable hypothesis register/fetch/recheck/stop flows have dedicated synthetic comparisons. Combined R21 acceptance remains pending.",
-        "R36 still requires complete generic and hypothesis HTTP typed-validation response details, nonfinite generic values through HTTP/MCP, database/server/connection timezone configuration and DST arithmetic across all generic operations.",
-        "Whole-runtime final-build R37 workloads and actual seven-day soak remain pending."
+        "Synthetic HTTP, MCP, timezone, numeric and analytical comparisons passed. The stdio response to malformed JSON containing NaN or Infinity still needs a release decision.",
+        "Whole-runtime final-build R37 workloads and the actual seven-day soak remain pending."
       ],
       "approved_deviations": []
     },

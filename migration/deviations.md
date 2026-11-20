@@ -22,6 +22,13 @@ change has a documented decision.
   requires the header. Both runtimes reject explicit non-JSON media types and
   preserve the same malformed-request errors in the comparison.
   See the five settings and export requests in `check_http_json_requests.py`.
+- Bare `NaN` and `Infinity` tokens are outside the JSON number grammar.
+  The pinned Python MCP transport passes those frames to tool validation and
+  returns a tool error. Native MCP discards the malformed frame, then accepts
+  subsequent valid requests. Both return the same validation error for valid
+  JSON numbers that overflow, and the same result for a usable threshold.
+  No data is changed in either runtime. Approval for the malformed-frame
+  difference is pending for PAR-15. [JSON standard](https://www.rfc-editor.org/rfc/rfc8259#section-6)
 - Installation rejects overlapping storage paths even when their capitalization
   differs. In three case-insensitive filesystem checks (token, backup, and lock
   directories under an existing data directory), both runtimes rejected setup
