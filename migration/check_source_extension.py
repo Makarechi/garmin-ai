@@ -39,8 +39,8 @@ if MODE == "wrong_version":
 if MODE == "malformed":
     print("synthetic_fixture_never_print {")
     sys.exit(0)
-if MODE == "rejected":
-    print(json.dumps({**reply, "error": "unavailable"}))
+if MODE in {"invalid_request", "unsupported", "unavailable"}:
+    print(json.dumps({**reply, "error": MODE}))
     sys.exit(0)
 if request["method"] == "describe":
     if "GA_EXTENSION_PROBE_ENV" in os.environ:
@@ -106,7 +106,9 @@ def verify(binary, sample):
             ("malformed", "invalid response envelope"),
             ("oversized", "invalid response envelope"),
             ("extra_line", "invalid response envelope"),
-            ("rejected", "refused the request"),
+            ("invalid_request", "refused the request"),
+            ("unsupported", "refused the request"),
+            ("unavailable", "temporarily unavailable"),
             ("disabled", "source capabilities are invalid"),
             ("out_of_window", "outside the source contract"),
             ("repeated_cursor", "outside the source contract"),
