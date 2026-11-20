@@ -3,6 +3,8 @@ use ga_domain::channel::InboundKind;
 
 use super::*;
 
+mod ceiling;
+
 const SPEECH: &str = "Save a synthetic voice note now";
 const CAPTION: &str = "Synthetic caption for the voice note";
 const SAFETY_MARKER: &str = "synthetic safety marker";
