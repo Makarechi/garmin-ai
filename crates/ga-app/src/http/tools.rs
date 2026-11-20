@@ -84,7 +84,7 @@ async fn execute_read_tool(
     let Some(database) = state.database else {
         return storage_unavailable();
     };
-    let arguments = match arguments(body).await {
+    let arguments = match arguments(body, headers).await {
         Ok(arguments) => arguments,
         Err(error) => return error.into_response(),
     };
@@ -300,7 +300,7 @@ pub(super) fn integer_input(value: &Value) -> Option<u32> {
 
 enum BodyError {
     Missing,
-    InvalidJson,
+    InvalidJson(super::request_json::ParseError),
     Limit,
     Validation(Vec<Value>),
 }
@@ -312,7 +312,7 @@ impl IntoResponse for BodyError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({"detail": [{"type":"missing","loc":["body"],"msg":"Field required","input":null}]})),
             ).into_response(),
-            Self::InvalidJson => invalid_arguments(),
+            Self::InvalidJson(error) => error.into_response(),
             Self::Limit => detail(StatusCode::PAYLOAD_TOO_LARGE, "Tool request exceeds the size limit"),
             Self::Validation(errors) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -322,15 +322,14 @@ impl IntoResponse for BodyError {
     }
 }
 
-async fn arguments(body: Body) -> Result<Map<String, Value>, BodyError> {
+async fn arguments(body: Body, headers: &HeaderMap) -> Result<Map<String, Value>, BodyError> {
     let data = to_bytes(body, MAX_REQUEST_BYTES)
         .await
         .map_err(|_| BodyError::Limit)?;
-    if data.is_empty() {
+    let document = super::request_json::parse(&data, headers).map_err(BodyError::InvalidJson)?;
+    if document.is_null() {
         return Err(BodyError::Missing);
     }
-    let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
-    let document: Value = serde_json::from_slice(data).map_err(|_| BodyError::InvalidJson)?;
     let Value::Object(mut document) = document else {
         return Err(BodyError::Validation(vec![json!({
             "type": "model_attributes_type", "loc": ["body"],

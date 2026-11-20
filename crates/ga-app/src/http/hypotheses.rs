@@ -1,18 +1,19 @@
 use axum::{
     Json,
-    body::to_bytes,
+    body::{Body, to_bytes},
     extract::{Path, Request, State},
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use ga_db::health_analysis::HypothesisError;
+use ga_db::{Database, health_analysis::HypothesisError};
 use ga_domain::{
     access::Scope,
     hypothesis::{HypothesisSpec, InvalidHypothesisSpec},
     timestamp::StoredInstant,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use super::{
     AppState, diary, method_not_allowed, private_cache,
@@ -40,40 +41,47 @@ pub(super) async fn collection(State(state): State<AppState>, request: Request) 
         {
             Err(status) => diary::access_failure(status),
             Ok((database, owner)) => {
-                let input = async {
-                    let bytes = to_bytes(body, MAX_REQUEST_BYTES).await.ok()?;
-                    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-                    if bytes.is_empty() {
-                        Some(Value::Null)
-                    } else {
-                        serde_json::from_slice(bytes).ok()
-                    }
-                }
-                .await;
-                match input.as_ref().map(HypothesisSpec::from_json) {
-                    Some(Ok(spec)) => {
-                        let stored = match now() {
-                            Some(at) => {
-                                database
-                                    .register_hypothesis(
-                                        owner,
-                                        &spec,
-                                        at,
-                                        &state.configured_timezone,
-                                    )
-                                    .await
-                            }
-                            None => Err(HypothesisError::Calendar),
-                        };
-                        result_response(stored)
-                    }
-                    Some(Err(error)) => validation_response(error),
-                    None => invalid_arguments(),
-                }
+                register(
+                    database,
+                    owner,
+                    &state.configured_timezone,
+                    &parts.headers,
+                    body,
+                )
+                .await
             }
         }
     };
     private_cache(response, &parts.headers)
+}
+
+async fn register(
+    database: &Database,
+    owner: Uuid,
+    timezone: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
+    let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return invalid_arguments();
+    };
+    let value = match super::request_json::parse(&bytes, headers) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let spec = match HypothesisSpec::from_json(&value) {
+        Ok(spec) => spec,
+        Err(error) => return validation_response(error),
+    };
+    let stored = match now() {
+        Some(at) => {
+            database
+                .register_hypothesis(owner, &spec, at, timezone)
+                .await
+        }
+        None => Err(HypothesisError::Calendar),
+    };
+    result_response(stored)
 }
 
 pub(super) async fn item(

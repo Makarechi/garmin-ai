@@ -11,6 +11,7 @@ mod natural_language;
 mod onboarding;
 mod operations;
 mod personal_goals;
+mod request_json;
 mod scenario_packs;
 mod source_mappings;
 pub(crate) mod tools;
