@@ -1,0 +1,24 @@
+markdown-it-py-rust: Rust mirror of executablebooks/markdown-it-py
+==================================================================
+
+This directory holds the rustsmith Stage-1 mirror of
+https://github.com/executablebooks/markdown-it-py (Markdown parsing,
+done right! Python port of markdown-it).
+
+* Upstream authors: Chris Sewell and individual contributors
+* Upstream license: MIT (see the upstream LICENSE file. This port carries
+  no vendored license text beyond the SPDX tags in each file header).
+* Bundled tables: the HTML5 entity table was generated from CPython's
+  `html.entities.html5` (PSF license, part of the standard library); the
+  punycode codec mirrors CPython's `encodings/punycode.py` algorithm
+  (PSF license).
+* This port: behavior-identical, same public API (`markdown_it` package,
+  `markdown_it._markdown_it` extension module plus thin `markdown_it/*.py`
+  shims), published as the `markdown-it-py-rust` distribution on PyPI (import
+  name unchanged: `import markdown_it`) with reusable core crate
+  `markdown-it-rust-core` on crates.io. Snapshot of upstream 4.2.0 at port
+  time (crate/dist version 4.2.0).
+
+Provenance: every artifact preserves the upstream license attribution
+(provenance gate). See `release.toml` for the publishing configuration
+and `docs/RELEASE.md` for the release procedure.

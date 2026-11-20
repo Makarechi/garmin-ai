@@ -13,6 +13,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --locked --release -p ga-app --bin garmin-ai-rust --bin garmin-ai-release-cleanup \
     && install -m 0555 target/release/garmin-ai-rust /garmin-ai-rust \
     && install -m 0555 target/release/garmin-ai-release-cleanup /garmin-ai-release-cleanup
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/collect_rust_notices.py ./scripts/
+COPY scripts/rust-license-notices ./scripts/rust-license-notices
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    target="$(rustc -vV | sed -n 's/^host: //p')" \
+    && cargo metadata --locked --format-version 1 --filter-platform "$target" > /tmp/metadata.json \
+    && cargo tree --locked --target "$target" -p ga-app --edges normal,no-proc-macro \
+       --prefix none --no-dedupe --format '{p}' > /tmp/tree.txt \
+    && python3 scripts/collect_rust_notices.py --metadata /tmp/metadata.json --tree /tmp/tree.txt \
+       --supplements scripts/rust-license-notices \
+       --notices /rust-third-party-notices.txt --inventory /rust-third-party-inventory.json
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN apt-get update \
@@ -27,6 +40,9 @@ COPY --from=builder /garmin-ai-release-cleanup /usr/local/bin/garmin-ai-release-
 COPY LICENSE /usr/share/doc/garmin-ai/LICENSE
 COPY crates/ga-domain/src/statistics/LICENSE-scipy.txt /usr/share/doc/garmin-ai/LICENSE-scipy.txt
 COPY crates/ga-domain/src/timestamp/LICENSE-python.txt /usr/share/doc/garmin-ai/LICENSE-python.txt
+COPY crates/ga-fit/profile/LICENSE-fitdecode.txt /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt
+COPY --from=builder /rust-third-party-notices.txt /usr/share/doc/garmin-ai/rust-third-party-notices.txt
+COPY --from=builder /rust-third-party-inventory.json /usr/share/doc/garmin-ai/rust-third-party-inventory.json
 WORKDIR /app
 ENV GA_DATA_DIR=/app/data GA_LOCK_DIR=/app/state GA_BACKUP_DIR=/app/backups
 USER 1000:1000

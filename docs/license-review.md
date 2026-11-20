@@ -32,9 +32,12 @@ project's `LICENSE`.
 
 ## Before publishing a versioned image or release
 
-For the exact release digest, regenerate an inventory of all direct and
-transitive Python distributions, collect their license texts and required
-notices, inspect the Python/uv/Timescale image contents and terms, and verify
-the final artifact includes what each license requires. CP-05 release
+For the exact release digest, inspect the dependency inventory and bundled
+notices produced by the image build. The Rust inventory uses the locked normal
+dependency tree for the target platform. It includes source notices pinned to
+the affected crate versions and flags any remaining missing texts for review.
+The Python inventory reflects the installed distributions. Inspect the base
+image and the Timescale image contents and verify that the final artifact
+includes the required notices. CP-05 release
 packaging remains open until that artifact-level check is complete. This page
 records a preliminary review and must not be used as a release clearance.

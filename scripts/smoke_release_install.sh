@@ -113,6 +113,23 @@ if [[ -z "$bundle_dir" ]]; then
 fi
 
 cd "$bundle_dir"
+if [[ "$runtime" == rust ]]; then
+    ./install.sh "${profile[@]}" licenses >"$work/notices.txt"
+    grep -Fxq 'Rust dependency license files bundled with this application image' "$work/notices.txt"
+    docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
+        /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt | cmp - "$root/crates/ga-fit/profile/LICENSE-fitdecode.txt"
+    docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
+        /usr/share/doc/garmin-ai/rust-third-party-inventory.json | "$python_bin" -c '
+import json
+import sys
+
+inventory = json.load(sys.stdin)
+names = {crate["name"] for crate in inventory}
+assert {"rmcp", "sqlx", "serde_json"} <= names
+assert "pyo3" not in names
+assert all(crate["license_files"] or crate["review_required"] for crate in inventory)
+'
+fi
 compose() {
     docker compose -p "$instance" --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 }
