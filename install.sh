@@ -125,6 +125,27 @@ case "${1:-}" in
         compose config --quiet
         compose up -d --wait
         ;;
+    migrate|inspect)
+        test "$runtime" = rust || { echo "This command requires a native bundle." >&2; exit 2; }
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        if [[ "$1" == migrate && $# -eq 2 && "$2" == --status ]]; then
+            compose run --rm --no-deps migrate migrate --status
+            exit
+        fi
+        test "$#" -eq 1 || { echo "Unexpected command arguments." >&2; exit 2; }
+        active=$(compose ps --status running --status restarting --status paused --quiet api worker)
+        if [[ -n "$active" ]]; then
+            echo "Stop the API and worker before preparing a cutover." >&2
+            exit 1
+        fi
+        if [[ "$1" == migrate ]]; then
+            compose up -d --wait db
+            compose run --rm --no-deps migrate
+        else
+            compose run --rm --no-deps --service-ports api \
+                serve --read-only --host 0.0.0.0 --port 8080
+        fi
+        ;;
     status)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose ps
@@ -181,7 +202,7 @@ case "${1:-}" in
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
     *)
-        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME}" >&2
+        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME | migrate [--status] | inspect}" >&2
         exit 2
         ;;
 esac

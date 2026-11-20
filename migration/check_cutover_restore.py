@@ -37,6 +37,7 @@ from garmin_ai.models import (
     AppState,
     ChannelBinding,
     Conversation,
+    HealthDay,
     Job,
     MessageDeliveryReceipt,
     OutboxMessage,
@@ -135,16 +136,20 @@ def prepare_state(engine):
         )
 
 
+def native_environment(config):
+    return {
+        **cli_environment(config),
+        "GA_API_TOKENS": json.dumps(TOKENS),
+        "GA_INTEGRATIONS": "[]",
+    }
+
+
 @contextmanager
-def native_api(binary, root, config):
+def native_api(binary, root, config, *, read_only=False):
     with subprocess.Popen(
-        [binary, "serve", "--port", "0"],
+        [binary, "serve", "--port", "0", *(["--read-only"] if read_only else [])],
         cwd=root,
-        env={
-            **cli_environment(config),
-            "GA_API_TOKENS": json.dumps(TOKENS),
-            "GA_INTEGRATIONS": "[]",
-        },
+        env=native_environment(config),
         stdout=subprocess.PIPE,
         text=True,
     ) as process:
@@ -186,10 +191,72 @@ def previous_api(config, engine):
     return TestClient(create_app(config, engine=engine))
 
 
+def health_snapshot(api, day):
+    return api.post(
+        "/tools/health_snapshot",
+        headers=headers("health"),
+        json={"arguments": {"day": day.isoformat()}},
+    )
+
+
+def inspect_before_writes(binary, root, config, engine, event_path, expected, pending_health):
+    lock = text("SELECT pg_try_advisory_xact_lock(72104620)")
+    with engine.begin() as connection:
+        assert connection.scalar(lock)
+        refused = subprocess.run(
+            [binary, "serve", "--port", "0", "--read-only"],
+            cwd=root,
+            env=native_environment(config),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert refused.returncode == 1 and not refused.stdout
+        assert "Another Garmin AI worker is already running" in refused.stderr
+
+    with native_api(binary, root, config, read_only=True) as native:
+        assert native.get(event_path, headers=headers("reader")).json() == expected
+        assert native.get(event_path).status_code == 401
+        tools = native.get("/tools", headers=headers("reader"))
+        assert tools.status_code == 200 and tools.json()
+        health = health_snapshot(native, AT.date())
+        assert (health.status_code, health.json()) == (503, pending_health)
+        for path in (
+            PATH,
+            "/wearable/marks",
+            "/web-chat/messages",
+            "/telegram/webhook",
+            "/garmin-auth/start",
+        ):
+            assert native.post(path, headers=headers("both"), json=NOTE).status_code == 404
+        assert native.put(event_path, headers=headers("both"), json=NOTE).status_code == 405
+        assert native.delete(event_path, headers=headers("both")).status_code == 405
+        with engine.begin() as connection:
+            assert not connection.scalar(lock)
+    with engine.begin() as connection:
+        assert connection.scalar(lock)
+    print(
+        "Verified read-only inspection before runtime handoff and refusal while the lease is held."
+    )
+
+
 def verify(binary, root, source, before_target, after_target):
     origin = settings(root / "source", source)
     before = settings(root / "before", before_target)
     after = settings(root / "after", after_target)
+    health_day = AT.date() + timedelta(days=1)
+    with Session(source) as session, session.begin():
+        session.add(HealthDay(day=health_day, steps=2345, updated_at=AT))
+    with previous_api(origin, source) as previous:
+        expected_health = health_snapshot(previous, health_day)
+        assert expected_health.status_code == 200, expected_health.text
+    with native_api(binary, root, origin, read_only=True) as native:
+        restored_health = health_snapshot(native, health_day)
+        assert (restored_health.status_code, restored_health.json()) == (
+            200,
+            expected_health.json(),
+        )
     capture(source, origin)
     prepare_state(source)
     old_id = str(table_values(source)["events"][0]["id"])
@@ -198,14 +265,17 @@ def verify(binary, root, source, before_target, after_target):
         observed = previous.get(old_path, headers=headers("reader"))
         assert observed.status_code == 200
         original_event = observed.json()
+        pending_health = health_snapshot(previous, AT.date())
+        assert pending_health.status_code == 503
 
     # The previous API has stopped. Its backup is taken before native writes are admitted.
     first_archive = origin.backup_dir / "before.enc"
     create_backup(source, origin, first_archive)
     before_digest = archive_digest(first_archive)
     initial = table_values(source)
-    with native_api(binary, root, origin) as native:
-        assert native.get(old_path, headers=headers("reader")).json() == original_event
+    inspect_before_writes(
+        binary, root, origin, source, old_path, original_event, pending_health.json()
+    )
     assert table_values(source) == initial
     first_seconds = restore(binary, root, before, first_archive, initial, origin, before_target)
     with previous_api(before, before_target) as recovered_previous:

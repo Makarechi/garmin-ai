@@ -40,6 +40,9 @@ enum Command {
         host: String,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Inspect stored data with the worker stopped
+        #[arg(long)]
+        read_only: bool,
     },
     /// Run the account-free synthetic dashboard
     Demo {
@@ -208,9 +211,17 @@ fn main() -> ExitCode {
             }
             println!();
         }
-        Some(Command::Serve { host, port }) => {
-            if http::serve(&host, port).is_err() {
-                eprintln!("Could not run the HTTP server.");
+        Some(Command::Serve {
+            host,
+            port,
+            read_only,
+        }) => {
+            if let Err(error) = http::serve(&host, port, read_only) {
+                if read_only {
+                    eprintln!("Could not run read-only inspection: {error}");
+                } else {
+                    eprintln!("Could not run the HTTP server.");
+                }
                 return ExitCode::FAILURE;
             }
         }

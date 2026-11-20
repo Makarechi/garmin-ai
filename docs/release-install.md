@@ -134,6 +134,13 @@ use an older binary only when its documented schema compatibility allows it.
 Never run a down migration or force the migration ledger to make an old image
 start.
 
+During a native cutover, keep external access and the old API, worker and MCP
+processes stopped. Run `./install.sh migrate --status`, `./install.sh migrate`
+and the status command again against the authorized database. Run
+`./install.sh inspect` to check stored records and readiness over the configured
+loopback API port. It provides read-only database access and holds the worker's
+exclusive lease while running. Exit with Ctrl-C before starting the service.
+
 The application image, platform matrix, third-party notices, seven-day run and
 independent-host restore are still pending before a supported public release.
 

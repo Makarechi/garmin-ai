@@ -181,8 +181,31 @@ with engine.begin() as connection:
 engine.dispose()
 print("Prepared the historical revision in the disposable installation database.")
 PY
+    ./install.sh "${profile[@]}" migrate --status | "$python_bin" -c '
+import json, sys
+assert json.load(sys.stdin) == {"revision":"f103aa712b44","current":False}
+'
+    ./install.sh "${profile[@]}" migrate
+    ./install.sh "${profile[@]}" migrate --status | "$python_bin" -c '
+import json, sys
+assert json.load(sys.stdin) == {"revision":"c54f8a72d130","current":True}
+'
+    PYTHONPATH="$root/scripts" "$python_bin" - "$api_port" "${profile[@]}" <<'PY'
+import sys
+from verify_release_install import inspect_bundle
+
+inspect_bundle(f"http://127.0.0.1:{int(sys.argv[1])}", ["./install.sh", *sys.argv[2:]])
+PY
+    test -z "$(compose ps --status running --quiet api worker)"
 fi
 ./install.sh "${profile[@]}" start
+if [[ "$historical" == true ]]; then
+    if ./install.sh "${profile[@]}" inspect >"$work/running-inspection.log" 2>&1; then
+        echo "Inspection unexpectedly started while the API or worker was running." >&2
+        exit 1
+    fi
+    grep -Fx 'Stop the API and worker before preparing a cutover.' "$work/running-inspection.log"
+fi
 "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
     --state-file "$work/tracker.json" --phase create --url "http://127.0.0.1:$api_port"
 ./install.sh "${profile[@]}" stop
@@ -261,6 +284,7 @@ Path(sys.argv[1]).write_text(
             "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
             "historical_upgrade_verified": sys.argv[7] == "true",
+            "staged_read_only_upgrade_verified": sys.argv[7] == "true",
             "deployment_profile": "gcp" if sys.argv[8] == "true" else "standard",
         },
         indent=2,
