@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 from capture_reference import isolated_engine
+from check_tracker_setup import DRAFT
 from fastapi.testclient import TestClient
 
 from garmin_ai.api import create_app
@@ -15,7 +16,13 @@ from garmin_ai.config import ApiToken, Settings
 
 TOKEN = {
     "key": "synthetic-json-request-validation-proof",
-    "scopes": ["read:health", "read:diary", "write:diary", "manage:integrations"],
+    "scopes": [
+        "read:health",
+        "read:diary",
+        "write:diary",
+        "manage:integrations",
+        "manage:definitions",
+    ],
 }
 JSON = "application/json"
 CASES = (
@@ -71,6 +78,11 @@ def compare(python, rust):
         ("POST", "/hypotheses"),
         ("PUT", "/preferences/goals"),
         ("PUT", "/scenario-packs/sleep_recovery"),
+        ("PUT", "/onboarding"),
+        ("POST", "/tracker-setups/preview"),
+        ("POST", "/tracker-setups"),
+        ("PUT", "/tracker-setups/00000000-0000-0000-0000-000000000017/settings"),
+        ("POST", "/tracker-packs/export"),
     )
     for method, route in routes:
         for name, data, content_type in CASES:
@@ -98,6 +110,57 @@ def compare(python, rust):
     print("Matched raw typed HTTP request cases", len(routes) * len(CASES), flush=True)
 
 
+def check_native_headerless_requests(python, rust):
+    headers = {"Authorization": "Bearer " + TOKEN["key"]}
+
+    def send(client, method, route, payload, content_type=None):
+        selected = headers if content_type is None else {**headers, "Content-Type": content_type}
+        request = client.build_request(method, route, content=json.dumps(payload), headers=selected)
+        if content_type is None:
+            assert "content-type" not in request.headers
+        return client.send(request)
+
+    def compare(method, route, payload):
+        legacy = send(python, method, route, payload)
+        assert (
+            legacy.status_code == 422
+            and legacy.json()["detail"][0]["type"] == "model_attributes_type"
+        )
+        explicit = send(rust, method, route, payload, "text/plain")
+        assert explicit.status_code == 422 and explicit.json() == legacy.json()
+        result = send(rust, method, route, payload)
+        assert result.status_code == 200, (route, result.text)
+        return result.json()
+
+    plan = {"locale": "en", "timezone": "UTC", "units": "metric"}
+    onboarded = compare("PUT", "/onboarding", plan)
+    assert onboarded["preferences"]["locale"] == "en"
+    preview = compare("POST", "/tracker-setups/preview", DRAFT)
+    confirmed = compare(
+        "POST",
+        "/tracker-setups",
+        {"draft": DRAFT, "confirmation_token": preview["confirmation_token"]},
+    )
+    tracker = confirmed["tracker"]
+    changed = compare(
+        "PUT",
+        f"/tracker-setups/{tracker['id']}/settings",
+        {
+            "revision": tracker["revision"],
+            "reminder_enabled": False,
+            "shortcut": "Synthetic headerless settings",
+        },
+    )
+    assert changed["shortcut"] == "Synthetic headerless settings"
+    exported = compare(
+        "POST", "/tracker-packs/export", {"definition_ids": [tracker["definition_id"]]}
+    )
+    assert len(exported["trackers"]) == 1
+    print(
+        "Verified 5 native headerless JSON settings requests and matching explicit non-JSON errors"
+    )
+
+
 def run(binary):
     database = isolated_engine()
     settings = Settings(_env_file=None, api_tokens=[ApiToken(**TOKEN)])
@@ -119,6 +182,7 @@ def run(binary):
                 assert url.startswith("http://127.0.0.1:")
                 with httpx.Client(base_url=url, timeout=120, trust_env=False) as rust:
                     compare(python, rust)
+                    check_native_headerless_requests(python, rust)
             finally:
                 process.terminate()
                 process.wait(timeout=5)

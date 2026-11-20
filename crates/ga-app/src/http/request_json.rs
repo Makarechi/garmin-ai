@@ -47,6 +47,21 @@ pub(super) fn parse(input: &[u8], headers: &HeaderMap) -> Result<Value, ParseErr
     })
 }
 
+pub(super) fn parse_object(input: &[u8], headers: &HeaderMap) -> Result<Value, ParseError> {
+    // Existing native settings clients may omit the media type on valid objects.
+    if !headers.contains_key(header::CONTENT_TYPE)
+        && let Some(text) = decode_json(input)
+        && let Ok(value @ Value::Object(_)) = serde_json::from_str(&text)
+    {
+        return Ok(value);
+    }
+    match parse(input, headers)? {
+        value @ Value::Object(_) => Ok(value),
+        Value::Null => Err(ParseError::MissingBody),
+        value => Err(ParseError::ObjectBody(value)),
+    }
+}
+
 fn decode_json(input: &[u8]) -> Option<Cow<'_, str>> {
     match input {
         [0, 0, 0xfe, 0xff, rest @ ..] => utf32(rest, u32::from_be_bytes),
@@ -91,6 +106,8 @@ pub(super) enum ParseError {
     Syntax { byte: usize, reason: &'static str },
     Encoding,
     Unsupported,
+    MissingBody,
+    ObjectBody(Value),
 }
 
 impl IntoResponse for ParseError {
@@ -109,6 +126,22 @@ impl IntoResponse for ParseError {
                 "There was an error parsing the body",
             ),
             Self::Unsupported => invalid_arguments(),
+            Self::MissingBody => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"detail":[
+                    {"type":"missing","loc":["body"],"msg":"Field required","input":null}
+                ]})),
+            )
+                .into_response(),
+            Self::ObjectBody(value) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"detail":[{
+                    "type":"model_attributes_type","loc":["body"],
+                    "msg":"Input should be a valid dictionary or object to extract fields from",
+                    "input":value
+                }]})),
+            )
+                .into_response(),
         }
     }
 }
