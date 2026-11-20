@@ -209,9 +209,31 @@ impl Archive {
     /// Stage and hash a stream in fixed-size chunks before publishing its key.
     pub fn put_reader(
         &self,
+        source: impl Read,
+        kind: ArchiveKind,
+        limits: PutLimits,
+    ) -> Result<ArchiveKey, ArchiveError> {
+        self.put_reader_checked(source, kind, limits, None)
+    }
+
+    /// Archive existing bytes only if their digest matches the input identity.
+    /// Their extension may change when the actual file type is recognized.
+    pub fn put_verified_reader(
+        &self,
+        source: impl Read,
+        kind: ArchiveKind,
+        limits: PutLimits,
+        expected: &ArchiveKey,
+    ) -> Result<ArchiveKey, ArchiveError> {
+        self.put_reader_checked(source, kind, limits, Some(expected))
+    }
+
+    fn put_reader_checked(
+        &self,
         mut source: impl Read,
         kind: ArchiveKind,
         limits: PutLimits,
+        expected: Option<&ArchiveKey>,
     ) -> Result<ArchiveKey, ArchiveError> {
         self.require_writable()?;
         self.check_space(limits.disk_reserve_bytes, 0)?;
@@ -244,6 +266,9 @@ impl Archive {
             digest: hasher.finalize().into(),
             kind,
         };
+        if expected.is_some_and(|expected| expected.digest != key.digest) {
+            return Err(ArchiveError::ExistingObjectDigestMismatch);
+        }
         let (prefix, name) = key.path_parts();
         let directory = ensure_directory(&self.root, OsStr::new(&prefix))?;
         fs::fchmod(&directory, DIRECTORY_MODE)?;

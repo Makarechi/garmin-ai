@@ -41,7 +41,7 @@ const PLAN_BUSY: Duration = Duration::from_secs(30);
 const PLAN_IDLE: Duration = Duration::from_secs(15 * 60);
 const LEASE_SECONDS: u32 = 120;
 const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
-const FIT_EXPORT_LIMITS: ExportLimits = ExportLimits {
+pub(crate) const FIT_EXPORT_LIMITS: ExportLimits = ExportLimits {
     max_bytes: MAX_FIT_BYTES,
     max_zip_entries: match NonZeroUsize::new(4096) {
         Some(limit) => limit,

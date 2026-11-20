@@ -209,6 +209,7 @@ impl Database {
                 Arc::clone(&archive),
                 limits.archive,
                 Some(lease),
+                None,
             )
             .await?;
         self.apply_export(
@@ -253,6 +254,17 @@ impl Database {
         Ok(())
     }
 
+    /// Check owner and collection consent before opening an archived FIT input.
+    pub async fn authorize_archived_legacy_fit(
+        &self,
+        fingerprint: &str,
+    ) -> Result<(), FitIngestError> {
+        let mut txn = self.fit_transaction().await?;
+        authorize_legacy_mutation(&mut txn, fingerprint, &["training"]).await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
     /// Archive the complete original FIT or ZIP after checking owner and consent.
     pub async fn capture_legacy_activity_export(
         &self,
@@ -261,7 +273,20 @@ impl Database {
         archive: Arc<Archive>,
         limits: PutLimits,
     ) -> Result<CapturedFit, FitIngestError> {
-        self.capture_export(request, source, archive, limits, None)
+        self.capture_export(request, source, archive, limits, None, None)
+            .await
+    }
+
+    /// Record an archived FIT export only when the staged bytes match its report key.
+    pub async fn capture_archived_activity_export(
+        &self,
+        request: LegacyFitCapture<'_>,
+        source: impl Read + Seek + Send + 'static,
+        archive: Arc<Archive>,
+        limits: PutLimits,
+        expected: ArchiveKey,
+    ) -> Result<CapturedFit, FitIngestError> {
+        self.capture_export(request, source, archive, limits, None, Some(expected))
             .await
     }
 
@@ -272,6 +297,7 @@ impl Database {
         archive: Arc<Archive>,
         mut limits: PutLimits,
         lease: Option<&GarminJobLease>,
+        expected: Option<ArchiveKey>,
     ) -> Result<CapturedFit, FitIngestError> {
         limits.max_bytes = limits.max_bytes.min(MAX_FIT_BYTES);
         let mut txn = self.fit_transaction().await?;
@@ -286,7 +312,10 @@ impl Database {
                 return Err(FitIngestError::InputTooLarge);
             }
             let kind = legacy_archive_kind(&mut source, bytes)?;
-            let key = archive.put_reader(source, kind, limits)?;
+            let key = match expected {
+                Some(expected) => archive.put_verified_reader(source, kind, limits, &expected)?,
+                None => archive.put_reader(source, kind, limits)?,
+            };
             Ok::<_, FitIngestError>((txn, key, bytes))
         })
         .await
@@ -303,8 +332,8 @@ impl Database {
         let archive_key = key.to_string();
         let id = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO source_payloads (id, source, endpoint, source_key, payload_hash,
-                 archive_key, fetched_at, status, parser_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0)
+                 archive_key, fetched_at, payload, status, parser_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'null'::jsonb, 'pending', 0)
              ON CONFLICT (source, endpoint, source_key, payload_hash) DO NOTHING RETURNING id",
         )
         .bind(Uuid::new_v4())

@@ -44,7 +44,7 @@ impl ActivityDocument {
         Self::Weather,
     ];
 
-    pub(crate) fn for_endpoint(endpoint: &str) -> Option<Self> {
+    pub fn for_endpoint(endpoint: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|kind| kind.endpoint() == endpoint)
@@ -79,7 +79,7 @@ pub enum ActivitySummaryKind {
 impl ActivitySummaryKind {
     pub(crate) const ALL: [Self; 2] = [Self::Single, Self::Page];
 
-    pub(crate) fn for_endpoint(endpoint: &str) -> Option<Self> {
+    pub fn for_endpoint(endpoint: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|kind| kind.endpoint() == endpoint)
