@@ -141,6 +141,51 @@ def interrupt_at_staging(binary, cwd, config, workspace):
     assert (workspace / "database.jsonl.gz").is_file()
 
 
+def interrupt_export(binary, cwd, config, source, destination):
+    # Hold the final table so the export has a snapshot and a private stage
+    # but cannot reach the footer or publish the destination.
+    waiting_for_final_table = text("""
+        SELECT EXISTS (
+            SELECT FROM pg_locks
+            WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND relation = 'metric_observations'::regclass
+              AND mode = 'AccessShareLock' AND NOT granted
+        )
+        """)
+    with source.begin() as lock:
+        lock.execute(text("LOCK TABLE metric_observations IN ACCESS EXCLUSIVE MODE"))
+        with (
+            source.connect().execution_options(isolation_level="AUTOCOMMIT") as monitor,
+            subprocess.Popen(
+                [binary, "export", destination],
+                cwd=cwd,
+                env=cli_environment(config),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ) as process,
+        ):
+            try:
+                deadline = time.monotonic() + 8
+                while process.poll() is None and time.monotonic() < deadline:
+                    if monitor.scalar(waiting_for_final_table):
+                        break
+                    time.sleep(0.01)
+                else:
+                    raise AssertionError("The export did not reach the locked final table")
+                (stage,) = destination.parent.glob(".rust-backup-*")
+                (partial,) = stage.iterdir()
+                assert stage.stat().st_mode & 0o777 == 0o700
+                assert partial.stat().st_mode & 0o777 == 0o600
+                assert not destination.exists()
+                process.kill()
+                stdout, stderr = process.communicate(timeout=5)
+                assert process.returncode == -9 and not stdout and not stderr
+            finally:
+                if process.poll() is None:
+                    process.kill()
+    assert not destination.exists()
+
+
 def verify(binary, root, source, native_target, python_target, export_target):
     origin = settings(root / "origin", source)
     target = settings(root / "target", native_target)
@@ -235,13 +280,21 @@ def verify(binary, root, source, native_target, python_target, export_target):
     run_cli(binary, root, target, "restore-db", logical, succeeds=False)
     check_rows(native_target, expected)
 
-    export = root / "standalone.jsonl.gz"
+    exports = root / "exports"
+    exports.mkdir()
+    export = exports / "standalone.jsonl.gz"
     assert json.loads(run_cli(binary, root, origin, "export", export)) == expected_counts
     assert export.stat().st_mode & 0o777 == 0o600
-    assert json.loads(run_cli(binary, root, standalone, "restore-db", export)) == expected_counts
+    original_export = hashlib.sha256(export.read_bytes()).digest()
+    retry = exports / "retry.jsonl.gz"
+    interrupt_export(binary, root, origin, source, retry)
+    assert hashlib.sha256(export.read_bytes()).digest() == original_export
+    assert json.loads(run_cli(binary, root, origin, "export", retry)) == expected_counts
+    assert json.loads(run_cli(binary, root, standalone, "restore-db", retry)) == expected_counts
     check_rows(export_target, expected)
     print(
-        f"Both complete backup directions and native export recovered {len(expected_counts)} tables"
+        f"Both backup directions and the retried native export recovered {len(expected_counts)} "
+        "tables. A killed export left the previous export intact and published no partial result."
     )
 
 
