@@ -27,7 +27,7 @@ from check_backup_commands import (
 from check_database_export import AT, SOURCE, table_values
 from check_diary_http import NOTE, PATH, TOKENS, headers
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -115,6 +115,23 @@ def prepare_state(engine):
         session.flush()
         session.add(
             MessageDeliveryReceipt(outbox_message_id=reply, state="uncertain", observed_at=AT)
+        )
+        session.add(
+            OutboxMessage(
+                id=UUID(int=873),
+                owner_id=owner,
+                conversation_id=conversation,
+                operation_id=UUID(int=874),
+                intent={
+                    "owner_id": str(owner),
+                    "conversation_id": str(conversation),
+                    "channel_instance": {"channel": "telegram", "instance_id": "primary"},
+                    "blocks": [{"text": "Synthetic unsent outbound reply"}],
+                },
+                dedup_key="synthetic:queued:reply",
+                state="queued",
+                attempts=0,
+            )
         )
 
 
@@ -235,6 +252,13 @@ def verify(binary, root, source, before_target, after_target):
         "channel_bindings",
     ):
         assert current[table] and current[table] == initial[table], table
+    for store in (source, before_target, after_target):
+        with store.connect() as connection:
+            rows = connection.execute(
+                text("SELECT state,attempts FROM outbox_messages ORDER BY state")
+            ).all()
+            assert rows == [("queued", 0), ("uncertain", 1)], rows
+    print("Verified queued and uncertain outbound receipts across both recovery boundaries.")
     print(
         json.dumps(
             {"before_restore_seconds": first_seconds, "after_restore_seconds": second_seconds}

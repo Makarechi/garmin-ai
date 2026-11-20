@@ -1,0 +1,91 @@
+{
+  "scope": "PAR-19",
+  "verification": "db",
+  "python_reference": {
+    "version": "3.15.2",
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_channel_contracts.py": 14,
+      "tests/test_headless_channels.py": 13,
+      "tests/test_dialogue.py": 38,
+      "tests/test_hf09_entrypoint_parity.py": 15
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "interface_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "crates/ga-db/tests/channel_ingress.rs",
+      "result": "passed",
+      "trace_sha256": "693f8231fc6e2eac6294d8eb17a4b8da52645297da5a8383ecc1ad378be5ec42"
+    },
+    {
+      "comparison": "crates/ga-db/tests/delivery_receipts.rs",
+      "result": "passed",
+      "trace_sha256": "ee43aa9b7324a9463a0db180c7dfad5af2f21dc4f600d2cfad20ddbd0d1001c4"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_inbox_leases.rs",
+      "result": "passed",
+      "trace_sha256": "695b98e136cab80884b3cf3b814eb535c565a961cbfd13c72f4c9e725799b968"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_reply.rs",
+      "result": "passed",
+      "trace_sha256": "c77e51abe058417d54547b430d35f587c298f57c30ce35a07e435d28ba6cb67b"
+    },
+    {
+      "comparison": "crates/ga-db/tests/action_tokens.rs",
+      "result": "passed",
+      "trace_sha256": "257f6f3a09a22eeb34874f235b41207d2be6fa5a060886ae5376a8f7990629e2",
+      "identical_token_and_test_sources_from": "25c92c9380e7be3350c3670eaa4181cf6f946347"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_callback_ingress.rs",
+      "result": "passed",
+      "trace_sha256": "8435dce04dab7c6be5a7741c4982a0115d7b3530b2cd4f9bf2d6ddfefce01dd6",
+      "identical_token_and_test_sources_from": "25c92c9380e7be3350c3670eaa4181cf6f946347"
+    },
+    {
+      "comparison": "migration/check_channel_extension.py",
+      "result": "passed",
+      "trace_sha256": "b09093a7160854ee3e46139efe1664b30ff09821379af6e3b8e9ae46b42e5298"
+    },
+    {
+      "comparison": "migration/check_channel_extension_runtime.py",
+      "result": "passed",
+      "trace_sha256": "ecab28fe07c18fbafeaf9c99ba626f9a8f76d0cd55520e25b5bd2ae29a628ada"
+    },
+    {
+      "comparison": "migration/check_web_chat_read.py",
+      "result": "passed",
+      "trace_sha256": "53d832ff9c17ec92cac00a5dad86cd347aeebb852b3ff380bfbef591ff773840"
+    },
+    {
+      "comparison": "migration/check_web_chat_model.py",
+      "result": "passed",
+      "trace_sha256": "98db1915ba957bd8320e2ad61598fc03c0610cdea88bf44be97cf9a3426e72e0"
+    },
+    {
+      "comparison": "migration/check_cutover_restore.py",
+      "result": "passed",
+      "trace_sha256": "105d34871c7fe07329aaa165a3bf2e4d94d98db1f59e6d2bf16eacecf1fd8539"
+    },
+    {
+      "comparison": "migration/check_worker_cutover.py",
+      "result": "passed",
+      "trace_sha256": "e59a9b8622154eafc3a09c417d6120861d637b808c7f04d0bc55d98c7c490a65"
+    }
+  ],
+  "release_scope": [
+    "Local synthetic accounts, isolated TimescaleDB and loopback transport probes.",
+    "Inbox de-duplication, scoped actions, explicit receipt evidence and bounded extension callbacks.",
+    "Pre-write and post-write archive recovery preserves both queued and uncertain outbound messages."
+  ]
+}
