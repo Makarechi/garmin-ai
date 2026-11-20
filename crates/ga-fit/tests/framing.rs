@@ -159,3 +159,29 @@ fn verifies_exact_limit_synthetic_fit_file() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+#[test]
+fn rejects_each_single_bit_change_to_a_chained_frame_body_or_footer() {
+    for fixture in [SHORT, WITH_CRC, ZERO_CRC] {
+        for byte in fixture[0] as usize..fixture.len() {
+            for bit in 0..8 {
+                let mut changed = fixture.to_vec();
+                changed[byte] ^= 1 << bit;
+                let raw = [WITH_CRC, changed.as_slice()].concat();
+                let mut verified = Vec::new();
+                assert_eq!(
+                    verify_frames(
+                        raw.as_slice(),
+                        raw.len() as u64,
+                        || false,
+                        |frame| verified.push(frame.offset)
+                    ),
+                    Err(FitError::FileChecksum),
+                    "header size {}, byte {byte}, bit {bit}",
+                    fixture[0],
+                );
+                assert_eq!(verified, [0]);
+            }
+        }
+    }
+}

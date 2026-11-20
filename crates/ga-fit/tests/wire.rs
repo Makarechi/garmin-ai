@@ -183,3 +183,81 @@ fn reads_every_wire_field_at_the_export_ceiling() -> Result<(), Box<dyn Error>> 
     );
     Ok(())
 }
+
+#[test]
+fn preserves_wire_and_projection_across_short_reader_chunks() -> Result<(), FitError> {
+    use ga_fit::visit_fit_projection;
+    use std::io::{self, Read};
+
+    struct Chunked<'a> {
+        bytes: &'a [u8],
+        limit: usize,
+    }
+
+    impl Read for Chunked<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = buffer.len().min(self.limit);
+            self.bytes.read(&mut buffer[..count])
+        }
+    }
+
+    let raw = [BIG_ENDIAN, COMPRESSED, RESET, OVERFLOW].concat();
+    let observe = |limit| -> Result<_, FitError> {
+        let reader = || Chunked {
+            bytes: raw.as_slice(),
+            limit,
+        };
+        let mut wire = Vec::new();
+        let wire_inventory = visit_fit_wire(
+            reader(),
+            raw.len() as u64,
+            || false,
+            |message| {
+                let fields: Vec<_> = message
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.number,
+                            field.developer_data_index,
+                            field.base_type,
+                            field.bytes.clone(),
+                        )
+                    })
+                    .collect();
+                wire.push((
+                    message.frame_index,
+                    message.message_index,
+                    message.byte_offset,
+                    message.global_number,
+                    message.local_number,
+                    message.byte_order,
+                    message.developer_data_flag,
+                    message.compressed_timestamp,
+                    fields,
+                ));
+                Ok(())
+            },
+        )?;
+        let mut projected = Vec::new();
+        let projected_inventory = visit_fit_projection(
+            reader(),
+            raw.len() as u64,
+            || false,
+            |message| {
+                projected.push((message.frame_index, message.message_index, message.payload));
+                Ok(())
+            },
+        )?;
+        Ok((wire_inventory, wire, projected_inventory, projected))
+    };
+    let normal = observe(raw.len())?;
+    assert_eq!(normal.0.member.frames, 4);
+    assert_eq!(normal.0.messages, 7);
+    assert_eq!(normal.2.member.frames, 4);
+    assert_eq!(normal.3.len(), 7);
+    for max_chunk in 1..=32 {
+        assert_eq!(observe(max_chunk)?, normal, "maximum chunk {max_chunk}");
+    }
+    Ok(())
+}
