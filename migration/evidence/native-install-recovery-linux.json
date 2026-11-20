@@ -1,0 +1,106 @@
+{
+  "scope": [
+    "PAR-01",
+    "PAR-25"
+  ],
+  "verification": "synthetic_packaged_and_recovery",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "passing_cases_by_module": {
+      "tests/test_deployment.py": 87,
+      "tests/test_onboarding.py": 15,
+      "tests/test_core_only_flow.py": 1,
+      "tests/test_release_bundle.py": 7,
+      "tests/test_backup_streaming.py": 6,
+      "tests/test_backup_verification.py": 9,
+      "tests/test_backup_space.py": 8,
+      "tests/test_retention.py": 36,
+      "tests/test_release_gate.py": 8,
+      "tests/test_operation_recovery.py": 16
+    },
+    "skip_evidence": {
+      "case_insensitive_setup_tests": {
+        "frozen_linux_report_skips": 3,
+        "paired_case_insensitive_cases_verified_separately": 3,
+        "trace_sha256": "076f327ab2f0049e6162c56fad3c8cb7c5ed4405590e813b45c26dae6cc8bc63"
+      },
+      "frozen_compose_config_resolution_skip": {
+        "frozen_linux_report_skips": 1,
+        "packaged_install_and_historical_upgrade_exercised_separately": true
+      }
+    }
+  },
+  "release_workflows": {
+    "packaging_commit": "eecd7cdfd767d9ab0720be868d98f08f9fbc1f85",
+    "recovery_commit": "057943731d0c05e3a8e753702a8d62801274a301",
+    "same_app_and_packaging_sources": true,
+    "workflow_ids": {
+      "install": 44739315134,
+      "offhost": 44739577709
+    },
+    "report_sha256": {
+      "native-rust-install-amd64/native-rust-install.json": "2662880a66f4ea56b74ddcc26ef7f9593f2c6af48b334173dc2680ae63bad1e9",
+      "native-rust-install-amd64/native-rust-upgrade.json": "c810385b466e2a4d07da83a7e881190884a84ca2d491df8c2825761bdd9c72e2",
+      "native-rust-install-amd64/native-rust-gcp-install.json": "6e0f68eaed70ea212b03cc7c026e059052daee645c72696127db46dd86874083",
+      "native-rust-install-arm64/native-rust-install.json": "82763a4df327341a6bfd03d024ddccd91be2616e61645b94cdae62f36d172006",
+      "native-rust-install-arm64/native-rust-upgrade.json": "e175ca55ec573b61f1059ee12f05e12eb6b4b3f8c3eecf2f59917c54ab2f6138",
+      "native-offhost-result-python-to-rust/native-offhost-result.json": "a5cb89a2e3889e583a725189778693b1be726d86b27af3fe3455b26c97a04e95",
+      "native-offhost-result-rust-to-python/native-offhost-result.json": "ec365ce7b30a6328a543fa61ab6ccc2ed2d9c0fc39f9c716292390047982a14f"
+    }
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_native_setup.py",
+      "result": "passed",
+      "trace_sha256": "076f327ab2f0049e6162c56fad3c8cb7c5ed4405590e813b45c26dae6cc8bc63"
+    },
+    {
+      "comparison": "migration/check_backup_volume_failure.py",
+      "result": "passed",
+      "trace_sha256": "9f71da3c178a6c32d9bad9289172de6e6b959920cd3a01d990e3627a0cbe1635"
+    },
+    {
+      "comparison": "migration/check_native_schema.py",
+      "result": "passed",
+      "trace_sha256": "ff358599f8dde2029a98696ecea0eb474ffbc3f085dd4c60ad899f762702d558"
+    },
+    {
+      "comparison": "migration/check_transport_retention.py",
+      "result": "passed",
+      "trace_sha256": "b2e5c69fcc6f3944eae1940a100013cdc2726966a7191fcf081a686ce8c3cbae"
+    },
+    {
+      "comparison": "migration/check_erasure_live_writers.py",
+      "result": "passed",
+      "trace_sha256": "b2e5c69fcc6f3944eae1940a100013cdc2726966a7191fcf081a686ce8c3cbae"
+    },
+    {
+      "comparison": "migration/check_cutover_restore.py",
+      "result": "passed",
+      "trace_sha256": "105d34871c7fe07329aaa165a3bf2e4d94d98db1f59e6d2bf16eacecf1fd8539"
+    },
+    {
+      "comparison": "migration/check_cutover_expired_lease.py",
+      "result": "passed",
+      "trace_sha256": "e59a9b8622154eafc3a09c417d6120861d637b808c7f04d0bc55d98c7c490a65"
+    },
+    {
+      "comparison": "crates/ga-app/src/release_cleanup/docker.rs",
+      "result": "passed",
+      "trace_sha256": "416c7715fd779be3199a166184a655be58cee53692f0d3119167025f3bd32fee"
+    },
+    {
+      "comparison": "compose.rust-gcp.yml",
+      "result": "passed",
+      "trace_sha256": "01de86a2c49ab529fe94a6d654ff879a46d8fac8913d5ba955497749d5e690b7"
+    }
+  ],
+  "release_scope": [
+    "Source-free physical AMD64 and ARM64 installation and historical upgrade. The AMD64 physical release exercised native GCP with encrypted backup and recovery.",
+    "Both backup formats crossed independent runners and recovered all 30 tested tables and three files. Both workflows used the same application and packaging source.",
+    "Synthetic release recovery included disk exhaustion, durable writes and leases, erasure, retention, and preservation of unrelated registry images.",
+    "Configuration deviations, the sustained run, and the authorized production pilot require their release decisions and evidence."
+  ]
+}
