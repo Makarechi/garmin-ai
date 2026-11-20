@@ -81,6 +81,14 @@
   "bidirectional_create_cases": 44,
   "release_scope": [
     "Canonical system diary types, linked episodes, intervals across the clock change, dose uncertainty, and cross-runtime retry/read.",
-    "The diagnostic body of the HTTP 422 for an incomplete coverage interval is recorded as a pending difference."
-  ]
+    "Creation and editing reject incomplete coverage intervals with the same diagnostic and leave the diary unchanged."
+  ],
+  "coverage_http_rejections": {
+    "cases": 24,
+    "platform": "linux/arm64",
+    "source_revision": "ddd97cd5b7b7089366c040c0b4576c72f648aa9b",
+    "source_tree": "358ec37c58eb3c3f83e465efbdc66376ad909ba2",
+    "app_sha256": "dd653710dad725f5a9cbe7172254f8ce05b2e66f02d1aa096ef969ec962bef1b",
+    "trace_sha256": "8c75f514a4ab544842f804f210800ca7005be9c0eaf318cb72f11c3bdb30418a"
+  }
 }

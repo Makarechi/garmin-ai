@@ -105,19 +105,43 @@ def seed(engine):
             )
 
 
+def verify_coverage_rejections(python, native, engine):
+    def counts():
+        with engine.connect() as connection:
+            return connection.execute(
+                text("SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM audit_log)")
+            ).one()
+
+    before = counts()
+    number = 0
+    for payload, _ in CASES:
+        if payload["type"] not in {
+            "headache_observation",
+            "caffeine_absence",
+            "caffeine_log_complete",
+        }:
+            continue
+        for closings in ({}, {"end": None}, {"end": START}, {"end": "2026-10-24T02:30:00+02:00"}):
+            event = {"start": START, "timezone": ZONE, "payload": payload, **closings}
+            edit = {"revision": 1, "event": event}
+            for method, route, data in (
+                ("POST", "/events", event),
+                ("PUT", "/events/00000000-0000-0000-0000-000000000018", edit),
+            ):
+                access = headers("both", f"synthetic-invalid-coverage-{number}")
+                expected, actual = (
+                    client.request(method, route, headers=access, json=data)
+                    for client in (python, native)
+                )
+                assert expected.status_code == actual.status_code == 422
+                assert expected.json() == actual.json(), (data, expected.json(), actual.json())
+                number += 1
+    assert number == 24 and counts() == before
+    print("Matched 24 incomplete coverage diagnostics and left diary records unchanged")
+
+
 def exercise(python, native, engine):
-    rejected = {
-        "start": START,
-        "timezone": ZONE,
-        "payload": {"type": "headache_observation", "headache": "unknown", "migraine": "no"},
-    }
-    access = headers("both", "synthetic-unbounded-coverage")
-    legacy_rejection = python.post("/events", headers=access, json=rejected)
-    native_rejection = native.post("/events", headers=access, json=rejected)
-    assert legacy_rejection.status_code == native_rejection.status_code == 422
-    reason = legacy_rejection.json()["detail"][0]["msg"]
-    assert reason.endswith("Coverage observation requires a nonempty covered interval")
-    assert native_rejection.json() == {"detail": "Invalid arguments"}
+    verify_coverage_rejections(python, native, engine)
     completed = set()
     for label, first, second in (("python", python, native), ("rust", native, python)):
         episode = None

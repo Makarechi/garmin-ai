@@ -17,12 +17,6 @@ change has a documented decision.
   older overlapping response is applied while retaining both revisions.
   Verify that ordering through replay, analytics and migration of legacy
   histories before declaring the temporal contract complete.
-- Submitting an incomplete coverage interval to owner diary HTTP returns
-  status `422` in both runtimes and leaves the store unchanged. The pinned
-  Python response includes a specific validation message and the submitted
-  fields. Native HTTP returns a short invalid-arguments message.
-  [The paired system diary fixture](check_system_diary_types.py) records this
-  response difference. Approval is pending for PAR-09.
 - Bare `NaN` and `Infinity` tokens are outside the JSON number grammar.
   The pinned Python MCP transport passes those frames to tool validation and
   returns a tool error. Native MCP discards the malformed frame, then accepts
