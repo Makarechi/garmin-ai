@@ -173,18 +173,22 @@ struct Frame {
     container: Container,
     value_issue: Option<JsonRowIssue>,
     key: String,
+    duplicate_key: bool,
+    retain_values: bool,
 }
 
 impl Frame {
-    fn array() -> Self {
+    fn array(retain_values: bool) -> Self {
         Self {
             container: Container::Array(Vec::new()),
             value_issue: None,
             key: String::new(),
+            duplicate_key: false,
+            retain_values,
         }
     }
 
-    fn object() -> Self {
+    fn object(retain_values: bool) -> Self {
         Self {
             container: Container::Object {
                 fields: Map::new(),
@@ -193,6 +197,8 @@ impl Frame {
             },
             value_issue: None,
             key: String::new(),
+            duplicate_key: false,
+            retain_values,
         }
     }
 
@@ -201,10 +207,14 @@ impl Frame {
         self.key.push_str(key);
     }
 
-    fn push(&mut self, mut item: Item) -> Result<(), ImportFileError> {
+    fn push(&mut self, mut item: Item) {
+        if self.duplicate_key {
+            return;
+        }
         self.value_issue = item.issue.or(self.value_issue);
         match &mut self.container {
-            Container::Array(items) => items.push(mem::take(&mut item.value)),
+            Container::Array(items) if self.retain_values => items.push(mem::take(&mut item.value)),
+            Container::Array(_) => {}
             Container::Object {
                 fields,
                 invalid_keys,
@@ -216,18 +226,21 @@ impl Frame {
                 if let Some(key) = valid_key {
                     match fields.entry(key.into_owned()) {
                         serde_json::map::Entry::Vacant(field) => {
-                            field.insert(mem::take(&mut item.value));
+                            field.insert(if self.retain_values {
+                                mem::take(&mut item.value)
+                            } else {
+                                Value::Null
+                            });
                         }
                         serde_json::map::Entry::Occupied(_) => {
-                            return Err(ImportFileError::JsonDuplicateKey);
+                            self.duplicate_key = true;
                         }
                     }
                 } else if !invalid_keys.insert(key) {
-                    return Err(ImportFileError::JsonDuplicateKey);
+                    self.duplicate_key = true;
                 }
             }
         }
-        Ok(())
     }
 
     fn step(&mut self, parser: &mut Jiter<'_>) -> Result<Option<Peek>, ImportFileError> {
@@ -243,8 +256,18 @@ impl Frame {
         }
     }
 
-    fn finish(mut self) -> Item {
-        match &mut self.container {
+    fn finish(mut self) -> Result<Item, ImportFileError> {
+        // Python's file import checks duplicate keys after parsing the object.
+        if self.duplicate_key {
+            return Err(ImportFileError::JsonDuplicateKey);
+        }
+        if !self.retain_values {
+            return Ok(Item {
+                value: Value::Null,
+                issue: None,
+            });
+        }
+        Ok(match &mut self.container {
             Container::Array(items) => Item {
                 value: Value::Array(mem::take(items)),
                 issue: self.value_issue,
@@ -256,7 +279,7 @@ impl Frame {
                 // Python walks values in reverse insertion order, then keys.
                 issue: self.value_issue.or(*key_issue),
             },
-        }
+        })
     }
 }
 
@@ -280,10 +303,15 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
                 if cost + next_cost > reader.limit.budget() {
                     return Err(ImportFileError::InvalidFormat);
                 }
+                // Finish validation after a duplicate without building its
+                // remaining values. Nested objects still track their keys.
+                let retain_values = stack
+                    .last()
+                    .is_none_or(|(frame, _)| frame.retain_values && !frame.duplicate_key);
                 let (frame, child) = if peek == Peek::Array {
-                    (Frame::array(), reader.parser.known_array()?)
+                    (Frame::array(retain_values), reader.parser.known_array()?)
                 } else {
-                    let mut frame = Frame::object();
+                    let mut frame = Frame::object(retain_values);
                     let child = if let Some(key) = reader.parser.known_object()? {
                         frame.set_key(key);
                         Some(reader.parser.peek()?)
@@ -298,7 +326,7 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
                     peek = child;
                     continue;
                 }
-                frame.finish()
+                frame.finish()?
             }
             Peek::String => {
                 let (text, issue) = strings::decode(reader.parser.known_str()?);
@@ -317,14 +345,19 @@ fn read_value(reader: &mut JsonReader<'_>, first: Peek) -> Result<Item, ImportFi
             let Some((frame, _)) = stack.last_mut() else {
                 return Ok(item);
             };
-            frame.push(item)?;
+            frame.push(item);
+            // Preserve the error order for chat answers, whose numeric parser
+            // applies its own precision checks while reading each value.
+            if frame.duplicate_key && matches!(reader.limit, ContainerLimit::Chat) {
+                return Err(ImportFileError::JsonDuplicateKey);
+            }
             if let Some(next) = frame.step(&mut reader.parser)? {
                 peek = next;
                 break;
             }
             let (frame, frame_cost) = stack.pop().ok_or(ImportFileError::InvalidFormat)?;
             cost -= frame_cost;
-            item = frame.finish();
+            item = frame.finish()?;
         }
     }
 }

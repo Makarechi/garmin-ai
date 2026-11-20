@@ -2,6 +2,9 @@
 
 import argparse
 import json
+import struct
+from decimal import Decimal
+from itertools import chain
 from pathlib import Path
 from random import Random
 
@@ -27,6 +30,15 @@ def examples():
         "excess-with-late-error": b"[" + b"{}," * 503 + b'{"a":0,"a":1}]',
         "duplicate": b'[{"a":0,"a":1}]',
         "duplicate-by-escape": rb'[{"a":0,"\u0061":1}]',
+        "duplicate-before-malformed-value": b'[{"a":0,"a":1,"z":}]',
+        "duplicate-before-nonfinite-value": b'[{"a":0,"a":1,"z":NaN}]',
+        "duplicate-before-lost-decimal-precision": b'[{"a":0,"a":1,"z":1e-1000}]',
+        "duplicate-before-trailing-comma": b'[{"a":0,"a":1},]',
+        "duplicate-in-closed-child-object": b'[{"nested":{"a":0,"a":1},"z":NaN}]',
+        "duplicate-surrogate-before-malformed-value": rb'[{"\ud800":0,"\uD800":1,"z":}]',
+        "duplicate-before-dense-value": b'[{"a":0,"a":1,"b":[' + b"0," * 250_000 + b"0]}]",
+        "duplicates-in-parent-and-child": b'[{"a":0,"a":1,"child":{"k":0,"k":1},"z":NaN}]',
+        "duplicate-before-invalid-child": b'[{"a":0,"a":1,"child":{"v":1e-1000}}]',
         "duplicate-nested": rb'[{"x":[{"\ud83e\uddea":12,"\uD83E\uDDEA":0}]}]',
         "surrogate-duplicate": rb'[{"\ud800":12,"\uD800":0}]',
         "surrogate-and-private-scalar": '[{"\\ud800":0,"\U000f0000\ue000":1}]'.encode(),
@@ -109,10 +121,47 @@ def examples():
         )
 
 
-def capture(root):
+def canonical_properties():
+    random = Random(20261120)
+    characters = ("a", "é", "e\u0301", "雪", "🧪", "\U000f0000", "\\", "\t", '"', "\r\n", "\u2028")
+    # One random significand and sign for each finite IEEE 754 exponent field.
+    for exponent in range(2047):
+        bits = (random.getrandbits(1) << 63) | (exponent << 52) | random.getrandbits(52)
+        number = repr(struct.unpack(">d", struct.pack(">Q", bits))[0])
+        sign, digits, scale = Decimal(number).as_tuple()
+        trailing = random.randrange(0, 9)
+        coefficient = "".join(str(digit) for digit in digits) + "0" * trailing
+        equivalent = ("-" if sign else "") + coefficient + f"E{scale - trailing:+05d}"
+        label = "".join(random.choices(characters, k=random.randrange(1, 10)))
+        row = {
+            "z": {"é": [label, None, {"雪": 8}], "a": False},
+            "a": [None, {"label": label, "value": "NUMERIC_TOKEN"}],
+            "unicode": {"\U000f0000": 2, "🧪": 1},
+        }
+        for index, token in enumerate((number, equivalent)):
+            body = json.dumps(
+                [row], ensure_ascii=(index + exponent) % 2 == 0, indent=1 if index == 0 else None
+            ).encode()
+            yield (
+                f"canonical-float-{exponent:04d}-{index}",
+                body.replace(b'"NUMERIC_TOKEN"', token.encode()),
+            )
+
+    keys = ("é", "e\u0301", "\U000f0000", "z", "a", "\u0000", "🧪", "\ud800")
+    for index in range(96):
+        values = [True, -0.0, "", "é", "\u0000", "\ud800", "\udfff", "\U000f0000"]
+        for _ in range(5):
+            fields = {key: random.choice(values) for key in random.sample(keys, 3)}
+            values = [fields, values[:2], *values[2:]]
+        row = {"val": values, "n": random.getrandbits(128)}
+        yield f"canonical-unicode-{index:04d}", json.dumps([row], ensure_ascii=True).encode()
+
+
+def capture(root, *, properties=False):
     root.mkdir(parents=True, exist_ok=True)
     cases = []
-    for name, body in examples():
+    generated = canonical_properties() if properties else ()
+    for name, body in chain(examples(), generated):
         path = root / (name + ".json")
         path.write_bytes(body)
         try:
@@ -124,7 +173,7 @@ def capture(root):
                     {"issue": issue}
                     if (issue := _jsonb_string_issue(row))
                     else {"canonical_sha256": _digest(row)}
-                    if name.startswith("deep")
+                    if name.startswith(("deep", "canonical-"))
                     else {"valid": True}
                     if name in {"dense", "largest-string"}
                     else {"row": row}
@@ -146,4 +195,6 @@ def capture(root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
-    capture(parser.parse_args().directory)
+    parser.add_argument("--properties", action="store_true")
+    args = parser.parse_args()
+    capture(args.directory, properties=args.properties)

@@ -8,7 +8,10 @@ use std::{
 
 use clap::ValueEnum;
 use ga_archive::storage_files::{StorageAccess, StorageFilesGuard};
-use ga_db::{Database, diary::actions::FileImportOutcome};
+use ga_db::{
+    Database,
+    diary::actions::{FileImportOutcome, FileImportStoreError},
+};
 use ga_domain::file_import::{FileMapping, ImportFileError, MAX_FILE_BYTES, MAX_MAPPING_BYTES};
 use rustix::fs::{Mode as FileMode, OFlags};
 
@@ -40,7 +43,14 @@ pub(crate) fn run(mode: Mode, file: &Path, mapping: &Path, confirmation: Option<
             }
         }
         Err(error) => {
-            eprintln!("{error}");
+            if matches!(
+                error.downcast_ref::<FileImportStoreError>(),
+                Some(FileImportStoreError::File(_))
+            ) {
+                eprintln!("Operation failed (ValueError). No sensitive details logged.");
+            } else {
+                eprintln!("{error}");
+            }
             ExitCode::FAILURE
         }
     }
