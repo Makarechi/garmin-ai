@@ -59,6 +59,7 @@
       ],
       "rust_tests": [
         "migration/check_native_compose.py",
+        "migration/check_native_setup.py",
         "migration/check_native_worker_health.py"
       ],
       "data_contracts": [
