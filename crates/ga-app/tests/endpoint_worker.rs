@@ -1111,3 +1111,51 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     assert!(old_export_still_visible);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable TimescaleDB and an independently held source-selection lock"]
+async fn waits_to_claim_when_source_selection_becomes_busy() -> Result<(), Box<dyn Error>> {
+    let (fixture, _root) = setup().await?;
+    let now: StoredInstant = fixture.start.try_into()?;
+    let instance = "source:garmin:primary";
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO jobs(id,kind,payload,dedup_key,status,run_at,attempts)
+         VALUES (gen_random_uuid(),'garmin_endpoint',
+            jsonb_build_object('endpoint','heart_rate','key',$1::text),
+            'synthetic-source-selection-race','pending',$2,0) RETURNING id",
+    )
+    .bind(fixture.start.date().to_string())
+    .bind(fixture.start)
+    .fetch_one(&fixture.inspect)
+    .await?;
+    assert!(matches!(
+        fixture
+            .database
+            .garmin_source_admission(instance, now)
+            .await?,
+        ga_db::garmin_integration::GarminSourceAdmission::Ready { .. }
+    ));
+
+    let mut onboarding = fixture.inspect.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104621::bigint)")
+        .execute(&mut *onboarding)
+        .await?;
+    let claim = || {
+        fixture
+            .database
+            .claim_selected_garmin_job(now, fixture.start.date(), 120, false, instance)
+    };
+    assert!(claim().await?.is_none());
+    let untouched: (String, i32, bool) =
+        sqlx::query_as("SELECT status,attempts,lease_token IS NULL FROM jobs WHERE id=$1")
+            .bind(id)
+            .fetch_one(&fixture.inspect)
+            .await?;
+    assert_eq!(untouched, ("pending".into(), 0, true));
+    onboarding.commit().await?;
+
+    let lease = claim().await?.ok_or("Expected the deferred source job")?;
+    assert_eq!(lease.id(), id);
+    assert_eq!(fixture.job(&lease).await?, ("running".into(), 1));
+    Ok(())
+}
