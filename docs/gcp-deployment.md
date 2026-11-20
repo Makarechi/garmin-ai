@@ -24,6 +24,25 @@ before starting the replacement. Run the same `--gcp` form for `stop`,
 `backup`, and `unpack-backup`. Keep the prior release available for rollback.
 An already bootstrapped host can continue to use its existing Docker installation.
 
+For an offline upload, export the complete Docker image from the build host.
+Use the same repository as the pinned reference in `release.env` and keep the
+versioned tag. A platform-filtered export can change the reference when the
+image includes attestations.
+
+```sh
+# On the build host, after building and verifying the AMD64 release.
+docker image save garmin-ai:gcp-RELEASE_ID | gzip > garmin-ai-gcp-RELEASE_ID.tar.gz
+
+# On the deployment host, after transferring the verified archive.
+docker image load -i garmin-ai-gcp-RELEASE_ID.tar.gz
+image=$(sed -n 's/^GA_APP_IMAGE=//p' release.env)
+docker image inspect "$image" --format '{{.Os}}/{{.Architecture}} {{.Id}}'
+```
+
+Continue with the uploaded image once Docker resolves the exact release
+reference for `linux/amd64`. Stage the pinned database image as well when
+installing a clean host offline.
+
 For the optional browser sign-in gateway, set these values in the private
 `.env` before starting the profile. Substitute the hostname approved for Garmin
 sign-in.

@@ -190,6 +190,12 @@ if [[ "$runtime" == rust ]]; then
             "SELECT current_database(),version_num,value->>'retained' FROM alembic_version CROSS JOIN app_state WHERE key='synthetic:release-upgrade'" \
             | grep -Fx 'garmin_ai|c54f8a72d130|true'
     fi
+    if [[ "$gcp" == true ]]; then
+        test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}' "$(compose ps -q db)")" \
+            = '335544320 805306368'
+        test "$(docker inspect --format '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config "max-size"}} {{index .HostConfig.LogConfig.Config "max-file"}}' "$(compose ps -q worker)")" \
+            = 'json-file 5m 2'
+    fi
     for service in api worker; do
         compose exec -T "$service" sh -ec '
             test "$(id -u)" -ne 0
@@ -217,7 +223,7 @@ fi
 
 mkdir -p "$root/test-results"
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
-    "$(git -C "$root" rev-parse HEAD)" "$image_ref" "$runtime" "$platform" "$historical" <<'PY'
+    "$(git -C "$root" rev-parse HEAD)" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -240,6 +246,7 @@ Path(sys.argv[1]).write_text(
             "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
             "historical_upgrade_verified": sys.argv[7] == "true",
+            "deployment_profile": "gcp" if sys.argv[8] == "true" else "standard",
         },
         indent=2,
         sort_keys=True,
