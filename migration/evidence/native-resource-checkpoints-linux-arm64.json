@@ -1,0 +1,85 @@
+{
+  "scope": "R02 snapshot and scoped R37 synthetic comparison",
+  "verification": "e2e_synthetic",
+  "small_linux_guest": {
+    "architecture": "arm64",
+    "cpu_count": 2,
+    "memory_mib": 1024,
+    "raw_fixture_bytes": 134217728,
+    "baseline_revision": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "candidate_revision": "52bb30d42e2207b8f3b998c09ae0917275e83c93",
+    "bundle_test_revision": "22f01e58bceb1624dd53129d9619ceb2e6308a1b",
+    "paired_report_sha256": "1b1eada444f04adcdb28fc1defe07544a92d68268e542a7cec7aee74de849826",
+    "runs": {
+      "python": {
+        "cold_database_and_application_ready_seconds": 74.0,
+        "minimum_sampled_guest_available_memory_mib": 420.785,
+        "backup_and_authentication_seconds": 6.563731,
+        "unpack_and_content_verification_seconds": 1.930848,
+        "health_requests": 32,
+        "readiness_p95_seconds_during_backup": 0.006038,
+        "readiness_max_seconds_during_backup": 0.006399,
+        "restored_raw_sha256": "276939aedb1ee034d7f0bff004d0a5f9dd8d7d48a362eba6b75627bb902ac137",
+        "log_sha256": "0548e53df10f981a8b203a9f89efbd68e4bf607bc4a952793053942784614db3"
+      },
+      "rust": {
+        "cold_database_and_application_ready_seconds": 28.0,
+        "minimum_sampled_guest_available_memory_mib": 667.152,
+        "backup_and_authentication_seconds": 5.280445,
+        "unpack_and_content_verification_seconds": 1.445653,
+        "health_requests": 26,
+        "readiness_p95_seconds_during_backup": 0.001287,
+        "readiness_max_seconds_during_backup": 0.003241,
+        "restored_raw_sha256": "276939aedb1ee034d7f0bff004d0a5f9dd8d7d48a362eba6b75627bb902ac137",
+        "log_sha256": "98736e385e3df62a2a8e8afb5295199e81f33790fb43ab3d1fb6ab32bdc21fac"
+      }
+    }
+  },
+  "bounded_fit_replay": {
+    "platform": "linux/arm64",
+    "baseline_revision": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "candidate_revision": "64f7b81e5117fdfbd1fa80c74775492080f9dfc5",
+    "paired_report_sha256": "6c6d2189415bcd2eea179aec8094c9cde5397aa3b704dcecca5c29b58fa16333",
+    "component_memory_limits": {
+      "shared_cpu_affinity": "6",
+      "database_memory_mib": 320,
+      "api_memory_mib": 192,
+      "worker_memory_mib": 384,
+      "migration_memory_mib": 256
+    },
+    "native_rows": 409600,
+    "native_lease_renewals": 4,
+    "native_control_latency_ms": {
+      "authenticated_web_pause_ms": 281.367,
+      "operations_response_ms": 265.988,
+      "webhook_ingress_ms": 429.857
+    },
+    "native_components": {
+      "api": {
+        "memory_peak_bytes": 23306240,
+        "memory_cap_events": 0,
+        "oom_kills": 0,
+        "swap_limit_bytes": 0
+      },
+      "worker": {
+        "memory_peak_bytes": 23490560,
+        "memory_cap_events": 0,
+        "oom_kills": 0,
+        "swap_limit_bytes": 0
+      },
+      "database": {
+        "memory_peak_bytes": 335544320,
+        "memory_cap_events": 11550,
+        "oom_kills": 0,
+        "swap_limit_bytes": 0
+      }
+    },
+    "baseline_rows": 0,
+    "baseline_worker_exit": 137,
+    "baseline_worker_oom_kills": 1
+  },
+  "unattended_release_window": {
+    "status": "pending",
+    "required_hours": 168
+  }
+}
