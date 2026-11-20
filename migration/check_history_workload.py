@@ -61,6 +61,13 @@ CHECKS = {
             LEFT JOIN metric_definitions definition ON definition.id=contract.definition_id
         ORDER BY m.ts,m.metric,m.source,raw.payload_hash,m.deleted
     """,
+    "plans": """
+        SELECT jsonb_build_array(
+            key,value-'created_at',(value->>'created_at')::timestamptz
+        )::text
+        FROM app_state WHERE starts_with(key,'syncplan:daily:')
+        ORDER BY key
+    """,
     "jobs": """
         SELECT jsonb_build_array(kind,dedup_key,payload->>'endpoint',payload->>'key',status,attempts,
             last_error,lease_token IS NULL,lease_until IS NULL,completed_at IS NOT NULL)::text

@@ -1092,6 +1092,7 @@ def main():
                 "samples": args.sync_days * 144,
                 "revisions": args.sync_days * 144,
                 "jobs": args.sync_days * 20,
+                "plans": 1,
             }
             if any(
                 after["stored_projection"][name]["rows"] != count

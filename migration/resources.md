@@ -237,21 +237,22 @@ Both runs use the normal history scheduler and endpoint writer. A local fixture
 provides the same synthetic input for each of the 20 endpoints. The fixture uses
 one shared CPU with 320 MiB for PostgreSQL, 192 MiB for the API, and 384 MiB each
 for the worker and the history workload. Both runtimes used schema \`c54f8a72d130\`.
-The Rust image and test executable were built from tree
-\`b1ab1949bca40e71813afcbe78519bf29215502b\`.
+The Rust runtime and endpoint executable were verified against revision
+`3688ea3bdf3c356fdf1d7868a71803b6a55643f4`.
 
 | Synthetic history | Identical results | Python time | Rust time | Workload peak, Python / Rust |
 | --- | --- | ---: | ---: | ---: |
-| [7 days](evidence/python-rust-history-7-linux-arm64.json.gz) | 140 jobs and archive objects, 7 daily rows, 1,008 measurement rows and their revisions | 5.332 s | 0.755 s | 117.36 / 16.61 MiB |
-| [365 days](evidence/python-rust-history-365-linux-arm64.json.gz) | 7,300 jobs and archive objects, 365 daily rows, 52,560 measurement rows and their revisions | 311.308 s | 50.994 s | 190.15 / 78.45 MiB |
+| [7 days](evidence/python-rust-history-7-linux-arm64.json.gz) | 140 jobs and archive objects, 7 daily rows, 1,008 measurement rows and their revisions | 6.481 s | 1.014 s | 156.77 / 15.93 MiB |
+| [365 days](evidence/python-rust-history-365-linux-arm64.json.gz) | 7,300 jobs and archive objects, 365 daily rows, 52,560 measurement rows and their revisions | 425.412 s | 66.538 s | 167.88 / 78.08 MiB |
 
-The comparison checked every archived object's bytes, source links, cursor
-values, endpoint fetch counts and final job outcomes. The timed stage includes
-the history scheduler and endpoint processing. PostgreSQL reached its 320 MiB
-ceiling in both year runs. The highest sampled liveness response time during
-the year run was 23.96 ms with Python and 21.51 ms with Rust. The workload peak
-includes charged file cache. These local trials model historical backfill with
-synthetic data. The sustained soak and live Garmin remain separate release checks.
+The comparison checked every archived object's bytes, source links, endpoint
+fetch counts and final job outcomes. The saved daily schedule is compared after
+normalizing its timestamp representation. Both reports include all plan fields,
+including the next history date, the recent date reached, and completion status.
+The highest sampled API liveness times during the year were 52.13 ms for Python and
+28.34 ms for Rust. The timings include endpoint scheduling and processing.
+The workload peak includes charged file cache. These trials used generated
+data and durable test storage.
 
 ## Analytical queries, MCP and backup
 
