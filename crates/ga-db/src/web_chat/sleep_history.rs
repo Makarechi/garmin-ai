@@ -7,10 +7,16 @@ use uuid::Uuid;
 use super::{Conversation, DESTINATION, WebChatError};
 use crate::{
     conversation_memory::CONTEXT_DELIVERY_LOCK,
-    health_analysis::{main_sleep_timing_in, permits_timing_in, sleep_timing_result_hash},
+    health_analysis::{
+        generic::{GenericAnalysisError, LegacyGenericQueryDependency},
+        main_sleep_timing_in, permits_timing_in, sleep_timing_result_hash,
+    },
     personal_goals::{self, GOAL_POLICY_LOCK},
     replay::{GARMIN_PARSER_VERSION, REPLAY_MUTATION_LOCK, projection_pending},
-    share_policy::{OWNER_ONBOARDING_LOCK, SharePolicyError, try_shared_lock},
+    share_policy::{
+        DestinationKind, MODEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK, ShareDestination,
+        SharePolicyError, try_shared_lock,
+    },
 };
 
 pub(super) const SLEEP_REFERENCE: &str = "sleep-timing:";
@@ -39,7 +45,7 @@ pub(super) fn evidence_refs(document: &Value) -> impl Iterator<Item = &str> {
         .filter_map(Value::as_str)
 }
 
-pub(super) async fn can_show_timing(
+pub(super) async fn can_show_legacy_analysis(
     txn: &mut Transaction<'_, Postgres>,
     conversation: Conversation,
     reference: &str,
@@ -85,27 +91,26 @@ pub(super) async fn can_show_timing(
     let Some(saved) = saved.and_then(|raw| serde_json::from_str::<TimingRecord>(&raw).ok()) else {
         return Ok(false);
     };
-    let snapshots = if dependent {
-        if saved.projection.contains_key("generic_metric_dependencies") {
-            return Ok(false);
-        }
-        let Some(snapshots) = saved
-            .projection
-            .get("sleep_timing_dependencies")
-            .and_then(Value::as_array)
-            .filter(|items| (1..=12).contains(&items.len()))
+    let (snapshots, generic) = if dependent {
+        let Some(snapshots) = dependency_list(&saved.projection, "sleep_timing_dependencies")
         else {
             return Ok(false);
         };
-        if !replay_generation_matches(txn, saved.projection.get("generation")).await? {
+        let Some(generic) = dependency_list(&saved.projection, "generic_metric_dependencies")
+        else {
+            return Ok(false);
+        };
+        if (snapshots.is_empty() && generic.is_empty())
+            || !replay_generation_matches(txn, saved.projection.get("generation")).await?
+        {
             return Ok(false);
         }
-        snapshots.as_slice()
+        (snapshots, generic)
     } else {
         let Some(snapshot) = saved.projection.get("sleep_timing") else {
             return Ok(false);
         };
-        std::slice::from_ref(snapshot)
+        (std::slice::from_ref(snapshot), &[][..])
     };
     let epoch: Option<String> = sqlx::query_scalar(
         "SELECT (CASE WHEN value->'epochs' ? $1 THEN value->'epochs'->$1
@@ -125,18 +130,51 @@ pub(super) async fn can_show_timing(
     let Ok((goals, _)) = personal_goals::load(txn, conversation.owner).await else {
         return Ok(false);
     };
-    let timezone: String =
-        sqlx::query_scalar("SELECT timezone FROM people WHERE id=$1 AND singleton")
-            .bind(conversation.owner)
-            .fetch_one(&mut **txn)
-            .await?;
-    if goals.revision != saved.goals_revision
-        || !permits_timing_in(txn)
-            .await
-            .map_err(|_| WebChatError::Database)?
+    if goals.revision != saved.goals_revision {
+        return Ok(false);
+    }
+    if !snapshots.is_empty() && !sleep_snapshots_current(txn, conversation.owner, snapshots).await?
     {
         return Ok(false);
     }
+    if generic.is_empty() {
+        return Ok(true);
+    }
+    let model = match saved.projection.get("model_provider_instance_id") {
+        None => "model:gemini:primary",
+        Some(Value::String(model)) => model,
+        _ => return Ok(false),
+    };
+    generic_snapshots_current(txn, conversation.owner, model, generic).await
+}
+
+fn dependency_list<'a>(
+    projection: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<&'a [Value]> {
+    match projection.get(key) {
+        None => Some(&[]),
+        Some(Value::Array(items)) if (1..=12).contains(&items.len()) => Some(items),
+        _ => None,
+    }
+}
+
+async fn sleep_snapshots_current(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    snapshots: &[Value],
+) -> Result<bool, WebChatError> {
+    if !permits_timing_in(txn)
+        .await
+        .map_err(|_| WebChatError::Database)?
+    {
+        return Ok(false);
+    }
+    let timezone: String =
+        sqlx::query_scalar("SELECT timezone FROM people WHERE id=$1 AND singleton")
+            .bind(owner)
+            .fetch_one(&mut **txn)
+            .await?;
     for snapshot in snapshots {
         let Ok(snapshot) = TimingSnapshot::deserialize(snapshot) else {
             return Ok(false);
@@ -153,6 +191,35 @@ pub(super) async fn can_show_timing(
         if sleep_timing_result_hash(&current).map_err(|_| WebChatError::Database)? != snapshot.hash
         {
             return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn generic_snapshots_current(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+    model: &str,
+    dependencies: &[Value],
+) -> Result<bool, WebChatError> {
+    match try_shared_lock(txn, MODEL_CONSENT_LOCK).await {
+        Ok(()) => {}
+        Err(SharePolicyError::Busy) => return Ok(false),
+        Err(_) => return Err(WebChatError::Database),
+    }
+    let Ok(model) = ShareDestination::new(DestinationKind::Model, model) else {
+        return Ok(false);
+    };
+    let channel = ShareDestination::new(DestinationKind::Channel, DESTINATION)
+        .map_err(|_| WebChatError::Database)?;
+    for evidence in dependencies {
+        let Ok(evidence) = LegacyGenericQueryDependency::deserialize(evidence) else {
+            return Ok(false);
+        };
+        match evidence.current(txn, owner, model, channel).await {
+            Ok(true) => {}
+            Err(GenericAnalysisError::Database) => return Err(WebChatError::Database),
+            _ => return Ok(false),
         }
     }
     Ok(true)

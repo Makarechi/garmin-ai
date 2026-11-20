@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use ga_domain::{
-    analysis_spec::AnalysisSpec,
+    analysis_spec::{AnalysisOperation, AnalysisSpec},
     legacy_json::{Utf8Layout, encode_ascii},
     model_consent::ModelCategories,
     sha256_hex,
@@ -27,6 +27,15 @@ pub struct GenericAnalysisEvidence {
     request_time: String,
     generic_result_digest: String,
     generic_result_hash: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyGenericQueryDependency {
+    arguments: Map<String, Value>,
+    request_time: String,
+    result_hash: String,
+    snapshots: Vec<Value>,
 }
 
 impl GenericAnalysisEvidence {
@@ -69,39 +78,67 @@ impl GenericAnalysisEvidence {
         channel: ShareDestination<'_>,
         categories: ModelCategories,
     ) -> Result<Option<BTreeSet<Uuid>>, GenericAnalysisError> {
-        let Some(request_time) = StoredInstant::from_python_isoformat(&self.request_time) else {
+        let Some(spec) = refreshed_spec(&self.generic_arguments, &self.request_time) else {
             return Ok(None);
         };
-        let Some(mut spec) = Self::input(&self.generic_arguments) else {
-            return Ok(None);
-        };
-        if spec.knowledge_cutoff_microseconds()
-            >= request_time.unix_microseconds() - FIVE_MINUTES_MICROSECONDS
-        {
-            let now = OffsetDateTime::now_utc()
-                .unix_timestamp_nanos()
-                .div_euclid(1_000);
-            let Some(now) = i64::try_from(now)
-                .ok()
-                .and_then(|micros| StoredInstant::from_unix_microseconds(micros).ok())
-            else {
-                return Ok(None);
-            };
-            if now.unix_microseconds() > spec.knowledge_cutoff_microseconds() {
-                let mut updated = spec.document().clone();
-                updated["knowledge_cutoff"] = json!(now.to_string());
-                let Ok(refreshed) = AnalysisSpec::from_json(&updated) else {
-                    return Ok(None);
-                };
-                spec = refreshed;
-            }
-        }
         let read = model_read_in(txn, owner, model, channel, categories, &spec).await?;
         Ok(
             (digest(&read.value).as_deref() == Some(&self.generic_result_digest))
                 .then_some(read.tracker_versions),
         )
     }
+}
+
+impl LegacyGenericQueryDependency {
+    pub(crate) async fn current(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        owner: Uuid,
+        model: ShareDestination<'_>,
+        channel: ShareDestination<'_>,
+    ) -> Result<bool, GenericAnalysisError> {
+        let Some(spec) = refreshed_spec(&self.arguments, &self.request_time) else {
+            return Ok(false);
+        };
+        if !self.snapshots.is_empty()
+            || !matches!(
+                spec.operation(),
+                AnalysisOperation::QueryEntries
+                    | AnalysisOperation::QueryObservations
+                    | AnalysisOperation::QueryCompleteness
+            )
+        {
+            return Ok(false);
+        }
+        let read = model_read_in(
+            txn,
+            owner,
+            model,
+            channel,
+            ModelCategories::HEALTH_AND_DIARY,
+            &spec,
+        )
+        .await?;
+        Ok(digest(&read.value).as_deref() == Some(&self.result_hash))
+    }
+}
+
+fn refreshed_spec(arguments: &Map<String, Value>, request_time: &str) -> Option<AnalysisSpec> {
+    let at = StoredInstant::from_python_isoformat(request_time)?;
+    let spec = GenericAnalysisEvidence::input(arguments)?;
+    if spec.knowledge_cutoff_microseconds() < at.unix_microseconds() - FIVE_MINUTES_MICROSECONDS {
+        return Some(spec);
+    }
+    let now = OffsetDateTime::now_utc()
+        .unix_timestamp_nanos()
+        .div_euclid(1_000);
+    let now = StoredInstant::from_unix_microseconds(i64::try_from(now).ok()?).ok()?;
+    if now.unix_microseconds() <= spec.knowledge_cutoff_microseconds() {
+        return Some(spec);
+    }
+    let mut updated = spec.document().clone();
+    updated["knowledge_cutoff"] = json!(now.to_string());
+    AnalysisSpec::from_json(&updated).ok()
 }
 
 fn digest(value: &Value) -> Option<String> {
