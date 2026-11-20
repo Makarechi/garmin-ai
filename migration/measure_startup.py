@@ -1,6 +1,7 @@
 """Measure startup, idle and workload costs in isolated synthetic Docker deployments."""
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -15,6 +16,8 @@ from pathlib import Path
 from web_chat_workload import MAX_MESSAGE_LENGTH, MULTIBYTE_FILLER
 
 DATABASE = "garmin_resource_test"
+# The offline CLI and the running API share the 384 MiB application budget.
+PAIRED_BACKUP_MEMORY_MIB = 192
 POSTGRES = (
     "timescale/timescaledb:latest-pg17@"
     "sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d"
@@ -188,16 +191,46 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
     }
 
 
-def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=None, probe=None):
+def collect_paired_backup(args, observer, workload, executable, db, api, worker, elapsed, probe):
+    for filename in ("paired_backup_fixture.py", "backup_workload.py"):
+        script = Path(__file__).with_name(filename)
+        docker("cp", str(script), f"{observer}:/tmp/{filename}")
+    fixture = ["exec", observer, "python", "/tmp/paired_backup_fixture.py"]
+    expected = json.loads(docker(*fixture, "prepare", str(args.backup_mib), timeout=180).stdout)
+    script = Path(__file__).with_name("paired_backup_commands.sh").read_text(encoding="utf-8")
+    measured = collect_client_workload(
+        ["docker", "exec", workload, "sh", "-c", script, "paired-backup", executable],
+        args.interval,
+        db,
+        api,
+        worker,
+        elapsed,
+        backup=workload,
+        probe=probe,
+    )
+    checked = json.loads(docker(*fixture, "verify", json.dumps(expected), timeout=180).stdout)
+    return {
+        "synthetic_raw_bytes": args.backup_mib * 1024 * 1024,
+        "worker_stopped_for_cli": True,
+        **measured,
+        **checked,
+    }
+
+
+def collect_client_workload(
+    command, interval, db, api, worker, elapsed, *, mcp=None, backup=None, probe=None
+):
     def capture():
         resources = {
             "elapsed_seconds": elapsed(),
             "database": sample(db, user="postgres"),
             "api": sample(api),
-            "worker": sample(worker),
+            "worker": sample(worker) if worker else None,
         }
         if mcp:
             resources["mcp"] = sample(mcp)
+        if backup:
+            resources["backup"] = sample(backup)
         if probe:
             live = probe("/health/live")
             resources["health_live_ms"] = float(live.stdout) if not live.returncode else None
@@ -216,10 +249,14 @@ def collect_client_workload(command, interval, db, api, worker, elapsed, *, mcp=
                     )
                 samples.append(capture())
                 time.sleep(interval)
-            stdout, _stderr = process.communicate(timeout=5)
+            stdout, stderr = process.communicate(timeout=5)
             if process.returncode:
+                phase = (
+                    re.search(r"Paired backup phase ([a-z]+) failed", stderr) if backup else None
+                )
+                detail = f" in the {phase[1]} phase" if phase else ""
                 raise RuntimeError(
-                    f"Synthetic client workload failed with status {process.returncode}"
+                    f"Synthetic client workload failed with status {process.returncode}{detail}"
                 )
         finally:
             if process.poll() is None:
@@ -307,6 +344,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
     control_env = {}
     paired_analytics = args.candidate_image is not None and args.analytics_rounds is not None
     paired_mcp = args.candidate_image is not None and args.mcp_idle_seconds is not None
+    paired_backup = args.candidate_image is not None and args.backup_mib is not None
     if args.web_chat_messages or paired_analytics:
         control_env["GA_API_KEY"] = secrets.token_urlsafe(32)
         api_env.update(control_env)
@@ -438,6 +476,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             env=api_env,
         )
         shared_archive = ()
+        observer_env = app_env | control_env
         worker_command = (executable, "worker")
         if args.fit_replay:
             volume = f"{prefix}-fit"
@@ -450,16 +489,31 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "-c",
                 f"{executable} worker; echo $? > /fit-fixture/worker-exit; exec sleep infinity",
             )
+        if paired_backup:
+            volume = f"{prefix}-backup"
+            docker("volume", "create", volume)
+            cleanup.callback(docker, "volume", "rm", volume, check=False)
+            shared_archive = ("--mount", f"type=volume,src={volume},dst=/backup-fixture")
+            backup_env = app_env | {
+                "GA_DATA_DIR": "/backup-fixture/data",
+                "GA_TOKEN_DIR": "/backup-fixture/tokens",
+                "GA_LOCK_DIR": "/backup-fixture/locks",
+                "GA_BACKUP_DIR": "/backup-fixture/backups",
+                "GA_BACKUP_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
+                "GA_BACKUP_DATABASE_URL": f"postgresql+psycopg://garmin:{password}@{db}/garmin_resource_backup_test",
+                "GA_RESTORE_DATABASE_URL": f"postgresql+psycopg://garmin:{password}@{db}/garmin_resource_restore_test",
+            }
+            observer_env.update(backup_env)
         # Readiness probes execute in a separate cgroup. Their RSS is excluded.
         launch(
             observer,
             observer_image or image,
             "sleep",
             "infinity",
-            env=app_env | control_env,
+            env=observer_env,
             mounts=shared_archive,
         )
-        if shared_archive:
+        if args.fit_replay:
             docker(
                 "exec",
                 "--user",
@@ -476,13 +530,29 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "/fit-fixture",
                 "/fit-fixture/raw",
             )
+        if paired_backup:
+            docker(
+                "exec",
+                "--user",
+                "0",
+                observer,
+                "install",
+                "-d",
+                "-m",
+                "0700",
+                "-o",
+                "1000",
+                "-g",
+                "1000",
+                "/backup-fixture",
+            )
         launch(
             worker,
             image,
             *worker_command,
             limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
             env=app_env,
-            mounts=shared_archive,
+            mounts=shared_archive if args.fit_replay else (),
         )
 
         def probe(path):
@@ -533,6 +603,37 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             time.sleep(args.interval)
 
         workload_result = {}
+        if paired_backup:
+            docker("stop", "-t", "10", worker)
+            for database in ("garmin_resource_backup_test", "garmin_resource_restore_test"):
+                docker("exec", db, "createdb", "-U", "garmin", database)
+            launch(
+                workload,
+                image,
+                "sleep",
+                "infinity",
+                limits=(*cpu, "-m", f"{PAIRED_BACKUP_MEMORY_MIB}m", "--memory-swap", "384m"),
+                env=backup_env | {"GA_DATABASE_URL": backup_env["GA_BACKUP_DATABASE_URL"]},
+                mounts=(
+                    *shared_archive,
+                    "--tmpfs",
+                    "/tmp/low-backup-space:rw,size=8m,uid=1000,gid=1000",
+                ),
+            )
+            docker("exec", workload, executable, "migrate", timeout=120)
+            docker(
+                "exec",
+                workload,
+                "sh",
+                "-ec",
+                'GA_DATABASE_URL="$GA_RESTORE_DATABASE_URL" GA_DATA_DIR=/backup-fixture/recovery-data "$1" migrate',
+                "migrate-recovery",
+                executable,
+                timeout=120,
+            )
+            workload_result["backup_workload"] = collect_paired_backup(
+                args, observer, workload, executable, db, api, None, elapsed, probe
+            )
         if args.fit_replay:
             workload_result["fit_replay_workload"] = collect_fit_replay(
                 args, observer, db, api, worker, elapsed, probe
@@ -571,7 +672,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             ("fitlimit", args.fit_limit_mib),
             ("sync", args.sync_days),
             ("reconcile", args.reconcile_days),
-            ("backup", args.backup_mib),
+            ("backup", None if paired_backup else args.backup_mib),
             ("analytics", None if paired_analytics else args.analytics_rounds),
             ("mcp", None if paired_mcp else args.mcp_idle_seconds),
             ("voice", args.voice_rounds),
@@ -698,6 +799,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "worker_memory_mib": 384,
                 "migration_memory_mib": 256,
                 **({"mcp_memory_mib": 384} if paired_mcp else {}),
+                **({"backup_memory_mib": PAIRED_BACKUP_MEMORY_MIB} if paired_backup else {}),
             },
             "config": POSTGRES_CONFIG,
             "lifecycle": lifecycle,
@@ -825,13 +927,12 @@ def main():
             "fit_limit_mib",
             "sync_days",
             "reconcile_days",
-            "backup_mib",
             "voice_rounds",
             "replay_days",
         )
     ):
         parser.error(
-            "The paired comparison supports startup, web chat, analytics, MCP and FIT replay"
+            "The paired comparison supports startup, web chat, analytics, MCP, FIT replay and backup"
         )
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
@@ -848,6 +949,14 @@ def main():
             or revision != candidate["migration_revision"]
         ):
             raise RuntimeError("Benchmark versions migrated to different database schemas")
+        if args.backup_mib:
+            before, after = baseline["backup_workload"], candidate["backup_workload"]
+            if any(
+                before[key] != after[key]
+                for key in ("raw_sha256", "restored_rows", "no_partial_destination")
+            ):
+                print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+                raise RuntimeError("Paired backup and restore disagree on retained synthetic data")
         if args.fit_replay:
             try:
                 check_fit_replay(

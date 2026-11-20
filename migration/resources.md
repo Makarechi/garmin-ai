@@ -292,6 +292,31 @@ the service, its container's idle process and the sampling commands. The
 observations showed no swap use, memory-limit event or out-of-memory kill.
 
 
+### Paired encrypted backup, export and recovery
+
+Add `--backup-mib 32` or `--backup-mib 128` to the paired image command. The fixture
+stops the service worker before running the ordinary standalone commands. It seeds a
+private source database and archive, and restores to a separate empty database. The API
+remains available on its own test store. The API and backup each have a 192 MiB limit,
+with one shared CPU and identical TimescaleDB settings for both runtimes.
+
+An 8 MiB mount with a 6 MiB filler leaves exactly 2 MiB of free space. The capacity check
+reports `insufficient` and the backup leaves no destination. The normal-volume backup,
+standalone export and restore report the same 30 table counts on both runtimes, and the
+restored archive digest and seeded diary identity match.
+
+| Synthetic raw file | Python backup / recovery | Rust backup / recovery | Sampled API and backup charge, Python / Rust |
+| --- | ---: | ---: | ---: |
+| [32 MiB](evidence/python-rust-backup-32-linux-arm64.json.gz) | 1.195 / 1.174 s | 0.597 / 0.115 s | 221.07 / 85.28 MiB |
+| [128 MiB](evidence/python-rust-backup-128-linux-arm64.json.gz) | 3.675 / 1.912 s | 3.181 / 1.256 s | 316.11 / 202.46 MiB |
+
+Recovery time covers archive authentication, unpack and database restore. The 128 MiB
+runs recorded memory-limit events as the containers reclaimed cache. Python used up to
+11.22 MiB of sampled swap, and no sampled Rust backup used swap. Both completed without
+an OOM kill. In a preliminary 384 MiB-per-backup trial, the 128 MiB Rust case reached
+392.55 MiB including the API, with up to 364.80 MiB of file charge in the backup cgroup.
+The tighter profile keeps the full workload within the combined budget.
+
 ## Recovery, provider timeout and controls
 
 | Case | Result |
