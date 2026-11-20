@@ -37,6 +37,7 @@ from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import (
     Activity,
+    ActivityPart,
     Event,
     HealthDay,
     Measurement,
@@ -44,6 +45,7 @@ from garmin_ai.models import (
     Person,
     SourcePayload,
 )
+from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
@@ -91,6 +93,9 @@ WINDOWS_START = datetime(2026, 9, 1, 9, tzinfo=UTC)
 WELLBEING_QUESTION = "Summarize the reported energy in the synthetic diary."
 WELLBEING_ANSWER = "The two reports retain missing and explicit zero ratings."
 WELLBEING_START = datetime(2026, 8, 1, 12, tzinfo=UTC)
+DEVICES_QUESTION = "What device and zone evidence exists for the synthetic activities?"
+DEVICES_ANSWER = "Current, older, and unavailable device evidence remain separate."
+DEVICES_START = datetime(2026, 6, 21, 10, tzinfo=UTC)
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -129,6 +134,8 @@ def output(prompt):
             return windows_output(prompt)
         if prompt["question"].startswith(WELLBEING_QUESTION):
             return wellbeing_output(prompt)
+        if prompt["question"].startswith(DEVICES_QUESTION):
+            return devices_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -176,6 +183,7 @@ def output(prompt):
             COFFEE_QUESTION,
             WINDOWS_QUESTION,
             WELLBEING_QUESTION,
+            DEVICES_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -435,6 +443,37 @@ def wellbeing_output(prompt):
     arguments = {
         "start": WELLBEING_START.isoformat(),
         "end": (WELLBEING_START + timedelta(days=2)).isoformat(),
+    }
+    return AgentStep(
+        calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
+    )
+
+
+def devices_output(prompt):
+    name = "device_history"
+    tools = {tool["name"] for tool in prompt["tools"]}
+    if prompt["question"].endswith(" without training access"):
+        assert name not in tools and not prompt["evidence"]
+        return AgentStep(response_language="en")
+    if prompt["evidence"]:
+        [item] = prompt["evidence"]
+        assert item["tool"] == name
+        current, stale, unavailable = item["result"]["rows"]
+        assert [row["evidence_status"] for row in (current, stale, unavailable)] == [
+            "available",
+            "stale",
+            "unavailable",
+        ], item["result"]
+        assert current["source_ref"] and stale["source_ref"]
+        assert unavailable["source_ref"] is None and unavailable["records"] == []
+        assert current["records"][0]["fields"] == {"device_index": 0, "software_version": 4.2}
+        assert current["records"][1]["fields"]["high_bpm"] == 145
+        assert "synthetic-private-device" not in json.dumps(item["result"])
+        return AgentStep(answer=DEVICES_ANSWER, evidence_ids=[1], response_language="en")
+    assert name in tools
+    arguments = {
+        "start": DEVICES_START.isoformat(),
+        "end": (DEVICES_START + timedelta(days=1)).isoformat(),
     }
     return AgentStep(
         calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
@@ -800,6 +839,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_coffee_sleep(engine, python, native)
     exercise_event_windows(engine, python, native)
     exercise_wellbeing(engine, python, native)
+    exercise_devices(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1677,6 +1717,88 @@ def exercise_wellbeing(engine, python, native):
     denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
     assert denied[0] == denied[1] and WELLBEING_ANSWER not in denied[1], denied
     print("Matched subjective wellbeing and withheld changed or unconsented reports")
+
+
+def exercise_devices(engine, python, native):
+    names = [f"synthetic-device-{state}" for state in ("available", "stale", "unavailable")]
+    with Session(engine) as session, session.begin():
+        training = ensure_scenario_packs(session)["training"]
+        training.tracking_enabled = True
+        training.llm_enabled = True
+        for index, identity in enumerate(names):
+            stamp = DEVICES_START + timedelta(hours=index)
+            key = f"synthetic/{identity}.fit"
+            session.add(
+                Activity(
+                    id=identity,
+                    start=stamp,
+                    end=stamp + timedelta(minutes=30),
+                    kind="running",
+                    timezone="UTC",
+                    fit_key=f"{key}-updated" if index == 1 else key,
+                    details={"parsed_fit_key": key},
+                )
+            )
+            if index < 2:
+                session.add(
+                    SourcePayload(
+                        source="garmin_connect",
+                        endpoint="activity_fit",
+                        source_key=identity,
+                        payload_hash=f"synthetic-hash-{index}",
+                        archive_key=key,
+                        fetched_at=stamp,
+                        parser_version=PARSER_VERSION,
+                        status="normalized",
+                        payload=None,
+                    )
+                )
+        session.flush()
+        session.add_all(
+            [
+                ActivityPart(
+                    activity_id=names[0],
+                    kind="fit_device_info",
+                    sequence=0,
+                    payload={
+                        "device_index": 0,
+                        "software_version": 4.2,
+                        "serial_number": "synthetic-private-device",
+                    },
+                ),
+                ActivityPart(
+                    activity_id=names[0],
+                    kind="fit_hr_zone",
+                    sequence=0,
+                    payload={"high_bpm": 145},
+                ),
+                ActivityPart(
+                    activity_id=names[1],
+                    kind="fit_hr_zone",
+                    sequence=0,
+                    payload={"high_bpm": 150},
+                ),
+            ]
+        )
+    old, new = [submit(client, DEVICES_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert DEVICES_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved Garmin data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    with Session(engine) as session, session.begin():
+        session.get(Activity, names[0]).fit_key += "-revised"
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with Session(engine) as session, session.begin():
+        session.get(Activity, names[0]).fit_key = f"synthetic/{names[0]}.fit"
+        ensure_scenario_packs(session)["training"].llm_enabled = False
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert new["id"] not in {row["id"] for row in history.json()["replies"]}
+    question = DEVICES_QUESTION + " without training access"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and DEVICES_ANSWER not in denied[1], denied
+    print("Matched bounded device evidence and withheld changed or unconsented fitness records")
 
 
 def main():

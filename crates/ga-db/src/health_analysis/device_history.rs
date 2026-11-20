@@ -135,13 +135,13 @@ impl DailyHealthReader {
         end: OffsetDateTime,
         limit: u16,
     ) -> Result<Value, DeviceHistoryError> {
-        let result = read_history(&mut self.0, start, end, limit).await?;
+        let result = device_history_in(&mut self.0, start, end, limit).await?;
         self.0.commit().await?;
-        serde_json::to_value(result).map_err(|_| HealthAnalysisError::Database.into())
+        Ok(result)
     }
 }
 
-fn device_range(
+pub(super) fn device_range(
     start: StoredInstant,
     end: StoredInstant,
     limit: u16,
@@ -158,6 +158,16 @@ fn device_range(
         return Err(DeviceHistoryError::Limit);
     }
     Ok((start, end))
+}
+
+pub(super) async fn device_history_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    limit: u16,
+) -> Result<Value, DeviceHistoryError> {
+    let result = read_history(txn, start, end, limit).await?;
+    serde_json::to_value(result).map_err(|_| HealthAnalysisError::Database.into())
 }
 
 async fn read_history(

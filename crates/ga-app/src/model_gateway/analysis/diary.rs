@@ -5,7 +5,7 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     health_analysis::{
-        COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence,
+        COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY, DailyAnalysisAccess, DailyAnalysisEvidence,
         DailyAnalysisQuery, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION,
         METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY,
         SLEEP_ANALYSIS, STRESS_HOURS, WELLBEING_OBSERVATIONS,
@@ -37,6 +37,7 @@ static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::
 static RANGE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Range));
 static SERIES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MetricSeries));
 static RUNNING: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::RunningEfficiency));
+static DEVICES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::DeviceHistory));
 static STRESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::StressHours));
 static WELLBEING: LazyLock<Value> =
     LazyLock::new(|| model_description(ReadTool::WellbeingObservations));
@@ -177,6 +178,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                 offered.push(OfferedReadTool {
                     name: RUNNING_EFFICIENCY,
                     description: &RUNNING,
+                });
+            }
+            if access.training {
+                offered.push(OfferedReadTool {
+                    name: DEVICE_HISTORY,
+                    description: &DEVICES,
                 });
             }
             if access.wellbeing {
