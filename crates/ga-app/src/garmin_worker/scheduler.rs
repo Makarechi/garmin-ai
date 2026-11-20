@@ -50,12 +50,17 @@ impl<S: ActivityExportSource> ScheduledGarminWorker<'_, S> {
         &self,
         at: StoredInstant,
     ) -> Result<GarminQueueStep, EndpointWorkerError> {
-        match self
+        let admission = self
             .runner
             .database
             .garmin_source_admission(self.instance, at)
-            .await?
-        {
+            .await;
+        let admission = match admission {
+            Ok(state) => state,
+            Err(GarminIntegrationError::Busy) => return Ok(GarminQueueStep::Idle),
+            Err(error) => return Err(error.into()),
+        };
+        match admission {
             GarminSourceAdmission::Ready { fingerprint }
                 if fingerprint == self.runner.source.fingerprint() => {}
             GarminSourceAdmission::Ready { .. } => {

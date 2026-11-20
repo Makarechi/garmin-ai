@@ -86,6 +86,7 @@ pub enum FailureReason {
     TelegramPairingChanged,
     TelegramPolicyBusy,
     GarminCollectionDisabled,
+    GarminStorageBusy,
     GarminAuthenticationRequired,
     InvalidGarminWork,
 }
@@ -101,6 +102,7 @@ impl FailureReason {
             Self::TelegramPairingChanged => "TelegramPairingChanged",
             Self::TelegramPolicyBusy => "TelegramPolicyBusy",
             Self::GarminCollectionDisabled => "GarminCollectionDisabled",
+            Self::GarminStorageBusy => "GarminStorageBusy",
             Self::GarminAuthenticationRequired => "AuthenticationRequired",
             Self::InvalidGarminWork => "ValueError",
         }
@@ -113,6 +115,7 @@ impl FailureReason {
                 | Self::ProviderCooldown
                 | Self::TelegramPolicyBusy
                 | Self::ReplayBusy
+                | Self::GarminStorageBusy
         ))
     }
 }

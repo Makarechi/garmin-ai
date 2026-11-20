@@ -5,7 +5,6 @@ use ga_db::{
         ActivityPageCapture, ActivityPagePreflight, ActivityPageResult, ActivityScanError,
         CaptureActivityPage, PublishActivityPage,
     },
-    garmin_integration::GarminTransportOutcome,
     jobs::{GarminJobLease, RecordedJobStatus},
 };
 use ga_domain::{activity_scan::ACTIVITY_PAGE_SIZE, event_input::known_timezone};
@@ -115,9 +114,7 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
             })
             .await?;
         if matches!(published, ActivityPageResult::Published(_)) {
-            self.database
-                .record_garmin_transport(account, requested_at, GarminTransportOutcome::Reachable)
-                .await?;
+            self.note_reachable(account, requested_at).await?;
         }
         Ok(ActivityPageWork::Publication(published))
     }

@@ -39,6 +39,8 @@ use ga_garmin::{
 };
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
+const STORAGE_BUSY_RETRY_MICROSECONDS: i64 = 2_000_000;
+
 pub trait EndpointSource {
     fn fingerprint(&self) -> &str;
 
@@ -133,6 +135,23 @@ impl From<GarminIntegrationError> for EndpointWorkerError {
 
 impl<S: EndpointSource> EndpointWorker<'_, S> {
     pub async fn run(&self, lease: &GarminJobLease) -> Result<EndpointWork, EndpointWorkerError> {
+        match self.run_endpoint(lease).await {
+            Err(EndpointWorkerError::Storage(error)) if error.storage_busy() => {
+                let retry = clock()?.unix_microseconds() + STORAGE_BUSY_RETRY_MICROSECONDS;
+                let retry = StoredInstant::from_unix_microseconds(retry)
+                    .map_err(|_| EndpointWorkerError::InvalidClock)?;
+                self.defer(lease, FailureReason::GarminStorageBusy, Some(retry))
+                    .await
+                    .map(EndpointWork::Deferred)
+            }
+            result => result,
+        }
+    }
+
+    async fn run_endpoint(
+        &self,
+        lease: &GarminJobLease,
+    ) -> Result<EndpointWork, EndpointWorkerError> {
         if !known_timezone(self.timezone) {
             return Err(EndpointError::InvalidScope.into());
         }
@@ -214,11 +233,26 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
             })
             .await?;
         if matches!(result, EndpointPublication::Published(_)) {
-            self.database
-                .record_garmin_transport(account, at, GarminTransportOutcome::Reachable)
-                .await?;
+            self.note_reachable(account, at).await?;
         }
         Ok(EndpointWork::Publication(result))
+    }
+
+    async fn note_reachable(
+        &self,
+        account: &str,
+        at: StoredInstant,
+    ) -> Result<(), EndpointWorkerError> {
+        match self
+            .database
+            .record_garmin_transport(account, at, GarminTransportOutcome::Reachable)
+            .await
+        {
+            // Publication already committed. A later successful request refreshes
+            // the connection state if the queue lock stays busy beyond its budget.
+            Ok(_) | Err(GarminIntegrationError::Busy) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn defer_if_paused(
