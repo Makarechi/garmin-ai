@@ -225,6 +225,35 @@ all 7,300 jobs completed in 297.779 s. TimescaleDB reached 320 MiB charged memor
 measurements. All 55 sampled HTTP liveness probes succeeded while the work ran.
 
 
+### Paired weekly and yearly history imports
+
+Add \`--sync-days 7\` or \`--sync-days 365\` and \`--native-history-test\` to the paired
+image command. Point \`--native-history-test\` at the Linux \`endpoint_worker\` test
+executable from the same candidate tree as the runtime image. For example,
+\`cargo test --locked --release -p ga-app --test endpoint_worker --no-run\` prints
+the executable path.
+
+Both runs use the normal history scheduler and endpoint writer. A local fixture
+provides the same synthetic input for each of the 20 endpoints. The fixture uses
+one shared CPU with 320 MiB for PostgreSQL, 192 MiB for the API, and 384 MiB each
+for the worker and the history workload. Both runtimes used schema \`c54f8a72d130\`.
+The Rust runtime and endpoint executable were verified against revision
+`3688ea3bdf3c356fdf1d7868a71803b6a55643f4`.
+
+| Synthetic history | Identical results | Python time | Rust time | Workload peak, Python / Rust |
+| --- | --- | ---: | ---: | ---: |
+| [7 days](evidence/python-rust-history-7-linux-arm64.json.gz) | 140 jobs and archive objects, 7 daily rows, 1,008 measurement rows and their revisions | 6.481 s | 1.014 s | 156.77 / 15.93 MiB |
+| [365 days](evidence/python-rust-history-365-linux-arm64.json.gz) | 7,300 jobs and archive objects, 365 daily rows, 52,560 measurement rows and their revisions | 425.412 s | 66.538 s | 167.88 / 78.08 MiB |
+
+The comparison checked every archived object's bytes, source links, endpoint
+fetch counts and final job outcomes. The saved daily schedule is compared after
+normalizing its timestamp representation. Both reports include all plan fields,
+including the next history date, the recent date reached, and completion status.
+The highest sampled API liveness times during the year were 52.13 ms for Python and
+28.34 ms for Rust. The timings include endpoint scheduling and processing.
+The workload peak includes charged file cache. These trials used generated
+data and durable test storage.
+
 ## Analytical queries, MCP and backup
 
 | Mode | Workload | Observation |
