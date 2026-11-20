@@ -1,0 +1,131 @@
+name: Native off-host recovery
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/native-offhost-restore.yml"
+      - "tests/evals/offhost_restore_probe.py"
+      - "scripts/extract_native_test_binary.sh"
+      - "Dockerfile.rust"
+      - "crates/ga-app/src/backup.rs"
+      - "crates/ga-archive/src/backup*"
+      - "crates/ga-archive/src/backup*/**"
+      - "crates/ga-db/src/database_export.rs"
+      - "crates/ga-db/src/database_restore.rs"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/native-offhost-restore.yml"
+      - "tests/evals/offhost_restore_probe.py"
+      - "scripts/extract_native_test_binary.sh"
+      - "Dockerfile.rust"
+      - "crates/ga-app/src/backup.rs"
+      - "crates/ga-archive/src/backup*"
+      - "crates/ga-archive/src/backup*/**"
+      - "crates/ga-db/src/database_export.rs"
+      - "crates/ga-db/src/database_restore.rs"
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Off-host backup (${{ matrix.runtime }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        runtime: [python, rust]
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+        env:
+          POSTGRES_USER: garmin
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: garmin_native_offhost_test
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U garmin -d garmin_native_offhost_test" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GA_TEST_DATABASE_URL: postgresql+psycopg://garmin@127.0.0.1:5432/garmin_native_offhost_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - run: uv sync --locked
+      - if: matrix.runtime == 'rust'
+        run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
+      - name: Create encrypted synthetic backup
+        env:
+          PROBE_RUNTIME: ${{ matrix.runtime }}
+        run: |
+          args=()
+          if [[ $PROBE_RUNTIME == rust ]]; then args+=(--native-binary "$RUNNER_TEMP/garmin-ai-rust"); fi
+          PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py create \
+            "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA" "${args[@]}"
+      # The short-lived key and archive contain only data generated in this job.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-offhost-fixture-${{ matrix.runtime }}
+          path: ${{ runner.temp }}/synthetic-offhost/synthetic-*
+          retention-days: 1
+          if-no-files-found: error
+
+  recover:
+    name: Off-host recovery (${{ matrix.source }} to ${{ matrix.target }})
+    needs: capture
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - source: python
+            target: rust
+          - source: rust
+            target: python
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+        env:
+          POSTGRES_USER: garmin
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: garmin_native_offhost_test
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U garmin -d garmin_native_offhost_test" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GA_TEST_DATABASE_URL: postgresql+psycopg://garmin@127.0.0.1:5432/garmin_native_offhost_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+      - run: uv sync --locked
+      - if: matrix.target == 'rust'
+        run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-offhost-fixture-${{ matrix.source }}
+          path: ${{ runner.temp }}/synthetic-offhost
+      - name: Verify cross-runtime recovery on a separate host
+        env:
+          PROBE_RUNTIME: ${{ matrix.target }}
+        run: |
+          args=()
+          if [[ $PROBE_RUNTIME == rust ]]; then args+=(--native-binary "$RUNNER_TEMP/garmin-ai-rust"); fi
+          PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py restore \
+            "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" \
+            --commit "$GITHUB_SHA" --evidence "$RUNNER_TEMP/native-offhost-result.json" "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-offhost-result-${{ matrix.source }}-to-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-offhost-result.json
+          if-no-files-found: error
