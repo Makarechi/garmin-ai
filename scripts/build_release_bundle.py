@@ -43,6 +43,14 @@ CONTENTS = (
     "tests/universal_acceptance_manifest.json",
 )
 NATIVE_CONTENTS = tuple(name for name in CONTENTS if not name.startswith(("scripts/", "src/"))) + (
+    "compose.gcp.yml",
+    "deploy/gcp/bootstrap.sh",
+    "deploy/gcp/Caddyfile.garmin-auth",
+    "deploy/gcp/garmin-ai-release-cleanup-native.service",
+    "deploy/gcp/garmin-ai-release-cleanup.timer",
+    "deploy/gcp/install-native-cleanup.sh",
+    "docs/gcp-deployment.md",
+    "docs/release-cleanup.md",
     "migration/rust-native-image.md",
     "migration/rust-native-schema.md",
 )
@@ -107,8 +115,15 @@ def build_bundle(
         with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
             for name in NATIVE_CONTENTS if native else CONTENTS:
                 source = compose_source if name == "compose.release.yml" else ROOT / name
+                if native and name == "compose.gcp.yml":
+                    source = ROOT / "compose.rust-gcp.yml"
                 data = source.read_bytes()
-                _add(tar, f"{prefix}/{name}", data, 0o755 if name in {"install.sh"} else 0o644)
+                executable = name in {
+                    "install.sh",
+                    "deploy/gcp/bootstrap.sh",
+                    "deploy/gcp/install-native-cleanup.sh",
+                }
+                _add(tar, f"{prefix}/{name}", data, 0o755 if executable else 0o644)
             runtime_setting = "GA_APP_RUNTIME=rust\n" if native else ""
             _add(
                 tar,

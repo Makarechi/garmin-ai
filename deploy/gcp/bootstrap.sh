@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
+case "$#:${1:-}" in
+    0:) set -- python3 ;;
+    1:--rust) set -- ;;
+    *) echo "Usage: sudo deploy/gcp/bootstrap.sh [--rust]" >&2; exit 2 ;;
+esac
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl python3
+apt-get install -y ca-certificates curl "$@"
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
@@ -21,6 +26,7 @@ fi
 if ! grep -q '^/swapfile ' /etc/fstab; then
     printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
+install -d -m 0755 /etc/sysctl.d
 printf '%s\n' 'vm.swappiness=10' > /etc/sysctl.d/90-garmin-ai.conf
 sysctl -p /etc/sysctl.d/90-garmin-ai.conf
 install -d -m 0700 -o 1000 -g 1000 /opt/garmin-ai

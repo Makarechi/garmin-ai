@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{self, File, FileTimes, Permissions};
 use std::io;
@@ -43,7 +44,14 @@ case "$1:$2" in
         cat "$record/images"
         ;;
     image:inspect)
-        cat "$record/$5"
+        if [ "$4" != '{{.Id}}' ]; then
+            cat "$record/references-$5"
+        else
+            case "$5" in
+                *@sha256:*) printf '%s\n' "${5##*@}" ;;
+                *) cat "$record/$5" ;;
+            esac
+        fi
         ;;
     image:rm)
         printf '%s\n' "$*" >> "$record/deletions"
@@ -128,6 +136,7 @@ impl Host {
 
     fn images(&self, entries: &[(char, &str, &str)]) -> TestResult {
         let mut output = String::new();
+        let mut tags = BTreeMap::<char, Vec<String>>::new();
         for (digit, repo, tag) in entries {
             let digest = image(*digit);
             let row = json!({"id": digest, "repository": repo, "tag": tag});
@@ -137,8 +146,31 @@ impl Host {
             if !reference.contains('/') {
                 fs::write(self.root.join(reference), format!("{digest}\n"))?;
             }
+            tags.entry(*digit)
+                .or_default()
+                .push(format!("{repo}:{tag}"));
+        }
+        for (digit, tags) in &tags {
+            self.references(*digit, tags, &[])?;
         }
         fs::write(self.root.join("images"), output)?;
+        Ok(())
+    }
+
+    fn references(&self, digit: char, tags: &[String], digests: &[String]) -> TestResult {
+        let id = image(digit);
+        fs::write(
+            self.root.join(format!("references-{id}")),
+            json!({"id":id,"tags":tags,"digests":digests}).to_string(),
+        )?;
+        Ok(())
+    }
+
+    fn release_reference(&self, container: char, reference: &str) -> TestResult {
+        let file = self.root.join(format!("container-{}", id(container)));
+        let mut data: Value = serde_json::from_slice(&fs::read(&file)?)?;
+        data["reference"] = json!(reference);
+        fs::write(&file, format!("{data}\n"))?;
         Ok(())
     }
 
@@ -353,6 +385,88 @@ fn remote_docker_endpoint_cannot_drive_local_retention() -> TestResult {
         report["error"],
         "Release cleanup requires a local Docker socket"
     );
+    assert!(!host.root.join("deletions").exists());
+    Ok(())
+}
+
+#[test]
+fn installer_refuses_to_reconfigure_retained_upload_directories() -> TestResult {
+    let host = Host::new()?;
+    host.with_legacy_state()?;
+    let original = fs::read(host.state())?;
+    let other = host.root.join("other-uploads");
+    fs::create_dir(&other)?;
+    let (output, report) = host.run(&[
+        "--apply",
+        "--record-only",
+        "--preserve-archive-dirs",
+        "--archive-dir",
+        other.to_str().ok_or("fixture path must be UTF-8")?,
+    ])?;
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert_eq!(
+        report["error"],
+        "Existing archive directories differ; review state before changing them",
+    );
+    assert_eq!(fs::read(host.state())?, original);
+    assert!(!host.root.join("deletions").exists());
+    Ok(())
+}
+
+#[test]
+fn release_digest_is_removed_before_local_tags_and_foreign_digests_are_preserved() -> TestResult {
+    let host = Host::new()?;
+    host.with_legacy_state()?;
+    host.images(&[
+        ('a', "garmin-ai", "current"),
+        ('b', "garmin-ai", "rollback"),
+        ('c', "garmin-ai", "old"),
+        ('e', "garmin-ai", "shared"),
+    ])?;
+    let repository = "registry.synthetic/owner/garmin-ai";
+    let release = format!("{repository}@{}", image('a'));
+    host.release_reference('1', &release)?;
+    host.release_reference('2', &release)?;
+    let obsolete = format!("{repository}@{}", image('c'));
+    host.references(
+        'c',
+        &["garmin-ai:old".into(), obsolete.clone()],
+        &[obsolete.clone(), format!("garmin-ai@{}", image('c'))],
+    )?;
+    host.references(
+        'e',
+        &["garmin-ai:shared".into()],
+        &[format!("elsewhere.synthetic/garmin-ai@{}", image('e'))],
+    )?;
+
+    let (output, report) = host.run(&["--apply"])?;
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["images"], json!([[obsolete, "garmin-ai:old"]]));
+    assert_eq!(
+        fs::read_to_string(host.root.join("deletions"))?,
+        format!(
+            "container rm {}\nimage rm --no-prune {obsolete} garmin-ai:old\n",
+            id('3')
+        ),
+    );
+    Ok(())
+}
+
+#[test]
+fn containers_with_different_release_references_keep_registry_images() -> TestResult {
+    let host = Host::new()?;
+    host.with_legacy_state()?;
+    let repository = "registry.synthetic/owner/garmin-ai";
+    host.release_reference('1', &format!("{repository}@{}", image('a')))?;
+    host.release_reference('2', "garmin-ai:current")?;
+    host.references(
+        'c',
+        &["garmin-ai:old".into(), "garmin-ai:old-alias".into()],
+        &[format!("{repository}@{}", image('c'))],
+    )?;
+    let (output, report) = host.run(&["--apply"])?;
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["images"], json!([]));
     assert!(!host.root.join("deletions").exists());
     Ok(())
 }

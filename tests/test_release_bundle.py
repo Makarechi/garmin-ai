@@ -88,8 +88,8 @@ def test_bundled_markdown_links_resolve_within_bundle():
             assert resolved in included, f"{name} links to missing {resolved}"
 
 
-@pytest.mark.parametrize("runtime", ["python", "rust"])
-def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, runtime):
+@pytest.mark.parametrize(("runtime", "gcp"), [("python", False), ("rust", False), ("rust", True)])
+def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, runtime, gcp):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose is unavailable")
     archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
@@ -102,6 +102,7 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, r
         "GA_CONTAINER_DATABASE_URL=postgresql+psycopg://garmin:test-only-password@db:5432/garmin_ai\n"
         "GA_API_KEY=" + "x" * 40 + "\n"
     )
+    override = ["-f", "compose.gcp.yml"] if gcp else []
     result = subprocess.run(
         [
             "docker",
@@ -112,6 +113,7 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, r
             "release.env",
             "-f",
             "compose.release.yml",
+            *override,
             "config",
             "--format",
             "json",
@@ -163,6 +165,47 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, r
             )
             assert state["source"] == str(root / ".state")
             assert state["bind"]["create_host_path"] is False
+    if gcp:
+        assert "auth-gateway" not in services
+        assert services["db"]["mem_limit"] == str(320 * 1024**2)
+        assert services["db"]["environment"]["NO_TS_TUNE"] == "true"
+        for service in services.values():
+            assert service["logging"]["options"] == {"max-file": "2", "max-size": "5m"}
+        assert os.access(root / "deploy/gcp/bootstrap.sh", os.X_OK)
+        assert os.access(root / "deploy/gcp/install-native-cleanup.sh", os.X_OK)
+        with (root / ".env").open("a") as settings:
+            settings.write(
+                "COMPOSE_PROFILES=garmin-web-auth\nGA_GARMIN_AUTH_HOST=synthetic.example\n"
+            )
+        gateway = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                ".env",
+                "--env-file",
+                "release.env",
+                "-f",
+                "compose.release.yml",
+                *override,
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        enabled = json.loads(gateway.stdout)["services"]["auth-gateway"]
+        assert enabled["environment"]["GA_GARMIN_AUTH_HOST"] == "synthetic.example"
+        assert enabled["depends_on"]["api"]["condition"] == "service_healthy"
+        assert [port["target"] for port in enabled["ports"]] == [80, 443]
+        caddyfile = next(
+            volume for volume in enabled["volumes"] if volume["target"] == "/etc/caddy/Caddyfile"
+        )
+        assert caddyfile["read_only"] is True
+        assert Path(caddyfile["source"]).is_file()
 
 
 def test_update_mounts_preserve_old_storage_paths_without_exposing_secrets(tmp_path):
