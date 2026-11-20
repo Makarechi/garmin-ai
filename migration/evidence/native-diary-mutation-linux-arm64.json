@@ -1,0 +1,96 @@
+{
+  "scope": "PAR-10",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_operation_undo.py": 5,
+      "tests/test_event_batches.py": 8,
+      "tests/test_operations_mcp.py": 147,
+      "tests/test_universal_characterization.py": 3
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "base_commit": "f92ac79efb0db2c8e7b1ecdcc6fe1810d6375faf",
+    "diary_http_source_sha256": "1ad213adee8e831d669e30acbc4890bd93ff3b6e8ecfb49187ea0a6df42460dd",
+    "candidate_app_binary_sha256": "5b94144f69ac0c0db22ed4d4789b2541bd3dd3f577381469cb07c37d085d94eb",
+    "mcp_reference_app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_diary_http.py",
+      "result": "passed",
+      "trace_sha256": "b6d5d22a17ad2e4654764101aead7014f64d9d64d9ce44bb1525c5e581f27039"
+    },
+    {
+      "comparison": "migration/check_diary_export_http.py",
+      "result": "passed",
+      "trace_sha256": "065346f8ac11a57ac4777d501bf82565900b3a98c9f2eddb7e5fa4e3ca52eeff"
+    },
+    {
+      "comparison": "migration/check_universal_data_contracts.py",
+      "result": "passed",
+      "trace_sha256": "f9a403d89e031e9054d562e17fe115e5ca4491fe70f7914ae0af544fd2b90061"
+    },
+    {
+      "comparison": "migration/check_mcp_diary_create.py",
+      "result": "passed",
+      "trace_sha256": "22ec7e0b263ec8ffa4025229d420de980c842d269b9d861df3f2e86cde936592"
+    },
+    {
+      "comparison": "migration/check_mcp_diary_update.py",
+      "result": "passed",
+      "trace_sha256": "90f5d0bc75330d9edfcd7c560f14b537e2c324a898cea46731092ff020b5925d"
+    },
+    {
+      "comparison": "migration/check_mcp_diary_delete.py",
+      "result": "passed",
+      "trace_sha256": "479df0fc680944f8dd9c1b23bcb71aa079b0b94ed5c1c821c79953f35db0334a"
+    },
+    {
+      "comparison": "migration/check_mcp_custom_diary.py",
+      "result": "passed",
+      "trace_sha256": "72cab3d4f1bbd541f01abd56f203031882473b39e87d3fc22fe7cfd32f069a92"
+    },
+    {
+      "comparison": "migration/check_diary_undo.py",
+      "result": "passed",
+      "trace_sha256": "052eac8bc2bedc31f4766d35de842c6923073af324fd3b30629c69dca3876b91"
+    },
+    {
+      "comparison": "crates/ga-db/tests/agent_diary_batch.rs",
+      "result": "passed",
+      "trace_sha256": "e573e0c192d766ca0a84600bdbf9e0c7e41e81be597b2b7c82381b3ad26345ff"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_diary_commit.rs",
+      "result": "passed",
+      "trace_sha256": "1ee4f359d12d645409d7f74f2f1c79ee0bd95c144638c2a2aea23ef0bb5e9e0e"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_diary_commands.rs::diary_commands_keep_order_and_undo_a_group_once",
+      "result": "passed",
+      "trace_sha256": "597470ef7ef9d9e32d709198a4063e5ff3550c29eb76b06120b44eb4d4214024"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_diary_commands.rs::diary_commands_preserve_every_row_when_a_group_has_changed",
+      "result": "passed",
+      "trace_sha256": "5d755c90a63e89c6333b9b48bbb8c8cddb1986329c2cea510521f6f3c291672b"
+    }
+  ],
+  "concurrent_http": {
+    "requests": 10,
+    "canonical_events": 1,
+    "creation_audit_entries": 1,
+    "native_retry_after_seconds": 1,
+    "baseline_waits_for_held_write_lock": true,
+    "prior_native_missing_retry_header_trace_sha256": "645a29f3e271304b7cb136cfe97b2f2c8e2dde775941380a370e7e41e630e7c7"
+  },
+  "release_scope": [
+    "Synthetic diary mutations through scoped HTTP and opt-in MCP, grouped undo, and native Telegram command ingress.",
+    "The documented native retryable response while a write is busy needs a release decision."
+  ]
+}

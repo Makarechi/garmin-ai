@@ -581,7 +581,10 @@
       "rust_tests": [
         "migration/check_diary_undo.py",
         "migration/check_agent_diary_batch.py",
-        "crates/ga-app/tests/telegram_diary_commit.rs"
+        "crates/ga-app/tests/telegram_diary_commit.rs",
+        "crates/ga-app/tests/telegram_diary_commands.rs",
+        "migration/check_diary_http.py",
+        "migration/evidence/native-diary-mutation-linux-arm64.json"
       ],
       "data_contracts": [
         "Idempotency, optimistic revisions, grouped undo, soft deletion and atomic changes."
@@ -591,10 +594,10 @@
       ],
       "resource_scenario": "Concurrent retries and grouped undo",
       "status": "implemented",
-      "verification": "db",
+      "verification": "e2e_synthetic",
       "owner_task": "R17",
       "known_limits": [
-        "Stored revisions, undo, and batched audit have synthetic database evidence. Full HTTP and channel mutation flows remain pending."
+        "Synthetic HTTP, MCP and Telegram mutations matched the data, revisions and audit. The difference in HTTP responses during write contention still needs a release decision."
       ],
       "approved_deviations": []
     },

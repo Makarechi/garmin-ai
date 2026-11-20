@@ -128,11 +128,23 @@ def capture(engine):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("output", nargs="?", type=Path, help="Write the frozen Python outcomes.")
+    parser.add_argument(
+        "--prepare-native",
+        choices=("ordered", "conflict"),
+        help="Seed a fresh test database for one native case using the same Python fixtures.",
+    )
     args = parser.parse_args()
+    if (args.output is None) == (args.prepare_native is None):
+        parser.error("choose an output path or --prepare-native")
     engine = isolated_engine()
     try:
-        args.output.write_text(json.dumps(capture(engine), ensure_ascii=False))
+        if args.prepare_native is None:
+            args.output.write_text(json.dumps(capture(engine), ensure_ascii=False))
+        else:
+            seed(engine)
+            if args.prepare_native == "conflict":
+                seed_conflict(engine)
     finally:
         engine.dispose()
 

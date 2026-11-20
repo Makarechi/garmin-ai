@@ -31,3 +31,11 @@ change has a documented decision.
   is reproducible with [the native setup comparison](check_native_setup.py).
   This affects failed installation attempts only. The existing data and settings
   can be used when reverting to Python. Approval is pending for PAR-01.
+- During concurrent diary writes, the pinned Python HTTP application waits
+  for the shared write lock. Native HTTP returns a retryable `503` with
+  `Retry-After: 1`. Retrying the same request with the same idempotency key
+  returns the canonical record without duplicating the event or audit.
+  [The paired HTTP fixture](check_diary_http.py) holds the lock in a
+  disposable database and compares both clients, then verifies recovery.
+  The database and audit remain readable when reverting to Python. Approval
+  is pending for PAR-10.
