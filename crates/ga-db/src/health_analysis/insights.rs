@@ -106,3 +106,73 @@ fn parse_cursor(text: &str) -> Result<Cursor, HealthAnalysisError> {
 fn storage_error(_: std::io::Error) -> HealthAnalysisError {
     HealthAnalysisError::Database
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ga_domain::timestamp::StoredInstant;
+    use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+    use uuid::Uuid;
+
+    use super::{HealthAnalysisError, parse_cursor};
+
+    #[test]
+    fn preserves_the_instant_and_identifier_across_time_offsets() -> Result<(), Box<dyn Error>> {
+        let anchor: StoredInstant = "2026-10-25T01:30:00Z".parse()?;
+        for minutes in [-720, -450, -330, -60, 0, 60, 120, 345, 765, 840] {
+            let offset = UtcOffset::from_whole_seconds(minutes * 60)?;
+            for micros in [0, 1, 1005, 123_456, 999_999] {
+                let instant = OffsetDateTime::from(anchor).replace_microsecond(micros)?;
+                let timestamp = instant.to_offset(offset).format(&Rfc3339)?;
+                let id = Uuid::from_u128(u128::from(micros) << 64 | 0x1234_5678_9abc_def0);
+                for identifier in [
+                    id.to_string(),
+                    id.simple().to_string(),
+                    id.braced().to_string(),
+                    id.urn().to_string(),
+                ] {
+                    let cursor = parse_cursor(&format!("{timestamp}|{identifier}"))?;
+                    assert_eq!(cursor.before, Some((instant, id)));
+                    assert!(!cursor.empty);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_broken_positions_and_bounds_out_of_range_instants() -> Result<(), Box<dyn Error>> {
+        let id = Uuid::from_u128(17);
+        let timestamp = "2026-10-25T01:30:00.000001Z";
+        for input in [
+            format!("{timestamp}¦{id}"),
+            format!("{timestamp}||{id}"),
+            format!("{timestamp}|{id}|"),
+            format!("{timestamp}|{id}é"),
+            format!("2026-02-29T00:00:00Z|{id}"),
+            format!("2026-10-25T24:00:01Z|{id}"),
+            format!("{timestamp}|{}", "中".repeat(201)),
+        ] {
+            assert!(
+                matches!(
+                    parse_cursor(&input),
+                    Err(HealthAnalysisError::InsightArguments)
+                ),
+                "{input:?}"
+            );
+        }
+        let midnight: StoredInstant = "2026-10-26T00:00:00Z".parse()?;
+        let rollover = parse_cursor(&format!("2026-10-25T24:00:00Z|{id}"))?;
+        assert_eq!(rollover.before, Some((midnight.into(), id)));
+        for (timestamp, empty) in [
+            ("0001-01-01T00:00:00+01:00", true),
+            ("9999-12-31T23:59:59-01:00", false),
+        ] {
+            let cursor = parse_cursor(&format!("{timestamp}|{id}"))?;
+            assert!(cursor.before.is_none());
+            assert_eq!(cursor.empty, empty);
+        }
+        Ok(())
+    }
+}
