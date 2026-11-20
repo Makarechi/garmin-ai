@@ -64,7 +64,16 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
         assert!(reader.context_current().await);
         assert_eq!(reader.categories(), ModelCategories::DIARY);
         let menu = reader.offered_tools();
-        assert_eq!(menu.len(), 1);
+        let names: Vec<_> = menu.iter().map(|tool| tool.name).collect();
+        assert_eq!(
+            names,
+            [
+                "events",
+                "event_definitions",
+                "resource_catalog",
+                "generic_analysis"
+            ]
+        );
         assert_eq!(*menu[0].description, fixture["menu"]);
         let result = reader
             .read("events", args)
@@ -137,11 +146,17 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
     )
     .execute(&inspect)
     .await?;
-    sqlx::query("UPDATE channel_bindings SET external_id='999999' WHERE channel_instance_id='telegram:allowed'")
-        .execute(&inspect).await?;
+    sqlx::query(
+        "UPDATE channel_bindings SET external_id='999999' WHERE channel_instance_id='allowed'",
+    )
+    .execute(&inspect)
+    .await?;
     assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
-    sqlx::query("UPDATE channel_bindings SET external_id='900001' WHERE channel_instance_id='telegram:allowed'")
-        .execute(&inspect).await?;
+    sqlx::query(
+        "UPDATE channel_bindings SET external_id='900001' WHERE channel_instance_id='allowed'",
+    )
+    .execute(&inspect)
+    .await?;
     assert!(reader.context_current().await);
 
     db.forget_conversation_memory(ConversationBinding {
@@ -198,7 +213,7 @@ async fn verify_native_ingress(
 ) -> Result<(), Box<dyn Error>> {
     let channel = TelegramBinding {
         owner_id,
-        instance_id: "telegram:allowed",
+        instance_id: "allowed",
         external_owner_id: 900001,
     };
     let arrival = json!({

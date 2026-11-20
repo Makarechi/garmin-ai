@@ -660,6 +660,7 @@ fn result_hash(value: &Value) -> Option<String> {
 
 pub struct DailyAnalysisAccess {
     pub migraine: bool,
+    pub sleep: bool,
     pub wellbeing: bool,
     pub running: bool,
     pub summaries: bool,
@@ -691,27 +692,21 @@ impl Database {
             if !health_allowed(&mut txn, context).await? {
                 return Ok(None);
             }
-            let migraine = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?
-                && model_packs_allowed(&mut txn, context.binding().owner_id, &["migraine"]).await?;
-            let wellbeing =
-                model_packs_allowed(&mut txn, context.binding().owner_id, &["wellbeing"]).await?;
-            let training =
-                model_packs_allowed(&mut txn, context.binding().owner_id, &["training"]).await?;
-            let running = wellbeing
-                && training
-                && model_packs_allowed(&mut txn, context.binding().owner_id, &["sleep"]).await?;
-            let summaries =
-                model_packs_allowed(&mut txn, context.binding().owner_id, MODEL_HEALTH_PACKS)
-                    .await?;
-            let coffee_sleep = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?
-                && model_packs_allowed(&mut txn, context.binding().owner_id, COFFEE_MODEL_PACKS)
-                    .await?;
-            let insights = migraine
-                && wellbeing
-                && model_packs_allowed(&mut txn, context.binding().owner_id, &["sleep"]).await?;
+            let owner = context.binding().owner_id;
+            let diary = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?;
+            let migraine = diary && model_packs_allowed(&mut txn, owner, &["migraine"]).await?;
+            let sleep = model_packs_allowed(&mut txn, owner, &["sleep"]).await?;
+            let wellbeing = model_packs_allowed(&mut txn, owner, &["wellbeing"]).await?;
+            let training = model_packs_allowed(&mut txn, owner, &["training"]).await?;
+            let running = wellbeing && training && sleep;
+            let summaries = model_packs_allowed(&mut txn, owner, MODEL_HEALTH_PACKS).await?;
+            let coffee_sleep =
+                diary && model_packs_allowed(&mut txn, owner, COFFEE_MODEL_PACKS).await?;
+            let insights = migraine && wellbeing && sleep;
             txn.commit().await?;
             Ok(Some(DailyAnalysisAccess {
                 migraine,
+                sleep: diary && sleep,
                 wellbeing,
                 running,
                 summaries,

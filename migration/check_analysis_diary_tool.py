@@ -23,13 +23,14 @@ def record_questions(engine):
         session.execute(
             text("""
             UPDATE app_state SET value=value || '{
-              "channel":{"channel":"telegram","instance_id":"telegram:allowed"},
-              "fallback_channels":[{"channel":"telegram","instance_id":"telegram:schema"}]
+              "channel":{"channel":"telegram","instance_id":"allowed"},
+              "fallback_channels":[{"channel":"telegram","instance_id":"schema"}]
             }'::jsonb WHERE key='preferences:onboarding'
             """)
         )
-        for index, suffix in enumerate(("allowed", "schema")):
-            channel = f"telegram:{suffix}"
+        # Bindings and inbound rows store the instance ID. Model consent uses
+        # the qualified destination, such as telegram:allowed.
+        for index, channel in enumerate(("allowed", "schema")):
             chat = str(900001 + index)
             conversation = UUID(int=100 + index)
             session.add(
