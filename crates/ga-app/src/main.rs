@@ -10,6 +10,7 @@ mod http;
 mod lifecycle;
 mod mcp_stdio;
 mod migrate;
+mod projection_audit;
 mod replay_worker;
 mod retention;
 mod setup;
@@ -89,6 +90,11 @@ enum Command {
         answer_cursor: Option<String>,
         #[arg(long)]
         neutral_cursor: Option<String>,
+    },
+    /// Preview custom metric projection drift without changing facts
+    ProjectionAudit {
+        #[arg(long, default_value_t = 500, allow_negative_numbers = true)]
+        limit: i64,
     },
     /// Inspect or upgrade the local PostgreSQL schema
     Migrate {
@@ -256,6 +262,12 @@ fn main() -> ExitCode {
                 neutral_cursor: neutral_cursor.as_deref(),
             };
             if let Err(error) = retention::run(selection) {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::ProjectionAudit { limit }) => {
+            if let Err(error) = projection_audit::run(limit) {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }

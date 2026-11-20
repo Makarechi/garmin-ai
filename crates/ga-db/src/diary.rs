@@ -23,6 +23,7 @@ pub use definition_discovery::{DefinitionPage, EVENT_DEFINITIONS, ModelDefinitio
 
 mod metrics;
 mod proactive_answers;
+pub mod projection_audit;
 pub(crate) use proactive_answers::caffeine_answer_at;
 pub(crate) use proactive_answers::reconcile as reconcile_answers;
 mod reads;
