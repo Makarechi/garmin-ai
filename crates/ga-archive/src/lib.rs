@@ -1,4 +1,5 @@
 pub mod backup_space;
+pub mod coverage_report;
 pub mod json_spool;
 mod key;
 pub mod scheduled_backup;

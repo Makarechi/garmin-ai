@@ -1,0 +1,10 @@
+version: 1
+name: garmin-legacy-coverage
+slug: garmin-legacy-coverage
+protocol: http
+interceptRequests: true
+port: 4514
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

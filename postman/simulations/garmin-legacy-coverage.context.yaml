@@ -1,0 +1,23 @@
+purpose:
+  stands_in_for: Legacy Garmin profile, read-only coverage routes and original activity download.
+  unblocks: Local checks of coverage requests and synthetic authorization and rate-limit outcomes.
+assumptions:
+  - id: saved-legacy-profile
+    status: unknown
+    claim: An authorized account can use a stored legacy Garmin session and inspect the supported read-only routes.
+    reason: Pinned SDK requests define the modeled paths. The fixture uses an invented profile and session.
+    verification: The local stand-in matched all 29 pinned read requests. Live account and device coverage still requires an authorized account.
+    source: migration/contracts/garmin-legacy-requests.json
+    updated_at: '2026-11-20'
+  - id: local-coverage-report
+    status: supported
+    claim: The probe preserved the modeled archives and its checkpoint after an injected rate limit.
+    reason: The controlled response permits checking both preserved data and subsequent calls against the Python reference.
+    verification: Postman recorded 31 successful local responses and one intentional 429. A separate Linux loopback run matched all archived bytes and recorded the incomplete checkpoint with no further upstream request. The database fixture also stopped after session loss.
+    source: migration/check_garmin_probe.py
+    updated_at: '2026-11-20'
+fingerprints:
+  - id: local-coverage
+    date: '2026-11-20'
+    commit: 9a850066b876559133135508a832c73e13d81ec6 plus native coverage changes
+    cli: '1.76.0'

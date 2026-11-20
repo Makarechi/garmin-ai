@@ -11,7 +11,10 @@ use reqwest::{RequestBuilder, Url};
 use crate::GarminError;
 
 pub use login::{LegacyLogin, LoginProgress, MfaChallenge};
-pub use query::{ActivityEndpoint, DailyEndpoint, LegacyRead};
+pub use query::{
+    ActivityEndpoint, DailyEndpoint, LEGACY_CAPABILITIES, LegacyInventoryEntry, LegacyRead,
+    LegacyResource,
+};
 pub use reader::LegacyReader;
 pub use session::{LegacySession, RestorePolicy};
 

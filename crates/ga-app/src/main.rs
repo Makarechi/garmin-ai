@@ -4,6 +4,7 @@ mod backup_space;
 mod configuration;
 mod extensions;
 mod file_import;
+mod garmin_probe;
 mod garmin_setup;
 mod healthcheck;
 mod http;
@@ -56,6 +57,15 @@ enum Command {
     EnrollAccount {
         #[arg(long, required = true)]
         confirm_existing_owner: bool,
+    },
+    /// List supported read-only Garmin methods without signing in
+    Inventory,
+    /// Archive up to 31 days to inspect Garmin coverage
+    Probe {
+        #[arg(long, value_parser = garmin_probe::parse_date)]
+        start: Option<time::Date>,
+        #[arg(long, value_parser = garmin_probe::parse_date)]
+        end: Option<time::Date>,
     },
     /// Pair the first Telegram owner using a one-time code
     PairTelegram {
@@ -214,6 +224,21 @@ fn main() -> ExitCode {
             if let Err(error) = garmin_setup::enroll() {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Inventory) => {
+            for entry in ga_garmin::legacy::LEGACY_CAPABILITIES {
+                println!("{}\t{}\t{}", entry.name, entry.method, entry.scope());
+            }
+        }
+        Some(Command::Probe { start, end }) => {
+            if let Err(error) = garmin_probe::run(start, end) {
+                eprintln!("{error}");
+                return if error.is::<garmin_probe::InvalidRange>() {
+                    ExitCode::from(2)
+                } else {
+                    ExitCode::FAILURE
+                };
             }
         }
         Some(Command::PairTelegram {

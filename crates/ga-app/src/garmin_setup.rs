@@ -50,7 +50,7 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
     validate_backup_layout(&data, &token_dir, &locks, &backups)?;
     let access = match mode {
         LocalGarminSetupMode::Login { .. } => StorageAccess::Recovery,
-        LocalGarminSetupMode::Enroll => StorageAccess::Active,
+        LocalGarminSetupMode::Enroll | LocalGarminSetupMode::Probe => StorageAccess::Active,
     };
     let _files = StorageFilesGuard::acquire(&locks, access)?;
     let retained = Archive::has_retained_entries(&data.join("raw"))?;
@@ -69,13 +69,13 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
             } if retained => {
                 return Err("Confirm ownership of retained raw storage locally".into());
             }
-            LocalGarminSetupMode::Login { .. } => None,
+            LocalGarminSetupMode::Login { .. } | LocalGarminSetupMode::Probe => None,
         },
     };
     let client = TransportConfig::default();
     let candidate = match mode {
         LocalGarminSetupMode::Login { .. } => authenticate(&mut Terminal::open()?, client).await?,
-        LocalGarminSetupMode::Enroll => {
+        LocalGarminSetupMode::Enroll | LocalGarminSetupMode::Probe => {
             let store = GarminTokenFile::open_existing(&token_dir)?
                 .ok_or(GarminError::AuthenticationRequired)?;
             LegacySession::restore_for_local_enrollment(&store, client).await?
@@ -89,7 +89,7 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
             .save_for_owner(&store, &fingerprint)
             .map_err(|_| GarminSetupError::TokenPublication)
     };
-    if let Some(setup) = setup {
+    if let Some(mut setup) = setup {
         setup.publish(&fingerprint, retained, publish).await?;
     } else {
         publish()?;

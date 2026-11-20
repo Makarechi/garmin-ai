@@ -1,0 +1,8 @@
+simulation: garmin-legacy-coverage
+routing: path
+mocks:
+  - name: garmin-legacy-coverage
+    routeKey: garmin-legacy-coverage
+    origin:
+      - connectapi.garmin.com
+    path: postman/mocks/garmin-legacy-coverage
