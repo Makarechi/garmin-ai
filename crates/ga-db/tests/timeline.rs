@@ -3,7 +3,7 @@ use std::{env, error::Error, fs, future::ready, io, str::FromStr};
 use ga_db::{
     Database,
     conversation_memory::{AnalysisSubject, ConversationBinding, MemoryFence},
-    diary::TimelineReadFence,
+    diary::{DefinitionPage, DefinitionReadFence, EVENT_DEFINITIONS, TimelineReadFence},
     health_analysis::{AnalysisTimelineQuery, HealthAnalysisError, TimelineError},
     share_policy::{DestinationKind, ModelChannelSharing, ModelConversation, ShareDestination},
 };
@@ -135,6 +135,7 @@ async fn check_timeline_before_model_delivery(
             daily: &[],
             generic: &[],
             timeline: &timeline,
+            definitions: &[],
         }),
     };
     let categories = ModelCategories::HEALTH_AND_DIARY;
@@ -178,6 +179,42 @@ async fn check_timeline_before_model_delivery(
         .execute(pool)
         .await?;
     assert_eq!(send().await?, Some(()));
+    let arguments = json!({"definition_key": "system.note"});
+    let page = DefinitionPage::parse(arguments.as_object().ok_or("Expected object")?)
+        .ok_or("Expected definition query")?;
+    let saved = database
+        .read_analysis_definitions(subject, model, page)
+        .await?;
+    assert!(saved.schema_versions.is_empty());
+    assert_eq!(saved.value["rows"][0]["key"], "system.note");
+    let definitions = [DefinitionReadFence::from_read(&json!({
+        "tool": EVENT_DEFINITIONS, "arguments": arguments, "result": saved.value,
+    }))
+    .ok_or("Expected saved definition evidence")?];
+    let definition_sharing = ModelChannelSharing {
+        conversation: Some(ModelConversation::Analysis {
+            subject,
+            daily: &[],
+            generic: &[],
+            timeline: &[],
+            definitions: &definitions,
+        }),
+        ..channel
+    };
+    let send_definition = || {
+        database.with_model_delivery(model, categories, &[], Some(definition_sharing), || {
+            ready(())
+        })
+    };
+    assert_eq!(send_definition().await?, Some(()));
+    sqlx::query("UPDATE event_definitions SET revision=revision+1 WHERE key='system.note'")
+        .execute(pool)
+        .await?;
+    assert_eq!(
+        send_definition().await?,
+        None,
+        "Changed definition must block the next model request"
+    );
     sqlx::query(
         "INSERT INTO source_payloads
          (id,source,endpoint,source_key,payload_hash,archive_key,fetched_at,parser_version,status,payload)

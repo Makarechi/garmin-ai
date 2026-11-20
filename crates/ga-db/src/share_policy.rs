@@ -20,7 +20,7 @@ use crate::{
         MemoryError, MemoryFence, analysis_channel_in, current_conversation_channel,
         current_web_conversation,
     },
-    diary::{DiaryReadError, TimelineReadFence},
+    diary::{DefinitionReadFence, DiaryReadError, TimelineReadFence},
     health_analysis::{
         DailyAnalysisEvidence, HealthAnalysisError, TimelineError,
         generic::{GenericAnalysisError, GenericAnalysisEvidence},
@@ -129,6 +129,7 @@ pub enum ModelConversation<'a> {
         daily: &'a [DailyAnalysisEvidence],
         generic: &'a [GenericAnalysisEvidence],
         timeline: &'a [TimelineReadFence],
+        definitions: &'a [DefinitionReadFence],
     },
 }
 
@@ -313,6 +314,7 @@ impl Database {
                         daily,
                         generic,
                         timeline,
+                        definitions,
                     } => {
                         let current =
                             analysis_channel_in(&mut txn, subject)
@@ -368,6 +370,23 @@ impl Database {
                                     | TimelineError::Health(HealthAnalysisError::Database)
                                     | TimelineError::Diary(DiaryReadError::Database),
                                 ) => return Err(SharePolicyError::Database),
+                                _ => return Ok(None),
+                            }
+                        }
+                        for read in definitions {
+                            match read
+                                .current(
+                                    &mut txn,
+                                    subject.binding().owner_id,
+                                    destination,
+                                    channel.destination,
+                                )
+                                .await
+                            {
+                                Ok(true) => {}
+                                Err(DiaryReadError::Database) => {
+                                    return Err(SharePolicyError::Database);
+                                }
                                 _ => return Ok(None),
                             }
                         }

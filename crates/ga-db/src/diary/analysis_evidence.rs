@@ -48,7 +48,7 @@ enum AnalysisReadFence {
 }
 
 #[derive(Deserialize, Serialize)]
-struct DefinitionReadFence {
+pub struct DefinitionReadFence {
     definition_arguments: Map<String, Value>,
     definition_result_hash: String,
 }
@@ -98,7 +98,7 @@ impl DiaryAnalysisFence {
                         )
                         .map(AnalysisReadFence::Generic)
                     } else if read["tool"] == EVENT_DEFINITIONS {
-                        DefinitionReadFence::from_evidence(read).map(AnalysisReadFence::Definitions)
+                        DefinitionReadFence::from_read(read).map(AnalysisReadFence::Definitions)
                     } else if read["tool"] == TIMELINE {
                         TimelineReadFence::from_read(read).map(AnalysisReadFence::Timeline)
                     } else if read["tool"]
@@ -212,30 +212,17 @@ impl DiaryAnalysisFence {
             let read = match read {
                 AnalysisReadFence::Diary(read) => read,
                 AnalysisReadFence::Definitions(read) => {
-                    let Some(input) = DefinitionPage::parse(&read.definition_arguments) else {
-                        return Ok(None);
-                    };
-                    let result = match analysis_definitions_in(
-                        txn,
-                        context.binding().owner_id,
-                        model,
-                        channel,
-                        input,
-                    )
-                    .await
+                    match read
+                        .current(txn, context.binding().owner_id, model, channel)
+                        .await
                     {
-                        Ok(result) => result,
+                        Ok(true) => {}
                         Err(DiaryReadError::Database) => {
                             return Err(sqlx::Error::Protocol(
                                 "Could not validate definition evidence".into(),
                             ));
                         }
-                        Err(_) => return Ok(None),
-                    };
-                    if evidence_digest(&result.value).as_deref()
-                        != Some(&read.definition_result_hash)
-                    {
-                        return Ok(None);
+                        Ok(false) | Err(_) => return Ok(None),
                     }
                     continue;
                 }
@@ -308,17 +295,34 @@ impl DiaryAnalysisFence {
 }
 
 impl DefinitionReadFence {
-    fn from_evidence(evidence: &Value) -> Option<Self> {
+    pub fn from_read(evidence: &Value) -> Option<Self> {
         let arguments = evidence["arguments"].as_object()?;
         DefinitionPage::parse(arguments)?;
         let result = &evidence["result"];
-        if !result.is_object() || result.get("error").is_some() {
+        if evidence["tool"] != EVENT_DEFINITIONS
+            || !result.is_object()
+            || result.get("error").is_some()
+        {
             return None;
         }
         Some(Self {
             definition_arguments: arguments.clone(),
             definition_result_hash: evidence_digest(result)?,
         })
+    }
+
+    pub(crate) async fn current(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        owner: Uuid,
+        model: ShareDestination<'_>,
+        channel: ShareDestination<'_>,
+    ) -> Result<bool, DiaryReadError> {
+        let Some(input) = DefinitionPage::parse(&self.definition_arguments) else {
+            return Ok(false);
+        };
+        let result = analysis_definitions_in(txn, owner, model, channel, input).await?;
+        Ok(evidence_digest(&result.value).as_deref() == Some(&self.definition_result_hash))
     }
 
     fn specification(&self) -> Value {

@@ -11,7 +11,7 @@ mod agent_batch;
 pub(crate) mod agent_correction;
 pub(crate) mod analysis_evidence;
 pub use agent_batch::CreateAgentLogBatch;
-pub use analysis_evidence::TimelineReadFence;
+pub use analysis_evidence::{DefinitionReadFence, TimelineReadFence};
 
 pub mod custom_entries;
 pub mod custom_registry;
