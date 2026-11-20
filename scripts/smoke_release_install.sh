@@ -177,7 +177,20 @@ if [[ "$runtime" == rust ]]; then
             | grep -Fx 'garmin_ai|c54f8a72d130|true'
     fi
     for service in api worker; do
-        compose exec -T "$service" sh -ec 'test "$(id -u)" -ne 0 && ! command -v python && ! command -v python3'
+        compose exec -T "$service" sh -ec '
+            test "$(id -u)" -ne 0
+            test "$(cat /proc/1/comm)" = garmin-ai-rust
+            if command -v python >/dev/null || command -v python3 >/dev/null; then
+                echo "Unexpected Python executable in the native image." >&2
+                exit 1
+            fi
+            for command_file in /proc/[0-9]*/comm; do
+                command_name=$(cat "$command_file" 2>/dev/null) || continue
+                case "$command_name" in
+                    python*|pypy*) echo "Unexpected Python process in the native runtime." >&2; exit 1 ;;
+                esac
+            done
+        '
     done
     compose exec -T api sh -ec 'test -s /etc/ssl/certs/ca-certificates.crt && test -f /usr/share/zoneinfo/Europe/Bratislava'
     ./install.sh backup
@@ -210,6 +223,7 @@ Path(sys.argv[1]).write_text(
             "owner_onboarding_without_integrations_verified": True,
             "fictional_tracker_survived_restart": True,
             "fictional_tracker_entry_survived_preference_change": True,
+            "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
             "historical_upgrade_verified": sys.argv[7] == "true",
         },
