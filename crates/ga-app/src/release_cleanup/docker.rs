@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::env::{self, VarError};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -47,10 +49,24 @@ pub(crate) struct ImageRow {
 }
 
 pub(crate) async fn command(args: &[&str]) -> Result<String> {
+    let local_only = || Failure::message("Release cleanup requires a local Docker socket");
+    let endpoint = match env::var("DOCKER_HOST") {
+        Ok(endpoint) => endpoint,
+        Err(VarError::NotPresent) => "unix:///var/run/docker.sock".to_owned(),
+        Err(VarError::NotUnicode(_)) => return Err(local_only()),
+    };
+    if !endpoint
+        .strip_prefix("unix://")
+        .is_some_and(|path| Path::new(path).is_absolute())
+    {
+        return Err(local_only());
+    }
     let operation = args[..2].join(" ");
     let failure = || Failure(format!("Docker command failed: {operation}"));
     let mut child = Command::new("docker")
         .args(args)
+        .env("DOCKER_HOST", endpoint)
+        .env_remove("DOCKER_CONTEXT")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

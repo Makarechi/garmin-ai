@@ -15,6 +15,8 @@ type TestResult = Result<(), Box<dyn Error>>;
 const DOCKER: &str = r#"#!/bin/sh
 set -eu
 record=$CLEANUP_FIXTURE
+[ "$DOCKER_HOST" = unix:///var/run/docker.sock ]
+[ "${DOCKER_CONTEXT+x}" != x ]
 case "$1:$2" in
     container:ls)
         while read -r id; do
@@ -159,16 +161,22 @@ impl Host {
         Ok(())
     }
 
-    fn run(&self, args: &[&str]) -> Result<(Output, Value), Box<dyn Error>> {
-        let output = Command::new(env!("CARGO_BIN_EXE_garmin-ai-release-cleanup"))
+    fn invocation(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_garmin-ai-release-cleanup"));
+        command
             .env("PATH", format!("{}:/usr/bin:/bin", self.root.display()))
             .env("CLEANUP_FIXTURE", &self.root)
+            .env_remove("DOCKER_HOST")
+            .env("DOCKER_CONTEXT", "foreign-fixture")
             .args(["--state-dir"])
             .arg(self.root.join("state"))
             .args(["--lock-file"])
-            .arg(self.root.join("lock"))
-            .args(args)
-            .output()?;
+            .arg(self.root.join("lock"));
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Result<(Output, Value), Box<dyn Error>> {
+        let output = self.invocation().args(args).output()?;
         let report = serde_json::from_slice(&output.stdout)?;
         Ok((output, report))
     }
@@ -326,6 +334,25 @@ fn unrelated_alias_and_foreign_container_keep_images_and_migration() -> TestResu
     let (output, report) = host.run(&["--apply"])?;
     assert!(output.status.success(), "{report}");
     assert_eq!(report["images"], json!([]));
+    assert!(!host.root.join("deletions").exists());
+    Ok(())
+}
+
+#[test]
+fn remote_docker_endpoint_cannot_drive_local_retention() -> TestResult {
+    let host = Host::new()?;
+    host.with_legacy_state()?;
+    let output = host
+        .invocation()
+        .env("DOCKER_HOST", "ssh://synthetic.invalid")
+        .arg("--apply")
+        .output()?;
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert_eq!(
+        report["error"],
+        "Release cleanup requires a local Docker socket"
+    );
     assert!(!host.root.join("deletions").exists());
     Ok(())
 }
