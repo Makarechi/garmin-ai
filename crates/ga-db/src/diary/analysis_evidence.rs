@@ -13,7 +13,11 @@ use uuid::Uuid;
 use super::{DiaryEventRange, DiaryReadError, analysis_events_in};
 use crate::{
     conversation_memory::{AnalysisReadContext, AnalysisSubject, ConversationBinding, MemoryFence},
-    health_analysis::{DailyAnalysisEvidence, HealthAnalysisError, owner_timezone},
+    health_analysis::{
+        DailyAnalysisEvidence, HealthAnalysisError,
+        generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
+        owner_timezone,
+    },
     model_gate::onboarding::onboarding_allows_model,
     share_policy::{DestinationKind, ShareDestination},
 };
@@ -31,6 +35,7 @@ pub(crate) struct DiaryAnalysisFence {
 #[serde(untagged)]
 enum AnalysisReadFence {
     Daily(DailyAnalysisEvidence),
+    Generic(GenericAnalysisEvidence),
     Diary(DiaryReadFence),
 }
 
@@ -64,7 +69,13 @@ impl DiaryAnalysisFence {
             reads: evidence
                 .iter()
                 .map(|read| {
-                    if read["tool"]
+                    if read["tool"] == GENERIC_ANALYSIS {
+                        GenericAnalysisEvidence::from_read(
+                            read,
+                            read["generic_request_time"].as_str()?,
+                        )
+                        .map(AnalysisReadFence::Generic)
+                    } else if read["tool"]
                         .as_str()
                         .is_some_and(DailyAnalysisEvidence::is_daily_tool)
                     {
@@ -106,6 +117,7 @@ impl DiaryAnalysisFence {
             .map(|read| match read {
                 AnalysisReadFence::Diary(read) => read.specification(),
                 AnalysisReadFence::Daily(read) => read.specification(),
+                AnalysisReadFence::Generic(read) => read.specification(),
             })
             .collect()
     }
@@ -141,17 +153,40 @@ impl DiaryAnalysisFence {
         let Some(model) = ShareDestination::new(DestinationKind::Model, &self.model).ok() else {
             return Ok(None);
         };
-        if crate::conversation_memory::analysis_channel_in(txn, context)
+        let Some(channel) = crate::conversation_memory::analysis_channel_in(txn, context)
             .await
             .map_err(|_| sqlx::Error::Protocol("Could not validate analysis context".into()))?
-            .is_none()
-        {
+        else {
             return Ok(None);
-        }
+        };
+        let Ok(channel) = ShareDestination::new(DestinationKind::Channel, &channel) else {
+            return Ok(None);
+        };
         let mut versions = BTreeSet::new();
         for read in &self.reads {
             let read = match read {
                 AnalysisReadFence::Diary(read) => read,
+                AnalysisReadFence::Generic(read) => match read
+                    .current(
+                        txn,
+                        context.binding().owner_id,
+                        model,
+                        channel,
+                        ModelCategories::HEALTH_AND_DIARY,
+                    )
+                    .await
+                {
+                    Ok(Some(current)) => {
+                        versions.extend(current);
+                        continue;
+                    }
+                    Err(GenericAnalysisError::Database) => {
+                        return Err(sqlx::Error::Protocol(
+                            "Could not validate generic analysis evidence".into(),
+                        ));
+                    }
+                    _ => return Ok(None),
+                },
                 AnalysisReadFence::Daily(read) => match read.current(txn, context).await {
                     Ok(true) => continue,
                     Err(HealthAnalysisError::Database) => {

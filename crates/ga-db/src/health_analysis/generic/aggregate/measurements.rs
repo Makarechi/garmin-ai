@@ -148,7 +148,7 @@ impl MeasurementSnapshot {
     }
 }
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     pub(super) async fn aggregate_measurement_fallback(
         &mut self,
         contract: Uuid,

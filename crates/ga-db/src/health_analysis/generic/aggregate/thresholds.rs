@@ -56,7 +56,7 @@ fn eligible(row: &MeasurementSnapshot, contract: &Value, id: uuid::Uuid) -> bool
             .is_none_or(|maximum| row.value <= maximum)
 }
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     async fn threshold_snapshot(
         &mut self,
         spec: &AnalysisSpec,

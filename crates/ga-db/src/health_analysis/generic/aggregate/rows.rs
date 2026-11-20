@@ -81,7 +81,7 @@ impl AggregateRow {
     }
 }
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     pub(super) async fn aggregate_observations(
         &mut self,
         contract: &AggregateContract,

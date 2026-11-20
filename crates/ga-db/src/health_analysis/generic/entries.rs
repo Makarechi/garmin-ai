@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{GenericAnalysisError, GenericAnalysisReader};
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     /// Reconstruct each entry from its last known audit or first future preimage.
     pub async fn query_entries(
         mut self,

@@ -33,7 +33,7 @@ impl ModelCategories {
             .filter_map(move |(bit, name)| (self.0 & (1 << bit) != 0).then_some(name))
     }
 
-    fn covers(self, requested: Self) -> bool {
+    pub fn covers(self, requested: Self) -> bool {
         self.0 & requested.0 == requested.0
     }
 }

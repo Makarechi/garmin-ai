@@ -41,7 +41,7 @@ fn difference(first: &Value, second: &Value) -> Result<Value, GenericAnalysisErr
         ))
 }
 
-impl GenericAnalysisReader {
+impl GenericAnalysisReader<'_> {
     pub async fn compare_periods(
         mut self,
         spec: &AnalysisSpec,

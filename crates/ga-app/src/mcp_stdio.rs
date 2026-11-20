@@ -30,7 +30,6 @@ use crate::{
     configuration,
     http::tools::{
         GarminReadError, generic_error_class, generic_input, range_with_kind, read_garmin,
-        read_generic,
     },
 };
 
@@ -174,7 +173,8 @@ impl Mcp {
             .await
             .map_err(|error| generic_error_class(&error))?;
         let spec = generic_input(&args).map_err(|error| error.class_name())?;
-        let document = read_generic(reader, &spec)
+        let document = reader
+            .read(&spec)
             .await
             .map_err(|error| generic_error_class(&error))?;
         Ok(ToolResult::data(document, Some(permit)))

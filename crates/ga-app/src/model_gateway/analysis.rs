@@ -5,7 +5,10 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 
 use ga_db::{
     conversation_memory::AnalysisSubject,
-    health_analysis::{DATA_FRESHNESS, DailyAnalysisEvidence, SLEEP_ANALYSIS},
+    health_analysis::{
+        DATA_FRESHNESS, DailyAnalysisEvidence, SLEEP_ANALYSIS,
+        generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
+    },
     share_policy::{
         ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
     },
@@ -200,57 +203,64 @@ impl ModelGateway<'_> {
             job,
             destination,
         } = scope;
-        answer_with(question, budget, tools, |prompt, versions, daily| {
-            let policy = &policy;
-            async move {
-                let mut current_requirements = requirements.to_vec();
-                current_requirements.extend(versions.iter().copied().map(|version_id| {
-                    ShareRequirement {
-                        version_id,
-                        categories: &[ShareCategory::Facts],
+        answer_with(
+            question,
+            budget,
+            tools,
+            |prompt, versions, daily, generic| {
+                let policy = &policy;
+                async move {
+                    let mut current_requirements = requirements.to_vec();
+                    current_requirements.extend(versions.iter().copied().map(|version_id| {
+                        ShareRequirement {
+                            version_id,
+                            categories: &[ShareCategory::Facts],
+                        }
+                    }));
+                    let mut channel_versions = versions;
+                    if let Some(destination) = destination {
+                        channel_versions.extend(destination.tracker_versions);
                     }
-                }));
-                let mut channel_versions = versions;
-                if let Some(destination) = destination {
-                    channel_versions.extend(destination.tracker_versions);
+                    let channel_requirements: Vec<_> = channel_versions
+                        .iter()
+                        .map(|&version_id| ShareRequirement {
+                            version_id,
+                            categories: &[ShareCategory::Schema, ShareCategory::Facts],
+                        })
+                        .collect();
+                    let channel = destination.map(|destination| ModelChannelSharing {
+                        destination: destination.channel,
+                        requirements: &channel_requirements,
+                        conversation: Some(ModelConversation::Analysis {
+                            subject: destination.subject,
+                            daily: &daily,
+                            generic: &generic,
+                        }),
+                    });
+                    let returned = self
+                        .execute_with_context(
+                            ModelInput::Structured {
+                                contract: ApprovedModelSchema::AgentStep,
+                                instruction: PROMPT.trim(),
+                                prompt: &prompt,
+                                categories,
+                            },
+                            policy,
+                            ModelRequestScope {
+                                uses_voice_text: destination
+                                    .is_some_and(|scope| scope.uses_voice_text),
+                                requirements: &current_requirements,
+                                channel,
+                                job,
+                            },
+                            sender,
+                        )
+                        .await
+                        .map_err(AnalysisError::Model)?;
+                    Ok(returned.value)
                 }
-                let channel_requirements: Vec<_> = channel_versions
-                    .iter()
-                    .map(|&version_id| ShareRequirement {
-                        version_id,
-                        categories: &[ShareCategory::Schema, ShareCategory::Facts],
-                    })
-                    .collect();
-                let channel = destination.map(|destination| ModelChannelSharing {
-                    destination: destination.channel,
-                    requirements: &channel_requirements,
-                    conversation: Some(ModelConversation::Analysis {
-                        subject: destination.subject,
-                        daily: &daily,
-                    }),
-                });
-                let returned = self
-                    .execute_with_context(
-                        ModelInput::Structured {
-                            contract: ApprovedModelSchema::AgentStep,
-                            instruction: PROMPT.trim(),
-                            prompt: &prompt,
-                            categories,
-                        },
-                        policy,
-                        ModelRequestScope {
-                            uses_voice_text: destination.is_some_and(|scope| scope.uses_voice_text),
-                            requirements: &current_requirements,
-                            channel,
-                            job,
-                        },
-                        sender,
-                    )
-                    .await
-                    .map_err(AnalysisError::Model)?;
-                Ok(returned.value)
-            }
-        })
+            },
+        )
         .await
     }
 }
@@ -263,7 +273,12 @@ async fn answer_with<T, F, Response>(
 ) -> Result<AnalysisResult, AnalysisError>
 where
     T: AnalysisReadTools,
-    F: FnMut(String, BTreeSet<Uuid>, Vec<DailyAnalysisEvidence>) -> Response,
+    F: FnMut(
+        String,
+        BTreeSet<Uuid>,
+        Vec<DailyAnalysisEvidence>,
+        Vec<GenericAnalysisEvidence>,
+    ) -> Response,
     Response: Future<Output = Result<Value, AnalysisError>>,
 {
     let mut evidence: Vec<Value> = Vec::new();
@@ -311,7 +326,12 @@ where
         let descriptions: Vec<_> = if answer_only {
             vec![]
         } else {
-            question.tools.iter().map(|tool| tool.description).collect()
+            question
+                .tools
+                .iter()
+                .filter(|tool| !replaying || tool.name != GENERIC_ANALYSIS)
+                .map(|tool| tool.description)
+                .collect()
         };
         let prompt = ordered(&json!({
             "now": question.now,
@@ -348,9 +368,19 @@ where
                     .ok_or(AnalysisError::InvalidDocument)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let generic = evidence
+            .iter()
+            .filter(|item| {
+                item["tool"] == GENERIC_ANALYSIS && item["result"].get("error").is_none()
+            })
+            .map(|item| {
+                GenericAnalysisEvidence::from_read(item, question.now)
+                    .ok_or(AnalysisError::InvalidDocument)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let output = tokio::time::timeout(
             remaining,
-            call_model(prompt, tracker_versions.clone(), daily),
+            call_model(prompt, tracker_versions.clone(), daily, generic),
         )
         .await
         .map_err(|_| AnalysisBudgetError::Timeout)??;
@@ -390,7 +420,12 @@ where
                     .into_iter()
                     .enumerate()
                     .filter(|(index, _)| answer.selected.contains(&((*index + 1) as u64)))
-                    .map(|(_, item)| item)
+                    .map(|(_, mut item)| {
+                        if item["tool"] == GENERIC_ANALYSIS {
+                            item["generic_request_time"] = json!(question.now);
+                        }
+                        item
+                    })
                     .collect();
                 let freshness = if answer.include_current_state_freshness {
                     quality.as_ref().and_then(|read| {
@@ -571,14 +606,16 @@ pub(crate) fn format_analysis_answer(
     let mut sources = Vec::new();
     if evidence.iter().any(|item| {
         item["implicit"] != true
-            && item["tool"]
+            && (item["tool"]
                 .as_str()
                 .is_some_and(DailyAnalysisEvidence::is_daily_tool)
+                || item["tool"] == GENERIC_ANALYSIS)
     }) {
         sources.push("Garmin");
     }
     if evidence.iter().any(|item| {
         item["tool"] == "events"
+            || item["tool"] == GENERIC_ANALYSIS
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
     }) {
