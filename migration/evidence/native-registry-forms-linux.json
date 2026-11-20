@@ -1,0 +1,83 @@
+{
+  "scope": "PAR-11",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_event_definitions.py": 63,
+      "tests/test_metric_definitions.py": 42,
+      "tests/test_tracker_forms.py": 18,
+      "tests/test_tracker_chat_form.py": 197,
+      "tests/test_dynamic_scales.py": 1
+    }
+  },
+  "candidate": {
+    "interface_platform": "linux/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_definitions_http.py",
+      "result": "passed",
+      "trace_sha256": "857b4da93f2e239bced738f705f1c5644170a79851f05892605ac90dc25e4cb3"
+    },
+    {
+      "comparison": "migration/check_event_definitions.py",
+      "result": "passed",
+      "trace_sha256": "2d169976a71d88916d38d02ee4d668f65bf6f9adf9c3ed57c87b7e8956a38800"
+    },
+    {
+      "comparison": "migration/check_generated_forms.py",
+      "result": "passed",
+      "trace_sha256": "164fe6cd921c8b18c284d7efa6f231b54d40796036246ed3102af38ee0a72a0a"
+    },
+    {
+      "comparison": "migration/check_tracker_setup.py",
+      "result": "passed",
+      "trace_sha256": "47585208d9703d100e868a84b9a878723f599cf385cd2e4cd8eb343e62c19a11"
+    },
+    {
+      "comparison": "migration/check_tracker_pack_export.py",
+      "result": "passed",
+      "trace_sha256": "9e8d2b348cd835bce49bb5be455fb2a2b01bfe6befd3b5b97c56ad1da6dd221f"
+    },
+    {
+      "comparison": "migration/check_resource_catalog.py",
+      "result": "passed",
+      "trace_sha256": "b46fb91a5bde01ddbf4ebfb922a78f219a29d83fbcc39b4b9d9e900afa656e6d"
+    },
+    {
+      "comparison": "migration/check_custom_definition_registry.py",
+      "result": "passed",
+      "trace_sha256": "0139ca56ff9e5d479da732d995ec4b87614fdf9a47447c0ae46d7f9cd5f28099"
+    },
+    {
+      "comparison": "migration/check_user_metric_registry.py",
+      "result": "passed",
+      "trace_sha256": "d2ce35aec99c4a6cd03da558336e92ec7f84b058ede7254e7b97d3c216b6491e"
+    },
+    {
+      "comparison": "migration/check_native_schema.py",
+      "result": "passed",
+      "trace_sha256": "ff358599f8dde2029a98696ecea0eb474ffbc3f085dd4c60ad899f762702d558"
+    }
+  ],
+  "historical_packaged_install": {
+    "ci_url": "https://github.com/Makarechi/garmin-ai/actions/runs/44735106363",
+    "ci_commit": "e0ad9b3163aabc27a4ac70515a9feeb429815bf5",
+    "release_tree": "e8136a5a88b34ecf660dfea98dfb70f6bc9f8158",
+    "report_sha256_by_arch": {
+      "amd64": "cc106b4b5f860fcc96d56486cfded0678c0fe6961786bea13173b4b30087d876",
+      "arm64": "0a680da94a3c8b0dd0f22fd92a506015cbe88ce241b5e88be89255cc846e2edf"
+    }
+  },
+  "release_scope": [
+    "Synthetic tracker definitions and facts used isolated TimescaleDB and both readers.",
+    "Physical AMD64 and ARM64 historical native upgrades retained tracker data, preferences, and behavior after restart."
+  ]
+}
