@@ -12,13 +12,13 @@ use ga_db::{
     onboarding::{OnboardingError, OnboardingPlan},
 };
 use ga_domain::access::Scope;
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 
 use super::{
     AppState,
     diary::{access_failure, authorized},
-    method_not_allowed, private_cache,
+    method_not_allowed, private_cache, request_json,
     tools::{MAX_REQUEST_BYTES, detail, invalid_arguments, storage_unavailable},
 };
 
@@ -28,7 +28,7 @@ pub(super) async fn preferences(State(state): State<AppState>, request: Request)
         let required = &[Scope::ManageDefinitions, Scope::ManageIntegrations];
         match authorized(&state, &parts.headers, required).await {
             Ok((database, owner)) if parts.method == Method::PUT => {
-                apply(database, owner, body).await
+                apply(database, owner, &parts.headers, body).await
             }
             Ok((database, owner)) => match integrations::declared() {
                 Some(declared) => match database.onboarding_status(owner, declared).await {
@@ -65,7 +65,7 @@ pub(super) async fn tracker_profile(
     private_cache(response, &headers)
 }
 
-async fn apply(database: &Database, owner: Uuid, body: Body) -> Response {
+async fn apply(database: &Database, owner: Uuid, headers: &HeaderMap, body: Body) -> Response {
     let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(data) => data,
         Err(_) => {
@@ -75,10 +75,26 @@ async fn apply(database: &Database, owner: Uuid, body: Body) -> Response {
             );
         }
     };
-    let input = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
-    let Ok(value) = serde_json::from_slice::<Value>(input) else {
-        return invalid_arguments();
+    let value = match request_json::parse(&data, headers) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
     };
+    if !value.is_object() {
+        let issue = if value.is_null() {
+            json!({"type":"missing","loc":["body"],"msg":"Field required","input":null})
+        } else {
+            json!({
+                "type":"model_attributes_type","loc":["body"],
+                "msg":"Input should be a valid dictionary or object to extract fields from",
+                "input":value
+            })
+        };
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"detail":[issue]})),
+        )
+            .into_response();
+    }
     let plan = match OnboardingPlan::parse(value.clone()) {
         Ok(plan) => plan,
         Err(OnboardingError::Validation(reason)) if reason != "Invalid arguments" => {

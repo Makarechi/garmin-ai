@@ -15,7 +15,13 @@ from garmin_ai.config import ApiToken, Settings
 
 TOKEN = {
     "key": "synthetic-json-request-validation-proof",
-    "scopes": ["read:health", "read:diary", "write:diary", "manage:integrations"],
+    "scopes": [
+        "read:health",
+        "read:diary",
+        "write:diary",
+        "manage:integrations",
+        "manage:definitions",
+    ],
 }
 JSON = "application/json"
 CASES = (
@@ -71,6 +77,7 @@ def compare(python, rust):
         ("POST", "/hypotheses"),
         ("PUT", "/preferences/goals"),
         ("PUT", "/scenario-packs/sleep_recovery"),
+        ("PUT", "/onboarding"),
     )
     for method, route in routes:
         for name, data, content_type in CASES:
