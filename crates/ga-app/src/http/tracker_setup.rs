@@ -1,8 +1,8 @@
 use axum::{
     Json,
-    body::to_bytes,
+    body::{Body, to_bytes},
     extract::{Path, Request, State},
-    http::{Method, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use ga_db::diary::{
@@ -20,6 +20,7 @@ use super::{
     AppState,
     diary::{access_failure, authorized},
     method_not_allowed, private_cache,
+    request_json::{self, ParseError},
     tools::{MAX_REQUEST_BYTES, detail},
 };
 
@@ -49,12 +50,9 @@ pub(super) async fn settings(
         let Ok(id) = id.parse::<Uuid>() else {
             return invalid();
         };
-        let Some(body) = to_bytes(body, MAX_REQUEST_BYTES)
-            .await
-            .ok()
-            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        else {
-            return invalid();
+        let body = match request_body(body, &head.headers).await {
+            Ok(body) => body,
+            Err(error) => return error.into_response(),
         };
         let Ok(settings) = TrackerSettingsUpdate::from_json(&body) else {
             return invalid();
@@ -98,12 +96,9 @@ pub(super) async fn export_pack(State(state): State<AppState>, request: Request)
                 Ok(context) => context,
                 Err(status) => return access_failure(status),
             };
-        let Some(value) = to_bytes(body, MAX_REQUEST_BYTES)
-            .await
-            .ok()
-            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        else {
-            return invalid();
+        let value = match request_body(body, &head.headers).await {
+            Ok(value) => value,
+            Err(error) => return error.into_response(),
         };
         let Some(object) = value.as_object().filter(|object| object.len() == 1) else {
             return invalid();
@@ -144,12 +139,9 @@ async fn tracker_setup(state: &AppState, request: Request, confirm: bool) -> Res
                 Ok(context) => context,
                 Err(status) => return access_failure(status),
             };
-        let Some(value) = to_bytes(body, MAX_REQUEST_BYTES)
-            .await
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        else {
-            return invalid();
+        let value = match request_body(body, &head.headers).await {
+            Ok(value) => value,
+            Err(error) => return error.into_response(),
         };
         let (draft, token) = if confirm {
             let Some(object) = value.as_object().filter(|object| object.len() == 2) else {
@@ -200,6 +192,13 @@ async fn tracker_setup(state: &AppState, request: Request, confirm: bool) -> Res
     }
     .await;
     private_cache(response, &head.headers)
+}
+
+async fn request_body(body: Body, headers: &HeaderMap) -> Result<Value, ParseError> {
+    let bytes = to_bytes(body, MAX_REQUEST_BYTES)
+        .await
+        .map_err(|_| ParseError::Unsupported)?;
+    request_json::parse_object(&bytes, headers)
 }
 
 fn invalid() -> Response {

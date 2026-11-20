@@ -75,26 +75,10 @@ async fn apply(database: &Database, owner: Uuid, headers: &HeaderMap, body: Body
             );
         }
     };
-    let value = match request_json::parse(&data, headers) {
+    let value = match request_json::parse_object(&data, headers) {
         Ok(value) => value,
         Err(error) => return error.into_response(),
     };
-    if !value.is_object() {
-        let issue = if value.is_null() {
-            json!({"type":"missing","loc":["body"],"msg":"Field required","input":null})
-        } else {
-            json!({
-                "type":"model_attributes_type","loc":["body"],
-                "msg":"Input should be a valid dictionary or object to extract fields from",
-                "input":value
-            })
-        };
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail":[issue]})),
-        )
-            .into_response();
-    }
     let plan = match OnboardingPlan::parse(value.clone()) {
         Ok(plan) => plan,
         Err(OnboardingError::Validation(reason)) if reason != "Invalid arguments" => {

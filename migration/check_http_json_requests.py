@@ -78,6 +78,10 @@ def compare(python, rust):
         ("PUT", "/preferences/goals"),
         ("PUT", "/scenario-packs/sleep_recovery"),
         ("PUT", "/onboarding"),
+        ("POST", "/tracker-setups/preview"),
+        ("POST", "/tracker-setups"),
+        ("PUT", "/tracker-setups/00000000-0000-0000-0000-000000000017/settings"),
+        ("POST", "/tracker-packs/export"),
     )
     for method, route in routes:
         for name, data, content_type in CASES:
