@@ -59,6 +59,7 @@ def preserved_bindings(binary):
         for option in ("GA_DATABASE_URL", "GA_CONTAINER_DATABASE_URL"):
             assert make_url(values[option]).password == values["GA_POSTGRES_PASSWORD"]
         assert Path(values["GA_DATA_DIR"]).samefile(root / "directory with spaces" / "data")
+        assert (Path(values["GA_DATA_DIR"]) / "raw").stat().st_mode & 0o777 == 0o700
         assert settings.stat().st_mode & 0o777 == 0o600
         result = command(binary, root)
         assert result.returncode == 0, result.stderr

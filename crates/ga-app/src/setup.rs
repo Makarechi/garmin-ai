@@ -309,16 +309,14 @@ fn prepare_directories(values: &mut ValueMap, root: &Path) -> Result<(), &'stati
             return Err("Storage ownership must match GA_APP_UID and GA_APP_GID");
         }
     }
+    let archive = paths[0].join("raw");
+    match fs::symlink_metadata(&archive) {
+        Ok(info) if info.is_dir() && (info.uid(), info.gid()) == (uid, gid) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => return Err("Raw archive must be a private directory owned by the service user"),
+    }
     for path in &paths {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .map_err(|_| DIRECTORY_ERROR)?;
-        let metadata = path.metadata().map_err(|_| DIRECTORY_ERROR)?;
-        if (metadata.uid(), metadata.gid()) != (uid, gid) {
-            return Err("Storage ownership must match GA_APP_UID and GA_APP_GID");
-        }
+        create_owned_directory(path, uid, gid)?;
     }
     // A case-insensitive filesystem may resolve different spellings to the
     // same directory only once the paths have been created.
@@ -332,6 +330,20 @@ fn prepare_directories(values: &mut ValueMap, root: &Path) -> Result<(), &'stati
                 .into_string()
                 .map_err(|_| DIRECTORY_ERROR)?,
         );
+    }
+    create_owned_directory(&archive, uid, gid)?;
+    fs::set_permissions(archive, fs::Permissions::from_mode(0o700)).map_err(|_| DIRECTORY_ERROR)
+}
+
+fn create_owned_directory(path: &Path, uid: u32, gid: u32) -> Result<(), &'static str> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|_| DIRECTORY_ERROR)?;
+    let metadata = path.metadata().map_err(|_| DIRECTORY_ERROR)?;
+    if (metadata.uid(), metadata.gid()) != (uid, gid) {
+        return Err("Storage ownership must match GA_APP_UID and GA_APP_GID");
     }
     Ok(())
 }

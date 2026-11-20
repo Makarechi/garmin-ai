@@ -31,6 +31,13 @@ if ! printf '%s\n' "$image" | grep -Eq '^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{
     echo "release.env must contain one digest-pinned GA_APP_IMAGE." >&2
     exit 1
 fi
+runtime=$(sed -n 's/^GA_APP_RUNTIME=//p' release.env)
+legacy_entry=
+case "${runtime:-python}" in
+    rust) ;;
+    python) legacy_entry=garmin-ai ;;
+    *) echo "release.env must select the rust or python application runtime." >&2; exit 1 ;;
+esac
 
 compose() (
     # Shell exports override --env-file interpolation. Keep Docker connection
@@ -46,6 +53,11 @@ compose() (
 case "${1:-}" in
     demo)
         shift
+        if [ -z "$legacy_entry" ]; then
+            exec docker run --rm --read-only --cap-drop ALL \
+                --user "$(id -u):$(id -g)" -p 127.0.0.1:8765:8765 \
+                "$image" demo --host 0.0.0.0 --port 8765 "$@"
+        fi
         exec docker run --rm --read-only \
             --user "$(id -u):$(id -g)" \
             -p 127.0.0.1:8765:8765 \
@@ -54,27 +66,44 @@ case "${1:-}" in
             /setup/scripts/serve_demo.py --host 0.0.0.0 --port 8765 "$@"
         ;;
     licenses)
+        if [ -z "$legacy_entry" ]; then
+            exec docker run --rm --read-only --entrypoint cat "$image" \
+                /usr/share/doc/garmin-ai/LICENSE \
+                /usr/share/doc/garmin-ai/LICENSE-scipy.txt \
+                /usr/share/doc/garmin-ai/LICENSE-python.txt
+        fi
         docker run --rm --read-only --entrypoint cat "$image" \
             /usr/share/doc/garmin-ai/LICENSE \
             /usr/share/doc/garmin-ai/python-third-party-notices.txt
         ;;
     setup)
         shift
-        mount_list=$(docker run --rm --read-only \
-            --user "$(id -u):$(id -g)" \
-            --mount "type=bind,source=$PWD,target=/setup,readonly" \
-            --entrypoint python "$image" \
-            /setup/scripts/release_mounts.py /setup/.env "$PWD")
+        if [ -z "$legacy_entry" ]; then
+            mount_list=$(docker run --rm --read-only --cap-drop ALL --network none \
+                --user "$(id -u):$(id -g)" --workdir /setup \
+                --mount "type=bind,source=$PWD,target=/setup,readonly" \
+                "$image" configure --mount-sources "$PWD")
+        else
+            mount_list=$(docker run --rm --read-only \
+                --user "$(id -u):$(id -g)" \
+                --mount "type=bind,source=$PWD,target=/setup,readonly" \
+                --entrypoint python "$image" \
+                /setup/scripts/release_mounts.py /setup/.env "$PWD")
+        fi
         mount_args=(--mount "type=bind,source=$PWD,target=$PWD")
         while IFS= read -r directory; do
             if [ -n "$directory" ]; then
                 mount_args+=(--mount "type=bind,source=$directory,target=$directory")
             fi
         done <<< "$mount_list"
-        docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            "${mount_args[@]}" --workdir "$PWD" --entrypoint python "$image" \
-            "$PWD/scripts/configure.py" "$@"
+        if [ -z "$legacy_entry" ]; then
+            docker run --rm --cap-drop ALL --network none \
+                --user "$(id -u):$(id -g)" "${mount_args[@]}" --workdir "$PWD" \
+                "$image" configure "$@"
+        else
+            docker run --rm --user "$(id -u):$(id -g)" "${mount_args[@]}" \
+                --workdir "$PWD" --entrypoint python "$image" "$PWD/scripts/configure.py" "$@"
+        fi
         compose config --quiet
         ;;
     start)
@@ -93,14 +122,14 @@ case "${1:-}" in
     login)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
-        compose run --rm --no-deps worker garmin-ai login "${@:2}"
+        compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} login "${@:2}"
         echo "Garmin login finished. Run ./install.sh start to recreate the worker."
         ;;
     pair-telegram)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
         compose run --rm --no-deps --workdir "$PWD" \
-            -v "$PWD:$PWD" worker garmin-ai pair-telegram --env-file "$PWD/.env" --container-runtime
+            -v "$PWD:$PWD" worker ${legacy_entry:+"$legacy_entry"} pair-telegram --env-file "$PWD/.env" --container-runtime
         echo "Pairing finished. Run ./install.sh start to recreate API and worker with the saved owner ID."
         ;;
     backup)
@@ -108,14 +137,19 @@ case "${1:-}" in
         compose config --quiet
         compose stop worker
         backup_name="manual-$(date -u +%Y%m%dT%H%M%SZ)-$$.enc"
-        compose run --rm --no-deps worker garmin-ai backup "/app/backups/$backup_name"
+        compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} backup "/app/backups/$backup_name"
         verify_volume="garmin-ai-verify-$(date -u +%Y%m%d%H%M%S)-$$"
         docker volume create "$verify_volume" >/dev/null
         trap 'docker volume rm -f "$verify_volume" >/dev/null' EXIT
         docker run --rm --user 0 -v "$verify_volume:/verification" --entrypoint chown \
             "$image" "$(id -u):$(id -g)" /verification
-        compose run --rm --no-deps -v "$PWD:/setup:ro" -v "$verify_volume:/verification" worker \
-            python /setup/scripts/verify_release_backup.py "/app/backups/$backup_name"
+        if [ -z "$legacy_entry" ]; then
+            compose run --rm --no-deps -v "$verify_volume:/verification" worker \
+                unpack-backup "/app/backups/$backup_name" /verification/extracted
+        else
+            compose run --rm --no-deps -v "$PWD:/setup:ro" -v "$verify_volume:/verification" worker \
+                python /setup/scripts/verify_release_backup.py "/app/backups/$backup_name"
+        fi
         docker volume rm "$verify_volume" >/dev/null
         trap - EXIT
         echo "Verified encrypted backup: $backup_name in GA_BACKUP_DIR. Worker remains stopped."
@@ -128,7 +162,7 @@ case "${1:-}" in
             exit 2
         fi
         recovery_name="${backup_name%.enc}-recovery-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-        compose run --rm --no-deps worker garmin-ai unpack-backup \
+        compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} unpack-backup \
             "/app/backups/$backup_name" "/app/backups/$recovery_name"
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;

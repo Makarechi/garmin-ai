@@ -8,6 +8,13 @@ Docker Compose 2.24.0 or newer are required. Run the installer as a dedicated
 non-root account with Docker access. The database image is pinned in
 the bundle as well.
 
+To prepare a native candidate, pass `--runtime rust` when building the bundle
+and supply the digest of an image built with `Dockerfile.rust`. On the host,
+the native bundle uses Docker and Compose for setup, demo, start, status and
+stop. Pairing, login and encrypted backup use the native application inside
+the same image. Preserve the Compose project, settings and private storage
+paths when rehearsing an upgrade on a separate copy of an installation.
+
 ## Build and inspect a candidate
 
 From a clean source revision, after building and checking an application image,

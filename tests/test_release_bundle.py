@@ -88,10 +88,12 @@ def test_bundled_markdown_links_resolve_within_bundle():
             assert resolved in included, f"{name} links to missing {resolved}"
 
 
-def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path):
+@pytest.mark.parametrize("runtime", ["python", "rust"])
+def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, runtime):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose is unavailable")
-    archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path)
+    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
     with tarfile.open(archive) as bundle:
         bundle.extractall(tmp_path, filter="data")
     root = next(tmp_path.glob("garmin-ai-*/compose.release.yml")).parent
@@ -126,6 +128,30 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path):
     assert {services[name]["image"] for name in ("migrate", "api", "worker")} == {IMAGE}
     assert all("build" not in services[name] for name in ("migrate", "api", "worker"))
     assert services["db"]["image"].startswith("timescale/timescaledb:")
+    if runtime == "rust":
+        assert "GA_APP_RUNTIME=rust\n" in (root / "release.env").read_text()
+        assert json.loads((root / "release-manifest.json").read_text())["runtime"] == "rust"
+        assert not list(root.rglob("*.py"))
+        assert services["migrate"]["command"] == ["migrate"]
+        assert services["worker"]["command"] == ["worker"]
+        assert services["api"]["healthcheck"]["test"] == [
+            "CMD",
+            "garmin-ai-rust",
+            "healthcheck",
+            "--ready",
+        ]
+        assert services["worker"]["healthcheck"]["test"] == [
+            "CMD",
+            "garmin-ai-rust",
+            "healthcheck",
+            "--worker",
+        ]
+        for name in ("migrate", "api", "worker"):
+            state = next(
+                path for path in services[name]["volumes"] if path["target"] == "/app/state"
+            )
+            assert state["source"] == str(root / ".state")
+            assert state["bind"]["create_host_path"] is False
 
 
 def test_update_mounts_preserve_old_storage_paths_without_exposing_secrets(tmp_path):
