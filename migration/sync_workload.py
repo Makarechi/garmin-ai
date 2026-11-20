@@ -86,6 +86,8 @@ class SyntheticReader:
             if self.fixture is not None:
                 return json.loads((self.fixture / f"{day}-{endpoint.name}.json").read_bytes())
             return fake_day(endpoint.name, day)
+        if self.fixture is not None and endpoint.scope == "global":
+            return json.loads((self.fixture / f"global-{endpoint.name}.json").read_bytes())
         if endpoint.name == "activity":
             return self.activity()
         fixture = {"synthetic": endpoint.name}
@@ -189,17 +191,37 @@ def backfill(engine, reader, archive, settings, days, preload):
     return windows
 
 
-def prepare_history_fixture(root, days):
+def prepare_daily_fixture(root, dates):
     root.mkdir(mode=0o755)
     endpoints = [endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day"]
     (root / "endpoints.txt").write_text("\n".join(endpoints) + "\n", encoding="ascii")
     (root / "fingerprint.txt").write_text(SyntheticReader().fingerprint, encoding="ascii")
-    for offset in range(1, days + 1):
-        day = HISTORY_NOW.date() - timedelta(days=offset)
+    for day in dates:
         for name in endpoints:
             (root / f"{day}-{name}.json").write_text(
                 json.dumps(fake_day(name, day)), encoding="utf-8"
             )
+
+
+def prepare_history_fixture(root, days):
+    prepare_daily_fixture(
+        root, (HISTORY_NOW.date() - timedelta(days=offset) for offset in range(1, days + 1))
+    )
+
+
+def verify_archive(engine, archive):
+    with transaction(engine) as session:
+        sources = session.execute(
+            select(SourcePayload.archive_key, SourcePayload.payload_hash).execution_options(
+                yield_per=200
+            )
+        )
+        verified = 0
+        for key, expected in sources:
+            if hashlib.sha256(archive.read(key)).hexdigest() != expected:
+                raise RuntimeError("The stored synthetic archive does not match its identity")
+            verified += 1
+    return verified
 
 
 def run(days, preload, fixture=None):
@@ -245,19 +267,7 @@ def run(days, preload, fixture=None):
             "historical_windows": windows,
         }
         if fixture is not None:
-            with transaction(engine) as session:
-                sources = session.execute(
-                    select(SourcePayload.archive_key, SourcePayload.payload_hash).execution_options(
-                        yield_per=200
-                    )
-                )
-                verified = 0
-                for key, expected in sources:
-                    if hashlib.sha256(archive.read(key)).hexdigest() != expected:
-                        raise RuntimeError(
-                            "The stored synthetic archive does not match its identity"
-                        )
-                    verified += 1
+            verified = verify_archive(engine, archive)
             if verified != expected_sources:
                 raise RuntimeError("The synthetic history archives are incomplete")
             result["archive_objects_verified"] = verified

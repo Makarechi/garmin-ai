@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import sys
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
@@ -71,13 +72,13 @@ CHECKS = {
     "jobs": """
         SELECT jsonb_build_array(kind,dedup_key,payload->>'endpoint',payload->>'key',status,attempts,
             last_error,lease_token IS NULL,lease_until IS NULL,completed_at IS NOT NULL)::text
-        FROM jobs WHERE kind='garmin_endpoint' AND starts_with(dedup_key,'syncwindow:')
+        FROM jobs WHERE kind='garmin_endpoint' AND starts_with(dedup_key,%s)
         ORDER BY dedup_key
     """,
 }
 
 
-def snapshot(url):
+def snapshot(url, *, periodic=False):
     dsn = url.replace("postgresql+psycopg://", "postgresql://", 1)
     name = conninfo_to_dict(dsn).get("dbname", "")
     if not name.endswith("_test"):
@@ -94,7 +95,8 @@ def snapshot(url):
             count = 0
             with connection.cursor(name=f"history_{label}") as cursor:
                 cursor.itersize = 200
-                cursor.execute(sql)
+                args = ("" if periodic else "syncwindow:",) if label == "jobs" else ()
+                cursor.execute(sql, args)
                 for (line,) in cursor:
                     digest.update((line + "\n").encode())
                     count += 1
@@ -103,4 +105,6 @@ def snapshot(url):
 
 
 if __name__ == "__main__":
-    print(json.dumps(snapshot(os.environ["GA_DATABASE_URL"])))
+    print(
+        json.dumps(snapshot(os.environ["GA_DATABASE_URL"], periodic=sys.argv[1:] == ["reconcile"]))
+    )

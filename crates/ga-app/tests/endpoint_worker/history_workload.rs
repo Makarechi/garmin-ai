@@ -6,6 +6,9 @@ use ga_domain::sha256_hex;
 
 use super::*;
 
+#[path = "history_workload/reconciliation.rs"]
+mod reconciliation;
+
 struct HistorySource {
     root: PathBuf,
     fingerprint: String,
@@ -23,16 +26,20 @@ impl EndpointSource for HistorySource {
         resource: LegacyRead,
         maximum_bytes: u64,
     ) -> Result<Option<Vec<u8>>, GarminError> {
-        let LegacyRead::Daily(_, date) = resource else {
-            return Err(GarminError::InvalidRequest);
+        let (key, endpoint) = match resource {
+            LegacyRead::Daily(_, date) => {
+                let key = date.to_string();
+                let endpoint = self
+                    .endpoints
+                    .iter()
+                    .find(|name| LegacyRead::queued_endpoint(name, &key) == Ok(resource))
+                    .ok_or(GarminError::InvalidRequest)?;
+                (key, endpoint.as_str())
+            }
+            LegacyRead::Devices => ("global".to_owned(), "devices"),
+            _ => return Err(GarminError::InvalidRequest),
         };
-        let day = date.to_string();
-        let name = self
-            .endpoints
-            .iter()
-            .find(|name| LegacyRead::queued_endpoint(name, &day) == Ok(resource))
-            .ok_or(GarminError::InvalidRequest)?;
-        let response = tokio::fs::read(self.root.join(format!("{day}-{name}.json")))
+        let response = tokio::fs::read(self.root.join(format!("{key}-{endpoint}.json")))
             .await
             .map_err(|_| GarminError::InvalidRequest)?;
         if response.len() as u64 > maximum_bytes {
@@ -41,7 +48,7 @@ impl EndpointSource for HistorySource {
         self.calls
             .lock()
             .map_err(|_| GarminError::InvalidRequest)?
-            .entry(name.clone())
+            .entry(endpoint.to_owned())
             .and_modify(|count| *count += 1)
             .or_insert(1);
         Ok(Some(response))
@@ -62,6 +69,7 @@ impl ActivityExportSource for HistorySource {
 async fn drain(
     fixture: &Fixture,
     worker: &ScheduledGarminWorker<'_, HistorySource>,
+    prefix: &str,
 ) -> Result<usize, Box<dyn Error>> {
     let mut completed = 0;
     let mut last_publication = Instant::now();
@@ -80,8 +88,9 @@ async fn drain(
             GarminQueueStep::Idle => {
                 let pending: bool = sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM jobs WHERE kind='garmin_endpoint'
-                       AND starts_with(dedup_key,'syncwindow:') AND status IN ('pending','running'))",
+                       AND starts_with(dedup_key,$1) AND status IN ('pending','running'))",
                 )
+                .bind(prefix)
                 .fetch_one(&fixture.inspect)
                 .await?;
                 if !pending {
@@ -102,30 +111,7 @@ async fn drain(
 async fn processes_shared_history_workload() -> Result<(), Box<dyn Error>> {
     let days: u16 = env::var("GA_TEST_HISTORY_DAYS")?.parse()?;
     assert!(matches!(days, 7 | 30 | 365));
-    let root = PathBuf::from(env::var("GA_TEST_HISTORY_FIXTURE")?);
-    let endpoints = std::fs::read_to_string(root.join("endpoints.txt"))?;
-    let fingerprint = std::fs::read_to_string(root.join("fingerprint.txt"))?;
-    assert_eq!(fingerprint.len(), 64);
-    assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    let source = HistorySource {
-        root,
-        fingerprint,
-        endpoints: endpoints.lines().map(str::to_owned).collect(),
-        calls: Mutex::new(BTreeMap::new()),
-    };
-    assert_eq!(source.endpoints.len(), 20);
-    let (fixture, _archive) = setup().await?;
-    sqlx::query("UPDATE app_state SET value=jsonb_build_object('fingerprint',$1::text) WHERE key='account:garmin'")
-        .bind(source.fingerprint())
-        .execute(&fixture.inspect)
-        .await?;
-    sqlx::query("UPDATE people SET timezone='UTC' WHERE singleton")
-        .execute(&fixture.inspect)
-        .await?;
-    // The Python workload selects collection for every pack before scheduling.
-    sqlx::query("UPDATE module_configs SET collection_enabled=true")
-        .execute(&fixture.inspect)
-        .await?;
+    let (fixture, _archive, source) = setup_source().await?;
     let worker = ScheduledGarminWorker {
         runner: fixture.worker(&source),
         instance: "source:garmin:primary",
@@ -153,11 +139,11 @@ async fn processes_shared_history_workload() -> Result<(), Box<dyn Error>> {
             .await?;
         assert_eq!(scheduled.queued, usize::from((days - offset).min(2)) * 20);
         if !preload {
-            completed += drain(&fixture, &worker).await?;
+            completed += drain(&fixture, &worker, "syncwindow:").await?;
         }
     }
     if preload {
-        completed += drain(&fixture, &worker).await?;
+        completed += drain(&fixture, &worker, "syncwindow:").await?;
     }
     let duration = started.elapsed().as_secs_f64();
     assert_eq!(completed, usize::from(days) * 20);
@@ -169,6 +155,52 @@ async fn processes_shared_history_workload() -> Result<(), Box<dyn Error>> {
     assert_eq!(calls.len(), source.endpoints.len());
     assert!(calls.values().all(|count| *count == usize::from(days)));
     let status = fixture.database.history_status().await?;
+    let verified = verify_archive(&fixture).await?;
+    assert_eq!(verified, completed);
+    println!(
+        "WORKLOAD_RESULT={}",
+        json!({
+            "days": days,
+            "history_queue": if preload {"preloaded"} else {"drained between scheduler passes"},
+            "duration_seconds": duration,
+            "fetch_counts": calls,
+            "historical_windows": status["windows"],
+            "archive_objects_verified": verified,
+        })
+    );
+    Ok(())
+}
+
+async fn setup_source() -> Result<(Fixture, tempfile::TempDir, HistorySource), Box<dyn Error>> {
+    let root = PathBuf::from(env::var("GA_TEST_HISTORY_FIXTURE")?);
+    let endpoints = std::fs::read_to_string(root.join("endpoints.txt"))?;
+    let fingerprint = std::fs::read_to_string(root.join("fingerprint.txt"))?;
+    assert_eq!(fingerprint.len(), 64);
+    assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let source = HistorySource {
+        root,
+        fingerprint,
+        endpoints: endpoints.lines().map(str::to_owned).collect(),
+        calls: Mutex::new(BTreeMap::new()),
+    };
+    assert_eq!(source.endpoints.len(), 20);
+    let (fixture, archive) = setup().await?;
+    sqlx::query("UPDATE app_state SET value=jsonb_build_object('fingerprint',$1::text) WHERE key='account:garmin'")
+        .bind(source.fingerprint())
+        .execute(&fixture.inspect)
+        .await?;
+    sqlx::query("UPDATE people SET timezone='UTC' WHERE singleton")
+        .execute(&fixture.inspect)
+        .await?;
+    // The Python workload selects collection for every pack before scheduling.
+    sqlx::query("UPDATE module_configs SET collection_enabled=true")
+        .execute(&fixture.inspect)
+        .await?;
+
+    Ok((fixture, archive, source))
+}
+
+async fn verify_archive(fixture: &Fixture) -> Result<usize, Box<dyn Error>> {
     let mut sources = sqlx::query_as::<_, (String, String)>(
         "SELECT archive_key,payload_hash FROM source_payloads",
     )
@@ -186,17 +218,6 @@ async fn processes_shared_history_workload() -> Result<(), Box<dyn Error>> {
         assert_eq!(sha256_hex(&bytes), hash);
         verified += 1;
     }
-    assert_eq!(verified, completed);
-    println!(
-        "WORKLOAD_RESULT={}",
-        json!({
-            "days": days,
-            "history_queue": if preload {"preloaded"} else {"drained between scheduler passes"},
-            "duration_seconds": duration,
-            "fetch_counts": calls,
-            "historical_windows": status["windows"],
-            "archive_objects_verified": verified,
-        })
-    );
-    Ok(())
+
+    Ok(verified)
 }
