@@ -522,7 +522,10 @@
         "migration/check_universal_data_contracts.py",
         "migration/check_diary_creation.py",
         "migration/check_diary_reads.py",
-        "migration/check_event_replays.py"
+        "migration/check_event_replays.py",
+        "migration/check_system_diary_types.py",
+        "migration/check_wellbeing_observations.py",
+        "migration/evidence/native-system-diary-linux-arm64.json"
       ],
       "data_contracts": [
         "Typed event payloads, interval semantics, incomplete medications and dose uncertainty."
@@ -532,10 +535,10 @@
       ],
       "resource_scenario": "Long diary history across local midnight and DST",
       "status": "implemented",
-      "verification": "db",
+      "verification": "e2e_synthetic",
       "owner_task": "R17",
       "known_limits": [
-        "Database comparisons cover immutable creation replay and canonical diary pagination. Full coverage of diary capture through user channels remains pending."
+        "All system diary types matched cross-runtime synthetic creation, replay and read. The HTTP diagnostic for an incomplete coverage interval still needs a release decision."
       ],
       "approved_deviations": []
     },

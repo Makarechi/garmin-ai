@@ -1,0 +1,86 @@
+{
+  "scope": "PAR-09",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_canonical_events.py": 14,
+      "tests/test_event_topology.py": 19,
+      "tests/test_incomplete_medication.py": 735,
+      "tests/test_caffeine_dose.py": 6,
+      "tests/test_diary_forms.py": 32
+    }
+  },
+  "candidate": {
+    "application_platform": "linux/arm64",
+    "domain_checks_platform": "darwin/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_system_diary_types.py",
+      "result": "passed",
+      "trace_sha256": "40007e075f9b8ded7347462f795550e8b23af4863538050e4f18bfea5c2cce55"
+    },
+    {
+      "comparison": "migration/check_wellbeing_observations.py",
+      "result": "passed",
+      "trace_sha256": "6513558179abd2109e8c8cccf8d6ebc484aa2ef1d0b492fbd8dd9438d609c5f1"
+    },
+    {
+      "comparison": "migration/check_diary_reads.py",
+      "result": "passed",
+      "trace_sha256": "6ad22d60e2257ee4730e78e62e9f8a2f41d00b4ec78777cbebf758a528c9e9c3"
+    },
+    {
+      "comparison": "migration/check_diary_creation.py",
+      "result": "passed",
+      "trace_sha256": "029c97ef9a27cb1a63f3f1f33975a783f94fb8df13d1c09d236eedd97287a724"
+    },
+    {
+      "comparison": "crates/ga-domain/tests/event_input.rs",
+      "result": "passed",
+      "trace_sha256": "3bd25bf01754b3003ed7004345790bec0fb37add542f5a9d91f0d045004b62f5"
+    },
+    {
+      "comparison": "crates/ga-domain/tests/event_payload.rs",
+      "result": "passed",
+      "trace_sha256": "3bd25bf01754b3003ed7004345790bec0fb37add542f5a9d91f0d045004b62f5"
+    },
+    {
+      "comparison": "crates/ga-domain/tests/event_replay.rs",
+      "result": "passed",
+      "trace_sha256": "3bd25bf01754b3003ed7004345790bec0fb37add542f5a9d91f0d045004b62f5"
+    },
+    {
+      "comparison": "migration/check_web_chat_model.py",
+      "result": "passed",
+      "trace_sha256": "0c70689aa1546653633fbb49045a1b70bad6ddb049a73b08fa4d85b595484b55"
+    }
+  ],
+  "domain_fixture_cases": {
+    "check_event_inputs": {
+      "cases": 1842,
+      "fixture_sha256": "3960721867a4a45ed4b439623e9a04ce2d0afb0c4a2e16f3c15472920dd64453"
+    },
+    "check_system_payloads": {
+      "cases": 1707,
+      "fixture_sha256": "323260fc9aea5f796ffc690ce5483361c8eff34dd526ca09dd708d90b0ef1e63"
+    },
+    "check_event_replays": {
+      "cases": 49,
+      "fixture_sha256": "59aeb4b965db3ec5a18d28b00658bf0cddf098caad3edd8822a62d1f4e2cfeff"
+    }
+  },
+  "synthetic_system_types": 19,
+  "bidirectional_create_cases": 44,
+  "release_scope": [
+    "Canonical system diary types, linked episodes, intervals across the clock change, dose uncertainty, and cross-runtime retry/read.",
+    "The diagnostic body of the HTTP 422 for an incomplete coverage interval is recorded as a pending difference."
+  ]
+}
