@@ -10,6 +10,7 @@ import secrets
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -150,12 +151,18 @@ def collect_http_analytics(args, observer, db, api, worker, elapsed):
     return collect_client_workload(command, args.interval, db, api, worker, elapsed)
 
 
-def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
-    for filename in ("fit_replay_workload.py", "fit_workload.py", "fitlimit_workload.py"):
+def collect_fit_replay(args, observer, db, api, worker, elapsed, probe, *, native):
+    mixed = native and args.mixed_controls_during_fit
+    files = ["fit_replay_workload.py", "fit_workload.py", "fitlimit_workload.py"]
+    if mixed:
+        files.extend(("analytics_workload.py", "web_chat_workload.py"))
+    for filename in files:
         source = Path(__file__).with_name(filename)
         docker("cp", str(source), f"{observer}:/tmp/{filename}")
     command = ["docker", "exec", observer, "python", "/tmp/fit_replay_workload.py"]
-    extra = ("--with-controls",) if args.controls_during_fit else ()
+    extra = ["--with-controls"] if args.controls_during_fit else []
+    if mixed:
+        extra.append("--with-mixed-controls")
     fixture = json.loads(
         docker(*command[1:], "prepare", args.fit_replay, *extra, timeout=300).stdout
     )
@@ -164,12 +171,28 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
     if args.controls_during_fit:
         script = Path(__file__).with_name("control_overlap.py").read_text(encoding="utf-8")
         before = json.loads(docker(*command[1:], "running", fixture["job"]).stdout)
-        response = docker(
-            "exec", observer, "python", "-c", script, f"http://{api}:8080", "--paired-fit"
+        probe_command = (
+            "exec",
+            observer,
+            "python",
+            "-c",
+            script,
+            f"http://{api}:8080",
+            "--paired-fit",
         )
+        if mixed:
+            probe_command += ("--analysis-spec", json.dumps(fixture["analysis"]))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                backup = executor.submit(probe_competing_backup, worker)
+                response = docker(*probe_command)
+                controls["competing_backup_refused"] = backup.result()
+        else:
+            response = docker(*probe_command)
         after = json.loads(docker(*command[1:], "running", fixture["job"]).stdout)
-        controls = {
-            "control_overlap": {**json.loads(response.stdout), "before": before, "after": after}
+        controls["control_overlap"] = {
+            **json.loads(response.stdout),
+            "before": before,
+            "after": after,
         }
     result = collect_client_workload(
         [*command, "wait", json.dumps(fixture)],
@@ -182,7 +205,21 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
     )
     processing = round(time.monotonic() - start, 3)
     validated = json.loads(docker(*command[1:], "verify", json.dumps(fixture), timeout=600).stdout)
-    public_fixture = {key: value for key, value in fixture.items() if key not in {"source", "job"}}
+    if mixed:
+        controls["analysis_after_replay"] = json.loads(
+            docker(
+                "exec",
+                observer,
+                "python",
+                "-c",
+                script,
+                f"http://{api}:8080",
+                "--analysis-after",
+                json.dumps(fixture["analysis"]),
+            ).stdout
+        )
+    hidden = {"source", "job", "analysis", "replay_source", "replay_job"}
+    public_fixture = {key: value for key, value in fixture.items() if key not in hidden}
     return {
         **public_fixture,
         **result,
@@ -190,6 +227,28 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
         **controls,
         "observed_queue_seconds": processing,
     }
+
+
+def probe_competing_backup(worker):
+    destination = "/app/backups/mixed-queue-test.enc"
+    key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+    result = docker(
+        "exec",
+        "-e",
+        "GA_BACKUP_KEY",
+        worker,
+        "garmin-ai-rust",
+        "backup",
+        destination,
+        variables={"GA_BACKUP_KEY": key},
+        check=False,
+    )
+    left_destination = docker("exec", worker, "test", "-e", destination, check=False)
+    return (
+        result.returncode == 1
+        and "Backup database storage is busy" in result.stderr
+        and left_destination.returncode == 1
+    )
 
 
 def prepare_paired_replay(args, observer, archive):
@@ -700,7 +759,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
             )
         if args.fit_replay:
             workload_result["fit_replay_workload"] = collect_fit_replay(
-                args, observer, db, api, worker, elapsed, probe
+                args, observer, db, api, worker, elapsed, probe, native=native
             )
         if paired_replay:
             workload_result["replay_workload"] = collect_paired_replay(
@@ -1022,6 +1081,7 @@ def main():
     parser.add_argument("--native-history-test", type=Path)
     parser.add_argument("--fit-developer", action="store_true")
     parser.add_argument("--controls-during-fit", action="store_true")
+    parser.add_argument("--mixed-controls-during-fit", action="store_true")
     args = parser.parse_args()
     if args.web_chat_multibyte and not args.web_chat_messages:
         parser.error("--web-chat-multibyte requires --web-chat-messages")
@@ -1031,6 +1091,10 @@ def main():
         parser.error("--fit-developer requires --fit-records")
     if args.controls_during_fit and args.fit_records != 50000 and args.fit_replay != "ceiling":
         parser.error("--controls-during-fit requires --fit-records 50000 or --fit-replay ceiling")
+    if args.mixed_controls_during_fit and (
+        not args.controls_during_fit or args.fit_replay != "ceiling" or not args.candidate_image
+    ):
+        parser.error("Mixed controls require a paired ceiling replay with --controls-during-fit")
     if bool(args.candidate_image) != bool(args.candidate_sha):
         parser.error("--candidate-image and --candidate-sha must be supplied together")
     if args.candidate_image and any(
@@ -1122,6 +1186,18 @@ def main():
                 )
                 if args.controls_during_fit:
                     check_fit_controls(candidate["fit_replay_workload"])
+                if args.mixed_controls_during_fit:
+                    result = candidate["fit_replay_workload"]
+                    if not (
+                        result["competing_backup_refused"]
+                        and result["ordinary_replay_completed"]
+                        and result["control_overlap"]["analysis"]["retry_after_seconds"] == 60
+                        and result["control_overlap"]["analysis"]["latency_ms"] <= 2000
+                        and result["analysis_after_replay"]["observations"] == 122
+                    ):
+                        raise RuntimeError(
+                            "Mixed FIT workload did not preserve replay and service admission"
+                        )
             except RuntimeError:
                 print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
                 raise
