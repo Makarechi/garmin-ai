@@ -103,5 +103,13 @@ cleanly, the Python worker can resume. The test compares the saved pending repla
 clarification, polling and replay cursors, account bindings and uncertain delivery receipt
 throughout the handover.
 
-This checks process ownership and preservation of pending state. Draining work and testing
-delivery across an actual external provider require the release rehearsal.
+Add `--replay-backlog` and use another fresh test database to exercise two real offline
+jobs from a synthetic archive. The test kills Python after it claims a job while an
+archive write is blocked. Rust defers the other job during storage contention, releases
+its attempt, and completes it after the lock becomes available. It then waits for the
+original Python claim to expire before completing that job. Allow just over five minutes
+for the unmodified Python lease. Both projections and source identities are checked
+after returning worker ownership to Python.
+
+The release rehearsal also needs the final package, a representative queue and external
+provider delivery checks.
