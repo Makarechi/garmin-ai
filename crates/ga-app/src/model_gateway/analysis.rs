@@ -7,7 +7,7 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     health_analysis::{
         DATA_FRESHNESS, DailyAnalysisEvidence, LAGGED_ASSOCIATION, MIGRAINE_WINDOWS,
-        SLEEP_ANALYSIS,
+        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -334,7 +334,11 @@ where
                     !replaying
                         || !matches!(
                             tool.name,
-                            GENERIC_ANALYSIS | LAGGED_ASSOCIATION | MIGRAINE_WINDOWS
+                            GENERIC_ANALYSIS
+                                | LAGGED_ASSOCIATION
+                                | MIGRAINE_WINDOWS
+                                | RUNNING_EFFICIENCY
+                                | STRESS_HOURS
                         )
                 })
                 .map(|tool| tool.description)

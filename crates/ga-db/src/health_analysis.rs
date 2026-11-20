@@ -21,8 +21,8 @@ pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
 pub use model_daily::{
     DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
-    LAGGED_ASSOCIATION, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, SLEEP_ANALYSIS,
-    STRESS_HOURS,
+    LAGGED_ASSOCIATION, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY,
+    SLEEP_ANALYSIS, STRESS_HOURS,
 };
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;
