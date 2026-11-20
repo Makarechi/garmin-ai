@@ -17,11 +17,6 @@ change has a documented decision.
   older overlapping response is applied while retaining both revisions.
   Verify that ordering through replay, analytics and migration of legacy
   histories before declaring the temporal contract complete.
-- The established native onboarding and tracker settings routes accept valid JSON
-  objects from authenticated clients that omit the content type. Frozen FastAPI
-  requires the header. Both runtimes reject explicit non-JSON media types and
-  preserve the same malformed-request errors in the comparison.
-  See the five settings and export requests in `check_http_json_requests.py`.
 - Bare `NaN` and `Infinity` tokens are outside the JSON number grammar.
   The pinned Python MCP transport passes those frames to tool validation and
   returns a tool error. Native MCP discards the malformed frame, then accepts

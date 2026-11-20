@@ -110,7 +110,7 @@ def compare(python, rust):
     print("Matched raw typed HTTP request cases", len(routes) * len(CASES), flush=True)
 
 
-def check_native_headerless_requests(python, rust):
+def check_settings_media_types(python, rust):
     headers = {"Authorization": "Bearer " + TOKEN["key"]}
 
     def send(client, method, route, payload, content_type=None):
@@ -128,7 +128,9 @@ def check_native_headerless_requests(python, rust):
         )
         explicit = send(rust, method, route, payload, "text/plain")
         assert explicit.status_code == 422 and explicit.json() == legacy.json()
-        result = send(rust, method, route, payload)
+        omitted = send(rust, method, route, payload)
+        assert omitted.status_code == 422 and omitted.json() == legacy.json()
+        result = send(rust, method, route, payload, "application/example+json")
         assert result.status_code == 200, (route, result.text)
         return result.json()
 
@@ -156,9 +158,7 @@ def check_native_headerless_requests(python, rust):
         "POST", "/tracker-packs/export", {"definition_ids": [tracker["definition_id"]]}
     )
     assert len(exported["trackers"]) == 1
-    print(
-        "Verified 5 native headerless JSON settings requests and matching explicit non-JSON errors"
-    )
+    print("Matched 5 settings routes with omitted, non-JSON and application/*+json media types")
 
 
 def run(binary):
@@ -182,7 +182,7 @@ def run(binary):
                 assert url.startswith("http://127.0.0.1:")
                 with httpx.Client(base_url=url, timeout=120, trust_env=False) as rust:
                     compare(python, rust)
-                    check_native_headerless_requests(python, rust)
+                    check_settings_media_types(python, rust)
             finally:
                 process.terminate()
                 process.wait(timeout=5)
