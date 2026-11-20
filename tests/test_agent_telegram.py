@@ -2246,6 +2246,24 @@ def test_slow_job_coordination_keeps_heartbeat_running(
             claimed.set()
         return job
 
+    def enqueue_during_checkins(session, kind, *args, **kwargs):
+        if kind == "channel_initiatives":
+            return identity
+        return enqueue(session, kind, *args, **kwargs)
+
+    def finish_checkins(session, job_id, lease_token, **kwargs):
+        deferred_before_checkin = (
+            job_id == identity
+            and kwargs.get("error_type") == "DiaryDeferred"
+            and not entered.is_set()
+        )
+        if deferred_before_checkin:
+            # The scheduler can already hold the diary lock when the test job is claimed.
+            kwargs["retry_at"] = datetime.now(UTC)
+        real_finish(session, job_id, lease_token, **kwargs)
+        if deferred_before_checkin:
+            claimed.clear()
+
     async def quick_lease_wait(awaitable, timeout):
         return await real_wait_for(awaitable, 0.05 if timeout == 45 else timeout)
 
@@ -2256,6 +2274,8 @@ def test_slow_job_coordination_keeps_heartbeat_running(
     monkeypatch.setattr(replay, "schedule_replay", lambda *_args: 0)
     if slow_step == "checkins":
         monkeypatch.setattr(initiative_rules, "queue_due_tracker_checkins", slow_operation)
+        monkeypatch.setattr(runtime, "enqueue", enqueue_during_checkins)
+        monkeypatch.setattr(runtime, "finish", finish_checkins)
     else:
         monkeypatch.setattr(runtime, slow_step, slow_operation)
     if slow_step == "renew":
