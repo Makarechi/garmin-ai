@@ -7,6 +7,7 @@ use ga_db::{
     health_analysis::{
         DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
         LAGGED_ASSOCIATION, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, SLEEP_ANALYSIS,
+        STRESS_HOURS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -29,6 +30,7 @@ static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sle
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
+static STRESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::StressHours));
 static MIGRAINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MigraineWindows));
 
 fn model_description(tool: ReadTool) -> Value {
@@ -115,6 +117,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                     description: &LAGS,
                 },
             ]);
+            if access.wellbeing {
+                offered.push(OfferedReadTool {
+                    name: STRESS_HOURS,
+                    description: &STRESS,
+                });
+            }
             if access.migraine {
                 offered.push(OfferedReadTool {
                     name: MIGRAINE_WINDOWS,

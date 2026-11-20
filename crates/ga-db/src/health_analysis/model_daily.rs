@@ -13,11 +13,12 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
-    HealthAnalysisError, HealthPeriod, NapPolicy, begin_daily_analysis, daily_metric,
-    freshness_report::model_freshness_in, lagged::lagged_association_in, main_sleep_timing_in,
-    migraine::migraine_comparison_in, model_metric_packs, observed_values, owner_timezone,
-    period_comparison, period_document, permits_timing_in, read_daily::model_packs_allowed,
-    require_current_projection, sleep_analysis::sleep_analysis_in,
+    HealthAnalysisError, HealthPeriod, NapPolicy, SeriesReadError, begin_daily_analysis,
+    daily_metric, freshness_report::model_freshness_in, lagged::lagged_association_in,
+    main_sleep_timing_in, migraine::migraine_comparison_in, model_metric_packs, observed_values,
+    owner_timezone, period_comparison, period_document, permits_timing_in,
+    read_daily::model_packs_allowed, require_current_projection, sleep_analysis::sleep_analysis_in,
+    stress::stress_hours_in,
 };
 use crate::{
     Database,
@@ -30,6 +31,7 @@ pub const PERIOD_COMPARISON: &str = "analysis_compare_periods";
 pub const SLEEP_ANALYSIS: &str = "analysis_sleep";
 pub const DATA_FRESHNESS: &str = "data_freshness";
 pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
+pub const STRESS_HOURS: &str = "analysis_stress_by_hour";
 pub const MIGRAINE_WINDOWS: &str = "analysis_migraine_windows";
 
 #[derive(Deserialize, Serialize)]
@@ -67,6 +69,12 @@ pub enum DailyAnalysisQuery {
         start: String,
         end: String,
         lags: Vec<i64>,
+    },
+    #[serde(rename = "analysis_stress_by_hour")]
+    StressHours {
+        start: String,
+        end: String,
+        timezone: Option<String>,
     },
     #[serde(rename = "analysis_migraine_windows")]
     Migraine {
@@ -182,6 +190,29 @@ impl DailyAnalysisQuery {
                 }
                 lagged_association_in(txn, metric_a, metric_b, period(start, end)?, lags).await?
             }
+            Self::StressHours {
+                start,
+                end,
+                timezone,
+            } => {
+                if !model_packs_allowed(txn, context.binding().owner_id, &["wellbeing"]).await? {
+                    return Ok(None);
+                }
+                stress_hours_in(
+                    txn,
+                    parse_day(start)?,
+                    parse_day(end)?,
+                    timezone.as_deref(),
+                    configured_timezone,
+                )
+                .await
+                .map_err(|error| match error {
+                    SeriesReadError::Analysis(error) => error,
+                    SeriesReadError::Invalid | SeriesReadError::SampleLimit => {
+                        HealthAnalysisError::DateRange
+                    }
+                })?
+            }
             Self::Migraine {
                 metric,
                 start,
@@ -232,6 +263,7 @@ impl DailyAnalysisEvidence {
                 | DATA_FRESHNESS
                 | LAGGED_ASSOCIATION
                 | MIGRAINE_WINDOWS
+                | STRESS_HOURS
         )
     }
 
@@ -254,7 +286,9 @@ impl DailyAnalysisEvidence {
         }
         let (timezone, checked_at) = match &query {
             DailyAnalysisQuery::Sleep { .. } => (Some(result["timezone"].as_str()?.into()), None),
-            DailyAnalysisQuery::Migraine { .. } => (Some(timezone.into()), None),
+            DailyAnalysisQuery::Migraine { .. } | DailyAnalysisQuery::StressHours { .. } => {
+                (Some(timezone.into()), None)
+            }
             DailyAnalysisQuery::Freshness {} => {
                 let checked_at = result["checked_at"].as_str()?;
                 StoredInstant::from_python_isoformat(checked_at)?;
@@ -280,6 +314,7 @@ impl DailyAnalysisEvidence {
             DailyAnalysisQuery::Sleep { .. }
                 | DailyAnalysisQuery::Freshness {}
                 | DailyAnalysisQuery::Migraine { .. }
+                | DailyAnalysisQuery::StressHours { .. }
         ) && self.timezone.is_none()
         {
             return Ok(false);
@@ -318,6 +353,7 @@ fn result_hash(value: &Value) -> Option<String> {
 
 pub struct DailyAnalysisAccess {
     pub migraine: bool,
+    pub wellbeing: bool,
 }
 
 impl Database {
@@ -332,8 +368,13 @@ impl Database {
             }
             let migraine = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?
                 && model_packs_allowed(&mut txn, context.binding().owner_id, &["migraine"]).await?;
+            let wellbeing =
+                model_packs_allowed(&mut txn, context.binding().owner_id, &["wellbeing"]).await?;
             txn.commit().await?;
-            Ok(Some(DailyAnalysisAccess { migraine }))
+            Ok(Some(DailyAnalysisAccess {
+                migraine,
+                wellbeing,
+            }))
         })
         .await
         .ok()?
