@@ -75,7 +75,24 @@ pub(crate) fn release_repository(project: &[Container]) -> Option<&str> {
     if references.next().flatten() != Some(reference) {
         return None;
     }
-    let (repository, digest) = reference.split_once('@')?;
+    let (name, digest) = reference.split_once('@')?;
+    let repository = match name.rsplit_once(':') {
+        Some((repository, tag)) if !tag.contains('/') => {
+            if !(1..=128).contains(&tag.len())
+                || !tag
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                || !tag
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return None;
+            }
+            repository
+        }
+        _ => name,
+    };
     (image_identity(digest)
         && !repository.is_empty()
         && repository.bytes().all(|byte| {
@@ -259,4 +276,37 @@ pub(crate) async fn inspect_image(reference: &str) -> Result<String> {
         return Err(Failure::message("Invalid Docker image identity"));
     }
     Ok(id.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_immutable_reference_accepts_tag_without_losing_registry_port() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let repository = "127.0.0.1:5017/release/garmin-ai";
+        for (reference, expected) in [
+            (format!("{repository}@{digest}"), Some(repository)),
+            (format!("{repository}:Version_1@{digest}"), Some(repository)),
+            (format!("{repository}:bad tag@{digest}"), None),
+            (format!("{repository}:@{digest}"), None),
+            (format!("{repository}:latest"), None),
+            (
+                format!("docker.io/library/garmin-ai:v1@{digest}"),
+                Some("garmin-ai"),
+            ),
+        ] {
+            let applications = ["api", "worker"].map(|service| Container {
+                id: String::new(),
+                image: digest.clone(),
+                reference: Some(reference.clone()),
+                service: Some(service.to_owned()),
+                status: "running".to_owned(),
+                exit_code: 0,
+                health: Some("healthy".to_owned()),
+            });
+            assert_eq!(release_repository(&applications), expected, "{reference}");
+        }
+    }
 }
