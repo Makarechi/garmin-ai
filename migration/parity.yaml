@@ -675,7 +675,12 @@
         "migration/check_definitions_http.py",
         "migration/check_custom_definition_registry.py",
         "migration/check_generated_forms.py",
-        "migration/check_user_metric_registry.py"
+        "migration/check_user_metric_registry.py",
+        "migration/check_event_definitions.py",
+        "migration/check_resource_catalog.py",
+        "migration/check_tracker_setup.py",
+        "migration/check_tracker_pack_export.py",
+        "migration/evidence/native-registry-forms-linux.json"
       ],
       "data_contracts": [
         "Versioned event/metric schemas, reserved namespaces, unit and scale validation, generated forms."
@@ -684,12 +689,10 @@
         "Definition management controls changes; diary read scope gates discovery and sharing may narrow access."
       ],
       "resource_scenario": "Many custom definitions, form rendering and validation",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R18",
-      "known_limits": [
-        "Repeat lifecycle, old readings, generated forms and permission checks with upgraded data in the assembled release."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
