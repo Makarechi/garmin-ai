@@ -28,7 +28,7 @@ DATE = "2026-03-29T03:10:00+02:00"
 ENTRY = "Synthetic personal value 🧪"
 
 
-def run(prefix, root, mode, filename, mapping="mapping.json", confirm=None, status=0):
+def run(prefix, root, mode, filename, mapping="mapping.json", confirm=None, status=0, error=None):
     command = [*prefix, "import-file", mode, filename, mapping]
     if confirm is not None:
         command += ["--confirm", confirm]
@@ -46,6 +46,8 @@ def run(prefix, root, mode, filename, mapping="mapping.json", confirm=None, stat
         secret not in result.stdout + result.stderr
         for secret in (ENTRY, "secret-like-synthetic-marker", "synthetic-owner-row-id")
     )
+    if error is not None:
+        assert not result.stdout and result.stderr.rstrip() == error, result.stderr
     return json.loads(result.stdout) if result.stdout else None
 
 
@@ -128,6 +130,27 @@ def exercise(engine, binary, root):
         row[1:] == (1, "file_import", "applied", 0, "file_import:synthetic-source", True)
         for row in stored
     )
+
+    rejection = "Operation failed (ValueError). No sensitive details logged."
+    invalid_files = [("invalid.csv", "mapping.json", "row,row,time,notes\n")]
+    for value in ("", "NaN", "1e-1000"):
+        malformed = '[{"row":"synthetic-owner-row-id","row":"same",' + f'"notes":{value}}}]'
+        invalid_files.append(("invalid.json", "json-map.json", malformed))
+    for filename, mapping, body in invalid_files:
+        (root / filename).write_text(body, encoding="utf-8")
+        for runtime in (python, native):
+            run(runtime, root, "preview", filename, mapping, status=1, error=rejection)
+            run(
+                runtime,
+                root,
+                "apply",
+                filename,
+                mapping,
+                preview["plan_sha256"],
+                status=1,
+                error=rejection,
+            )
+    assert imported(engine) == stored
 
     failed = (
         f"row,time,notes\r\nnew-synthetic-row,{DATE},Synthetic first row\r\n"

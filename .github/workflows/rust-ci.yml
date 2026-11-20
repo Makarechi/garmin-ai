@@ -75,7 +75,7 @@ jobs:
           fixtures=$(mktemp -d)
           docker run --rm --network none --user "$(id -u):$(id -g)" --ulimit stack=8388608:8388608 \
             --volume "$GITHUB_WORKSPACE/migration/check_file_json.py:/capture.py:ro" \
-            --volume "$fixtures:/fixtures" garmin-ai-file-reference python /capture.py /fixtures
+            --volume "$fixtures:/fixtures" garmin-ai-file-reference python /capture.py /fixtures --properties
           GA_TEST_FILE_JSON="$fixtures" cargo test --locked -p ga-domain --test file_json -- --ignored
       - name: Record crate and license inventory
         run: cargo metadata --locked --format-version 1 > rust-package-inventory.json

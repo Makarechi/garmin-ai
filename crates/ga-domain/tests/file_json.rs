@@ -1,6 +1,9 @@
 use std::{env, error::Error, fs, io, path::PathBuf};
 
-use ga_domain::{file_import::read_json_rows, sha256_hex};
+use ga_domain::{
+    file_import::{ImportFileError, read_json_rows},
+    sha256_hex,
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -26,10 +29,28 @@ fn accepts_deep_file_rows_in_the_linux_amd64_reference_range() -> Result<(), Box
         assert_eq!(row.canonical_json()?, valid[1..valid.len() - 1]);
         assert!(matches!(
             read_json_rows(input(rejected).as_bytes()),
-            Err(ga_domain::file_import::ImportFileError::InvalidFormat)
+            Err(ImportFileError::InvalidFormat)
         ));
     }
     Ok(())
+}
+
+#[test]
+fn file_errors_follow_the_reference_order_within_an_object() {
+    for (input, expected) in [
+        (r#"[{"a":0,"a":1,"z":}]"#, ImportFileError::InvalidFormat),
+        (r#"[{"a":0,"a":1,"z":NaN}]"#, ImportFileError::JsonNonfinite),
+        (
+            r#"[{"a":0,"a":1,"z":1e-1000}]"#,
+            ImportFileError::JsonPrecision,
+        ),
+        (
+            r#"[{"nested":{"a":0,"a":1},"z":NaN}]"#,
+            ImportFileError::JsonDuplicateKey,
+        ),
+    ] {
+        assert_eq!(read_json_rows(input.as_bytes()).err(), Some(expected));
+    }
 }
 
 #[test]
@@ -49,7 +70,9 @@ fn matches_json_syntax_precision_and_redacted_rows() -> Result<(), Box<dyn Error
                     .map(|row| {
                         Ok(match row {
                             Err(issue) => json!({"issue": issue.code()}),
-                            Ok(row) if file.starts_with("deep") => {
+                            Ok(row)
+                                if file.starts_with("deep") || file.starts_with("canonical-") =>
+                            {
                                 let document = row.canonical_json()?;
                                 json!({"canonical_sha256": sha256_hex(document.as_bytes())})
                             }
@@ -59,7 +82,7 @@ fn matches_json_syntax_precision_and_redacted_rows() -> Result<(), Box<dyn Error
                             Ok(row) => json!({"row": row.fields()}),
                         })
                     })
-                    .collect::<Result<_, ga_domain::file_import::ImportFileError>>()?;
+                    .collect::<Result<_, ImportFileError>>()?;
                 json!({"rows": rows})
             }
             Err(error) => json!({"error": error.to_string()}),
