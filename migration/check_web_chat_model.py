@@ -984,9 +984,21 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     first = submit(native, NOTE, identity)
     assert first["reply"]["text"] == reference["reply"]["text"]
     assert not first["duplicate"]
-    second = submit(native, NOTE, identity)
-    assert second == {**first, "duplicate": True}
+    for _ in range(9):
+        second = submit(native, NOTE, identity)
+        assert second == {**first, "duplicate": True}
     assert len(native_calls) == 1
+    with engine.connect() as connection:
+        stored = connection.execute(
+            text("""
+                SELECT (SELECT count(*) FROM inbound_messages i WHERE i.operation_id=reply.operation_id),
+                       (SELECT count(*) FROM outbox_messages o WHERE o.operation_id=reply.operation_id)
+                FROM outbox_messages reply WHERE reply.id=CAST(:reply AS uuid)
+            """),
+            {"reply": first["reply"]["id"]},
+        ).one()
+        assert stored == (1, 1), stored
+    print("Verified ten identical native web requests create one inbox operation and one reply.")
     assert native.get("/web-chat/messages", headers=HEADERS).status_code == 200
     read = native.post(f"/web-chat/messages/{first['reply']['id']}/read", headers=HEADERS)
     assert read.status_code == 200 and read.json() == {"status": "read"}

@@ -1300,8 +1300,20 @@
       ],
       "rust_tests": [
         "migration/check_channel_ingress.py",
+        "migration/check_delivery_receipts.py",
+        "crates/ga-db/tests/channel_ingress.rs",
+        "crates/ga-db/tests/delivery_receipts.rs",
+        "crates/ga-db/tests/action_tokens.rs",
+        "crates/ga-app/tests/telegram_callback_ingress.rs",
         "crates/ga-app/tests/telegram_inbox_leases.rs",
-        "crates/ga-app/tests/telegram_reply.rs"
+        "crates/ga-app/tests/telegram_reply.rs",
+        "migration/check_channel_extension.py",
+        "migration/check_channel_extension_runtime.py",
+        "migration/check_web_chat_read.py",
+        "migration/check_web_chat_model.py",
+        "migration/check_cutover_restore.py",
+        "migration/check_worker_cutover.py",
+        "migration/evidence/native-neutral-messaging-linux-arm64.json"
       ],
       "data_contracts": [
         "Inbox, conversations, instance-scoped outbox, leases, action tokens, provider acceptance vs read receipt."
@@ -1310,11 +1322,11 @@
         "Bind channel actor and action to installation, owner and destination; adapter may expose only limited capabilities."
       ],
       "resource_scenario": "Ordered drain and retries across restart",
-      "status": "implemented",
+      "status": "verified",
       "verification": "db",
       "owner_task": "R26",
       "known_limits": [
-        "Synthetic cases cover durable inbox claims, reply receipts and a replaced pairing. Browser read receipts and cutover with pending delivery remain pending."
+        "Messaging verification uses synthetic accounts, loopback channels and isolated TimescaleDB."
       ],
       "approved_deviations": []
     },
