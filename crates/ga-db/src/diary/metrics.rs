@@ -1,7 +1,7 @@
 use ga_domain::event_input::source_calendar_date;
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
@@ -12,14 +12,32 @@ use super::{
 
 const DURATION_FIELD: &str = "__derived_duration_minutes_v1__";
 
-pub(super) async fn project_event(
+pub(super) struct ExpectedMetric {
+    pub field: String,
+    pub version: Uuid,
+    pub key: String,
+    pub number: Option<f64>,
+    pub text: Option<String>,
+    pub boolean: Option<bool>,
+    pub unit: String,
+    pub sequence: i32,
+}
+
+pub(super) struct ExpectedMetrics<'a> {
+    pub values: Vec<ExpectedMetric>,
+    pub start: OffsetDateTime,
+    pub end: Option<OffsetDateTime>,
+    pub recorded_at: OffsetDateTime,
+    pub timezone: &'a str,
+    pub day: Date,
+}
+
+pub(super) async fn expected_metrics<'a>(
     txn: &mut Transaction<'_, Postgres>,
-    source: Uuid,
-    snapshot: &Value,
-    transition_at: OffsetDateTime,
-) -> Result<(), DiaryWriteError> {
+    snapshot: &'a Value,
+) -> Result<Option<ExpectedMetrics<'a>>, DiaryWriteError> {
     if snapshot["definition_version_id"].is_null() {
-        return Ok(());
+        return Ok(None);
     }
     let definition = relation_id(&snapshot["definition_version_id"])?;
     type Mapping = (
@@ -53,7 +71,7 @@ pub(super) async fn project_event(
     .fetch_all(&mut **txn)
     .await?;
     if mappings.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let start =
         snapshot_instant(snapshot, "start")?.ok_or(DiaryWriteError::InvalidRecordedState)?;
@@ -63,6 +81,7 @@ pub(super) async fn project_event(
     let timezone = snapshot_text(snapshot, "timezone")?;
     let day = source_calendar_date(stored_instant(start)?, timezone)
         .ok_or(DiaryWriteError::InvalidMetricMapping)?;
+    let mut values = Vec::with_capacity(mappings.len());
     for (sequence, (field, name, version, key, kind, unit, low, high)) in
         mappings.into_iter().enumerate()
     {
@@ -82,6 +101,39 @@ pub(super) async fn project_event(
         let (number, text, boolean) = metric_value(&kind, value, low, high)?;
         let sequence =
             i32::try_from(sequence).map_err(|_| DiaryWriteError::InvalidMetricMapping)?;
+        values.push(ExpectedMetric {
+            field,
+            version,
+            key,
+            number,
+            text: text.map(str::to_owned),
+            boolean,
+            unit: unit
+                .filter(|unit| !unit.is_empty())
+                .unwrap_or_else(|| "1".into()),
+            sequence,
+        });
+    }
+    Ok(Some(ExpectedMetrics {
+        values,
+        start,
+        end,
+        recorded_at,
+        timezone,
+        day,
+    }))
+}
+
+pub(super) async fn project_event(
+    txn: &mut Transaction<'_, Postgres>,
+    source: Uuid,
+    snapshot: &Value,
+    transition_at: OffsetDateTime,
+) -> Result<(), DiaryWriteError> {
+    let Some(expected) = expected_metrics(txn, snapshot).await? else {
+        return Ok(());
+    };
+    for metric in expected.values {
         sqlx::query(
             "INSERT INTO metric_observations (id, metric, value, value_text, value_boolean, unit,
                  metric_definition_version_id, source_entry_id, field_id, projection_version,
@@ -94,21 +146,21 @@ pub(super) async fn project_event(
                  'event-projection-v1')",
         )
         .bind(Uuid::new_v4())
-        .bind(key)
-        .bind(number)
-        .bind(text)
-        .bind(boolean)
-        .bind(unit.as_deref().filter(|unit| !unit.is_empty()).unwrap_or("1"))
-        .bind(version)
+        .bind(metric.key)
+        .bind(metric.number)
+        .bind(metric.text)
+        .bind(metric.boolean)
+        .bind(metric.unit)
+        .bind(metric.version)
         .bind(source)
-        .bind(field)
-        .bind(start)
-        .bind(end)
-        .bind(recorded_at)
-        .bind(day)
+        .bind(metric.field)
+        .bind(expected.start)
+        .bind(expected.end)
+        .bind(expected.recorded_at)
+        .bind(expected.day)
         .bind(transition_at)
-        .bind(timezone)
-        .bind(sequence)
+        .bind(expected.timezone)
+        .bind(metric.sequence)
         .execute(&mut **txn)
         .await?;
     }
