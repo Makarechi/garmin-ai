@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -99,6 +100,8 @@ async def run(repetitions):
         "repetitions": repetitions,
         "downloads": bot.downloads,
         "provider_attempts": calls,
+        "provider_models": models,
+        "transcript_sha256": hashlib.sha256(transcript.encode()).hexdigest(),
         "oversized_rejected_before_download": True,
         "elapsed_seconds": round(elapsed, 3),
     }

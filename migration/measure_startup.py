@@ -422,6 +422,25 @@ def verify_web_chat_storage(db, result, *, multibyte):
             )
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as executable:
+        for block in iter(lambda: executable.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def native_workload_command(binary, test):
+    return (
+        f"{binary} --ignored --exact {test} "
+        "--nocapture > /tmp/native-test-output; task_status=$?; "
+        "sed -n 's/^.*WORKLOAD_RESULT=//p' /tmp/native-test-output > /tmp/result.json; "
+        'if [ "$task_status" -eq 0 ] && [ ! -s /tmp/result.json ]; then '
+        "cat /tmp/native-test-output >&2; task_status=2; fi; "
+        "echo $task_status > /tmp/finished; exec sleep infinity"
+    )
+
+
 def report_run(args, image, platform, *, native=False, observer_image=None, history_fixture=None):
     started = time.monotonic()
     executable = "garmin-ai-rust" if native else "garmin-ai"
@@ -851,13 +870,15 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                     "reconcile": "history_workload::reconciliation::reconciles_two_shared_periodic_windows",
                     "sync": "history_workload::processes_shared_history_workload",
                 }[name]
-                workload_command = (
-                    f"/history-test --ignored --exact {scenario} "
-                    "--nocapture > /tmp/history-output; task_status=$?; "
-                    "sed -n 's/^.*WORKLOAD_RESULT=//p' /tmp/history-output > /tmp/result.json; "
-                    'if [ "$task_status" -eq 0 ] && [ ! -s /tmp/result.json ]; then '
-                    "cat /tmp/history-output >&2; task_status=2; fi; "
-                    "echo $task_status > /tmp/finished; exec sleep infinity"
+                workload_command = native_workload_command("/history-test", scenario)
+            if name == "voice" and native:
+                binary = args.native_voice_test.resolve(strict=True)
+                mounts.extend(("--mount", f"type=bind,src={binary},dst=/voice-test,readonly"))
+                workload_env["GA_TEST_DATABASE_URL"] = app_env["GA_DATABASE_URL"]
+                workload_command = native_workload_command(
+                    "/voice-test",
+                    "telegram_transport::model_worker::tests::voice::ceiling"
+                    "::transcribes_maximum_audio_and_rejects_one_extra_byte",
                 )
             launch(
                 workload,
@@ -914,11 +935,11 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                 raise RuntimeError("Synthetic workload exceeded the measurement deadline")
             status = int(docker("exec", workload, "cat", "/tmp/finished").stdout)
             if status and name != "fitlimit":
-                lines = (
-                    "16"
-                    if name in {"sync", "reconcile", "daily_sync"} and history_fixture is not None
-                    else "1"
+                native_test = native and (
+                    name == "voice"
+                    or (name in {"sync", "reconcile", "daily_sync"} and history_fixture)
                 )
+                lines = "16" if native_test else "1"
                 logs = docker("logs", "--tail", lines, workload, check=False).stderr
                 detail = logs.replace(password, "<redacted>").strip()[:1000]
                 raise RuntimeError(f"Synthetic workload failed with status {status}: {detail}")
@@ -1079,6 +1100,7 @@ def main():
     parser.add_argument("--web-chat-multibyte", action="store_true")
     parser.add_argument("--preload-history", action="store_true")
     parser.add_argument("--native-history-test", type=Path)
+    parser.add_argument("--native-voice-test", type=Path)
     parser.add_argument("--fit-developer", action="store_true")
     parser.add_argument("--controls-during-fit", action="store_true")
     parser.add_argument("--mixed-controls-during-fit", action="store_true")
@@ -1102,12 +1124,9 @@ def main():
         for name in (
             "fit_records",
             "fit_limit_mib",
-            "voice_rounds",
         )
     ):
-        parser.error(
-            "The paired comparison supports startup, web chat, analytics, MCP, FIT replay, backup, Garmin sync and reconciliation"
-        )
+        parser.error("Use --fit-replay for paired FIT workloads")
     if args.candidate_image and (args.sync_days is not None or args.reconcile_days is not None):
         if not args.native_history_test:
             parser.error("A paired Garmin sync or reconciliation requires --native-history-test")
@@ -1119,6 +1138,13 @@ def main():
             )
     elif args.native_history_test:
         parser.error("--native-history-test requires paired Garmin sync or reconciliation")
+    if args.candidate_image and args.voice_rounds is not None:
+        if args.voice_rounds != 1 or not args.native_voice_test:
+            parser.error("A paired voice run requires --voice-rounds 1 and --native-voice-test")
+        if not args.native_voice_test.is_file() or not os.access(args.native_voice_test, os.X_OK):
+            parser.error("--native-voice-test must name the built Linux ga-app library test")
+    elif args.native_voice_test:
+        parser.error("--native-voice-test requires a paired voice workload")
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
@@ -1241,13 +1267,27 @@ def main():
             before, after = baseline["mcp_workload"], candidate["mcp_workload"]
             if any(before[key] != after[key] for key in ("tool_names", "read_result")):
                 raise RuntimeError("The paired MCP sessions produced different results")
+        if args.voice_rounds:
+            before, after = baseline["voice_workload"], candidate["voice_workload"]
+            after["test_executable_sha256"] = file_sha256(args.native_voice_test)
+            fields = (
+                "audio_bytes_per_call",
+                "duration_seconds_per_clip",
+                "repetitions",
+                "downloads",
+                "provider_models",
+                "oversized_rejected_before_download",
+                "transcript_sha256",
+            )
+            if (
+                any(before[key] != after[key] for key in fields)
+                or not after["transcript_committed_once"]
+            ):
+                print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+                raise RuntimeError("The paired voice workloads produced different results")
         if args.sync_days == 1:
             before, after = baseline["daily_sync_workload"], candidate["daily_sync_workload"]
-            digest = hashlib.sha256()
-            with args.native_history_test.open("rb") as executable:
-                for block in iter(lambda: executable.read(1024 * 1024), b""):
-                    digest.update(block)
-            after["test_executable_sha256"] = digest.hexdigest()
+            after["test_executable_sha256"] = file_sha256(args.native_history_test)
             fields = (
                 "days",
                 "fetch_counts",
@@ -1276,11 +1316,7 @@ def main():
                 raise RuntimeError(f"The paired evening sync workloads differed in {mismatched}")
         elif args.sync_days is not None:
             before, after = baseline["sync_workload"], candidate["sync_workload"]
-            digest = hashlib.sha256()
-            with args.native_history_test.open("rb") as executable:
-                for block in iter(lambda: executable.read(1024 * 1024), b""):
-                    digest.update(block)
-            after["test_executable_sha256"] = digest.hexdigest()
+            after["test_executable_sha256"] = file_sha256(args.native_history_test)
             fields = (
                 "days",
                 "history_queue",
@@ -1308,11 +1344,7 @@ def main():
                 raise RuntimeError(f"The paired history workloads differed in {mismatched}")
         if args.reconcile_days is not None:
             before, after = baseline["reconcile_workload"], candidate["reconcile_workload"]
-            digest = hashlib.sha256()
-            with args.native_history_test.open("rb") as executable:
-                for block in iter(lambda: executable.read(1024 * 1024), b""):
-                    digest.update(block)
-            after["test_executable_sha256"] = digest.hexdigest()
+            after["test_executable_sha256"] = file_sha256(args.native_history_test)
             fields = (
                 "window_days",
                 "fetch_counts",

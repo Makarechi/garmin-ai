@@ -444,3 +444,35 @@ when moving the FIT write to the proposed bounded pipeline.
 
 The developer-field fixture uses a file ID, developer data ID and field description before its
 data messages. [Garmin FIT protocol](https://developer.garmin.com/fit/protocol/)
+
+## Paired maximum-size voice transcription
+
+Add `--voice-rounds 1 --native-voice-test /path/to/ga_app-TEST_ID` to the
+paired image command. Build the executable on Linux from the candidate tree
+with `cargo test --locked --release -p ga-app --lib --no-run`.
+
+The [Linux ARM64 trial](evidence/python-rust-voice-ceiling-linux-arm64.json.gz)
+used one shared CPU, a 384 MiB workload limit, and the same PostgreSQL, API
+and worker limits for each runtime. The Rust executable and package came from
+tree `53a5c123c1d5b9ea18fafce17513f7979e589b30`. The clip was exactly
+20 MiB with a declared duration of 600 seconds.
+
+Both runtimes downloaded the clip once, attempted the primary model once, and
+returned the same transcript through the authorized fallback after a synthetic
+timeout. Both refused a clip one byte larger before download. The native test
+also exercised the authenticated Telegram webhook ingress, streamed the bytes
+over local HTTP, verified the prepared Gemini audio payload and confirmed that
+a repeated update retained one transcript.
+
+| Observed workload | Python | Rust |
+| --- | ---: | ---: |
+| Peak workload cgroup charge | 163.55 MiB | 77.44 MiB |
+| Measured stage | 0.214 s | 0.305 s |
+
+The Python timer begins at the direct transcription call. The Rust timer
+includes accepted ingress, storage and duplicate detection. Both stubs simulate
+the model transport's outcome at the request boundary. The memory peaks include
+charged file cache. The samples recorded zero memory-limit events, OOM kills
+and swap use. The Python stage captured two overlapping liveness probes and
+the Rust stage captured one. Live provider traffic and sustained overlap remain
+release checks.
