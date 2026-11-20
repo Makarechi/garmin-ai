@@ -20,7 +20,7 @@ mod sleep_timing;
 pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
 pub use model_daily::{
-    DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON, PERSONAL_BASELINE,
+    DailyAnalysisEvidence, DailyAnalysisQuery, PERIOD_COMPARISON, PERSONAL_BASELINE, SLEEP_ANALYSIS,
 };
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;

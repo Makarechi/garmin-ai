@@ -81,7 +81,13 @@ impl ModelGateway<'_> {
         };
         let tools = DiaryAnalysisTools::new(&self.database, subject, self.binding().instance_id)
             .ok()?
-            .with_daily_access(self.binding(), policy(), session.at, false)
+            .with_daily_access(
+                self.binding(),
+                policy(),
+                session.at,
+                false,
+                &session.timezone,
+            )
             .await;
         let answer = self
             .answer_for_channel(

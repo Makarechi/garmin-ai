@@ -13,7 +13,7 @@ use sqlx::{Acquire, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::analysis::{ANALYSIS_REFERENCE, WebAnalysisProof};
+use super::analysis::WebAnalysisProof;
 use super::send::{finish_web_chat_message, web_chat_envelope};
 use super::{WebChatError, WebChatSnapshot, WebChatSubmission, prepare, timestamp};
 use crate::{
@@ -385,8 +385,8 @@ async fn render_model_reply(
             ]
         })
         .collect();
-    if analysis_proof.is_some() {
-        facts.push(ANALYSIS_REFERENCE.to_owned());
+    if let Some(proof) = analysis_proof {
+        facts.push(proof.reference().to_owned());
     }
     Ok((message, facts))
 }

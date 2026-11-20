@@ -9,7 +9,7 @@ pub use model::{
 };
 pub use send::WebChatSubmission;
 
-use analysis::{ANALYSIS_REFERENCE, current_web_analysis};
+use analysis::{ANALYSIS_REFERENCE, NATIVE_TIMING_REFERENCE, current_web_analysis};
 use std::{collections::VecDeque, error::Error, fmt, time::Duration};
 
 use ga_domain::timestamp::StoredInstant;
@@ -345,7 +345,8 @@ async fn can_show(
 ) -> Result<bool, WebChatError> {
     if state == "queued"
         && evidence_refs(document).any(|reference| reference == ANALYSIS_REFERENCE)
-        && (!replay_locked || !current_web_analysis(txn, conversation, outbox).await?)
+        && (!replay_locked
+            || !current_web_analysis(txn, conversation, outbox, ANALYSIS_REFERENCE).await?)
     {
         return Ok(false);
     }
@@ -363,7 +364,12 @@ async fn can_show(
         if !replay_locked && reference.starts_with(DEPENDENT_REFERENCE) {
             return Ok(false);
         }
-        if !can_show_timing(txn, conversation, reference).await? {
+        let current = if reference == NATIVE_TIMING_REFERENCE {
+            current_web_analysis(txn, conversation, outbox, reference).await?
+        } else {
+            can_show_timing(txn, conversation, reference).await?
+        };
+        if !current {
             return Ok(false);
         }
     }
