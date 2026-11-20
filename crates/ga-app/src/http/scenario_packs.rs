@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Path, Request, State},
-    http::{Method, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use ga_db::{
@@ -64,7 +64,7 @@ async fn handle(state: AppState, key: Option<&str>, request: Request) -> Respons
             forbidden()
         } else if let Some(database) = state.database.as_ref() {
             match (database.enrolled_owner_id().await, key) {
-                (Ok(owner), Some(key)) => update(database, owner, key, body).await,
+                (Ok(owner), Some(key)) => update(database, owner, key, &parts.headers, body).await,
                 (Ok(owner), None) => match database.scenario_packs(owner, true).await {
                     Ok(packs) => Json(json!({"packs": packs})).into_response(),
                     Err(error) => failure(error),
@@ -80,7 +80,13 @@ async fn handle(state: AppState, key: Option<&str>, request: Request) -> Respons
     private_cache(response, &parts.headers)
 }
 
-async fn update(database: &Database, owner: Uuid, key: &str, body: Body) -> Response {
+async fn update(
+    database: &Database,
+    owner: Uuid,
+    key: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
     let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(data) => data,
         Err(_) => {
@@ -90,14 +96,9 @@ async fn update(database: &Database, owner: Uuid, key: &str, body: Body) -> Resp
             );
         }
     };
-    let value = if data.is_empty() {
-        Value::Null
-    } else {
-        let input = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
-        match serde_json::from_slice(input) {
-            Ok(value) => value,
-            Err(_) => return invalid_arguments(),
-        }
+    let value = match super::request_json::parse(&data, headers) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
     };
     let selection = match validate(value) {
         Ok(selection) => selection,
