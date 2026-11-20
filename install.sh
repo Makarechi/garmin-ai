@@ -62,6 +62,15 @@ compose() (
     GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 )
 
+stop_inspection() {
+    if docker container inspect "$inspection_name" >/dev/null 2>&1 &&
+        ! docker container stop "$inspection_name" >/dev/null 2>&1 &&
+        docker container inspect "$inspection_name" >/dev/null 2>&1; then
+        echo "Could not stop the read-only inspection container." >&2
+        return 1
+    fi
+}
+
 case "${1:-}" in
     demo)
         shift
@@ -142,7 +151,15 @@ case "${1:-}" in
             compose up -d --wait db
             compose run --rm --no-deps migrate
         else
-            compose run --rm --no-deps --service-ports api \
+            inspection_name="garmin-ai-inspect-$$-$RANDOM-$RANDOM"
+            if docker container inspect "$inspection_name" >/dev/null 2>&1; then
+                echo "The inspection container name is already in use." >&2
+                exit 1
+            fi
+            trap stop_inspection EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            compose run --rm --no-deps --name "$inspection_name" --service-ports api \
                 serve --read-only --host 0.0.0.0 --port 8080
         fi
         ;;
