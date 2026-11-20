@@ -1,0 +1,83 @@
+{
+  "scope": "Native Linux ARM64 build with synthetic PostgreSQL stores, local HTTP doubles and frozen Python comparisons",
+  "frozen_python": {
+    "revision": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "image_id": "sha256:c99c94edb95f38260cb5fcde2f7949a02648641de086e2461065cc7ea41aa95c"
+  },
+  "native": {
+    "revision": "de5b7ebde73e7c38ed701d7d5ea1ea82ea0f8929",
+    "crates_tree": "a3f15c56981b908a7508e302659a547b50fab35e",
+    "image_id": "sha256:11da530a4389476df0178b28cda31df9d8ec55bd5bf67805ace641dac51c8675"
+  },
+  "checks": {
+    "forms_en": {
+      "test_source": "crates/ga-app/tests/telegram_tracker_forms.rs",
+      "fixture_executable_sha256": "dce5e31c8fb709ca67d46ff4b6aaada5173d0a7926255c798638be34af345a01",
+      "synthetic_report_sha256": "db6d69d2eca8d217c7c34da396a947e9e626402fc07e02a2a87e0c7932a8ddf8",
+      "paired_conversation_steps": 98
+    },
+    "forms_ru": {
+      "test_source": "crates/ga-app/tests/telegram_tracker_forms.rs",
+      "fixture_executable_sha256": "dce5e31c8fb709ca67d46ff4b6aaada5173d0a7926255c798638be34af345a01",
+      "synthetic_report_sha256": "7037e1ac5ea6d1514574fdee6e4f1ab29b443ecee12d78173b142fa1b4deca25",
+      "paired_conversation_steps": 98
+    },
+    "forms_locale": {
+      "test_source": "crates/ga-app/tests/telegram_tracker_forms.rs",
+      "fixture_executable_sha256": "dce5e31c8fb709ca67d46ff4b6aaada5173d0a7926255c798638be34af345a01",
+      "synthetic_report_sha256": "3c6cea4b670066ceb666fdbfc228ea8f8d0739d311b560fa92bcc8a6313c0061",
+      "paired_conversation_steps": 13
+    },
+    "webhook": {
+      "test_source": "crates/ga-app/tests/telegram_webhook.rs",
+      "fixture_executable_sha256": "0acbb388e7b67bc9ad9096fa8cd42cc25c16b9302b51fb86bb18313b1714c833",
+      "synthetic_report_sha256": "eb977a229a4b77c4650670a4fc1589d243b39e75c49375b5e4520048a9e830dd"
+    },
+    "callbacks": {
+      "test_source": "crates/ga-app/tests/telegram_callback_ingress.rs",
+      "fixture_executable_sha256": "62f38f0ce4149eaacaa37b54d9868ec95844a5afbcb3b9d505e04640b3a942cb",
+      "synthetic_report_sha256": "f7614db7abb6e64a744c1554c4bceb08e925b53092c94957d2e3afaa39077a8e"
+    },
+    "fallback": {
+      "test_source": "crates/ga-model/tests/fallback.rs",
+      "fixture_executable_sha256": "2506c0cef51e0a31df991c3692f1515c4efbb5e35978311dfc473b886fc3467d",
+      "synthetic_report_sha256": "87e7a393db147ce82ce194ac667a5e58c2219b7766252c26e33a03b796402298",
+      "paired_cases": 24
+    },
+    "voice_pipeline": {
+      "test_source": "crates/ga-app/src/telegram_transport/model_worker/tests/voice.rs",
+      "fixture_executable_sha256": "3a22f5a8808ff874b6ecda2ffdd360535b566ac2329dfe7d031eec14ea6641a9",
+      "synthetic_report_sha256": "32d6595800384ccfc7c37fe07db57696cd934c97256fcb59ff867ee42d2a331b",
+      "voice_downloads": 8,
+      "rate_limited_download_requests": 1,
+      "checks": [
+        "voice duration limit and retry delay",
+        "cached transcript and expired processing lease recovery",
+        "consent revoked before processing and during download",
+        "bounded safety screening",
+        "one attributed diary write and one queued reply"
+      ]
+    },
+    "provider_loopback": {
+      "test_source": "crates/ga-model/src/tests.rs",
+      "fixture_executable_sha256": "8dc93e06d9059acf34fc0fcb179f56fd39d9e017acff94922cc1ef425828fed2",
+      "synthetic_report_sha256": "49e052b18350ad5d20dc24babdd944bf3d2b38dc4e5450aef7cc5d3dcd8c3ae8",
+      "cases": 8
+    },
+    "maximum_voice_workload": {
+      "test_source": "crates/ga-app/src/telegram_transport/model_worker/tests/voice/ceiling.rs",
+      "fixture_executable_sha256": "3a22f5a8808ff874b6ecda2ffdd360535b566ac2329dfe7d031eec14ea6641a9",
+      "synthetic_report_sha256": "4722623e2b33f19c155272a7e5477a083a73c87b58cfbccaadfcf2f22aedef46",
+      "tested_native_image_id": "sha256:69fdbb58a8e3f5518b1fd911b9ff4d175254b2ecda8667ac48d43596d8320b26",
+      "native_runtime_identical_to_current_package": true,
+      "maximum_clip_bytes": 20971520,
+      "duration_seconds": 600,
+      "same_transcript": true,
+      "oversized_rejected_before_download": true
+    }
+  },
+  "release_verification": {
+    "provider_and_private_bot_live_checks": "pending",
+    "full_parity": "pending"
+  }
+}
