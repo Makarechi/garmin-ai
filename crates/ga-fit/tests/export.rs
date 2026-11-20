@@ -295,3 +295,32 @@ fn projects_the_exact_ceiling_zip_without_buffering_members() -> Result<(), Box<
     assert_eq!(result.export.fit_bytes, MAX_FIT_BYTES);
     Ok(())
 }
+
+#[test]
+fn enforces_single_member_boundary_at_every_small_zip_size() -> Result<(), Box<dyn Error>> {
+    for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+        for fit_members in 1..=10 {
+            let names: Vec<_> = (0..fit_members)
+                .map(|index| format!("part-{index}.fit"))
+                .collect();
+            let mut entries: Vec<_> = names.iter().map(|name| (name.as_str(), FIT)).collect();
+            entries.push(("metadata.json", b"{}"));
+            let raw = zip(&entries, method)?;
+            let member_limit = NonZeroUsize::try_from(entries.len())?;
+            let accepted = ExportLimits {
+                max_zip_entries: member_limit,
+                ..limits()
+            };
+            let inventory = verify(&raw, accepted)?;
+            assert_eq!(inventory.fit_members, fit_members);
+            assert_eq!(inventory.frames, fit_members as u32);
+            assert_eq!(inventory.fit_bytes, (fit_members * FIT.len()) as u64);
+            let denied = ExportLimits {
+                max_zip_entries: NonZeroUsize::try_from(entries.len() - 1)?,
+                ..accepted
+            };
+            assert_eq!(verify(&raw, denied), Err(FitError::TooManyZipMembers));
+        }
+    }
+    Ok(())
+}
