@@ -542,11 +542,11 @@
         "Diary read and write scopes for facts; source and role restrictions survive normalization."
       ],
       "resource_scenario": "Long diary history across local midnight and DST",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R17",
       "known_limits": [
-        "All system diary types matched cross-runtime synthetic creation, replay and read. The HTTP diagnostic for an incomplete coverage interval still needs a release decision."
+        "All system diary types matched cross-runtime synthetic creation, replay and read. Twenty-four incomplete coverage requests matched the frozen create and edit diagnostics without changing events or audit records."
       ],
       "approved_deviations": []
     },
