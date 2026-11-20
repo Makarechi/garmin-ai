@@ -7,6 +7,9 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'scripts/check_rust_boundaries.py'
+      - 'src/garmin_ai/static/**'
+      - 'tests/test_web_chat_browser.py'
+      - 'tests/test_dashboard_demo_browser.py'
       - 'migration/check_postgres_readiness.py'
       - 'migration/capture_reference.py'
       - 'src/garmin_ai/api.py'
@@ -22,6 +25,9 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - 'scripts/check_rust_boundaries.py'
+      - 'src/garmin_ai/static/**'
+      - 'tests/test_web_chat_browser.py'
+      - 'tests/test_dashboard_demo_browser.py'
       - 'migration/check_postgres_readiness.py'
       - 'migration/capture_reference.py'
       - 'src/garmin_ai/api.py'
@@ -98,3 +104,18 @@ jobs:
       - run: cargo test --locked -p ga-db --test job_leases -- --ignored
       - run: cargo test --locked -p ga-db --test garmin_owner -- --ignored
       - run: cargo test --locked -p ga-db --test raw_capture -- --ignored
+      - name: Exercise the Rust HTTP server and demo in Chromium
+        env:
+          GA_REQUIRE_TEST_DB: "1"
+          GA_TEST_NATIVE_WEB: target/release/garmin-ai-rust
+          GA_TEST_NATIVE_DEMO: target/release/garmin-ai-rust
+        run: |
+          uv run playwright install --with-deps chromium
+          uv run pytest -q -ra --junitxml=native-browser.xml \
+            tests/test_web_chat_browser.py tests/test_dashboard_demo_browser.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-browser-results
+          path: native-browser.xml
+          if-no-files-found: warn
