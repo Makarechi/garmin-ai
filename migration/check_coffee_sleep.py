@@ -42,10 +42,10 @@ PATH = "/tools/" + NAME
 REQUEST = {"start": str(BASE), "end": str(BASE + timedelta(days=30))}
 
 
-def seed_coffee(engine):
+def seed_coffee(engine, base=BASE):
     with Session(engine) as session, session.begin():
         for index in range(31):
-            day = BASE + timedelta(days=index)
+            day = base + timedelta(days=index)
             finish = datetime.combine(day, datetime.min.time(), UTC) + timedelta(
                 hours=7, microseconds=index * 123
             )
