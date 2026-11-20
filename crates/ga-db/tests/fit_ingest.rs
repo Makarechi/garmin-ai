@@ -356,7 +356,7 @@ async fn verify_atomic_queue_effects(
         authenticated_fingerprint: fingerprint,
         fetched_at,
     };
-    let expiring = claim(db, inspect, fingerprint, 3).await?;
+    let expiring = claim(db, inspect, fingerprint, 60).await?;
     assert!(matches!(
         db.authorize_legacy_fit_job(
             &LegacyFitCapture {
@@ -371,12 +371,16 @@ async fn verify_atomic_queue_effects(
     db.authorize_legacy_fit_job(&request(at(6)?), &expiring)
         .await?;
 
+    // Publication renews the initial lease. Expire the actual lease from
+    // inside the replacement to exercise the final commit fence.
     sqlx::raw_sql(
         "CREATE SEQUENCE synthetic_fit_started;
+         CREATE TABLE synthetic_fit_lease (id uuid PRIMARY KEY);
          CREATE FUNCTION expire_fit_during_replacement() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
             PERFORM nextval('synthetic_fit_started');
-            PERFORM pg_sleep(3.15);
+            UPDATE jobs SET lease_until=clock_timestamp()-interval '1 second'
+             WHERE id=(SELECT id FROM synthetic_fit_lease);
             RETURN NEW;
          END $$;
          CREATE TRIGGER synthetic_fit_expires BEFORE INSERT ON activity_parts
@@ -384,6 +388,10 @@ async fn verify_atomic_queue_effects(
     )
     .execute(inspect)
     .await?;
+    sqlx::query("INSERT INTO synthetic_fit_lease (id) VALUES ($1)")
+        .bind(expiring.id())
+        .execute(inspect)
+        .await?;
     let result = db
         .ingest_leased_legacy_fit(
             request(at(6)?),
@@ -408,9 +416,17 @@ async fn verify_atomic_queue_effects(
         job_status(inspect, expiring.id()).await?,
         ("running".to_owned(), 1, None)
     );
-    sqlx::raw_sql("DROP TRIGGER synthetic_fit_expires ON activity_parts; DROP FUNCTION expire_fit_during_replacement(); DROP SEQUENCE synthetic_fit_started;")
+    sqlx::raw_sql("DROP TRIGGER synthetic_fit_expires ON activity_parts; DROP FUNCTION expire_fit_during_replacement(); DROP SEQUENCE synthetic_fit_started; DROP TABLE synthetic_fit_lease;")
         .execute(inspect)
         .await?;
+    let expired = sqlx::query(
+        "UPDATE jobs SET lease_until=clock_timestamp()-interval '1 second'
+         WHERE id=$1 AND status='running' AND lease_until>clock_timestamp()",
+    )
+    .bind(expiring.id())
+    .execute(inspect)
+    .await?;
+    assert_eq!(expired.rows_affected(), 1);
 
     let now = OffsetDateTime::now_utc();
     let recovered = db
