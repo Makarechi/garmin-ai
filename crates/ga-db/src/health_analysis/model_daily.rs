@@ -7,14 +7,16 @@ use ga_domain::{
     statistics::describe,
     timestamp::StoredInstant,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value, json};
 use sqlx::{Postgres, Transaction};
 use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
     ActivityReadError, HealthAnalysisError, HealthPeriod, MODEL_HEALTH_PACKS, NapPolicy,
-    SeriesReadError, begin_daily_analysis, daily_metric,
+    SeriesReadError, begin_daily_analysis,
+    coffee::coffee_sleep_in,
+    daily_metric,
     freshness_report::model_freshness_in,
     lagged::lagged_association_in,
     main_sleep_timing_in,
@@ -41,6 +43,8 @@ pub const DATA_FRESHNESS: &str = "data_freshness";
 pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
 pub const HEALTH_SNAPSHOT: &str = "health_snapshot";
 pub const HEALTH_RANGE: &str = "health_range";
+pub const COFFEE_SLEEP: &str = "analysis_coffee_sleep";
+const COFFEE_MODEL_PACKS: &[&str] = &["caffeine", "sleep"];
 pub const METRIC_SERIES: &str = "metric_series";
 pub const RUNNING_EFFICIENCY: &str = "analysis_running_efficiency";
 const RUNNING_MODEL_PACKS: &[&str] = &["training", "sleep", "wellbeing"];
@@ -82,6 +86,19 @@ pub enum DailyAnalysisQuery {
         start: String,
         end: String,
         lags: Vec<i64>,
+    },
+    #[serde(rename = "analysis_coffee_sleep")]
+    CoffeeSleep {
+        start: String,
+        end: String,
+        #[serde(
+            default,
+            deserialize_with = "explicit_number",
+            skip_serializing_if = "Option::is_none"
+        )]
+        late_hours: Option<Number>,
+        #[serde(default = "default_coffee_outcome")]
+        outcome: String,
     },
     #[serde(rename = "health_snapshot")]
     Snapshot { day: String },
@@ -223,6 +240,24 @@ impl DailyAnalysisQuery {
                     return Ok(None);
                 }
                 lagged_association_in(txn, metric_a, metric_b, period(start, end)?, lags).await?
+            }
+            Self::CoffeeSleep {
+                start,
+                end,
+                late_hours,
+                outcome,
+            } => {
+                if !onboarding_allows_model(txn, ModelCategories::DIARY).await?
+                    || !model_packs_allowed(txn, context.binding().owner_id, COFFEE_MODEL_PACKS)
+                        .await?
+                {
+                    return Ok(None);
+                }
+                let hours = late_hours
+                    .as_ref()
+                    .map(|value| value.as_f64().ok_or(HealthAnalysisError::DateRange))
+                    .transpose()?;
+                coffee_sleep_in(txn, parse_day(start)?, parse_day(end)?, hours, outcome).await?
             }
             Self::Snapshot { day } => {
                 if !model_packs_allowed(txn, context.binding().owner_id, MODEL_HEALTH_PACKS).await?
@@ -368,6 +403,7 @@ impl DailyAnalysisEvidence {
                 | HEALTH_SNAPSHOT
                 | HEALTH_RANGE
                 | METRIC_SERIES
+                | COFFEE_SLEEP
         )
     }
 
@@ -465,6 +501,7 @@ pub struct DailyAnalysisAccess {
     pub wellbeing: bool,
     pub running: bool,
     pub summaries: bool,
+    pub coffee_sleep: bool,
 }
 
 impl Database {
@@ -487,12 +524,16 @@ impl Database {
             let summaries =
                 model_packs_allowed(&mut txn, context.binding().owner_id, MODEL_HEALTH_PACKS)
                     .await?;
+            let coffee_sleep = onboarding_allows_model(&mut txn, ModelCategories::DIARY).await?
+                && model_packs_allowed(&mut txn, context.binding().owner_id, COFFEE_MODEL_PACKS)
+                    .await?;
             txn.commit().await?;
             Ok(Some(DailyAnalysisAccess {
                 migraine,
                 wellbeing,
                 running,
                 summaries,
+                coffee_sleep,
             }))
         })
         .await
@@ -581,4 +622,15 @@ fn model_series_error(error: SeriesReadError) -> HealthAnalysisError {
         SeriesReadError::Analysis(error) => error,
         SeriesReadError::Invalid | SeriesReadError::SampleLimit => HealthAnalysisError::DateRange,
     }
+}
+
+fn explicit_number<'de, D>(deserializer: D) -> Result<Option<Number>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Number::deserialize(deserializer).map(Some)
+}
+
+fn default_coffee_outcome() -> String {
+    "sleep_score".into()
 }

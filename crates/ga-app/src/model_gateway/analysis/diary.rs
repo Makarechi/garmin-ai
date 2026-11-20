@@ -5,9 +5,10 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     health_analysis::{
-        DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
-        HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
-        PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
+        COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence,
+        DailyAnalysisQuery, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES,
+        MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
+        STRESS_HOURS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -30,6 +31,7 @@ static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sle
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
+static COFFEE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::CoffeeSleep));
 static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Snapshot));
 static RANGE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Range));
 static SERIES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MetricSeries));
@@ -136,6 +138,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                         description: &RANGE,
                     },
                 ]);
+            }
+            if access.coffee_sleep {
+                offered.push(OfferedReadTool {
+                    name: COFFEE_SLEEP,
+                    description: &COFFEE,
+                });
             }
             if access.running {
                 offered.push(OfferedReadTool {
