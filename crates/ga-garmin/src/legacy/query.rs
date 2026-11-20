@@ -41,6 +41,182 @@ pub enum ActivityEndpoint {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyResource {
+    Day(DailyEndpoint),
+    Devices,
+    Activity(ActivityEndpoint),
+    ActivityPage,
+    ActivityFit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacyInventoryEntry {
+    pub name: &'static str,
+    pub method: &'static str,
+    pub resource: LegacyResource,
+}
+
+impl LegacyInventoryEntry {
+    const fn new(name: &'static str, method: &'static str, resource: LegacyResource) -> Self {
+        Self {
+            name,
+            method,
+            resource,
+        }
+    }
+
+    pub fn scope(self) -> &'static str {
+        match self.resource {
+            LegacyResource::Day(_) => "day",
+            LegacyResource::Devices => "global",
+            LegacyResource::Activity(_) | LegacyResource::ActivityFit => "activity",
+            LegacyResource::ActivityPage => "page",
+        }
+    }
+}
+
+/// The ordered legacy coverage inventory, including the two specialized readers.
+pub const LEGACY_CAPABILITIES: &[LegacyInventoryEntry] = &[
+    LegacyInventoryEntry::new(
+        "daily",
+        "get_stats",
+        LegacyResource::Day(DailyEndpoint::Summary),
+    ),
+    LegacyInventoryEntry::new(
+        "steps",
+        "get_steps_data",
+        LegacyResource::Day(DailyEndpoint::Steps),
+    ),
+    LegacyInventoryEntry::new(
+        "heart_rate",
+        "get_heart_rates",
+        LegacyResource::Day(DailyEndpoint::HeartRate),
+    ),
+    LegacyInventoryEntry::new(
+        "sleep",
+        "get_sleep_data",
+        LegacyResource::Day(DailyEndpoint::Sleep),
+    ),
+    LegacyInventoryEntry::new(
+        "hrv",
+        "get_hrv_data",
+        LegacyResource::Day(DailyEndpoint::Hrv),
+    ),
+    LegacyInventoryEntry::new(
+        "stress",
+        "get_stress_data",
+        LegacyResource::Day(DailyEndpoint::Stress),
+    ),
+    LegacyInventoryEntry::new(
+        "body_battery",
+        "get_body_battery",
+        LegacyResource::Day(DailyEndpoint::BodyBattery),
+    ),
+    LegacyInventoryEntry::new(
+        "body_battery_events",
+        "get_body_battery_events",
+        LegacyResource::Day(DailyEndpoint::BodyBatteryEvents),
+    ),
+    LegacyInventoryEntry::new(
+        "respiration",
+        "get_respiration_data",
+        LegacyResource::Day(DailyEndpoint::Respiration),
+    ),
+    LegacyInventoryEntry::new(
+        "spo2",
+        "get_spo2_data",
+        LegacyResource::Day(DailyEndpoint::Spo2),
+    ),
+    LegacyInventoryEntry::new(
+        "readiness",
+        "get_training_readiness",
+        LegacyResource::Day(DailyEndpoint::Readiness),
+    ),
+    LegacyInventoryEntry::new(
+        "training_status",
+        "get_training_status",
+        LegacyResource::Day(DailyEndpoint::TrainingStatus),
+    ),
+    LegacyInventoryEntry::new(
+        "max_metrics",
+        "get_max_metrics",
+        LegacyResource::Day(DailyEndpoint::MaxMetrics),
+    ),
+    LegacyInventoryEntry::new(
+        "endurance",
+        "get_endurance_score",
+        LegacyResource::Day(DailyEndpoint::Endurance),
+    ),
+    LegacyInventoryEntry::new(
+        "hill",
+        "get_hill_score",
+        LegacyResource::Day(DailyEndpoint::Hill),
+    ),
+    LegacyInventoryEntry::new(
+        "hydration",
+        "get_hydration_data",
+        LegacyResource::Day(DailyEndpoint::Hydration),
+    ),
+    LegacyInventoryEntry::new(
+        "body_composition",
+        "get_body_composition",
+        LegacyResource::Day(DailyEndpoint::BodyComposition),
+    ),
+    LegacyInventoryEntry::new(
+        "intensity",
+        "get_intensity_minutes_data",
+        LegacyResource::Day(DailyEndpoint::Intensity),
+    ),
+    LegacyInventoryEntry::new(
+        "resting_hr",
+        "get_rhr_day",
+        LegacyResource::Day(DailyEndpoint::RestingHeartRate),
+    ),
+    LegacyInventoryEntry::new(
+        "all_day_events",
+        "get_all_day_events",
+        LegacyResource::Day(DailyEndpoint::AllDayEvents),
+    ),
+    LegacyInventoryEntry::new("devices", "get_devices", LegacyResource::Devices),
+    LegacyInventoryEntry::new(
+        "activity",
+        "get_activity",
+        LegacyResource::Activity(ActivityEndpoint::Summary),
+    ),
+    LegacyInventoryEntry::new(
+        "activity_details",
+        "get_activity_details",
+        LegacyResource::Activity(ActivityEndpoint::Details),
+    ),
+    LegacyInventoryEntry::new(
+        "activity_splits",
+        "get_activity_splits",
+        LegacyResource::Activity(ActivityEndpoint::Splits),
+    ),
+    LegacyInventoryEntry::new(
+        "activity_typed_splits",
+        "get_activity_typed_splits",
+        LegacyResource::Activity(ActivityEndpoint::TypedSplits),
+    ),
+    LegacyInventoryEntry::new(
+        "activity_zones",
+        "get_activity_hr_in_timezones",
+        LegacyResource::Activity(ActivityEndpoint::Zones),
+    ),
+    LegacyInventoryEntry::new(
+        "activity_weather",
+        "get_activity_weather",
+        LegacyResource::Activity(ActivityEndpoint::Weather),
+    ),
+    LegacyInventoryEntry::new("activities", "get_activities", LegacyResource::ActivityPage),
+    LegacyInventoryEntry::new(
+        "activity_fit",
+        "download_activity",
+        LegacyResource::ActivityFit,
+    ),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacyRead {
     Daily(DailyEndpoint, Date),
     Devices,
@@ -51,47 +227,26 @@ pub enum LegacyRead {
 impl LegacyRead {
     /// Interpret a date, device, or activity endpoint saved by the scheduler.
     pub fn queued_endpoint(name: &str, key: &str) -> Result<Self, GarminError> {
-        let daily = match name {
-            "daily" => DailyEndpoint::Summary,
-            "steps" => DailyEndpoint::Steps,
-            "heart_rate" => DailyEndpoint::HeartRate,
-            "sleep" => DailyEndpoint::Sleep,
-            "hrv" => DailyEndpoint::Hrv,
-            "stress" => DailyEndpoint::Stress,
-            "body_battery" => DailyEndpoint::BodyBattery,
-            "body_battery_events" => DailyEndpoint::BodyBatteryEvents,
-            "respiration" => DailyEndpoint::Respiration,
-            "spo2" => DailyEndpoint::Spo2,
-            "readiness" => DailyEndpoint::Readiness,
-            "training_status" => DailyEndpoint::TrainingStatus,
-            "max_metrics" => DailyEndpoint::MaxMetrics,
-            "endurance" => DailyEndpoint::Endurance,
-            "hill" => DailyEndpoint::Hill,
-            "hydration" => DailyEndpoint::Hydration,
-            "body_composition" => DailyEndpoint::BodyComposition,
-            "intensity" => DailyEndpoint::Intensity,
-            "resting_hr" => DailyEndpoint::RestingHeartRate,
-            "all_day_events" => DailyEndpoint::AllDayEvents,
-            "devices" if key == "global" => return Ok(Self::Devices),
-            _ => {
-                let activity = match name {
-                    "activity" => ActivityEndpoint::Summary,
-                    "activity_details" => ActivityEndpoint::Details,
-                    "activity_splits" => ActivityEndpoint::Splits,
-                    "activity_typed_splits" => ActivityEndpoint::TypedSplits,
-                    "activity_zones" => ActivityEndpoint::Zones,
-                    "activity_weather" => ActivityEndpoint::Weather,
-                    _ => return Err(GarminError::InvalidRequest),
-                };
-                let identity = key.parse().map_err(|_| GarminError::InvalidRequest)?;
-                return Ok(Self::Activity(activity, identity));
+        let resource = LEGACY_CAPABILITIES
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or(GarminError::InvalidRequest)?
+            .resource;
+        match resource {
+            LegacyResource::Day(endpoint) => {
+                let day = Date::parse(key, &Iso8601::DATE)
+                    .ok()
+                    .filter(|day| (1..=9999).contains(&day.year()))
+                    .ok_or(GarminError::InvalidRequest)?;
+                Ok(Self::Daily(endpoint, day))
             }
-        };
-        let day = Date::parse(key, &Iso8601::DATE)
-            .ok()
-            .filter(|day| (1..=9999).contains(&day.year()))
-            .ok_or(GarminError::InvalidRequest)?;
-        Ok(Self::Daily(daily, day))
+            LegacyResource::Devices if key == "global" => Ok(Self::Devices),
+            LegacyResource::Activity(endpoint) => {
+                let id = key.parse().map_err(|_| GarminError::InvalidRequest)?;
+                Ok(Self::Activity(endpoint, id))
+            }
+            _ => Err(GarminError::InvalidRequest),
+        }
     }
 
     pub(super) fn url(self, base: &Url, display_name: Option<&str>) -> Result<Url, GarminError> {
@@ -228,53 +383,21 @@ mod tests {
         let expected: BTreeMap<String, (String, BTreeMap<String, String>)> = serde_json::from_str(
             include_str!("../../../../migration/contracts/garmin-legacy-requests.json"),
         )?;
-        let days = [
-            ("daily", DailyEndpoint::Summary),
-            ("steps", DailyEndpoint::Steps),
-            ("heart_rate", DailyEndpoint::HeartRate),
-            ("sleep", DailyEndpoint::Sleep),
-            ("hrv", DailyEndpoint::Hrv),
-            ("stress", DailyEndpoint::Stress),
-            ("body_battery", DailyEndpoint::BodyBattery),
-            ("body_battery_events", DailyEndpoint::BodyBatteryEvents),
-            ("respiration", DailyEndpoint::Respiration),
-            ("spo2", DailyEndpoint::Spo2),
-            ("readiness", DailyEndpoint::Readiness),
-            ("training_status", DailyEndpoint::TrainingStatus),
-            ("max_metrics", DailyEndpoint::MaxMetrics),
-            ("endurance", DailyEndpoint::Endurance),
-            ("hill", DailyEndpoint::Hill),
-            ("hydration", DailyEndpoint::Hydration),
-            ("body_composition", DailyEndpoint::BodyComposition),
-            ("intensity", DailyEndpoint::Intensity),
-            ("resting_hr", DailyEndpoint::RestingHeartRate),
-            ("all_day_events", DailyEndpoint::AllDayEvents),
-        ]
-        .map(|(name, endpoint)| (name, LegacyRead::Daily(endpoint, day)));
-        let activities = [
-            ("activity", ActivityEndpoint::Summary),
-            ("activity_details", ActivityEndpoint::Details),
-            ("activity_splits", ActivityEndpoint::Splits),
-            ("activity_typed_splits", ActivityEndpoint::TypedSplits),
-            ("activity_zones", ActivityEndpoint::Zones),
-            ("activity_weather", ActivityEndpoint::Weather),
-        ]
-        .map(|(name, endpoint)| (name, LegacyRead::Activity(endpoint, activity)));
-        let other = [
-            ("devices", LegacyRead::Devices),
-            (
-                "activities",
-                LegacyRead::Activities {
+        let mut actual = BTreeMap::new();
+        for entry in LEGACY_CAPABILITIES {
+            let resource = match entry.resource {
+                LegacyResource::Day(endpoint) => LegacyRead::Daily(endpoint, day),
+                LegacyResource::Devices => LegacyRead::Devices,
+                LegacyResource::Activity(endpoint) => LegacyRead::Activity(endpoint, activity),
+                LegacyResource::ActivityPage => LegacyRead::Activities {
                     start: 10,
                     limit: NonZeroU16::try_from(100)?,
                 },
-            ),
-        ];
-        let mut actual = BTreeMap::new();
-        for (name, resource) in days.into_iter().chain(activities).chain(other) {
+                LegacyResource::ActivityFit => continue,
+            };
             let url = resource.url(&base, Some("Synthetic Profile"))?;
             actual.insert(
-                name.to_owned(),
+                entry.name.to_owned(),
                 (
                     url.path().to_owned(),
                     url.query_pairs().into_owned().collect(),

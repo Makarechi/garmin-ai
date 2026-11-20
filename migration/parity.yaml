@@ -244,7 +244,9 @@
       "rust_tests": [
         "crates/ga-db/tests/garmin_endpoint.rs",
         "migration/check_health_publication.py",
-        "migration/check_garmin_source_settings.py"
+        "migration/check_garmin_source_settings.py",
+        "crates/ga-app/tests/garmin_inventory.rs",
+        "migration/check_garmin_probe.py"
       ],
       "data_contracts": [
         "Endpoint identity, pagination, per-capability availability, request pacing, retry and cooldown."
@@ -257,7 +259,7 @@
       "verification": "db",
       "owner_task": "R13",
       "known_limits": [
-        "Compare all configured acquisition capabilities and limits against the authorized account and the final normal worker."
+        "The local inventory and probe cover all 29 pinned read requests, including checkpoint and owner checks. Verify advertised acquisition and limits against an authorized account and its devices."
       ],
       "approved_deviations": []
     },

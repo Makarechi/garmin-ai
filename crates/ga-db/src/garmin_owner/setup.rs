@@ -35,6 +35,7 @@ const BOOTSTRAP_TABLES: &[&str] = &[
 pub enum LocalGarminSetupMode {
     Login { confirm_existing_owner: bool },
     Enroll,
+    Probe,
 }
 
 impl LocalGarminSetupMode {
@@ -116,12 +117,14 @@ impl Database {
                 }
             }
             let layout = layout(&mut connection).await?;
-            if matches!(mode, LocalGarminSetupMode::Enroll) {
-                match layout {
-                    Layout::Empty => return Err(GarminSetupError::MigrationRequired),
-                    Layout::Erased => return Err(GarminSetupError::StorageDisabled),
-                    Layout::Active => {}
+            match (&layout, mode) {
+                (Layout::Empty, LocalGarminSetupMode::Enroll) => {
+                    return Err(GarminSetupError::MigrationRequired);
                 }
+                (Layout::Erased, LocalGarminSetupMode::Enroll | LocalGarminSetupMode::Probe) => {
+                    return Err(GarminSetupError::StorageDisabled);
+                }
+                _ => {}
             }
             Ok(LocalGarminSetup {
                 connection,
@@ -135,8 +138,19 @@ impl Database {
 }
 
 impl LocalGarminSetup {
+    /// A fenced probe stops when its dedicated database session is lost.
+    pub async fn check_connection(&mut self) -> Result<(), GarminSetupError> {
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            sqlx::query("SELECT 1").execute(&mut self.connection),
+        )
+        .await
+        .map_err(|_| GarminSetupError::Database)??;
+        Ok(())
+    }
+
     pub async fn publish(
-        mut self,
+        &mut self,
         fingerprint: &str,
         retained_archive: bool,
         save_tokens: impl FnOnce() -> Result<(), GarminSetupError>,
@@ -190,13 +204,15 @@ impl LocalGarminSetup {
             }
             Err(error) => return Err(GarminSetupError::Owner(error)),
         }
-        let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *txn)
-            .await?;
-        let at = StoredInstant::try_from(now).map_err(|_| GarminSetupError::Database)?;
-        record_transport_in(&mut txn, at, GarminTransportOutcome::AuthorizedLogin)
-            .await
-            .map_err(|_| GarminSetupError::Database)?;
+        if !matches!(self.mode, LocalGarminSetupMode::Probe) {
+            let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *txn)
+                .await?;
+            let at = StoredInstant::try_from(now).map_err(|_| GarminSetupError::Database)?;
+            record_transport_in(&mut txn, at, GarminTransportOutcome::AuthorizedLogin)
+                .await
+                .map_err(|_| GarminSetupError::Database)?;
+        }
         save_tokens()?;
         txn.commit().await?;
         Ok(())

@@ -53,14 +53,33 @@ impl LegacyReader {
                 &mut schedule,
             )
             .await?;
-        Ok(Self {
+        Ok(Self::from_parts(store, session, native, schedule))
+    }
+
+    /// Continue a session after the caller has verified its local owner.
+    pub fn from_verified_session(
+        store: GarminTokenFile,
+        session: LegacySession,
+        config: TransportConfig,
+    ) -> Result<Self, GarminError> {
+        let native = Native::new(Hosts::production()?, config)?;
+        Ok(Self::from_parts(store, session, native, Schedule::new()))
+    }
+
+    fn from_parts(
+        store: GarminTokenFile,
+        session: LegacySession,
+        native: Native,
+        schedule: Schedule,
+    ) -> Self {
+        Self {
             inner: Arc::new(Inner {
                 native,
                 store,
-                expected_fingerprint: expected_fingerprint.to_owned(),
+                expected_fingerprint: session.fingerprint(),
                 state: Mutex::new(State { session, schedule }),
             }),
-        })
+        }
     }
 
     /// Account identity verified when the reader restored or refreshed its session.

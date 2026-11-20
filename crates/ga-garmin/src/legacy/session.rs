@@ -127,12 +127,21 @@ impl LegacySession {
         store: &GarminTokenFile,
         config: TransportConfig,
     ) -> Result<Self, GarminError> {
+        let (session, _) = Self::restore_for_local_verification(store, config).await?;
+        Ok(session)
+    }
+
+    /// Verify the profile without publishing any credentials until the caller
+    /// has checked the local owner. The flag indicates a rotated session.
+    pub async fn restore_for_local_verification(
+        store: &GarminTokenFile,
+        config: TransportConfig,
+    ) -> Result<(Self, bool), GarminError> {
         let native = Native::new(Hosts::production()?, config)?;
         let guard = store.try_lock().map_err(|_| GarminError::TokenStorage)?;
-        let (candidate, _) = native
+        native
             .restore_candidate(&guard, RestorePolicy::IfNeeded, &mut Schedule::new())
-            .await?;
-        Ok(candidate)
+            .await
     }
 }
 
