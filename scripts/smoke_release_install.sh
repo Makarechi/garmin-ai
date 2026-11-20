@@ -76,32 +76,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker buildx build --load --platform "$platform" -f "$root/$dockerfile" -t "$image_tag" "$root" >"$work/build.log" 2>&1 || {
+revision=$(git -C "$root" rev-parse HEAD)
+docker buildx build --load --platform "$platform" -f "$root/$dockerfile" \
+    --label "org.opencontainers.image.revision=$revision" -t "$image_tag" "$root" >"$work/build.log" 2>&1 || {
     tail -40 "$work/build.log" >&2
     exit 1
 }
-image_ref=
 if [[ "$runtime" == rust ]]; then
     docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
         --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_tag" --help >/dev/null
-    image_ref=$(docker image inspect "$image_tag" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}')
 fi
-if [[ -z "$image_ref" ]] || ! docker image inspect "$image_ref" >/dev/null 2>&1; then
-    docker run -d --rm -p 127.0.0.1::5000 --name "$registry_name" registry:2 >/dev/null
-    registry_port=$(docker port "$registry_name" 5000/tcp | sed -n 's/.*://p')
-    registry_tag="127.0.0.1:$registry_port/garmin-ai:smoke"
-    docker tag "$image_tag" "$registry_tag"
-    docker push "$registry_tag" >"$work/push.log" 2>&1 || {
-        tail -40 "$work/push.log" >&2
-        exit 1
-    }
-    digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' "$work/push.log" | tail -1)
-    if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-        echo "Could not identify the registry image digest." >&2
-        exit 1
-    fi
-    image_ref="127.0.0.1:$registry_port/garmin-ai@$digest"
+docker run -d --rm -p 127.0.0.1::5000 --name "$registry_name" registry:2 >/dev/null
+registry_port=$(docker port "$registry_name" 5000/tcp | sed -n 's/.*://p')
+registry_tag="127.0.0.1:$registry_port/garmin-ai:smoke"
+docker tag "$image_tag" "$registry_tag"
+docker push "$registry_tag" >"$work/push.log" 2>&1 || {
+    tail -40 "$work/push.log" >&2
+    exit 1
+}
+digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' "$work/push.log" | tail -1)
+if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    echo "Could not identify the registry image digest." >&2
+    exit 1
 fi
+image_ref="127.0.0.1:$registry_port/garmin-ai@$digest"
 PYTHONPATH="$root/src" "$python_bin" "$root/scripts/build_release_bundle.py" \
     --runtime "$runtime" --app-image "$image_ref" --output "$work/bundle"
 mkdir "$work/install"
@@ -240,7 +238,7 @@ fi
 
 mkdir -p "$root/test-results"
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
-    "$(git -C "$root" rev-parse HEAD)" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" <<'PY'
+    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
