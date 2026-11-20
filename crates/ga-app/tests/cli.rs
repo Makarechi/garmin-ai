@@ -1,5 +1,7 @@
 use std::process::{Command, Output};
 
+use serde_json::Value;
+
 fn invoke(args: &[&str]) -> std::io::Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_garmin-ai-rust"))
         .env_clear()
@@ -16,6 +18,41 @@ fn help_runs_in_an_empty_environment() -> Result<(), Box<dyn std::error::Error>>
         assert!(String::from_utf8(output.stdout)?.contains("Usage: garmin-ai-rust"));
     }
 
+    Ok(())
+}
+
+#[test]
+fn exposes_frozen_commands_and_options() -> Result<(), Box<dyn std::error::Error>> {
+    let inventory: Value = serde_json::from_str(include_str!(
+        "../../../migration/contracts/baseline-surfaces.json"
+    ))?;
+    let commands = inventory["cli"]["commands"]
+        .as_object()
+        .ok_or("Expected frozen commands")?;
+    assert_eq!(commands.len(), 20);
+
+    for (command, contract) in commands {
+        let output = invoke(&[command, "--help"])?;
+        assert!(output.status.success(), "{command} --help failed");
+        assert!(output.stderr.is_empty(), "{command} --help wrote to stderr");
+        let help = String::from_utf8(output.stdout)?;
+        assert!(help.contains(&format!("Usage: garmin-ai-rust {command}")));
+        for argument in contract["arguments"]
+            .as_array()
+            .ok_or("Expected arguments")?
+        {
+            if argument["hidden"] == true {
+                continue;
+            }
+            for flag in argument["flags"].as_array().ok_or("Expected flags")? {
+                let flag = flag.as_str().ok_or("Expected flag name")?;
+                assert!(
+                    help.split_whitespace().any(|word| word == flag),
+                    "{command} is missing {flag} from the frozen contract"
+                );
+            }
+        }
+    }
     Ok(())
 }
 

@@ -415,7 +415,9 @@
         "src/garmin_ai/freshness.py",
         "src/garmin_ai/temporal.py",
         "src/garmin_ai/projection_changes.py",
-        "src/garmin_ai/projection_history.py"
+        "src/garmin_ai/projection_history.py",
+        "src/garmin_ai/sync.py",
+        "src/garmin_ai/projection_audit.py"
       ],
       "entrypoints": {
         "cli": [
@@ -440,7 +442,10 @@
         "tests/test_archive_replay.py",
         "tests/test_observation_freshness.py",
         "tests/test_metric_definitions.py",
-        "tests/test_temporal.py"
+        "tests/test_temporal.py",
+        "tests/test_account_binding.py::test_probe_import_requires_matching_provenance_even_with_legacy_confirmation",
+        "tests/test_account_binding.py::test_probe_import_does_not_count_disabled_collection",
+        "tests/test_account_binding.py::test_probe_import_rejects_present_invalid_provenance"
       ],
       "rust_tests": [
         "migration/check_replay_status.py",
@@ -448,7 +453,10 @@
         "crates/ga-app/tests/replay_worker.rs",
         "crates/ga-db/tests/replay_status.rs",
         "migration/check_replay_calendar.py",
-        "migration/evidence/native-offline-replay-linux-arm64.json"
+        "migration/evidence/native-offline-replay-linux-arm64.json",
+        "crates/ga-app/tests/cli.rs::exposes_frozen_commands_and_options",
+        "migration/check_probe_import.py",
+        "migration/check_projection_audit.py"
       ],
       "data_contracts": [
         "Parser-version identity, replay checkpoint, failed revisions, historical timezone and invalidation."
@@ -457,11 +465,11 @@
         "Replay only approved local archive and associated owner; fenced partial outputs remain unavailable."
       ],
       "resource_scenario": "Full offline replay, corruption and restart",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R16",
       "known_limits": [
-        "The scheduled offline replay, corruption handling, and synthetic rollback match. The native import-probe and projection-audit commands are still pending."
+        "Synthetic archive replay, corruption handling, rollback, owner-verified coverage import, and read-only paginated projection audit match the frozen application. Unattended release observation remains in R37."
       ],
       "approved_deviations": []
     },

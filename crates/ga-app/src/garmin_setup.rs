@@ -50,7 +50,7 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
     validate_backup_layout(&data, &token_dir, &locks, &backups)?;
     let access = match mode {
         LocalGarminSetupMode::Login { .. } => StorageAccess::Recovery,
-        LocalGarminSetupMode::Enroll | LocalGarminSetupMode::Probe => StorageAccess::Active,
+        _ => StorageAccess::Active,
     };
     let _files = StorageFilesGuard::acquire(&locks, access)?;
     let retained = Archive::has_retained_entries(&data.join("raw"))?;
@@ -61,7 +61,7 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
             Some(db.acquire_local_garmin_setup(mode).await?)
         }
         None => match mode {
-            LocalGarminSetupMode::Enroll => {
+            LocalGarminSetupMode::Enroll | LocalGarminSetupMode::ImportProbe { .. } => {
                 return Err("Local enrollment requires a database".into());
             }
             LocalGarminSetupMode::Login {
@@ -75,7 +75,7 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
     let client = TransportConfig::default();
     let candidate = match mode {
         LocalGarminSetupMode::Login { .. } => authenticate(&mut Terminal::open()?, client).await?,
-        LocalGarminSetupMode::Enroll | LocalGarminSetupMode::Probe => {
+        _ => {
             let store = GarminTokenFile::open_existing(&token_dir)?
                 .ok_or(GarminError::AuthenticationRequired)?;
             LegacySession::restore_for_local_enrollment(&store, client).await?

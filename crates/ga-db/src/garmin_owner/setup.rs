@@ -11,7 +11,7 @@ use super::{
     verify_binding,
 };
 use crate::{
-    Database, SCHEMA_REVISION,
+    Database, OWNER_ENROLLMENT_LOCK, SCHEMA_REVISION, STORAGE_LIFECYCLE_LOCK,
     database_export::{TABLES, TOKEN_PUBLICATION_LOCK},
     garmin_integration::{GarminTransportOutcome, record_transport_in},
     storage_maintenance::StorageMaintenanceError,
@@ -36,6 +36,7 @@ pub enum LocalGarminSetupMode {
     Login { confirm_existing_owner: bool },
     Enroll,
     Probe,
+    ImportProbe { confirm_existing_owner: bool },
 }
 
 impl LocalGarminSetupMode {
@@ -44,6 +45,9 @@ impl LocalGarminSetupMode {
             self,
             Self::Enroll
                 | Self::Login {
+                    confirm_existing_owner: true
+                }
+                | Self::ImportProbe {
                     confirm_existing_owner: true
                 }
         )
@@ -118,10 +122,13 @@ impl Database {
             }
             let layout = layout(&mut connection).await?;
             match (&layout, mode) {
-                (Layout::Empty, LocalGarminSetupMode::Enroll) => {
+                (
+                    Layout::Empty,
+                    LocalGarminSetupMode::Enroll | LocalGarminSetupMode::ImportProbe { .. },
+                ) => {
                     return Err(GarminSetupError::MigrationRequired);
                 }
-                (Layout::Erased, LocalGarminSetupMode::Enroll | LocalGarminSetupMode::Probe) => {
+                (Layout::Erased, mode) if !matches!(mode, LocalGarminSetupMode::Login { .. }) => {
                     return Err(GarminSetupError::StorageDisabled);
                 }
                 _ => {}
@@ -138,6 +145,31 @@ impl Database {
 }
 
 impl LocalGarminSetup {
+    /// Keep erasure and enrollment fenced while allowing normal ingestion
+    /// transactions to obtain their own shared storage locks.
+    pub async fn begin_probe_import(&mut self) -> Result<(), GarminSetupError> {
+        if !matches!(self.mode, LocalGarminSetupMode::ImportProbe { .. }) {
+            return Err(GarminSetupError::Database);
+        }
+        for lock in [STORAGE_LIFECYCLE_LOCK, OWNER_ENROLLMENT_LOCK] {
+            let shared: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock_shared($1)")
+                .bind(lock)
+                .fetch_one(&mut self.connection)
+                .await?;
+            if !shared {
+                return Err(GarminSetupError::Lock(StorageMaintenanceError::Busy));
+            }
+            let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+                .bind(lock)
+                .fetch_one(&mut self.connection)
+                .await?;
+            if !released {
+                return Err(GarminSetupError::Database);
+            }
+        }
+        Ok(())
+    }
+
     /// A fenced probe stops when its dedicated database session is lost.
     pub async fn check_connection(&mut self) -> Result<(), GarminSetupError> {
         tokio::time::timeout(
@@ -204,7 +236,10 @@ impl LocalGarminSetup {
             }
             Err(error) => return Err(GarminSetupError::Owner(error)),
         }
-        if !matches!(self.mode, LocalGarminSetupMode::Probe) {
+        if matches!(
+            self.mode,
+            LocalGarminSetupMode::Login { .. } | LocalGarminSetupMode::Enroll
+        ) {
             let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn)
                 .await?;

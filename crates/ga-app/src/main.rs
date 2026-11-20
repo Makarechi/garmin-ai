@@ -11,6 +11,7 @@ mod http;
 mod lifecycle;
 mod mcp_stdio;
 mod migrate;
+mod probe_import;
 mod projection_audit;
 mod replay_worker;
 mod retention;
@@ -67,6 +68,13 @@ enum Command {
         start: Option<time::Date>,
         #[arg(long, value_parser = garmin_probe::parse_date)]
         end: Option<time::Date>,
+    },
+    /// Import data from a locally archived Garmin coverage report
+    ImportProbe {
+        #[arg(long)]
+        confirm_legacy_owner: bool,
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
     /// Pair the first Telegram owner using a one-time code
     PairTelegram {
@@ -247,6 +255,20 @@ fn main() -> ExitCode {
                 };
             }
         }
+        Some(Command::ImportProbe {
+            confirm_legacy_owner,
+            report,
+        }) => match probe_import::run(report, confirm_legacy_owner) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("Some archived data needs parser corrections.");
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        },
         Some(Command::PairTelegram {
             env_file,
             container_runtime,

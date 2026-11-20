@@ -137,5 +137,21 @@
       "observed": "Across 7,300 older archive revisions and 52,560 measurements, a newly retained stale revision fenced analytical reads until it was brought current. Readiness and outcome counts matched the reference."
     }
   ],
-  "remaining_release_validation": "Native import-probe and projection-audit, and the release-level unattended observation, remain pending."
+  "remaining_release_validation": "Unattended release observation remains in R37.",
+  "local_cli_verification": {
+    "platform": "linux/arm64",
+    "source_revision": "2d90e256362764da280fa199174d8596d809ae3a",
+    "source_tree": "24889729321756827fd369750127f7b0a77c52fa",
+    "app_sha256": "2f2516d7f16c96190990112ca78a3d3b88bca12b0b4414e7f7729ae9cc6f6ba3",
+    "frozen_commands": 20,
+    "synthetic_coverage_requests": 29,
+    "invalid_explicit_provenance_cases": 6,
+    "audit_snapshot_pages": 103,
+    "traces_sha256": {
+      "commands": "3a15fdf8d067f6de17ef250f05af4615221aa450b828b0649391d0610cddd890",
+      "coverage_probe": "33eba502f79f834e445bb44def5c584545b137677667fa31d7261d35eeb2d165",
+      "archived_import": "765915e3184833e10d26a40e55ad18a6608c6938bf4fc54551f6af2fc8971c1c",
+      "read_only_audit": "1382e2cb17576eb5d80a55c39c168521b77080fa05a999b4c94a1a38e8eb6a7e"
+    }
+  }
 }
