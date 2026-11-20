@@ -1,4 +1,4 @@
-"""Compare JSON input validation before two typed HTTP request handlers."""
+"""Compare JSON input validation before typed HTTP request handlers."""
 
 import argparse
 import json
@@ -15,7 +15,7 @@ from garmin_ai.config import ApiToken, Settings
 
 TOKEN = {
     "key": "synthetic-json-request-validation-proof",
-    "scopes": ["read:health", "read:diary", "write:diary"],
+    "scopes": ["read:health", "read:diary", "write:diary", "manage:integrations"],
 }
 JSON = "application/json"
 CASES = (
@@ -66,13 +66,20 @@ def value(response):
 
 def compare(python, rust):
     failures = []
-    for route in ("/tools/health_snapshot", "/hypotheses"):
+    routes = (
+        ("POST", "/tools/health_snapshot"),
+        ("POST", "/hypotheses"),
+        ("PUT", "/preferences/goals"),
+        ("PUT", "/scenario-packs/sleep_recovery"),
+    )
+    for method, route in routes:
         for name, data, content_type in CASES:
             headers = {"Authorization": "Bearer " + TOKEN["key"]}
             if content_type is not None:
                 headers["Content-Type"] = content_type
             expected, actual = (
-                client.post(route, content=data, headers=headers) for client in (python, rust)
+                client.request(method, route, content=data, headers=headers)
+                for client in (python, rust)
             )
             if expected.status_code != actual.status_code or value(expected) != value(actual):
                 failures.append(
@@ -88,7 +95,7 @@ def compare(python, rust):
     for item in failures:
         print("JSON validation difference", json.dumps(item, ensure_ascii=True), flush=True)
     assert not failures, len(failures)
-    print("Matched raw typed HTTP request cases", 2 * len(CASES), flush=True)
+    print("Matched raw typed HTTP request cases", len(routes) * len(CASES), flush=True)
 
 
 def run(binary):

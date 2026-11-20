@@ -8,7 +8,7 @@ use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{Method, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use ga_db::{
@@ -38,7 +38,9 @@ pub(super) async fn preferences(State(state): State<AppState>, request: Request)
                 forbidden()
             } else if let Some(database) = state.database.as_ref() {
                 match database.enrolled_owner_id().await {
-                    Ok(owner) if parts.method == Method::PUT => store(database, owner, body).await,
+                    Ok(owner) if parts.method == Method::PUT => {
+                        store(database, owner, &parts.headers, body).await
+                    }
                     Ok(owner) => match database.bound_personal_goals(owner).await {
                         Ok(value) => Json(json!(value)).into_response(),
                         Err(error) => failure(error),
@@ -57,7 +59,7 @@ pub(super) async fn preferences(State(state): State<AppState>, request: Request)
     private_cache(response, &parts.headers)
 }
 
-async fn store(database: &Database, owner: Uuid, body: Body) -> Response {
+async fn store(database: &Database, owner: Uuid, headers: &HeaderMap, body: Body) -> Response {
     let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(data) => data,
         Err(_) => {
@@ -67,14 +69,9 @@ async fn store(database: &Database, owner: Uuid, body: Body) -> Response {
             );
         }
     };
-    let value = if data.is_empty() {
-        Value::Null
-    } else {
-        let input = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
-        match serde_json::from_slice(input) {
-            Ok(value) => value,
-            Err(_) => return invalid_arguments(),
-        }
+    let value = match super::request_json::parse(&data, headers) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
     };
     let (revision, goals) = match validate(value) {
         Ok(value) => value,
