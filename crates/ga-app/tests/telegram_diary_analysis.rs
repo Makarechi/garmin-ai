@@ -182,7 +182,14 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
     };
     assert!(matches!(
         database
-            .queue_telegram_diary_analysis(&lease, policy, goals_revision, &[first], reply()?)
+            .queue_telegram_diary_analysis(
+                &lease,
+                policy,
+                goals_revision,
+                &[first],
+                &Default::default(),
+                reply()?
+            )
             .await,
         Err(TelegramDiaryCommitError::ModelContextChanged)
     ));
@@ -200,6 +207,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
                 policy,
                 goals_revision,
                 &[current_evidence],
+                &Default::default(),
                 reply()?
             )
             .await,
@@ -212,7 +220,14 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
     .execute(&pool)
     .await?;
     let queued = database
-        .queue_telegram_diary_analysis(&lease, policy, goals_revision, &[read().await?], reply()?)
+        .queue_telegram_diary_analysis(
+            &lease,
+            policy,
+            goals_revision,
+            &[read().await?],
+            &Default::default(),
+            reply()?,
+        )
         .await?;
     let destination = || ReplyDestination {
         owner_id: owner,

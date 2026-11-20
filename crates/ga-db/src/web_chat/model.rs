@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation},
@@ -32,7 +32,7 @@ use crate::{
     model_gate::onboarding::onboarding_allows_model,
     share_policy::{
         DestinationKind, MODEL_CONSENT_LOCK, OWNER_ONBOARDING_LOCK, ShareDestination,
-        try_shared_lock,
+        schema_answer_references, try_shared_lock,
     },
 };
 
@@ -67,6 +67,7 @@ pub enum WebChatModelReply<'a> {
         memory: &'a MemoryFence,
         goals_revision: u64,
         evidence: &'a [Value],
+        schema_versions: &'a BTreeSet<Uuid>,
         expected: WebChatInterpretationContext<'a>,
     },
 }
@@ -252,6 +253,7 @@ async fn render_model_reply(
     };
 
     let mut versions = context.events.channel_versions;
+    let mut schema_refs = Vec::new();
     let message = match reply {
         WebChatModelReply::Unverified => MODEL_FAILED.to_owned(),
         WebChatModelReply::FixedNotice(message) => message.to_owned(),
@@ -345,6 +347,7 @@ async fn render_model_reply(
             memory,
             goals_revision,
             evidence,
+            schema_versions,
             ..
         } => {
             let Some(fence) = DiaryAnalysisFence::from_evidence(
@@ -353,9 +356,14 @@ async fn render_model_reply(
                 configured_timezone,
                 goals_revision,
                 evidence,
+                schema_versions,
             ) else {
                 return Ok((MODEL_FAILED.to_owned(), Vec::new()));
             };
+            schema_refs = schema_answer_references(txn, super::DESTINATION, schema_versions)
+                .await
+                .map_err(|_| WebChatError::Database)?
+                .ok_or(WebChatError::ChannelConsent)?;
             let Some(cited) = fence.check_web(txn, session.binding(), memory).await? else {
                 return Ok((MODEL_FAILED.to_owned(), Vec::new()));
             };
@@ -385,6 +393,11 @@ async fn render_model_reply(
             ]
         })
         .collect();
+    for reference in schema_refs {
+        if !facts.contains(&reference) {
+            facts.push(reference);
+        }
+    }
     if let Some(proof) = analysis_proof {
         facts.push(proof.reference().to_owned());
     }

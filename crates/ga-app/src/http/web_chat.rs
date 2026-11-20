@@ -169,6 +169,7 @@ fn owner_database<'a>(
 
 fn failure(error: WebChatError) -> Response {
     let status = match error {
+        WebChatError::ChannelConsent => StatusCode::FORBIDDEN,
         WebChatError::Missing => StatusCode::NOT_FOUND,
         WebChatError::Unavailable | WebChatError::ReusedMessage => StatusCode::CONFLICT,
         WebChatError::Invalid => StatusCode::UNPROCESSABLE_ENTITY,

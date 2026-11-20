@@ -19,6 +19,7 @@ mod sleep_timing;
 
 pub use activity_reads::ActivityReadError;
 pub use device_history::DeviceHistoryError;
+pub(crate) use model_daily::compact_document;
 pub use model_daily::{
     ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
     DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery, EVENT_WINDOWS, HEALTH_RANGE,

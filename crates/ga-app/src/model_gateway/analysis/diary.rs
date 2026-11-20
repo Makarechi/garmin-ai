@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use ga_db::{
     Database,
     conversation_memory::AnalysisSubject,
-    diary::DiaryEventRange,
+    diary::{DefinitionPage, DiaryEventRange, EVENT_DEFINITIONS},
     health_analysis::{
         ACTIVITIES, ACTIVITY_DETAILS, AnalysisTimelineQuery, COFFEE_SLEEP, DATA_FRESHNESS,
         DEVICE_HISTORY, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
@@ -25,6 +25,8 @@ use crate::{model_gateway::CurrentModelPolicy, read_tool_catalog::ReadTool};
 
 const EVENTS: &str = "events";
 
+static DEFINITIONS: LazyLock<Value> =
+    LazyLock::new(|| model_description(ReadTool::EventDefinitions));
 static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Events));
 static BASELINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Baseline));
 static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ComparePeriods));
@@ -120,6 +122,10 @@ impl<'a> DiaryAnalysisTools<'a> {
             OfferedReadTool {
                 name: GENERIC_ANALYSIS,
                 description: &GENERIC,
+            },
+            OfferedReadTool {
+                name: EVENT_DEFINITIONS,
+                description: &DEFINITIONS,
             },
         ];
         if self.wellbeing_read.is_some() {
@@ -252,6 +258,19 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
     }
 
     async fn read(&self, name: &str, args: &Map<String, Value>) -> Option<AnalysisToolRead> {
+        if name == EVENT_DEFINITIONS {
+            let page = DefinitionPage::parse(args)?;
+            let result = self
+                .database
+                .read_analysis_definitions(self.context, self.model, page)
+                .await
+                .ok()?;
+            return Some(AnalysisToolRead {
+                value: result.value,
+                schema_versions: result.schema_versions,
+                ..Default::default()
+            });
+        }
         if name == GENERIC_ANALYSIS {
             let spec = GenericAnalysisEvidence::input(args)?;
             let read = self
@@ -262,13 +281,14 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
                 Ok(read) => Some(AnalysisToolRead {
                     value: read.value,
                     tracker_versions: read.tracker_versions,
+                    ..Default::default()
                 }),
                 Err(GenericAnalysisError::ResultTooLarge) => Some(AnalysisToolRead {
                     value: json!({
                         "error": "result_too_large",
                         "instruction": "Narrow the date range or use an analysis tool. Do not treat this as empty data.",
                     }),
-                    tracker_versions: Default::default(),
+                    ..Default::default()
                 }),
                 Err(_) => None,
             };
@@ -284,6 +304,7 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
             return Some(AnalysisToolRead {
                 value: result.value,
                 tracker_versions: result.tracker_versions,
+                ..Default::default()
             });
         }
         let read_access = if name == WELLBEING_OBSERVATIONS {
@@ -303,7 +324,7 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
                     .read_analysis_daily(self.context, &query, timezone, at)
                     .await
                     .ok()??,
-                tracker_versions: Default::default(),
+                ..Default::default()
             });
         }
         if name != EVENTS {
@@ -321,6 +342,7 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
         Some(AnalysisToolRead {
             value: page.value,
             tracker_versions: page.tracker_versions,
+            ..Default::default()
         })
     }
 }

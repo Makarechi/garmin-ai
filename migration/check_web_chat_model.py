@@ -26,7 +26,7 @@ from check_running_efficiency import seed_activities
 from check_stress_hours import seed_stress
 from check_tracker_extraction_http import certificates
 from fastapi.testclient import TestClient
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from garmin_ai.agent import AgentStep, Interpretation
@@ -39,6 +39,8 @@ from garmin_ai.models import (
     Activity,
     ActivityPart,
     Event,
+    EventDefinition,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     Measurement,
@@ -49,6 +51,7 @@ from garmin_ai.models import (
 )
 from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
+from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
 HEADERS = {"Authorization": f"Bearer {TOKENS[0]['key']}"}
@@ -108,6 +111,9 @@ INSIGHTS_START = datetime(2026, 6, 27, 12, tzinfo=UTC)
 TIMELINE_QUESTION = "What overlaps on the synthetic timeline?"
 TIMELINE_ANSWER = "Recorded sleep, a run, a diary point and a plan remain independent."
 TIMELINE_START = datetime(2026, 2, 19, 20, tzinfo=UTC)
+DEFINITIONS_KEY = "user.synthetic_chat_contract"
+DEFINITIONS_QUESTION = "Show the current and prior synthetic tracker contracts."
+DEFINITIONS_ANSWER = "The current version and its earlier schema are available."
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -154,6 +160,8 @@ def output(prompt):
             return insights_output(prompt)
         if prompt["question"].startswith(TIMELINE_QUESTION):
             return timeline_output(prompt)
+        if prompt["question"].startswith(DEFINITIONS_QUESTION):
+            return definitions_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -205,6 +213,7 @@ def output(prompt):
             ACTIVITIES_QUESTION,
             INSIGHTS_QUESTION,
             TIMELINE_QUESTION,
+            DEFINITIONS_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -623,6 +632,27 @@ def timeline_output(prompt):
     )
 
 
+def definitions_output(prompt):
+    name = "event_definitions"
+    if prompt["evidence"]:
+        [item] = prompt["evidence"]
+        assert item["tool"] == name and item["result"]["next_cursor"] is None
+        if prompt["question"].endswith(" without schema access"):
+            assert item["result"]["rows"] == []
+            return AgentStep(response_language="en")
+        [definition] = item["result"]["rows"]
+        assert definition["key"] == DEFINITIONS_KEY and definition["namespace"] == "user"
+        assert definition["current_version"] == 2 and definition["contract"]["version"] == 2
+        [prior] = definition["versions"]
+        assert prior["version"] == 1 and prior["schema"]["description"] == "Synthetic revision 1"
+        return AgentStep(answer=DEFINITIONS_ANSWER, evidence_ids=[1], response_language="en")
+    assert name in {tool["name"] for tool in prompt["tools"]}
+    arguments = {"definition_key": DEFINITIONS_KEY, "before_version": 2, "limit": 1}
+    return AgentStep(
+        calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
+    )
+
+
 def summaries_output(prompt):
     if prompt["evidence"]:
         first, second, third = prompt["evidence"]
@@ -986,6 +1016,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_activities(engine, python, native)
     exercise_insights(engine, python, native)
     exercise_timeline(engine, python, native)
+    exercise_definitions(engine, python, native, source_calls, native_calls)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -2114,6 +2145,77 @@ def exercise_timeline(engine, python, native):
     print(
         "Matched independent timeline layers, point evidence, stale diary anchors and pack bounds"
     )
+
+
+def exercise_definitions(engine, python, native, source_calls, native_calls):
+    identity = uuid4()
+    with Session(engine) as session, session.begin():
+        owner = session.scalar(select(Person.id).where(Person.singleton))
+        session.add(
+            EventDefinition(
+                id=identity,
+                owner_id=owner,
+                namespace="user",
+                key=DEFINITIONS_KEY,
+                status="active",
+                current_version=2,
+                revision=3,
+            )
+        )
+        session.flush()
+        for number in (1, 2):
+            session.add(
+                EventDefinitionVersion(
+                    definition_id=identity,
+                    version=number,
+                    schema={"type": "object", "description": f"Synthetic revision {number}"},
+                    schema_hash=f"{number:064x}",
+                    topology="point",
+                    field_metadata={},
+                    labels={"en": "Synthetic tracker contract"},
+                    privacy="sensitive",
+                    allowed_operations=["query"],
+                )
+            )
+
+    def grant(kind, instance, categories):
+        with Session(engine) as session, session.begin():
+            grant_tracker_share(
+                session,
+                TrackerShareConsent(
+                    definition_id=identity,
+                    destination_kind=kind,
+                    destination_instance_id=instance,
+                    categories=categories,
+                    granted_at=datetime.now(UTC) - timedelta(seconds=2),
+                ),
+                authorized=True,
+            )
+
+    denied = [
+        submit(client, DEFINITIONS_QUESTION + " without schema access")["reply"]["text"]
+        for client in (python, native)
+    ]
+    assert denied[0] == denied[1] and DEFINITIONS_ANSWER not in denied[1], denied
+    grant("model", INSTANCE, {"schema"})
+    grant("channel", "web:local", {"schema", "facts"})
+    old, new = [submit(client, DEFINITIONS_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert DEFINITIONS_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved diary data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    grant("channel", "web:local", {"schema"})
+    for client, calls in ((python, source_calls), (native, native_calls)):
+        before = len(calls)
+        denial = submit(client, DEFINITIONS_QUESTION + " without channel facts access", status=403)
+        assert denial["detail"] == "Operation not allowed", denial
+        assert any(
+            call.get("evidence") and call["evidence"][0]["tool"] == "event_definitions"
+            for call in calls[before:]
+        )
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    print("Matched current and prior tracker schemas and the legacy channel publication boundary")
 
 
 def main():

@@ -11,7 +11,7 @@ mod agent_batch;
 pub(crate) mod agent_correction;
 pub(crate) mod analysis_evidence;
 pub use agent_batch::CreateAgentLogBatch;
-pub use analysis_evidence::TimelineReadFence;
+pub use analysis_evidence::{DefinitionReadFence, TimelineReadFence};
 
 pub mod custom_entries;
 pub mod custom_registry;
@@ -19,7 +19,7 @@ mod definition_discovery;
 pub use custom_registry::{
     ActivatedCustomDefinition, CustomRegistryError, ManageCustomDefinition, StoredCustomDefinition,
 };
-pub use definition_discovery::DefinitionPage;
+pub use definition_discovery::{DefinitionPage, EVENT_DEFINITIONS, ModelDefinitionPage};
 
 mod metrics;
 mod proactive_answers;

@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 
 use ga_db::{
     conversation_memory::AnalysisSubject,
-    diary::TimelineReadFence,
+    diary::{DefinitionReadFence, EVENT_DEFINITIONS, TimelineReadFence},
     health_analysis::{
         ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
         DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST,
@@ -74,9 +74,11 @@ struct AnalysisScope<'a> {
 }
 
 /// Trusted reader output. Dependency IDs come from storage, outside the model payload.
+#[derive(Default)]
 pub struct AnalysisToolRead {
     pub value: Value,
     pub tracker_versions: BTreeSet<Uuid>,
+    pub schema_versions: BTreeSet<Uuid>,
 }
 
 /// Read-only adapter tied to the owner, the offered arguments, and the current
@@ -110,6 +112,7 @@ pub enum AnalysisResult {
         freshness: Option<String>,
         used_evidence: Vec<Value>,
         tracker_versions: BTreeSet<Uuid>,
+        schema_versions: BTreeSet<Uuid>,
     },
     NoAnswer {
         language: String,
@@ -211,7 +214,7 @@ impl ModelGateway<'_> {
             question,
             budget,
             tools,
-            |prompt, versions, daily, generic, timeline| {
+            |prompt, versions, schemas, daily, generic, timeline, definitions| {
                 let policy = &policy;
                 async move {
                     let mut current_requirements = requirements.to_vec();
@@ -221,17 +224,29 @@ impl ModelGateway<'_> {
                             categories: &[ShareCategory::Facts],
                         }
                     }));
+                    current_requirements.extend(schemas.iter().copied().map(|version_id| {
+                        ShareRequirement {
+                            version_id,
+                            categories: &[ShareCategory::Schema],
+                        }
+                    }));
                     let mut channel_versions = versions;
                     if let Some(destination) = destination {
                         channel_versions.extend(destination.tracker_versions);
                     }
-                    let channel_requirements: Vec<_> = channel_versions
+                    let mut channel_requirements: Vec<_> = channel_versions
                         .iter()
                         .map(|&version_id| ShareRequirement {
                             version_id,
                             categories: &[ShareCategory::Schema, ShareCategory::Facts],
                         })
                         .collect();
+                    channel_requirements.extend(schemas.iter().copied().map(|version_id| {
+                        ShareRequirement {
+                            version_id,
+                            categories: &[ShareCategory::Schema],
+                        }
+                    }));
                     let channel = destination.map(|destination| ModelChannelSharing {
                         destination: destination.channel,
                         requirements: &channel_requirements,
@@ -240,6 +255,7 @@ impl ModelGateway<'_> {
                             daily: &daily,
                             generic: &generic,
                             timeline: &timeline,
+                            definitions: &definitions,
                         }),
                     });
                     let returned = self
@@ -281,14 +297,17 @@ where
     F: FnMut(
         String,
         BTreeSet<Uuid>,
+        BTreeSet<Uuid>,
         Vec<DailyAnalysisEvidence>,
         Vec<GenericAnalysisEvidence>,
         Vec<TimelineReadFence>,
+        Vec<DefinitionReadFence>,
     ) -> Response,
     Response: Future<Output = Result<Value, AnalysisError>>,
 {
     let mut evidence: Vec<Value> = Vec::new();
     let mut tracker_versions = BTreeSet::new();
+    let mut schema_versions = BTreeSet::new();
     let mut language = question.locale.to_owned();
     let mut quality = None;
     let mut quality_loaded = false;
@@ -409,9 +428,24 @@ where
             .filter(|item| item["tool"] == TIMELINE && item["result"].get("error").is_none())
             .map(|item| TimelineReadFence::from_read(item).ok_or(AnalysisError::InvalidDocument))
             .collect::<Result<Vec<_>, _>>()?;
+        let definitions = evidence
+            .iter()
+            .filter(|item| {
+                item["tool"] == EVENT_DEFINITIONS && item["result"].get("error").is_none()
+            })
+            .map(|item| DefinitionReadFence::from_read(item).ok_or(AnalysisError::InvalidDocument))
+            .collect::<Result<Vec<_>, _>>()?;
         let output = tokio::time::timeout(
             remaining,
-            call_model(prompt, tracker_versions.clone(), daily, generic, timeline),
+            call_model(
+                prompt,
+                tracker_versions.clone(),
+                schema_versions.clone(),
+                daily,
+                generic,
+                timeline,
+                definitions,
+            ),
         )
         .await
         .map_err(|_| AnalysisBudgetError::Timeout)??;
@@ -483,6 +517,7 @@ where
                     freshness,
                     used_evidence: selected,
                     tracker_versions,
+                    schema_versions,
                 });
             }
             AnalysisStepAction::NoAnswer => {
@@ -522,6 +557,7 @@ where
                         .filter(|read| read.value.is_object() || read.value.is_array())
                         .map(|read| {
                             tracker_versions.extend(read.tracker_versions);
+                            schema_versions.extend(read.schema_versions);
                             read.value
                         })
                         .unwrap_or_else(
@@ -648,6 +684,7 @@ pub(crate) fn format_analysis_answer(
     }
     if evidence.iter().any(|item| {
         item["tool"] == "events"
+            || item["tool"] == EVENT_DEFINITIONS
             || item["tool"] == WELLBEING_OBSERVATIONS
             || item["tool"] == GENERIC_ANALYSIS
             || item["tool"] == MIGRAINE_WINDOWS

@@ -354,6 +354,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 timestamps,
                 freshness,
                 used_evidence,
+                schema_versions,
                 ..
             } => {
                 let body = format_analysis_answer(
@@ -372,6 +373,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                         interpretation.publication_context(self.timezone),
                         goals.revision,
                         &used_evidence,
+                        &schema_versions,
                         intent,
                     )
                     .await

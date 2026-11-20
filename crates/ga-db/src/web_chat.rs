@@ -39,6 +39,7 @@ pub enum WebChatError {
     Database,
     Missing,
     Unavailable,
+    ChannelConsent,
     Invalid,
     ReusedMessage,
 }
@@ -50,6 +51,7 @@ impl fmt::Display for WebChatError {
             Self::Storage(_) | Self::Database => "Database unavailable or identity is not ready",
             Self::Missing => "Message not found",
             Self::Unavailable => "Message is no longer available",
+            Self::ChannelConsent => "Operation not allowed",
             Self::Invalid => "Invalid arguments",
             Self::ReusedMessage => "Message ID was already used for different text",
         })

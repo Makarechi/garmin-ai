@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use ga_domain::{
     channel::{InboundEnvelope, OutboundIntent},
@@ -6,6 +6,7 @@ use ga_domain::{
 };
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
+use uuid::Uuid;
 
 use super::{
     TelegramDiaryCommitError, TelegramInboundLease, TelegramModelContext,
@@ -15,6 +16,7 @@ use super::{
 use crate::{
     Database, conversation_memory::ConversationBinding,
     diary::analysis_evidence::DiaryAnalysisFence, outbox_enqueue::QueuedIntent,
+    share_policy::schema_answer_references,
 };
 
 impl Database {
@@ -25,6 +27,7 @@ impl Database {
         expected: TelegramModelContext<'_>,
         goals_revision: u64,
         evidence: &[Value],
+        schema_versions: &BTreeSet<Uuid>,
         intent: OutboundIntent,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
         let envelope = text_envelope(lease)?;
@@ -45,6 +48,7 @@ impl Database {
             expected.configured_timezone,
             goals_revision,
             evidence,
+            schema_versions,
         )
         .ok_or(TelegramDiaryCommitError::Reply)?;
         tokio::time::timeout(Duration::from_millis(1800), async {
@@ -53,6 +57,18 @@ impl Database {
             let current = fence.check(&mut txn, binding, lease.message_id(), lease.operation_id(), &context.memory)
                 .await?.ok_or(TelegramDiaryCommitError::ModelContextChanged)?;
             context.versions.extend(current);
+            let intent = if schema_versions.is_empty() {
+                intent
+            } else {
+                let target = format!("telegram:{}", intent.channel().instance_id());
+                let refs = schema_answer_references(&mut txn, &target, schema_versions)
+                    .await.map_err(|_| TelegramDiaryCommitError::Database)?
+                    .ok_or(TelegramDiaryCommitError::ModelContextChanged)?;
+                let mut raw = intent.document().clone();
+                let saved = raw["evidence_refs"].as_array_mut().ok_or(TelegramDiaryCommitError::Reply)?;
+                saved.extend(refs.into_iter().map(Value::String));
+                OutboundIntent::normalize(raw).map_err(|_| TelegramDiaryCommitError::Reply)?
+            };
             let queued = queue(&mut txn, lease, context, intent).await?;
             let proof = serde_json::to_string(&fence).map_err(|_| TelegramDiaryCommitError::Reply)?;
             sqlx::query("UPDATE outbox_messages SET memory_fence=memory_fence||jsonb_build_object('telegram_diary_analysis',$2::jsonb)

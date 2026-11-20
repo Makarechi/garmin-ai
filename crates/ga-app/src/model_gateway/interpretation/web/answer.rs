@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use ga_db::{
     conversation_memory::AnalysisSubject,
     share_policy::{DestinationKind, ShareDestination},
@@ -9,6 +11,7 @@ use ga_domain::{
 };
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
+use uuid::Uuid;
 
 use super::{CurrentModelPolicy, ModelGateway, WebInterpretation, urgent_notice};
 use crate::model_gateway::{
@@ -21,6 +24,7 @@ pub(super) enum WebAnswer<'a> {
     Grounded {
         text: String,
         evidence: Vec<Value>,
+        schema_versions: BTreeSet<Uuid>,
         goals_revision: u64,
         interpretation: &'a WebInterpretation,
     },
@@ -36,6 +40,7 @@ impl WebAnswer<'_> {
             Self::Grounded {
                 text,
                 evidence,
+                schema_versions,
                 goals_revision,
                 interpretation,
             } => WebChatModelReply::Analysis {
@@ -43,6 +48,7 @@ impl WebAnswer<'_> {
                 memory: &interpretation.memory,
                 goals_revision: *goals_revision,
                 evidence,
+                schema_versions,
                 expected,
             },
         }
@@ -134,6 +140,7 @@ impl ModelGateway<'_> {
                 timestamps,
                 freshness,
                 used_evidence,
+                schema_versions,
                 ..
             } => Some(WebAnswer::Grounded {
                 text: format_analysis_answer(
@@ -145,6 +152,7 @@ impl ModelGateway<'_> {
                     &used_evidence,
                 ),
                 evidence: used_evidence,
+                schema_versions,
                 goals_revision: goals.revision,
                 interpretation,
             }),
