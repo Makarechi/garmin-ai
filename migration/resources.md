@@ -165,6 +165,31 @@ verification and its charged file cache. This comparison uses the baseline write
 Separate checks below exercise developer data, a leased FIT job, and the 100 MiB admission limit.
 
 
+### Paired FIT archive replay
+
+Use `--fit-replay developer`, `--fit-replay ceiling` or `--fit-replay over-limit` with the
+paired image command. The observer prepares one archived synthetic export under the previous
+parser revision. The ordinary worker claims the resulting replay job. Both runtimes use the
+same TimescaleDB settings, one shared CPU and the normal 384 MiB worker limit. The observer
+checks the retained ZIP digest and streams the stored projection to compare its digest.
+
+| Input | Python result and sampled application peak | Rust result and sampled application peak |
+| --- | --- | --- |
+| [50,000 FIT records plus developer metadata](evidence/python-rust-fit-replay-developer-linux-arm64.json.gz) | 50,006 rows, 6.146 s, 379.25 MiB | Same row and archive digests, 2.813 s, 24.29 MiB |
+| [Exactly 100 MiB of FIT data](evidence/python-rust-fit-replay-ceiling-linux-arm64.json.gz) | Worker OOM kill, zero rows, 563.52 MiB | 409,600 rows, 127.875 s, 28.23 MiB |
+| [One byte above the limit](evidence/python-rust-fit-replay-over-limit-linux-arm64.json.gz) | Rejected with no rows or projection pointer | Same result and original archive digest |
+
+The application peak is the largest sampled sum of API and worker cgroup memory. At the
+ceiling, the Rust worker's peak cgroup memory was 18.81 MiB, and sampled worker swap and
+recorded memory-limit and OOM events were zero. The API's slowest liveness response in that
+trial was 25.292 ms across 149 samples. Queue time includes waiting for the worker and observing
+the outcome. The two-minute Rust staging window previously expired during database COPY, so
+the candidate uses a finite window that allows the maximum-size projection to finish on one CPU.
+A [separate correctness run](evidence/python-rust-fit-replay-ceiling-projection.json) gave the
+frozen Python worker a 4 GiB limit and replayed the same file. It committed 409,600 rows with
+the same complete projection and archive digests as Rust. The tables above use only the
+matched resource limits. The mixed-workload and release soak checks remain separate.
+
 ## Daily source sync and historical jobs
 
 Use `--sync-days 1` to pass synthetic responses through the actual Garmin job dispatcher for
