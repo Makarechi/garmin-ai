@@ -4,6 +4,29 @@ use ga_domain::{file_import::read_json_rows, sha256_hex};
 use serde_json::{Value, json};
 
 #[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn accepts_deep_file_rows_in_the_linux_amd64_reference_range() {
+    for (opening, closing, accepted, rejected) in [
+        ("[", "]", 52_000, 52_400),
+        ("{\"v\":", "}", 30_600, 31_000),
+        ("[{\"v\":", "}]", 19_300, 19_500),
+    ] {
+        let input = |depth| {
+            format!(
+                "[{{\"val\":{}0{}}}]",
+                opening.repeat(depth),
+                closing.repeat(depth)
+            )
+        };
+        let valid = input(accepted);
+        let mut rows = read_json_rows(valid.as_bytes()).expect("Supported nesting");
+        let row = rows.pop().expect("One object row").expect("Valid row");
+        assert_eq!(row.canonical_json().unwrap(), valid[1..valid.len() - 1]);
+        assert!(read_json_rows(input(rejected).as_bytes()).is_err());
+    }
+}
+
+#[test]
 #[ignore = "requires the synthetic JSON fixture generated with pinned Python"]
 fn matches_json_syntax_precision_and_redacted_rows() -> Result<(), Box<dyn Error>> {
     let root = PathBuf::from(env::var("GA_TEST_FILE_JSON")?);
