@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import httpx
+from capture_analysis_specs import arguments as spec_arguments
 from capture_analysis_specs import cases as spec_cases
 from capture_reference import isolated_engine
 from check_generic_aggregate_history import cases as aggregate_cases
@@ -27,6 +28,7 @@ from mcp.client.stdio import stdio_client
 
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
+from garmin_ai.generic_analytics import AnalysisSpec
 
 TOKENS = [
     {"key": "synthetic-generic-both-transport-proof", "scopes": ["read:health", "read:diary"]},
@@ -124,6 +126,71 @@ def http_compare(python, native, requests, label):
     print("Matched generic HTTP", label, "requests", count, flush=True)
 
 
+def validation_cases():
+    for arguments in ({}, {"spec": None}, {"spec": []}, {"spec": {}}, {"extra": True}):
+        yield {"arguments": arguments}
+    base = spec_arguments("query_observations")
+    for overrides in (
+        {"source": False, "method": "X", "limit": 0, "start": "bad", "other": 1},
+        {"start": "2026-02-29", "end": "2026-01-01T00:00:00+30:00"},
+        {"start": "0000-01-01T00:00:00Z", "comparison_start": 1e20},
+        {"start": "0000-01-01", "end": "2026-01-01"},
+        {"limit": 1e30, "metric_version": "9" * 4301},
+        {"limit": "a" * 4301, "metric_version": "9" * 4300 + "x"},
+        {"limit": "0" * 4301, "metric_version": "-" + "9" * 4300},
+        {"limit": "9" + "_" * 4300 + "0", "metric_version": "9" * 4301 + "x"},
+    ):
+        yield {"arguments": {"spec": base | overrides, "z_extra": 1, "a_extra": 2}}
+    yield {"arguments": {"spec": base, "extra": "synthetic"}}
+    specs = {json.dumps(spec, ensure_ascii=True): spec for spec in spec_cases()}.values()
+    for spec in specs:
+        try:
+            AnalysisSpec.model_validate(spec)
+        except (OverflowError, ValueError):
+            yield {"arguments": {"spec": spec}}
+    threshold = spec_arguments("threshold_segments")
+    for value in (float("nan"), float("inf"), float("-inf")):
+        yield {"arguments": {"spec": {**threshold, "threshold": value}}}
+
+
+def http_validation_compare(python, native):
+    headers = {
+        "Authorization": "Bearer " + TOKENS[0]["key"],
+        "Content-Type": "application/json",
+    }
+    mismatches = {}
+    count = 0
+    for body in validation_cases():
+        raw = json.dumps(body, ensure_ascii=True)
+        before = python.post("/tools/" + NAME, content=raw, headers=headers)
+        after = native.post("/tools/" + NAME, content=raw, headers=headers)
+        count += 1
+        if before.status_code == after.status_code and response_value(before) == response_value(
+            after
+        ):
+            continue
+        expected = response_value(before)
+        actual = response_value(after)
+        if isinstance(expected, dict) and isinstance(expected.get("detail"), list):
+            fields = ",".join(
+                ".".join(map(str, row["loc"])) + ":" + row["type"] for row in expected["detail"]
+            )
+            sample = [
+                {key: value for key, value in row.items() if key != "input"}
+                for row in expected["detail"]
+            ]
+        else:
+            fields = str(expected)
+            sample = expected
+        key = (before.status_code, after.status_code, fields)
+        mismatches.setdefault(key, {"sample": sample, "actual": actual, "count": 0})
+        mismatches[key]["count"] += 1
+    for key, value in mismatches.items():
+        print("Validation mismatch", key, value, flush=True)
+    assert not mismatches, (count, len(mismatches))
+    print("Matched generic HTTP typed validation requests", count, flush=True)
+
+
 async def mcp_capture(command, args, environment, root, cases, label):
     process = StdioServerParameters(command=command, args=args, env=environment, cwd=root)
     with (root / (label + ".log")).open("w") as errors:
@@ -214,6 +281,7 @@ def run(binary):
                 url = server.stdout.readline().strip().removeprefix("Listening on ")
                 assert url.startswith("http://127.0.0.1:")
                 with httpx.Client(base_url=url, timeout=120, trust_env=False) as native:
+                    http_validation_compare(python, native)
                     http_compare(python, native, cases, "normal scopes and all operations")
                     configure_phase(engine, "replay")
                     http_compare(python, native, cases, "replay and source-health scope")
