@@ -1,0 +1,76 @@
+{
+  "scope": "PAR-06",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_ingestion.py": 23,
+      "tests/test_storage.py": 32,
+      "tests/test_archive_replay.py": 194
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "archive_storage_tests": {
+    "passed": 14,
+    "trace_sha256": "52e64d2ac5aa84da93a8d8e1864c2a06745aa127f4be9f7d630b83f77bc1b182"
+  },
+  "mixed_acquisition_restore_and_replay_by_days": {
+    "1": {
+      "archive_rows": 20,
+      "encrypted_backup_and_original_preserved": true,
+      "endpoints": 20,
+      "paired_result": {
+        "archive_rows_sha256": "28f97971f375c294ffde807bada449fe526e04c5dddddfdd84073f1eb35a2b68",
+        "corrupt_archives_preserved": 1,
+        "projection_sha256": "4e8f4a92ec6d9b305d2c533f02c519595a64f5ee51e90e4ab27c1809c857edeb",
+        "status": {
+          "outcomes": {
+            "archived": 7,
+            "error": 1,
+            "normalized": 12
+          },
+          "ready_with_corrupt_input": false,
+          "successfully_replayed": 19,
+          "target_parser_version": 9
+        },
+        "valid_archives_verified": 19
+      },
+      "trace_sha256": "148cbbcb7c87816b29fa1af53a1aaed446c01deeba9f3ddf213569b1d3c5892c"
+    },
+    "7": {
+      "archive_rows": 140,
+      "encrypted_backup_and_original_preserved": true,
+      "endpoints": 20,
+      "paired_result": {
+        "archive_rows_sha256": "ed2d0b0454ce6bea6440c125b34528847aa5be0611731d2cf332ef48532da28d",
+        "corrupt_archives_preserved": 1,
+        "projection_sha256": "509165e6ac4274217f3afa668be985dc56bf6d10ae148a573d5298500b48e518",
+        "status": {
+          "outcomes": {
+            "archived": 55,
+            "error": 1,
+            "normalized": 84
+          },
+          "ready_with_corrupt_input": false,
+          "successfully_replayed": 139,
+          "target_parser_version": 9
+        },
+        "valid_archives_verified": 139
+      },
+      "trace_sha256": "091c1db4bbe1664bc266f2bd51344931936aee1f485d8a4bb20a7cc2ecb1ff0f"
+    }
+  },
+  "release_scope": [
+    "Pinned synthetic acquisition covers the 20 day-scoped Garmin payload types.",
+    "An authenticated native backup was opened by both runtimes. Independent fresh databases and archive roots were compared before both normal workers replayed the copied inputs.",
+    "The newer-overlapping-sample ordering candidate remains in the deviations register."
+  ]
+}
