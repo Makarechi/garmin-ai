@@ -192,6 +192,58 @@ def collect_fit_replay(args, observer, db, api, worker, elapsed, probe):
     }
 
 
+def prepare_paired_replay(args, observer, archive):
+    docker(
+        "exec",
+        "--user",
+        "0",
+        observer,
+        "install",
+        "-d",
+        "-m",
+        "0700",
+        "-o",
+        "1000",
+        "-g",
+        "1000",
+        archive,
+        f"{archive}/raw",
+    )
+    for filename in (
+        "paired_replay_workload.py",
+        "replay_workload.py",
+        "sync_workload.py",
+        "fit_workload.py",
+    ):
+        source = Path(__file__).with_name(filename)
+        docker("cp", str(source), f"{observer}:/tmp/{filename}")
+    command = ("exec", observer, "python", "/tmp/paired_replay_workload.py")
+    fixture = json.loads(docker(*command, "prepare", str(args.replay_days), timeout=300).stdout)
+    return command, fixture
+
+
+def collect_paired_replay(args, prepared, db, api, worker, elapsed, probe):
+    command, fixture = prepared
+    result = collect_client_workload(
+        ["docker", *command, "wait", json.dumps(fixture)],
+        args.interval,
+        db,
+        api,
+        worker,
+        elapsed,
+        probe=probe,
+        timeout=1900,
+    )
+    verified = json.loads(docker(*command, "verify", json.dumps(fixture), timeout=90).stdout)
+    return {
+        "history_days": fixture["history_days"],
+        "archive_objects": fixture["archive_objects"],
+        **result,
+        **verified,
+        "final_worker_memory": sample(worker),
+    }
+
+
 def collect_paired_backup(args, observer, workload, executable, db, api, worker, elapsed, probe):
     for filename in ("paired_backup_fixture.py", "backup_workload.py"):
         script = Path(__file__).with_name(filename)
@@ -219,7 +271,7 @@ def collect_paired_backup(args, observer, workload, executable, db, api, worker,
 
 
 def collect_client_workload(
-    command, interval, db, api, worker, elapsed, *, mcp=None, backup=None, probe=None
+    command, interval, db, api, worker, elapsed, *, mcp=None, backup=None, probe=None, timeout=900
 ):
     def capture():
         resources = {
@@ -238,7 +290,7 @@ def collect_client_workload(
         return resources
 
     samples = []
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + timeout
     with subprocess.Popen(
         command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     ) as process:
@@ -339,8 +391,11 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
         )
     if args.replay_days or args.fit_replay:
         app_env["GA_TIMEZONE"] = "UTC"
+    paired_replay = args.candidate_image is not None and args.replay_days is not None
     if args.fit_replay:
         app_env["GA_DATA_DIR"] = "/fit-fixture"
+    if paired_replay:
+        app_env["GA_DATA_DIR"] = "/replay-fixture"
     api_env = dict(app_env)
     control_env = {}
     paired_analytics = args.candidate_image is not None and args.analytics_rounds is not None
@@ -490,6 +545,11 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                 "-c",
                 f"{executable} worker; echo $? > /fit-fixture/worker-exit; exec sleep infinity",
             )
+        if paired_replay:
+            volume = f"{prefix}-replay"
+            docker("volume", "create", volume)
+            cleanup.callback(docker, "volume", "rm", volume, check=False)
+            shared_archive = ("--mount", f"type=volume,src={volume},dst=/replay-fixture")
         if paired_backup:
             volume = f"{prefix}-backup"
             docker("volume", "create", volume)
@@ -547,13 +607,16 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
                 "1000",
                 "/backup-fixture",
             )
+        prepared_replay = None
+        if paired_replay:
+            prepared_replay = prepare_paired_replay(args, observer, app_env["GA_DATA_DIR"])
         launch(
             worker,
             image,
             *worker_command,
             limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
             env=app_env,
-            mounts=shared_archive if args.fit_replay else (),
+            mounts=shared_archive if args.fit_replay or paired_replay else (),
         )
 
         def probe(path):
@@ -639,6 +702,10 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
             workload_result["fit_replay_workload"] = collect_fit_replay(
                 args, observer, db, api, worker, elapsed, probe
             )
+        if paired_replay:
+            workload_result["replay_workload"] = collect_paired_replay(
+                args, prepared_replay, db, api, worker, elapsed, probe
+            )
         if args.web_chat_messages:
             result = collect_web_chat_workload(args, observer, db, api, worker, elapsed)
             verify_web_chat_storage(db, result, multibyte=args.web_chat_multibyte)
@@ -677,7 +744,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None, hist
             ("analytics", None if paired_analytics else args.analytics_rounds),
             ("mcp", None if paired_mcp else args.mcp_idle_seconds),
             ("voice", args.voice_rounds),
-            ("replay", args.replay_days),
+            ("replay", None if paired_replay else args.replay_days),
         )
         selected = next(
             ((name, value) for name, value in workload_modes if value is not None), None
@@ -972,7 +1039,6 @@ def main():
             "fit_records",
             "fit_limit_mib",
             "voice_rounds",
-            "replay_days",
         )
     ):
         parser.error(
@@ -1059,6 +1125,23 @@ def main():
             except RuntimeError:
                 print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
                 raise
+        if args.replay_days is not None:
+            before, after = baseline["replay_workload"], candidate["replay_workload"]
+            comparable = (
+                "history_days",
+                "archive_objects",
+                "archive_rows_sha256",
+                "projection_sha256",
+                "valid_archives_verified",
+                "corrupt_archives_preserved",
+                "target_parser_version",
+                "outcomes",
+                "successfully_replayed",
+                "ready_with_corrupt_input",
+            )
+            if any(before[key] != after[key] for key in comparable):
+                print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+                raise RuntimeError("Paired offline archive replay results differed")
         if args.web_chat_messages:
             fields = (
                 "notes",
