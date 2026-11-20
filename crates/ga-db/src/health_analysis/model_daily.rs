@@ -13,10 +13,11 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
-    ActivityReadError, HealthAnalysisError, HealthPeriod, MODEL_HEALTH_PACKS, NapPolicy,
-    SeriesReadError, begin_daily_analysis,
+    ActivityReadError, DeviceHistoryError, HealthAnalysisError, HealthPeriod, MODEL_HEALTH_PACKS,
+    NapPolicy, SeriesReadError, begin_daily_analysis,
     coffee::coffee_sleep_in,
     daily_metric,
+    device_history::{device_history_in, device_range},
     event_windows::{event_windows_in, permits_model_event_kind_in},
     freshness_report::model_freshness_in,
     lagged::lagged_association_in,
@@ -57,6 +58,7 @@ const RUNNING_MODEL_PACKS: &[&str] = &["training", "sleep", "wellbeing"];
 pub const STRESS_HOURS: &str = "analysis_stress_by_hour";
 pub const MIGRAINE_WINDOWS: &str = "analysis_migraine_windows";
 pub const WELLBEING_OBSERVATIONS: &str = "wellbeing_observations";
+pub const DEVICE_HISTORY: &str = "device_history";
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "tool", content = "arguments", deny_unknown_fields)]
@@ -146,6 +148,13 @@ pub enum DailyAnalysisQuery {
         start: Value,
         end: Value,
         cursor: Option<String>,
+    },
+    #[serde(rename = "device_history")]
+    DeviceHistory {
+        start: Value,
+        end: Value,
+        #[serde(default = "default_activity_limit")]
+        limit: u16,
     },
     #[serde(rename = "analysis_migraine_windows")]
     Migraine {
@@ -419,6 +428,24 @@ impl DailyAnalysisQuery {
                 .await
                 .map_err(model_series_error)?
             }
+            Self::DeviceHistory { start, end, limit } => {
+                if !model_packs_allowed(txn, context.binding().owner_id, &["training"]).await? {
+                    return Ok(None);
+                }
+                let parse = |value: &Value| {
+                    StoredInstant::from_legacy_input(value)
+                        .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
+                };
+                let map_error = |error| match error {
+                    DeviceHistoryError::Analysis(error) => error,
+                    _ => HealthAnalysisError::DateRange,
+                };
+                let (start, end) =
+                    device_range(parse(start)?, parse(end)?, *limit).map_err(map_error)?;
+                device_history_in(txn, start, end, *limit)
+                    .await
+                    .map_err(map_error)?
+            }
             Self::Migraine {
                 metric,
                 start,
@@ -491,6 +518,7 @@ impl DailyAnalysisEvidence {
                 | COFFEE_SLEEP
                 | EVENT_WINDOWS
                 | WELLBEING_OBSERVATIONS
+                | DEVICE_HISTORY
         )
     }
 
@@ -589,6 +617,7 @@ pub struct DailyAnalysisAccess {
     pub running: bool,
     pub summaries: bool,
     pub coffee_sleep: bool,
+    pub training: bool,
 }
 
 impl Database {
@@ -618,9 +647,11 @@ impl Database {
                 && model_packs_allowed(&mut txn, context.binding().owner_id, &["migraine"]).await?;
             let wellbeing =
                 model_packs_allowed(&mut txn, context.binding().owner_id, &["wellbeing"]).await?;
+            let training =
+                model_packs_allowed(&mut txn, context.binding().owner_id, &["training"]).await?;
             let running = wellbeing
-                && model_packs_allowed(&mut txn, context.binding().owner_id, RUNNING_MODEL_PACKS)
-                    .await?;
+                && training
+                && model_packs_allowed(&mut txn, context.binding().owner_id, &["sleep"]).await?;
             let summaries =
                 model_packs_allowed(&mut txn, context.binding().owner_id, MODEL_HEALTH_PACKS)
                     .await?;
@@ -634,6 +665,7 @@ impl Database {
                 running,
                 summaries,
                 coffee_sleep,
+                training,
             }))
         })
         .await
@@ -728,6 +760,10 @@ fn default_hr_min() -> Number {
 
 fn default_hr_max() -> Number {
     250.into()
+}
+
+fn default_activity_limit() -> u16 {
+    100
 }
 
 fn default_series_minutes() -> u16 {

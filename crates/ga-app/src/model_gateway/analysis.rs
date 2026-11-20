@@ -6,9 +6,9 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 use ga_db::{
     conversation_memory::AnalysisSubject,
     health_analysis::{
-        COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE,
-        HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY,
-        SLEEP_ANALYSIS, STRESS_HOURS, WELLBEING_OBSERVATIONS,
+        COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY, DailyAnalysisEvidence, EVENT_WINDOWS,
+        HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
+        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -345,6 +345,7 @@ where
                                 | METRIC_SERIES
                                 | COFFEE_SLEEP
                                 | EVENT_WINDOWS
+                                | DEVICE_HISTORY
                         )
                 })
                 .map(|tool| tool.description)
