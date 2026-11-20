@@ -684,6 +684,7 @@ def test_unavailable_plugin_primary_is_exposed_to_fallback_delivery(
         backup_key="",
     )
     monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    restrict_runtime_jobs(monkeypatch, {"channel_initiatives"})
     before = len(SampleChannel.instances)
 
     async def scenario():
