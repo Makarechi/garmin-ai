@@ -515,6 +515,7 @@
         "tests/test_diary_forms.py"
       ],
       "rust_tests": [
+        "migration/check_universal_data_contracts.py",
         "migration/check_diary_creation.py",
         "migration/check_diary_reads.py",
         "migration/check_event_replays.py"
@@ -725,6 +726,7 @@
         "tests/test_tracker_chat_form.py"
       ],
       "rust_tests": [
+        "migration/check_categorical_tracker_evidence.py",
         "migration/check_tracker_setup.py",
         "migration/capture_tracker_chat_fields.py",
         "migration/capture_tracker_chat_setup.py",
@@ -1063,6 +1065,7 @@
         "tests/test_metric_evidence_delivery.py"
       ],
       "rust_tests": [
+        "migration/check_web_language_context.py",
         "migration/check_web_chat_model.py",
         "migration/check_web_sleep_history.py",
         "migration/check_conversation_memory.py",
