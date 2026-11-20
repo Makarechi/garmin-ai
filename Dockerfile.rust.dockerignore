@@ -11,7 +11,10 @@
 !crates/**/*.json
 !crates/ga-domain/src/statistics/LICENSE-scipy.txt
 !crates/ga-domain/src/timestamp/LICENSE-python.txt
+!crates/ga-fit/profile/LICENSE-fitdecode.txt
 !crates/**/contracts/model-prompts/*.txt
+!scripts/
+!scripts/collect_rust_notices.py
 !src/
 !src/garmin_ai/
 !src/garmin_ai/locales/

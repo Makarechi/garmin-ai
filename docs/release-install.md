@@ -39,12 +39,14 @@ notices for the final image and database image, test the actual target platforms
 complete the [operational acceptance](operational-acceptance.md), and update the
 manifest only from that evidence. This bundle alone is not release clearance.
 
-The application image carries an inventory and bundled license texts for its
-installed Python packages. Run `./install.sh licenses` to read them after
-extracting the bundle. An entry marked `REVIEW REQUIRED` has no text license file
-in its installed package. This inventory does not cover the Python base image,
-operating-system packages or the separate database image; those still need a
-distribution review before publication.
+Run `./install.sh licenses` to read the application's bundled license texts.
+The Rust image includes its embedded FIT profile notice and collects the license
+files from the locked dependencies selected for that image's Linux architecture.
+Its machine-readable inventory is `/usr/share/doc/garmin-ai/rust-third-party-inventory.json`.
+Python bundles continue to include the installed Python distributions' license files
+and inventory. An entry marked `REVIEW REQUIRED` has missing license text in the
+dependency package. The final distribution review also covers the base image,
+operating-system packages and the separate database image.
 
 ## Use the bundle on a private host
 

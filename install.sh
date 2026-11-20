@@ -82,7 +82,9 @@ case "${1:-}" in
             exec docker run --rm --read-only --entrypoint cat "$image" \
                 /usr/share/doc/garmin-ai/LICENSE \
                 /usr/share/doc/garmin-ai/LICENSE-scipy.txt \
-                /usr/share/doc/garmin-ai/LICENSE-python.txt
+                /usr/share/doc/garmin-ai/LICENSE-python.txt \
+                /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt \
+                /usr/share/doc/garmin-ai/rust-third-party-notices.txt
         fi
         docker run --rm --read-only --entrypoint cat "$image" \
             /usr/share/doc/garmin-ai/LICENSE \
