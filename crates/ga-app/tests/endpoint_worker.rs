@@ -38,6 +38,9 @@ use time::{OffsetDateTime, format_description::well_known::Iso8601};
 use tokio::{fs::File, io::AsyncWriteExt, sync::Notify};
 use uuid::Uuid;
 
+#[path = "endpoint_worker/history_workload.rs"]
+mod history_workload;
+
 const ACCOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 struct Source {

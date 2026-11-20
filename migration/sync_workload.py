@@ -1,11 +1,13 @@
 """Measure synthetic Garmin normalization and durable history using the Python baseline."""
 
 import argparse
+import hashlib
 import json
 import time
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
+from pathlib import Path
 
 from fit_workload import archive_input
 from sqlalchemy import func, select
@@ -70,9 +72,10 @@ def fake_day(endpoint, day):
 
 
 class SyntheticReader:
-    def __init__(self):
+    def __init__(self, fixture=None):
         self.calls = Counter()
         self.fingerprint = profile_fingerprint({"profileId": 12345})
+        self.fixture = fixture
 
     def account_fingerprint(self):
         return self.fingerprint
@@ -80,6 +83,8 @@ class SyntheticReader:
     def fetch(self, endpoint, *, day=None, activity_id=None):
         self.calls[endpoint.name] += 1
         if endpoint.scope == "day":
+            if self.fixture is not None:
+                return json.loads((self.fixture / f"{day}-{endpoint.name}.json").read_bytes())
             return fake_day(endpoint.name, day)
         if endpoint.name == "activity":
             return self.activity()
@@ -184,13 +189,26 @@ def backfill(engine, reader, archive, settings, days, preload):
     return windows
 
 
-def run(days, preload):
+def prepare_history_fixture(root, days):
+    root.mkdir(mode=0o755)
+    endpoints = [endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day"]
+    (root / "endpoints.txt").write_text("\n".join(endpoints) + "\n", encoding="ascii")
+    (root / "fingerprint.txt").write_text(SyntheticReader().fingerprint, encoding="ascii")
+    for offset in range(1, days + 1):
+        day = HISTORY_NOW.date() - timedelta(days=offset)
+        for name in endpoints:
+            (root / f"{day}-{name}.json").write_text(
+                json.dumps(fake_day(name, day)), encoding="utf-8"
+            )
+
+
+def run(days, preload, fixture=None):
     settings = Settings(_env_file=None, backfill_days=days, timezone="UTC")
     engine = make_engine(settings)
     if not (engine.url.database or "").endswith("_test") or engine.url.query:
         raise ValueError("The sync workload requires a dedicated synthetic test database")
     archive = LocalArchive(settings.data_dir / "raw")
-    reader = SyntheticReader()
+    reader = SyntheticReader(fixture)
     try:
         configure_synthetic_owner(engine, reader, archive)
         start = time.monotonic()
@@ -218,7 +236,7 @@ def run(days, preload):
             raise RuntimeError(f"Unexpected committed workload counts: {counts}")
         if days == 1 and (counts["activities"], counts["activity_parts"]) != (1, 125):
             raise RuntimeError("Unexpected activity part counts")
-        return {
+        result = {
             "days": days,
             "history_queue": "preloaded" if preload else "drained between scheduler passes",
             "duration_seconds": round(duration, 3),
@@ -226,6 +244,24 @@ def run(days, preload):
             "rows": counts,
             "historical_windows": windows,
         }
+        if fixture is not None:
+            with transaction(engine) as session:
+                sources = session.execute(
+                    select(SourcePayload.archive_key, SourcePayload.payload_hash).execution_options(
+                        yield_per=200
+                    )
+                )
+                verified = 0
+                for key, expected in sources:
+                    if hashlib.sha256(archive.read(key)).hexdigest() != expected:
+                        raise RuntimeError(
+                            "The stored synthetic archive does not match its identity"
+                        )
+                    verified += 1
+            if verified != expected_sources:
+                raise RuntimeError("The synthetic history archives are incomplete")
+            result["archive_objects_verified"] = verified
+        return result
     finally:
         engine.dispose()
 
@@ -234,5 +270,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("days", type=int, choices=(1, 7, 30, 365))
     parser.add_argument("--preload-history", action="store_true")
+    fixture = parser.add_mutually_exclusive_group()
+    fixture.add_argument("--prepare-history-fixture", type=Path)
+    fixture.add_argument("--history-fixture", type=Path)
     args = parser.parse_args()
-    print(json.dumps(run(args.days, args.preload_history)))
+    if args.days == 1 and (args.prepare_history_fixture or args.history_fixture):
+        parser.error("A historical fixture requires a multi-day workload")
+    if args.prepare_history_fixture:
+        prepare_history_fixture(args.prepare_history_fixture, args.days)
+    else:
+        print(json.dumps(run(args.days, args.preload_history, args.history_fixture)))

@@ -12,6 +12,7 @@ import sys
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from web_chat_workload import MAX_MESSAGE_LENGTH, MULTIBYTE_FILLER
 
@@ -310,7 +311,7 @@ def verify_web_chat_storage(db, result, *, multibyte):
             )
 
 
-def report_run(args, image, platform, *, native=False, observer_image=None):
+def report_run(args, image, platform, *, native=False, observer_image=None, history_fixture=None):
     started = time.monotonic()
     executable = "garmin-ai-rust" if native else "garmin-ai"
     prefix = f"garmin-benchmark-{secrets.token_hex(5)}"
@@ -686,12 +687,16 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
             workload_key = f"{name}_workload"
             directory = Path(__file__).resolve().parent
             mounts = ["--mount", f"type=bind,src={directory},dst=/benchmark,readonly"]
+            workload_env = dict(app_env)
             if name == "replay":
                 docker("stop", "-t", "30", worker)
             if name == "backup":
                 docker("exec", db, "createdb", "-U", "garmin", "garmin_resource_restore_test")
                 mounts.extend(("--tmpfs", "/tmp/low-backup-space:rw,size=8m,uid=1000,gid=1000"))
             extra = " --preload-history" if args.preload_history else ""
+            if name == "sync" and history_fixture is not None:
+                mounts.extend(("--mount", f"type=bind,src={history_fixture},dst=/history,readonly"))
+                extra += " --history-fixture /history"
             if args.fit_developer:
                 extra = " --developer"
             if args.controls_during_fit:
@@ -701,6 +706,23 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "task_status=$?; echo $task_status > /tmp/finished; "
                 "exec sleep infinity"
             )
+            if name == "sync" and history_fixture is not None and native:
+                binary = args.native_history_test.resolve(strict=True)
+                mounts.extend(("--mount", f"type=bind,src={binary},dst=/history-test,readonly"))
+                workload_env.update(
+                    GA_TEST_DATABASE_URL=app_env["GA_DATABASE_URL"],
+                    GA_TEST_HISTORY_DAYS=str(quantity),
+                    GA_TEST_HISTORY_FIXTURE="/history",
+                    GA_TEST_HISTORY_PRELOAD="1" if args.preload_history else "0",
+                )
+                workload_command = (
+                    "/history-test --ignored --exact history_workload::processes_shared_history_workload "
+                    "--nocapture > /tmp/history-output; task_status=$?; "
+                    "sed -n 's/^.*WORKLOAD_RESULT=//p' /tmp/history-output > /tmp/result.json; "
+                    'if [ "$task_status" -eq 0 ] && [ ! -s /tmp/result.json ]; then '
+                    "cat /tmp/history-output >&2; task_status=2; fi; "
+                    "echo $task_status > /tmp/finished; exec sleep infinity"
+                )
             launch(
                 workload,
                 image,
@@ -708,7 +730,7 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "-c",
                 workload_command,
                 limits=(*cpu, "-m", "384m", "--memory-swap", "1024m"),
-                env=app_env,
+                env=workload_env,
                 mounts=mounts,
             )
             controls = {}
@@ -756,8 +778,9 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 raise RuntimeError("Synthetic workload exceeded the measurement deadline")
             status = int(docker("exec", workload, "cat", "/tmp/finished").stdout)
             if status and name != "fitlimit":
-                logs = docker("logs", "--tail", "1", workload, check=False).stderr
-                detail = logs.replace(password, "<redacted>").strip()[:300]
+                lines = "16" if name == "sync" and history_fixture is not None else "1"
+                logs = docker("logs", "--tail", lines, workload, check=False).stderr
+                detail = logs.replace(password, "<redacted>").strip()[:1000]
                 raise RuntimeError(f"Synthetic workload failed with status {status}: {detail}")
             result_path = "/tmp/fit-limit-input.json" if status else "/tmp/result.json"
             workload_result[workload_key] = {
@@ -767,6 +790,14 @@ def report_run(args, image, platform, *, native=False, observer_image=None):
                 "samples": workload_samples,
                 **({"control_overlap": controls} if controls else {}),
             }
+            if name == "sync" and history_fixture is not None:
+                script = (
+                    Path(__file__)
+                    .with_name("check_history_workload.py")
+                    .read_text(encoding="utf-8")
+                )
+                rows = docker("exec", observer, "python", "-c", script, timeout=90).stdout
+                workload_result[workload_key]["stored_projection"] = json.loads(rows)
         revision = docker(
             "exec",
             db,
@@ -907,6 +938,7 @@ def main():
     workload.add_argument("--web-chat-messages", type=int, choices=(80, 800))
     parser.add_argument("--web-chat-multibyte", action="store_true")
     parser.add_argument("--preload-history", action="store_true")
+    parser.add_argument("--native-history-test", type=Path)
     parser.add_argument("--fit-developer", action="store_true")
     parser.add_argument("--controls-during-fit", action="store_true")
     args = parser.parse_args()
@@ -925,24 +957,70 @@ def main():
         for name in (
             "fit_records",
             "fit_limit_mib",
-            "sync_days",
             "reconcile_days",
             "voice_rounds",
             "replay_days",
         )
     ):
         parser.error(
-            "The paired comparison supports startup, web chat, analytics, MCP, FIT replay and backup"
+            "The paired comparison supports startup, web chat, analytics, MCP, FIT replay, backup and history"
         )
+    if args.candidate_image and args.sync_days is not None:
+        if args.sync_days == 1 or not args.native_history_test:
+            parser.error(
+                "A paired history run requires --sync-days 7, 30 or 365 and --native-history-test"
+            )
+        if (
+            not os.access(args.native_history_test, os.X_OK)
+            or not args.native_history_test.is_file()
+        ):
+            parser.error(
+                "--native-history-test must name the built Linux endpoint_worker test executable"
+            )
+    elif args.native_history_test:
+        parser.error("--native-history-test requires a paired multi-day history workload")
     baseline_image, platform = local_image(args.image, args.sha)
     if args.candidate_image:
         candidate_image, candidate_platform = local_image(args.candidate_image, args.candidate_sha)
         if candidate_image == baseline_image or candidate_platform != platform:
             parser.error("Comparison requires distinct images built for the same platform")
-        baseline = report_run(args, baseline_image, platform)
-        candidate = report_run(
-            args, candidate_image, platform, native=True, observer_image=baseline_image
-        )
+        with ExitStack() as work:
+            history_fixture = None
+            if args.sync_days is not None:
+                directory = Path(__file__).resolve().parent
+                staging = Path(work.enter_context(TemporaryDirectory(prefix="garmin-history-")))
+                history_fixture = staging / "fixture"
+                docker(
+                    "run",
+                    "--rm",
+                    "--pull",
+                    "never",
+                    "--network",
+                    "none",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--mount",
+                    f"type=bind,src={directory},dst=/benchmark,readonly",
+                    "--mount",
+                    f"type=bind,src={staging},dst=/history",
+                    "--entrypoint",
+                    "python",
+                    baseline_image,
+                    "/benchmark/sync_workload.py",
+                    str(args.sync_days),
+                    "--prepare-history-fixture",
+                    "/history/fixture",
+                    timeout=90,
+                )
+            baseline = report_run(args, baseline_image, platform, history_fixture=history_fixture)
+            candidate = report_run(
+                args,
+                candidate_image,
+                platform,
+                native=True,
+                observer_image=baseline_image,
+                history_fixture=history_fixture,
+            )
         revision = baseline["migration_revision"]
         if (
             not re.fullmatch(r"[0-9a-f]{12}", revision)
@@ -992,6 +1070,37 @@ def main():
             before, after = baseline["mcp_workload"], candidate["mcp_workload"]
             if any(before[key] != after[key] for key in ("tool_names", "read_result")):
                 raise RuntimeError("The paired MCP sessions produced different results")
+        if args.sync_days is not None:
+            before, after = baseline["sync_workload"], candidate["sync_workload"]
+            digest = hashlib.sha256()
+            with args.native_history_test.open("rb") as executable:
+                for block in iter(lambda: executable.read(1024 * 1024), b""):
+                    digest.update(block)
+            after["test_executable_sha256"] = digest.hexdigest()
+            fields = (
+                "days",
+                "history_queue",
+                "fetch_counts",
+                "historical_windows",
+                "archive_objects_verified",
+                "stored_projection",
+            )
+            mismatched = [key for key in fields if before[key] != after[key]]
+            expected_counts = {
+                "raw": args.sync_days * 20,
+                "daily": args.sync_days,
+                "samples": args.sync_days * 144,
+                "revisions": args.sync_days * 144,
+                "jobs": args.sync_days * 20,
+            }
+            if any(
+                after["stored_projection"][name]["rows"] != count
+                for name, count in expected_counts.items()
+            ):
+                mismatched.append("row_counts")
+            if mismatched:
+                print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
+                raise RuntimeError(f"The paired history workloads differed in {mismatched}")
         print(json.dumps({"python": baseline, "rust": candidate}, indent=2))
         return 0
     report = report_run(args, baseline_image, platform)
