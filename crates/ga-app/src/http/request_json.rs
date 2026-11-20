@@ -48,6 +48,13 @@ pub(super) fn parse(input: &[u8], headers: &HeaderMap) -> Result<Value, ParseErr
 }
 
 pub(super) fn parse_object(input: &[u8], headers: &HeaderMap) -> Result<Value, ParseError> {
+    // Existing native settings clients may omit the media type on valid objects.
+    if !headers.contains_key(header::CONTENT_TYPE)
+        && let Some(text) = decode_json(input)
+        && let Ok(value @ Value::Object(_)) = serde_json::from_str(&text)
+    {
+        return Ok(value);
+    }
     match parse(input, headers)? {
         value @ Value::Object(_) => Ok(value),
         Value::Null => Err(ParseError::MissingBody),
