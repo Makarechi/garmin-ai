@@ -7,9 +7,9 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     health_analysis::{
         ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
-        DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION,
-        METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
-        WELLBEING_OBSERVATIONS,
+        DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST,
+        LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
+        STRESS_HOURS, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -349,6 +349,7 @@ where
                                 | DEVICE_HISTORY
                                 | ACTIVITIES
                                 | ACTIVITY_DETAILS
+                                | INSIGHTS_LIST
                         )
                 })
                 .map(|tool| tool.description)
@@ -642,6 +643,7 @@ pub(crate) fn format_analysis_answer(
             || item["tool"] == MIGRAINE_WINDOWS
             || item["tool"] == COFFEE_SLEEP
             || item["tool"] == EVENT_WINDOWS
+            || item["tool"] == INSIGHTS_LIST
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
     }) {

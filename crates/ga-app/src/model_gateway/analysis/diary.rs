@@ -7,9 +7,9 @@ use ga_db::{
     health_analysis::{
         ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
         DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery, EVENT_WINDOWS,
-        HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
-        PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
-        WELLBEING_OBSERVATIONS,
+        HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST, LAGGED_ASSOCIATION, METRIC_SERIES,
+        MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
+        STRESS_HOURS, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -32,6 +32,7 @@ static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sle
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
+static INSIGHTS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Insights));
 static WINDOWS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::EventWindows));
 static COFFEE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::CoffeeSleep));
 static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Snapshot));
@@ -203,6 +204,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                 offered.push(OfferedReadTool {
                     name: STRESS_HOURS,
                     description: &STRESS,
+                });
+            }
+            if access.insights {
+                offered.push(OfferedReadTool {
+                    name: INSIGHTS_LIST,
+                    description: &INSIGHTS,
                 });
             }
             if access.migraine {
