@@ -1,0 +1,98 @@
+{
+  "scope": "PAR-23",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_schema_security.py": 21,
+      "tests/test_access_scopes.py": 13,
+      "tests/test_provider_consent.py": 39,
+      "tests/test_calendar_context.py": 14,
+      "tests/test_hf01_channel_consent.py": 30
+    }
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_calendar_context_http.py",
+      "result": "passed",
+      "trace_sha256": "f9ba7992aa6ad03a3a84312a6d0a4b2354b7d69c835e69c4c8e3d0d8c9d89f45"
+    },
+    {
+      "comparison": "migration/check_tracker_consent_http.py",
+      "result": "passed",
+      "trace_sha256": "2311b5123cd0caa986d0cf1c9feb45d93d9d86a00ae80af62c1d1abaeab2fe65"
+    },
+    {
+      "comparison": "migration/check_wearable_http.py",
+      "result": "passed",
+      "trace_sha256": "204bdfe633d5038cc360837eff29835fb1351c1df138df48c3b0aea6f89b37e9"
+    },
+    {
+      "comparison": "migration/check_analysis_diary_tool.py",
+      "result": "passed",
+      "trace_sha256": "6c0645188b95f83ab7bb4d5b8e0357067e05c7f44ef72be69af6ded24f14c362"
+    },
+    {
+      "comparison": "migration/check_model_diary_policy.py",
+      "result": "passed",
+      "trace_sha256": "4b30e9a994d6a94bc5b95f16f96189c3b28b910497089193de745babffa7fefa"
+    },
+    {
+      "comparison": "migration/check_tracker_share_policy.py",
+      "result": "passed",
+      "trace_sha256": "2e6ab02788ba0016e4766d809664ac1b32759b103f6cdc1f042356253f8bd44d"
+    },
+    {
+      "comparison": "migration/check_tracker_consent_writes.py",
+      "result": "passed",
+      "trace_sha256": "a34a344686b402c9e4a23b7d24f2bba5300db4f39f4a68a5a55df011d14e5a13"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_reply.rs",
+      "result": "passed",
+      "trace_sha256": "b833b9bed1d136acf94014c85373c85595a7bc48792c107a208617aa08f65c5c"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_model_context.rs",
+      "result": "passed",
+      "trace_sha256": "56e31007854da492c559c7c8a960f41424d0025fa114afa19a444f342d1483a8"
+    },
+    {
+      "comparison": "migration/check_event_definitions.py",
+      "result": "passed",
+      "trace_sha256": "2d169976a71d88916d38d02ee4d668f65bf6f9adf9c3ed57c87b7e8956a38800"
+    },
+    {
+      "comparison": "migration/check_web_chat_model.py",
+      "result": "passed",
+      "trace_sha256": "0c70689aa1546653633fbb49045a1b70bad6ddb049a73b08fa4d85b595484b55"
+    },
+    {
+      "comparison": "crates/ga-app/tests/http.rs::scope_matrix_matches_reference_at_http_boundary",
+      "result": "passed",
+      "trace_sha256": "72e5d474c32c3c01a288dd436ba620563e6a17a7b1915ae73a6280f87f0d2d89"
+    },
+    {
+      "comparison": "model_gateway transport fences",
+      "result": "passed",
+      "trace_sha256": "d34086a7631835e1fe69b7983374bcd7b86c1f734610329cfcabb75ac72095ee"
+    }
+  ],
+  "scope_matrix": {
+    "capability_responses": 52,
+    "decisions": 4096
+  },
+  "release_scope": [
+    "Synthetic owner data, narrow wearable writes, source sharing, model and channel disclosure, and calendar opt-in through ordinary packaged routes.",
+    "Tracker scopes matched stored access, historical paging, revocation, affected receipts, and the authenticated Telegram pre-send fence."
+  ]
+}
