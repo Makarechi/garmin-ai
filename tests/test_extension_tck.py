@@ -451,7 +451,8 @@ def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
             for _ in range(200):
                 await asyncio.sleep(0.05)
                 db.expire_all()
-                if generated and db.get(OutboxMessage, generated[0]).state == "provider_accepted":
+                message = db.get(OutboxMessage, generated[0]) if generated else None
+                if message is not None and message.state == "provider_accepted":
                     break
             else:
                 pytest.fail("Plugin tracker initiative stayed blocked by Telegram startup")
