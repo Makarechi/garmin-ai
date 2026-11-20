@@ -21,7 +21,7 @@ use ga_app::{
 use ga_archive::Archive;
 use ga_db::{
     Database,
-    fit_ingest::FitReplayError,
+    fit_ingest::{FitIngestError, FitReplayError},
     jobs::{JobStoreError, RecordedJobStatus},
     replay::{CalendarReplayError, ReplaySelectionError, ReplayWorkerError, RunReplayJob},
     runtime_lease::RuntimeLeaseError,
@@ -41,9 +41,15 @@ const PLAN_BUSY: Duration = Duration::from_secs(30);
 const PLAN_IDLE: Duration = Duration::from_secs(15 * 60);
 const LEASE_SECONDS: u32 = 120;
 const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_ZIP_ENTRIES: NonZeroUsize = match NonZeroUsize::new(4096) {
-    Some(limit) => limit,
-    None => NonZeroUsize::MIN,
+const FIT_EXPORT_LIMITS: ExportLimits = ExportLimits {
+    max_bytes: MAX_FIT_BYTES,
+    max_zip_entries: match NonZeroUsize::new(4096) {
+        Some(limit) => limit,
+        None => NonZeroUsize::MIN,
+    },
+    // A 100 MiB FIT can expand into hundreds of thousands of JSONB rows.
+    // Allow time for the database to stage those rows on a single CPU.
+    max_duration: Duration::from_secs(600),
 };
 
 #[derive(Debug)]
@@ -415,11 +421,6 @@ async fn process_archive(
     timezone: &str,
     once: bool,
 ) -> Result<(), ReplayServiceError> {
-    let limits = ExportLimits {
-        max_bytes: MAX_FIT_BYTES,
-        max_zip_entries: MAX_ZIP_ENTRIES,
-        max_duration: Duration::from_secs(120),
-    };
     let mut next_plan = Instant::now();
     loop {
         if Instant::now() >= next_plan {
@@ -445,7 +446,7 @@ async fn process_archive(
                         lease: &lease,
                         configured_timezone: timezone,
                         max_json_bytes: MAX_JSON_BYTES,
-                        fit_limits: limits,
+                        fit_limits: FIT_EXPORT_LIMITS,
                     },
                     archive.clone(),
                     || false,
@@ -454,6 +455,12 @@ async fn process_archive(
             let status = match outcome {
                 Ok(result) => Some(result.job),
                 Err(error) => {
+                    if let ReplayWorkerError::Fit(FitReplayError::Publication(
+                        FitIngestError::Stage(stage),
+                    )) = &error
+                    {
+                        eprintln!("{stage}");
+                    }
                     let busy_until = if matches!(
                         error,
                         ReplayWorkerError::Json(CalendarReplayError::Busy)
