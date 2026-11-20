@@ -81,6 +81,9 @@ GENERIC_DETAIL = "Synthetic historical analysis entry"
 AGGREGATE_QUESTION = "Show the synthetic step aggregate."
 MEASUREMENT_START = datetime(2026, 10, 10, 14, tzinfo=UTC)
 MEASUREMENT_SOURCE = "synthetic-historical-aggregate"
+SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
+SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
+SUMMARIES_DAY = date(2026, 10, 12)
 RUNNING_QUESTION = "How do the synthetic running summaries compare?"
 RUNNING_ANSWER = "The saved runs are grouped by activity type."
 STRESS_QUESTION = "Which synthetic hours rank highest by measured stress?"
@@ -110,6 +113,8 @@ def output(prompt):
             return generic_output(prompt)
         if prompt["question"].startswith(AGGREGATE_QUESTION):
             return aggregate_output(prompt)
+        if prompt["question"].startswith(SUMMARIES_QUESTION):
+            return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
             return running_output(prompt)
         if prompt["question"].startswith(STRESS_QUESTION):
@@ -151,6 +156,7 @@ def output(prompt):
             STATISTICS_QUESTION,
             STRESS_QUESTION,
             RUNNING_QUESTION,
+            SUMMARIES_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -312,6 +318,46 @@ def aggregate_output(prompt):
         answer="The synthetic step aggregate is available.",
         evidence_ids=[1],
         numeric_claims=[{"evidence_id": 1, "path": ["value"], "value": result["value"]}],
+        response_language="en",
+    )
+
+
+def summaries_output(prompt):
+    if prompt["evidence"]:
+        first, second, third = prompt["evidence"]
+        assert [row["tool"] for row in (first, second, third)] == [
+            "health_snapshot",
+            "health_range",
+            "metric_series",
+        ]
+        assert first["result"]["values"]["steps"] == 3210
+        assert "hrv_nightly_avg" in first["result"]["missing_metrics"]
+        assert second["result"]["days_available"] == 1
+        assert second["result"]["days_requested"] == 3
+        assert third["result"]["start"] == "2026-10-12T02:00:00+02:00"
+        assert third["result"]["rows"][0]["value"] == 25
+        return AgentStep(answer=SUMMARIES_ANSWER, evidence_ids=[1, 2, 3], response_language="en")
+    tools = {tool["name"] for tool in prompt["tools"]}
+    expected = {"health_snapshot", "health_range"}
+    assert "metric_series" in tools
+    if prompt["question"].endswith(" without general diary"):
+        assert not expected & tools
+        return AgentStep(response_language="en")
+    assert expected <= tools
+    reads = {
+        "health_snapshot": {"day": SUMMARIES_DAY.isoformat()},
+        "health_range": {"start": "2026-10-11", "end": "2026-10-13"},
+        "metric_series": {
+            "metric": "steps_bucket",
+            "start": "2026-10-12T02:00:00+02:00",
+            "end": "2026-10-12T02:05:00+02:00",
+        },
+    }
+    return AgentStep(
+        calls=[
+            {"name": name, "arguments_json": json.dumps(arguments)}
+            for name, arguments in reads.items()
+        ],
         response_language="en",
     )
 
@@ -631,6 +677,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_statistics(engine, python, native)
     exercise_stress(engine, python, native)
     exercise_running(engine, python, native)
+    exercise_health_summaries(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1320,6 +1367,56 @@ def exercise_running(engine, python, native):
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM source_payloads WHERE id=:id"), {"id": identity})
     print("Matched running summaries and withheld stale, disallowed and replay-dependent evidence")
+
+
+def exercise_health_summaries(engine, python, native):
+    start = datetime.combine(SUMMARIES_DAY, time.min, tzinfo=UTC)
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for name in ("general_diary", "sleep", "training", "wellbeing"):
+            packs[name].tracking_enabled = True
+            packs[name].llm_enabled = True
+        session.add(HealthDay(day=SUMMARIES_DAY, steps=3210))
+        for minutes, value in ((0, 10), (2, 15)):
+            session.add(
+                Measurement(
+                    ts=start + timedelta(minutes=minutes),
+                    local_date=SUMMARIES_DAY,
+                    source="garmin_connect",
+                    metric="steps_bucket",
+                    unit="steps",
+                    quality="observed",
+                    value=value,
+                )
+            )
+    original, result = [submit(client, SUMMARIES_QUESTION)["reply"] for client in (python, native)]
+    assert original is not None and result is not None, (original, result)
+    assert original["text"] == result["text"] and SUMMARIES_ANSWER in result["text"]
+    measurement = (
+        Measurement.ts == start,
+        Measurement.metric == "steps_bucket",
+        Measurement.source == "garmin_connect",
+    )
+    with engine.begin() as connection:
+        changed = connection.execute(update(Measurement).where(*measurement).values(value=12))
+        assert changed.rowcount == 1
+    assert (
+        native.post(f"/web-chat/messages/{result['id']}/read", headers=HEADERS).status_code == 409
+    )
+    with Session(engine) as session, session.begin():
+        session.execute(update(Measurement).where(*measurement).values(value=10))
+        ensure_scenario_packs(session)["general_diary"].llm_enabled = False
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert result["id"] not in {row["id"] for row in history.json()["replies"]}
+    denied = [
+        submit(client, SUMMARIES_QUESTION + " without general diary")["reply"]["text"]
+        for client in (python, native)
+    ]
+    assert denied[0] == denied[1] and SUMMARIES_ANSWER not in denied[1], denied
+    print(
+        "Matched daily summaries and stored step intervals, and withheld changed or unconsented evidence"
+    )
 
 
 def main():

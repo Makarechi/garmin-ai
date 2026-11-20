@@ -62,29 +62,11 @@ impl DailyHealthReader {
         end: OffsetDateTime,
         minutes: u16,
     ) -> Result<Value, SeriesReadError> {
-        check_calendar_bounds(
-            start.to_offset(UtcOffset::UTC).date(),
-            end.to_offset(UtcOffset::UTC).date(),
-        )
-        .map_err(|_| SeriesReadError::Invalid)?;
-        if start >= end || end - start > time::Duration::days(366) || !(1..=1440).contains(&minutes)
-        {
-            return Err(SeriesReadError::Invalid);
-        }
         let work = async {
             sqlx::query("SET LOCAL statement_timeout = '1500ms'")
                 .execute(&mut *self.0)
                 .await?;
-            let result = series_in(
-                &mut self.0,
-                metric,
-                start,
-                end,
-                minutes,
-                2000,
-                OffsetDateTime::UNIX_EPOCH,
-            )
-            .await?;
+            let result = metric_series_in(&mut self.0, metric, start, end, minutes).await?;
             self.0.commit().await?;
             Ok(result)
         };
@@ -92,6 +74,33 @@ impl DailyHealthReader {
             .await
             .map_err(|_| HealthAnalysisError::Database)?
     }
+}
+
+pub(super) async fn metric_series_in(
+    txn: &mut Transaction<'_, Postgres>,
+    metric: &str,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    minutes: u16,
+) -> Result<Value, SeriesReadError> {
+    check_calendar_bounds(
+        start.to_offset(UtcOffset::UTC).date(),
+        end.to_offset(UtcOffset::UTC).date(),
+    )
+    .map_err(|_| SeriesReadError::Invalid)?;
+    if start >= end || end - start > time::Duration::days(366) || !(1..=1440).contains(&minutes) {
+        return Err(SeriesReadError::Invalid);
+    }
+    series_in(
+        txn,
+        metric,
+        start,
+        end,
+        minutes,
+        2000,
+        OffsetDateTime::UNIX_EPOCH,
+    )
+    .await
 }
 
 pub(super) async fn series_in(

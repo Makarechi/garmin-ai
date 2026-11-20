@@ -89,60 +89,77 @@ impl DailyHealthReader {
 
     /// Return recorded summaries for this inclusive calendar range.
     pub async fn range(mut self, period: HealthPeriod) -> Result<Value, HealthAnalysisError> {
-        let mut rows = Vec::new();
-        {
-            let mut stream = sqlx::query_as::<_, (String, OffsetDateTime)>(DAILY_ROWS)
-                .bind(period.start)
-                .bind(period.end)
-                .fetch(&mut *self.0);
-            while let Some((document, updated_at)) = stream.try_next().await? {
-                rows.push(health_day(&document, updated_at)?);
-            }
-        }
+        let result = range_in(&mut self.0, period).await?;
         self.0.commit().await?;
-        let mut response = json!({
-            "start": period.start.to_string(),
-            "end": period.end.to_string(),
-            "days_available": rows.len(),
-            "days_requested": period.days(),
-        });
-        response["rows"] = Value::Array(rows);
-        Ok(response)
+        Ok(result)
     }
+
     /// Show the stored calendar day, including missing metrics and the separate hydration contract.
     pub async fn snapshot(mut self, day: Date) -> Result<Value, HealthAnalysisError> {
-        if !(1..=9999).contains(&day.year()) {
-            return Err(HealthAnalysisError::DateRange);
-        }
-        let row = sqlx::query_as::<_, (String, OffsetDateTime)>(DAILY_ROWS)
-            .bind(day)
-            .bind(day)
-            .fetch_optional(&mut *self.0)
-            .await?;
+        let result = snapshot_in(&mut self.0, day).await?;
         self.0.commit().await?;
-        let values = row
-            .map(|(document, updated_at)| health_day(&document, updated_at))
-            .transpose()?;
-        let missing: Vec<&str> = METRICS
-            .iter()
-            .copied()
-            .filter(|field| {
-                values
-                    .as_ref()
-                    .is_none_or(|values| values[*field].is_null())
-            })
-            .collect();
-        Ok(json!({
-            "date": day.to_string(),
-            "available": values.is_some(),
-            "values": values,
-            "time_semantics": "daily_summary; updated_at is ingestion time, not measurement time",
-            "usable_for_current_state": false,
-            "metric_contracts": legacy_metric_contracts(),
-            "hydration_sources": "Garmin daily total; manual diary water is separate and not summed",
-            "missing_metrics": missing,
-        }))
+        Ok(result)
     }
+}
+
+pub(super) async fn range_in(
+    txn: &mut Transaction<'_, Postgres>,
+    period: HealthPeriod,
+) -> Result<Value, HealthAnalysisError> {
+    let mut rows = Vec::new();
+    {
+        let mut stream = sqlx::query_as::<_, (String, OffsetDateTime)>(DAILY_ROWS)
+            .bind(period.start)
+            .bind(period.end)
+            .fetch(&mut **txn);
+        while let Some((document, updated_at)) = stream.try_next().await? {
+            rows.push(health_day(&document, updated_at)?);
+        }
+    }
+    let mut response = json!({
+        "start": period.start.to_string(),
+        "end": period.end.to_string(),
+        "days_available": rows.len(),
+        "days_requested": period.days(),
+    });
+    response["rows"] = Value::Array(rows);
+    Ok(response)
+}
+
+pub(super) async fn snapshot_in(
+    txn: &mut Transaction<'_, Postgres>,
+    day: Date,
+) -> Result<Value, HealthAnalysisError> {
+    if !(1..=9999).contains(&day.year()) {
+        return Err(HealthAnalysisError::DateRange);
+    }
+    let row = sqlx::query_as::<_, (String, OffsetDateTime)>(DAILY_ROWS)
+        .bind(day)
+        .bind(day)
+        .fetch_optional(&mut **txn)
+        .await?;
+    let values = row
+        .map(|(document, updated_at)| health_day(&document, updated_at))
+        .transpose()?;
+    let missing: Vec<&str> = METRICS
+        .iter()
+        .copied()
+        .filter(|field| {
+            values
+                .as_ref()
+                .is_none_or(|values| values[*field].is_null())
+        })
+        .collect();
+    Ok(json!({
+        "date": day.to_string(),
+        "available": values.is_some(),
+        "values": values,
+        "time_semantics": "daily_summary; updated_at is ingestion time, not measurement time",
+        "usable_for_current_state": false,
+        "metric_contracts": legacy_metric_contracts(),
+        "hydration_sources": "Garmin daily total; manual diary water is separate and not summed",
+        "missing_metrics": missing,
+    }))
 }
 
 pub(super) async fn model_packs_allowed(
