@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from garmin_ai.agent import AgentStep, Interpretation
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
+from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
@@ -52,6 +53,13 @@ from garmin_ai.models import (
 from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.tracker_forms import (
+    TrackerConfirmation,
+    TrackerFieldDraft,
+    TrackerSetupDraft,
+    confirm_tracker,
+    preview_tracker,
+)
 
 TOKENS = [{"key": "synthetic-web-chat-owner-bearer-for-disposable-tests-7042", "scopes": ["admin"]}]
 HEADERS = {"Authorization": f"Bearer {TOKENS[0]['key']}"}
@@ -124,6 +132,11 @@ STRESS_ANSWER = "The first ranked hour has complete observed coverage."
 STATISTICS_QUESTION = "Compare the synthetic lags and matched controls."
 STATISTICS_START = date(2026, 11, 2)
 STATISTICS_END = STATISTICS_START + timedelta(days=13)
+CATALOG_QUESTION = "Find the synthetic tracker in the resource catalog"
+CATALOG_SHARED = "z_synthetic_catalog"
+CATALOG_HIDDEN = "y_synthetic_private"
+CATALOG_LOOKAHEAD = "zz_synthetic_catalog_lookahead"
+CATALOG_LABEL = "Synthetic catalog tracker"
 HEALTH_READS = {
     "personal_baseline": {"metric": "sleep_score", "start": "2026-09-19", "end": "2026-09-20"},
     "analysis_compare_periods": {
@@ -170,6 +183,8 @@ def output(prompt):
             return stress_output(prompt)
         if prompt["question"].startswith(STATISTICS_QUESTION):
             return statistics_output(prompt)
+        if prompt["question"].startswith(CATALOG_QUESTION):
+            return catalog_output(prompt)
         assert prompt["question"].startswith(DIARY_QUESTION)
         if prompt["evidence"]:
             evidence = prompt["evidence"][0]
@@ -214,6 +229,7 @@ def output(prompt):
             INSIGHTS_QUESTION,
             TIMELINE_QUESTION,
             DEFINITIONS_QUESTION,
+            CATALOG_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -375,6 +391,34 @@ def aggregate_output(prompt):
         answer="The synthetic step aggregate is available.",
         evidence_ids=[1],
         numeric_claims=[{"evidence_id": 1, "path": ["value"], "value": result["value"]}],
+        response_language="en",
+    )
+
+
+def catalog_output(prompt):
+    facts = prompt["question"].endswith(" with facts")
+    lookahead = prompt["question"].endswith(" with a schema-only lookahead")
+    shared_key = f"user.{CATALOG_SHARED}"
+    if prompt["evidence"]:
+        [evidence] = prompt["evidence"]
+        assert evidence["tool"] == "resource_catalog"
+        assert evidence["result"]["next_cursor"] == (shared_key if lookahead else None)
+        [resource] = evidence["result"]["resources"]
+        assert resource["id"] == shared_key, resource
+        assert resource["labels"]["en"] == CATALOG_LABEL
+        if facts or lookahead:
+            assert resource["availability"]["records_for_version"] == 1
+        else:
+            assert resource["availability"] is None
+        assert ("fields" in resource) == facts
+        return AgentStep(answer=CATALOG_LABEL, evidence_ids=[1], response_language="en")
+
+    assert any(tool["name"] == "resource_catalog" for tool in prompt["tools"])
+    arguments = {"kind": "events", "after_key": "user.y", "limit": 1}
+    if facts:
+        arguments = {"kind": "events", "resource_key": shared_key, "detail": True}
+    return AgentStep(
+        calls=[{"name": "resource_catalog", "arguments_json": json.dumps(arguments)}],
         response_language="en",
     )
 
@@ -1017,6 +1061,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_insights(engine, python, native)
     exercise_timeline(engine, python, native)
     exercise_definitions(engine, python, native, source_calls, native_calls)
+    exercise_catalog_analysis(engine, python, native, source_calls, native_calls)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -2216,6 +2261,97 @@ def exercise_definitions(engine, python, native, source_calls, native_calls):
         )
     assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
     print("Matched current and prior tracker schemas and the legacy channel publication boundary")
+
+
+def exercise_catalog_analysis(engine, python, native, source_calls, native_calls):
+    def tracker(session, key, label):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=label,
+            privacy="sensitive",
+            fields=[TrackerFieldDraft(key="description", label="Synthetic field", kind="text")],
+        )
+        preview = preview_tracker(session, draft)
+        created = confirm_tracker(
+            session,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="synthetic-fixture",
+        )
+        create_custom_event(
+            session,
+            CustomEntryInput(
+                definition_key=f"user.{key}",
+                start=GENERIC_START,
+                timezone="UTC",
+                values={"description": "Synthetic private content"},
+            ),
+            actor="synthetic-fixture",
+        )
+        return created["tracker"]["definition_id"]
+
+    def grant(session, definition, kind, destination, categories):
+        grant_tracker_share(
+            session,
+            TrackerShareConsent(
+                definition_id=definition,
+                destination_kind=kind,
+                destination_instance_id=destination,
+                categories=categories,
+                granted_at=GENERIC_START,
+            ),
+            authorized=True,
+        )
+
+    with Session(engine) as session, session.begin():
+        shared = tracker(session, CATALOG_SHARED, CATALOG_LABEL)
+        hidden = tracker(session, CATALOG_HIDDEN, "Hidden synthetic catalog tracker")
+        for definition in (shared, hidden):
+            grant(session, definition, "model", INSTANCE, {"schema", "facts"})
+        grant(session, shared, "channel", "web:local", {"schema"})
+
+    def denied_after_read(question):
+        for client, calls in ((python, source_calls), (native, native_calls)):
+            before = len(calls)
+            result = submit(client, question, status=403)
+            assert result["detail"] == "Operation not allowed", result
+            assert any(
+                call.get("evidence") and call["evidence"][0]["tool"] == "resource_catalog"
+                for call in calls[before:]
+            )
+
+    denied_after_read(CATALOG_QUESTION)
+
+    with Session(engine) as session, session.begin():
+        grant(session, shared, "channel", "web:local", {"schema", "facts"})
+    with_facts = [
+        submit(client, CATALOG_QUESTION + " with facts")["reply"] for client in (python, native)
+    ]
+    expected = f"{CATALOG_LABEL}\n\nBased on saved diary data."
+    assert with_facts[0]["text"] == with_facts[1]["text"] == expected
+
+    with Session(engine) as session, session.begin():
+        lookahead = tracker(session, CATALOG_LOOKAHEAD, "Synthetic lookahead tracker")
+        grant(session, lookahead, "model", INSTANCE, {"schema"})
+        grant(session, lookahead, "channel", "web:local", {"schema"})
+    denied_after_read(CATALOG_QUESTION + " with a schema-only lookahead")
+    native_id = with_facts[1]["id"]
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert native_id in {row["id"] for row in history.json()["replies"]}
+    with engine.begin() as connection:
+        # Let the queued reply's own evidence check observe the lost permission.
+        count = connection.execute(
+            text("DELETE FROM app_state WHERE key=:key"),
+            {"key": f"tracker-consent:{shared}:channel:web:local"},
+        ).rowcount
+        assert count == 1
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert native_id not in {row["id"] for row in history.json()["replies"]}
+    assert native.post(f"/web-chat/messages/{native_id}/read", headers=HEADERS).status_code == 409
+    print(
+        "Matched catalog pagination, schema and facts, and withheld the reply after consent changed"
+    )
 
 
 def main():

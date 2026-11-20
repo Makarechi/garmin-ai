@@ -5,7 +5,10 @@ use ga_db::{
     conversation_memory::{AnalysisSubject, ConversationBinding, MemoryFence},
     diary::{DefinitionPage, DefinitionReadFence, EVENT_DEFINITIONS, TimelineReadFence},
     health_analysis::{AnalysisTimelineQuery, HealthAnalysisError, TimelineError},
-    share_policy::{DestinationKind, ModelChannelSharing, ModelConversation, ShareDestination},
+    share_policy::{
+        AnalysisShareEvidence, DestinationKind, ModelChannelSharing, ModelConversation,
+        ShareDestination,
+    },
 };
 use ga_domain::model_consent::ModelCategories;
 use serde::Deserialize;
@@ -127,15 +130,16 @@ async fn check_timeline_before_model_delivery(
         "tool": "timeline", "arguments": arguments, "result": result.value,
     }))
     .ok_or("Expected saved timeline evidence")?];
+    let evidence = AnalysisShareEvidence {
+        timeline: timeline.into(),
+        ..Default::default()
+    };
     let channel = ModelChannelSharing {
         destination: ShareDestination::new(DestinationKind::Channel, "web:local")?,
         requirements: &[],
         conversation: Some(ModelConversation::Analysis {
             subject,
-            daily: &[],
-            generic: &[],
-            timeline: &timeline,
-            definitions: &[],
+            evidence: &evidence,
         }),
     };
     let categories = ModelCategories::HEALTH_AND_DIARY;
@@ -191,13 +195,14 @@ async fn check_timeline_before_model_delivery(
         "tool": EVENT_DEFINITIONS, "arguments": arguments, "result": saved.value,
     }))
     .ok_or("Expected saved definition evidence")?];
+    let evidence = AnalysisShareEvidence {
+        definitions: definitions.into(),
+        ..Default::default()
+    };
     let definition_sharing = ModelChannelSharing {
         conversation: Some(ModelConversation::Analysis {
             subject,
-            daily: &[],
-            generic: &[],
-            timeline: &[],
-            definitions: &definitions,
+            evidence: &evidence,
         }),
         ..channel
     };

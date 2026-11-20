@@ -23,6 +23,7 @@ use crate::{
         owner_timezone,
     },
     model_gate::onboarding::onboarding_allows_model,
+    resource_catalog::{CatalogError, CatalogEvidence, RESOURCE_CATALOG},
     share_policy::{DestinationKind, ShareDestination, schema_answer_references},
 };
 
@@ -44,6 +45,7 @@ enum AnalysisReadFence {
     Generic(GenericAnalysisEvidence),
     Timeline(TimelineReadFence),
     Definitions(DefinitionReadFence),
+    Catalog(CatalogEvidence),
     Diary(DiaryReadFence),
 }
 
@@ -101,6 +103,8 @@ impl DiaryAnalysisFence {
                         DefinitionReadFence::from_read(read).map(AnalysisReadFence::Definitions)
                     } else if read["tool"] == TIMELINE {
                         TimelineReadFence::from_read(read).map(AnalysisReadFence::Timeline)
+                    } else if read["tool"] == RESOURCE_CATALOG {
+                        CatalogEvidence::from_read(read).map(AnalysisReadFence::Catalog)
                     } else if read["tool"]
                         .as_str()
                         .is_some_and(DailyAnalysisEvidence::is_daily_tool)
@@ -146,6 +150,7 @@ impl DiaryAnalysisFence {
                 AnalysisReadFence::Generic(read) => read.specification(),
                 AnalysisReadFence::Timeline(read) => read.specification(),
                 AnalysisReadFence::Definitions(read) => read.specification(),
+                AnalysisReadFence::Catalog(read) => read.specification(),
             })
             .collect()
     }
@@ -268,6 +273,24 @@ impl DiaryAnalysisFence {
                     Err(HealthAnalysisError::Database) => {
                         return Err(sqlx::Error::Protocol(
                             "Could not validate daily analysis evidence".into(),
+                        ));
+                    }
+                    _ => return Ok(None),
+                },
+                AnalysisReadFence::Catalog(read) => match read
+                    .current(
+                        txn,
+                        context.binding().owner_id,
+                        model,
+                        channel,
+                        ModelCategories::HEALTH_AND_DIARY,
+                    )
+                    .await
+                {
+                    Ok(true) => continue,
+                    Err(CatalogError::Database) => {
+                        return Err(sqlx::Error::Protocol(
+                            "Could not validate resource catalog evidence".into(),
                         ));
                     }
                     _ => return Ok(None),

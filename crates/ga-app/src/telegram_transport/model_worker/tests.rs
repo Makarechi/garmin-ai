@@ -29,6 +29,7 @@ const HEALTH_QUESTION: &str = "What is the synthetic Garmin sleep baseline?";
 const FRESHNESS_QUESTION: &str = "How recent is the synthetic Garmin sleep summary?";
 const SLEEP_QUESTION: &str = "When did the synthetic sleep interval start?";
 const GENERIC_QUESTION: &str = "Find the synthetic note with a generic diary query.";
+const CATALOG_QUESTION: &str = "Can the synthetic diary use the saved notes resource?";
 const SLEEP_DAY: &str = "2024-02-18";
 const SLEEP_START: &str = "2024-02-17T22:15:02.119000+00:00";
 const SLEEP_END: &str = "2024-02-18T06:23:08+00:00";
@@ -194,6 +195,28 @@ impl Sender for SyntheticProvider {
                     "Synthetic detail"
                 );
                 json!({"answer":"The saved synthetic note is available.","evidence_ids":[1],
+                       "response_language":"en"})
+            }
+            19 => {
+                assert_eq!(prompt["text"], CATALOG_QUESTION);
+                json!({"intent":"question","confidence":1.0,"response_language":"en"})
+            }
+            20 => {
+                assert_eq!(prompt["question"], CATALOG_QUESTION);
+                assert!(prompt["tools"].as_array().is_some_and(|tools| {
+                    tools.iter().any(|tool| tool["name"] == "resource_catalog")
+                }));
+                json!({"calls":[{"name":"resource_catalog","arguments_json":json!({
+                    "kind":"events","resource_key":"system.note"
+                }).to_string()}]})
+            }
+            21 => {
+                assert_eq!(prompt["evidence"][0]["tool"], "resource_catalog");
+                assert_eq!(
+                    prompt["evidence"][0]["result"]["resources"][0]["id"],
+                    "system.note"
+                );
+                json!({"answer":"Notes are available in the synthetic diary.","evidence_ids":[1],
                        "response_language":"en"})
             }
             _ => panic!("Unexpected provider retry"),
@@ -630,6 +653,49 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
         database
             .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
                 panic!("Revoked generic evidence escaped to Telegram")
+            })
+            .await?,
+        ReplyDispatchResult::Cancelled
+    );
+    sqlx::query(allow_generic)
+        .bind(owner_id)
+        .bind(true)
+        .execute(&pool)
+        .await?;
+    process(&mut runtime, 9, CATALOG_QUESTION).await?;
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 22);
+    let (reply, body, proof): (Uuid, String, String) = sqlx::query_as(
+        "SELECT o.id,o.intent#>>'{blocks,0,text}',(o.memory_fence->'telegram_diary_analysis')::text
+         FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+         WHERE i.normalized_text=$1",
+    )
+    .bind(CATALOG_QUESTION)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        body.contains("Notes are available in the synthetic diary.")
+            && body.contains("Based on saved diary data"),
+        "{body}"
+    );
+    let proof: Value = serde_json::from_str(&proof)?;
+    assert_eq!(
+        proof["reads"][0]["catalog_arguments"]["resource_key"],
+        "system.note"
+    );
+    let claim = database
+        .claim_outbox_reply(destination(), started, LEASE)
+        .await?
+        .ok_or("Expected claimed catalog reply")?;
+    assert_eq!(claim.outbox_id, reply);
+    sqlx::query(allow_generic)
+        .bind(owner_id)
+        .bind(false)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        database
+            .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
+                panic!("Revoked catalog evidence escaped to Telegram")
             })
             .await?,
         ReplyDispatchResult::Cancelled

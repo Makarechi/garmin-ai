@@ -27,6 +27,7 @@ use crate::{
     },
     model_gate::onboarding::onboarding_allows_model,
     replay::REPLAY_MUTATION_LOCK,
+    resource_catalog::{CatalogError, CatalogEvidence},
 };
 
 pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72104631;
@@ -126,11 +127,17 @@ pub enum ModelConversation<'a> {
     },
     Analysis {
         subject: AnalysisSubject<'a>,
-        daily: &'a [DailyAnalysisEvidence],
-        generic: &'a [GenericAnalysisEvidence],
-        timeline: &'a [TimelineReadFence],
-        definitions: &'a [DefinitionReadFence],
+        evidence: &'a AnalysisShareEvidence,
     },
+}
+
+#[derive(Default)]
+pub struct AnalysisShareEvidence {
+    pub daily: Vec<DailyAnalysisEvidence>,
+    pub generic: Vec<GenericAnalysisEvidence>,
+    pub catalogs: Vec<CatalogEvidence>,
+    pub timeline: Vec<TimelineReadFence>,
+    pub definitions: Vec<DefinitionReadFence>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -309,13 +316,7 @@ impl Database {
                         }
                         current_web_conversation(&mut txn, binding, memory).await
                     }
-                    ModelConversation::Analysis {
-                        subject,
-                        daily,
-                        generic,
-                        timeline,
-                        definitions,
-                    } => {
+                    ModelConversation::Analysis { subject, evidence } => {
                         let current =
                             analysis_channel_in(&mut txn, subject)
                                 .await
@@ -326,7 +327,7 @@ impl Database {
                         if current.as_deref() != Some(channel.destination.instance()) {
                             return Ok(None);
                         }
-                        for read in daily {
+                        for read in &evidence.daily {
                             match read.current(&mut txn, subject).await {
                                 Ok(true) => {}
                                 Err(HealthAnalysisError::Storage(ReadinessError::Unavailable)) => {
@@ -338,7 +339,7 @@ impl Database {
                                 _ => return Ok(None),
                             }
                         }
-                        for read in generic {
+                        for read in &evidence.generic {
                             match read
                                 .current(
                                     &mut txn,
@@ -359,7 +360,28 @@ impl Database {
                                 _ => return Ok(None),
                             }
                         }
-                        for read in timeline {
+                        for read in &evidence.catalogs {
+                            match read
+                                .current(
+                                    &mut txn,
+                                    subject.binding().owner_id,
+                                    destination,
+                                    channel.destination,
+                                    model.unwrap_or_default(),
+                                )
+                                .await
+                            {
+                                Ok(true) => {}
+                                Err(CatalogError::Health(HealthAnalysisError::Storage(
+                                    ReadinessError::Unavailable,
+                                ))) => return Err(SharePolicyError::Busy),
+                                Err(CatalogError::Database) => {
+                                    return Err(SharePolicyError::Database);
+                                }
+                                _ => return Ok(None),
+                            }
+                        }
+                        for read in &evidence.timeline {
                             match read.current(&mut txn, subject, destination).await {
                                 Ok(Some(_)) => {}
                                 Err(TimelineError::Health(HealthAnalysisError::Storage(
@@ -373,7 +395,7 @@ impl Database {
                                 _ => return Ok(None),
                             }
                         }
-                        for read in definitions {
+                        for read in &evidence.definitions {
                             match read
                                 .current(
                                     &mut txn,

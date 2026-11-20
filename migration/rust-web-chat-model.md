@@ -22,6 +22,14 @@ reply across the runtime boundary. The native test confirmed a read receipt
 after fetching the message. During a held model request, an unrelated local
 command completed and a duplicate shared the original reply. Revoking diary
 consent while a synthetic response was in flight prevented the proposed write.
+
+The catalog checks model and channel grants when showing tracker names and
+record counts. Before displaying an answer, both web senders require channel
+access to schema and facts for the consulted tracker definitions. The paired
+fixture covers schema-only grants, a page that consults a tracker beyond the
+returned rows, permitted counts and the withdrawal of access to a saved reply.
+The native runtime rechecks the catalog evidence before subsequent model calls
+and delivery.
 A separate run cancelled a pending clarification from another tab during a
 safety classification. The safety notice reached the owner and was reused
 after reconnecting through the Python server with the same message ID.

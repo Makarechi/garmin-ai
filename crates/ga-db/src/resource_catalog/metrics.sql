@@ -1,6 +1,7 @@
             ) IS TRUE
         )) AS permitted
     FROM event_definition_versions AS version CROSS JOIN destinations AS destination
+    GROUP BY version.id,destination.categories
 ), selected AS (
     SELECT definition.key,version.*,
         ($5 IS NULL OR definition.namespace='system' OR (
@@ -33,6 +34,12 @@
         ))
         AND NOT (definition.key=ANY($9::text[]))
     ORDER BY definition.key LIMIT $3+1
+), schema_refs AS (
+    SELECT DISTINCT mapping.event_definition_version_id AS id
+    FROM (SELECT definition_id FROM selected ORDER BY key LIMIT $3) AS sent
+    JOIN metric_definition_versions AS version ON version.definition_id=sent.definition_id
+    JOIN event_metric_mappings AS mapping ON mapping.metric_definition_version_id=version.id
+    WHERE $11::text IS NOT NULL AND $10::text='tracker_metrics'
 ), rows AS (
     SELECT selected.key,
         jsonb_build_object('id',key,'version',version,'version_id',id,'kind','metric',

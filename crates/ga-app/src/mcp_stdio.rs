@@ -181,7 +181,8 @@ impl Mcp {
     }
 
     async fn catalog(&self, args: Map<String, Value>) -> Result<ToolResult, &'static str> {
-        let page = crate::http::tools::catalog_input(&args)?;
+        let page =
+            ga_db::resource_catalog::ResourcePage::parse(&args).map_err(|_| "ValidationError")?;
         let permit = self
             .active_reads
             .clone()
@@ -198,7 +199,9 @@ impl Mcp {
                     CatalogError::Arguments => "ValueError",
                     CatalogError::ModelConsent => "PermissionError",
                     CatalogError::Health(HealthAnalysisError::ReplayPending) => "ReplayUnavailable",
-                    CatalogError::Health(_) | CatalogError::Database => "RuntimeError",
+                    CatalogError::Health(_)
+                    | CatalogError::Database
+                    | CatalogError::ResultTooLarge => "RuntimeError",
                 }
             })?;
         Ok(ToolResult::data(document, Some(permit)))

@@ -13,8 +13,10 @@ use ga_db::{
         STRESS_HOURS, TIMELINE, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
+    resource_catalog::{CatalogEvidence, RESOURCE_CATALOG},
     share_policy::{
-        ModelChannelSharing, ModelConversation, ShareCategory, ShareDestination, ShareRequirement,
+        AnalysisShareEvidence, ModelChannelSharing, ModelConversation, ShareCategory,
+        ShareDestination, ShareRequirement,
     },
 };
 use ga_domain::{
@@ -214,7 +216,7 @@ impl ModelGateway<'_> {
             question,
             budget,
             tools,
-            |prompt, versions, schemas, daily, generic, timeline, definitions| {
+            |prompt, versions, schemas, evidence| {
                 let policy = &policy;
                 async move {
                     let mut current_requirements = requirements.to_vec();
@@ -252,10 +254,7 @@ impl ModelGateway<'_> {
                         requirements: &channel_requirements,
                         conversation: Some(ModelConversation::Analysis {
                             subject: destination.subject,
-                            daily: &daily,
-                            generic: &generic,
-                            timeline: &timeline,
-                            definitions: &definitions,
+                            evidence: &evidence,
                         }),
                     });
                     let returned = self
@@ -294,15 +293,7 @@ async fn answer_with<T, F, Response>(
 ) -> Result<AnalysisResult, AnalysisError>
 where
     T: AnalysisReadTools,
-    F: FnMut(
-        String,
-        BTreeSet<Uuid>,
-        BTreeSet<Uuid>,
-        Vec<DailyAnalysisEvidence>,
-        Vec<GenericAnalysisEvidence>,
-        Vec<TimelineReadFence>,
-        Vec<DefinitionReadFence>,
-    ) -> Response,
+    F: FnMut(String, BTreeSet<Uuid>, BTreeSet<Uuid>, AnalysisShareEvidence) -> Response,
     Response: Future<Output = Result<Value, AnalysisError>>,
 {
     let mut evidence: Vec<Value> = Vec::new();
@@ -359,6 +350,7 @@ where
                         || !matches!(
                             tool.name,
                             GENERIC_ANALYSIS
+                                | RESOURCE_CATALOG
                                 | LAGGED_ASSOCIATION
                                 | MIGRAINE_WINDOWS
                                 | RUNNING_EFFICIENCY
@@ -423,6 +415,13 @@ where
                     .ok_or(AnalysisError::InvalidDocument)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let catalogs = evidence
+            .iter()
+            .filter(|item| {
+                item["tool"] == RESOURCE_CATALOG && item["result"].get("error").is_none()
+            })
+            .map(|item| CatalogEvidence::from_read(item).ok_or(AnalysisError::InvalidDocument))
+            .collect::<Result<Vec<_>, _>>()?;
         let timeline = evidence
             .iter()
             .filter(|item| item["tool"] == TIMELINE && item["result"].get("error").is_none())
@@ -441,10 +440,13 @@ where
                 prompt,
                 tracker_versions.clone(),
                 schema_versions.clone(),
-                daily,
-                generic,
-                timeline,
-                definitions,
+                AnalysisShareEvidence {
+                    daily,
+                    generic,
+                    catalogs,
+                    timeline,
+                    definitions,
+                },
             ),
         )
         .await
@@ -679,6 +681,11 @@ pub(crate) fn format_analysis_answer(
                 .is_some_and(DailyAnalysisEvidence::is_daily_tool)
                 || item["tool"] == GENERIC_ANALYSIS
                 || item["tool"] == TIMELINE)
+            || (item["tool"] == RESOURCE_CATALOG
+                && matches!(
+                    item["arguments"]["kind"].as_str(),
+                    Some("system_metrics" | "raw_sources")
+                ))
     }) {
         sources.push("Garmin");
     }
@@ -692,6 +699,11 @@ pub(crate) fn format_analysis_answer(
             || item["tool"] == EVENT_WINDOWS
             || item["tool"] == INSIGHTS_LIST
             || item["tool"] == TIMELINE
+            || (item["tool"] == RESOURCE_CATALOG
+                && matches!(
+                    item["arguments"]["kind"].as_str(),
+                    Some("events" | "tracker_metrics")
+                ))
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
     }) {

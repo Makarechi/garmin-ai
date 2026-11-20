@@ -13,7 +13,9 @@ use ga_db::{
     diary::DiaryReadError,
     health_analysis::{HealthAnalysisError, NapPolicy},
 };
-use ga_domain::{access::ReadToolInput, timestamp::StoredInstant};
+use ga_domain::{
+    access::ReadToolInput, legacy_json::boolean_argument as bool_input, timestamp::StoredInstant,
+};
 use serde_json::{Map, Value, json};
 use speedate::{DateTime, DateTimeConfig, MicrosecondsPrecisionOverflowBehavior, TimeConfig};
 use time::{Date, Month, OffsetDateTime};
@@ -118,7 +120,7 @@ async fn execute_read_tool(
         };
     }
     if matches!(tool, ReadTool::ResourceCatalog) {
-        let Ok(page) = catalog_input(&arguments) else {
+        let Ok(page) = ga_db::resource_catalog::ResourcePage::parse(&arguments) else {
             return invalid_arguments();
         };
         if !scopes.permits_tool(tool.name(), ReadToolInput::Catalog(page.kind.name())) {
@@ -136,7 +138,10 @@ async fn execute_read_tool(
             Err(ga_db::resource_catalog::CatalogError::Health(error)) => health_failure(error),
             Err(ga_db::resource_catalog::CatalogError::Arguments) => invalid_arguments(),
             Err(ga_db::resource_catalog::CatalogError::ModelConsent) => forbidden(),
-            Err(ga_db::resource_catalog::CatalogError::Database) => storage_unavailable(),
+            Err(
+                ga_db::resource_catalog::CatalogError::Database
+                | ga_db::resource_catalog::CatalogError::ResultTooLarge,
+            ) => storage_unavailable(),
         };
     }
     if matches!(tool, ReadTool::EventDefinitions) {
@@ -266,23 +271,6 @@ fn diary_failure(error: DiaryReadError) -> Response {
             storage_unavailable()
         }
         _ => invalid_arguments(),
-    }
-}
-
-fn bool_input(value: &Value) -> Option<bool> {
-    match value {
-        Value::Bool(value) => Some(*value),
-        Value::Number(_) => match value.as_f64()? {
-            0.0 => Some(false),
-            1.0 => Some(true),
-            _ => None,
-        },
-        Value::String(value) => match value.to_ascii_lowercase().as_str() {
-            "0" | "off" | "f" | "false" | "n" | "no" => Some(false),
-            "1" | "on" | "t" | "true" | "y" | "yes" => Some(true),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
@@ -531,48 +519,4 @@ pub(crate) fn definition_input(
     arguments: &Map<String, Value>,
 ) -> Result<ga_db::diary::DefinitionPage<'_>, &'static str> {
     ga_db::diary::DefinitionPage::parse(arguments).ok_or("ValidationError")
-}
-
-pub(crate) fn catalog_input(
-    arguments: &Map<String, Value>,
-) -> Result<ga_db::resource_catalog::ResourcePage<'_>, &'static str> {
-    use ga_db::resource_catalog::{ResourceKind, ResourcePage};
-    if arguments.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "kind" | "after_key" | "resource_key" | "limit" | "detail"
-        )
-    }) {
-        return Err("ValidationError");
-    }
-    let kind = match arguments.get("kind").and_then(Value::as_str) {
-        Some("events") => ResourceKind::Events,
-        Some("system_metrics") => ResourceKind::SystemMetrics,
-        Some("tracker_metrics") => ResourceKind::TrackerMetrics,
-        Some("raw_sources") => ResourceKind::RawSources,
-        _ => return Err("ValidationError"),
-    };
-    let text = |key| match arguments.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.chars().count() <= 200 => Ok(Some(value.as_str())),
-        _ => Err("ValidationError"),
-    };
-    let limit = match arguments.get("limit") {
-        None => 10,
-        Some(value) => ga_domain::legacy_json::integer_argument(value)
-            .ok_or("ValidationError")?
-            .try_into()
-            .unwrap_or(0),
-    };
-    let detail = match arguments.get("detail") {
-        None => false,
-        Some(value) => bool_input(value).ok_or("ValidationError")?,
-    };
-    Ok(ResourcePage {
-        kind,
-        after_key: text("after_key")?,
-        resource_key: text("resource_key")?,
-        limit,
-        detail,
-    })
 }
