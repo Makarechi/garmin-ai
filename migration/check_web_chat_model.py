@@ -88,6 +88,9 @@ COFFEE_DAY = date(2026, 7, 1)
 WINDOWS_QUESTION = "Compare synthetic physiology around the saved diary note."
 WINDOWS_ANSWER = "The diary anchor has five measured windows with separate sources."
 WINDOWS_START = datetime(2026, 9, 1, 9, tzinfo=UTC)
+WELLBEING_QUESTION = "Summarize the reported energy in the synthetic diary."
+WELLBEING_ANSWER = "The two reports retain missing and explicit zero ratings."
+WELLBEING_START = datetime(2026, 8, 1, 12, tzinfo=UTC)
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -124,6 +127,8 @@ def output(prompt):
             return coffee_output(prompt)
         if prompt["question"].startswith(WINDOWS_QUESTION):
             return windows_output(prompt)
+        if prompt["question"].startswith(WELLBEING_QUESTION):
+            return wellbeing_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -170,6 +175,7 @@ def output(prompt):
             SUMMARIES_QUESTION,
             COFFEE_QUESTION,
             WINDOWS_QUESTION,
+            WELLBEING_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -399,6 +405,36 @@ def windows_output(prompt):
         "metric": "stress_score",
         "start": WINDOWS_START.isoformat(),
         "end": (WINDOWS_START + timedelta(minutes=1)).isoformat(),
+    }
+    return AgentStep(
+        calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
+    )
+
+
+def wellbeing_output(prompt):
+    name = "wellbeing_observations"
+    tools = {tool["name"] for tool in prompt["tools"]}
+    if prompt["question"].endswith(" without wellbeing access"):
+        assert name not in tools and not prompt["evidence"]
+        return AgentStep(response_language="en")
+    if prompt["evidence"]:
+        [item] = prompt["evidence"]
+        assert item["tool"] == name
+        result = item["result"]
+        assert result["evidence_type"] == "subjective_diary"
+        assert result["missingness"] == "unreported_is_unknown"
+        assert result["summary"]["reports"] == 2
+        assert result["summary"]["ratings"]["energy"]["mean"] == 3
+        assert result["summary"]["ratings"]["pain"]["count"] == 1
+        assert result["summary"]["ratings"]["pain"]["mean"] == 0
+        assert all("original_text" not in row for row in result["rows"])
+        assert all("idempotency_key" not in row for row in result["rows"])
+        assert "Synthetic private wellbeing original" not in json.dumps(result)
+        return AgentStep(answer=WELLBEING_ANSWER, evidence_ids=[1], response_language="en")
+    assert name in tools
+    arguments = {
+        "start": WELLBEING_START.isoformat(),
+        "end": (WELLBEING_START + timedelta(days=2)).isoformat(),
     }
     return AgentStep(
         calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
@@ -763,6 +799,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_health_summaries(engine, python, native)
     exercise_coffee_sleep(engine, python, native)
     exercise_event_windows(engine, python, native)
+    exercise_wellbeing(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1592,6 +1629,54 @@ def exercise_event_windows(engine, python, native):
     print(
         "Matched five source-separated event windows, stale anchors, pack denial and output bounds"
     )
+
+
+def exercise_wellbeing(engine, python, native):
+    with Session(engine) as session, session.begin():
+        pack = ensure_scenario_packs(session)["wellbeing"]
+        pack.tracking_enabled = True
+        pack.llm_enabled = True
+        first = create_event(
+            session,
+            EventInput(
+                start=WELLBEING_START,
+                timezone="UTC",
+                payload={"type": "wellbeing_observation", "energy": 0, "pain": 0},
+            ),
+            actor="synthetic-fixture",
+        )
+        first.original_text = "Synthetic private wellbeing original"
+        identity = first.id
+        create_event(
+            session,
+            EventInput(
+                start=WELLBEING_START + timedelta(days=1),
+                timezone="UTC",
+                payload={"type": "wellbeing_observation", "energy": 6},
+            ),
+            actor="synthetic-fixture",
+        )
+    old, new = [submit(client, WELLBEING_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert WELLBEING_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved diary data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    with Session(engine) as session, session.begin():
+        entry = session.get(Event, identity)
+        entry.payload = {**entry.payload, "energy": 8}
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with Session(engine) as session, session.begin():
+        entry = session.get(Event, identity)
+        entry.payload = {**entry.payload, "energy": 0}
+        ensure_scenario_packs(session)["wellbeing"].llm_enabled = False
+    history = native.get("/web-chat/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assert new["id"] not in {row["id"] for row in history.json()["replies"]}
+    question = WELLBEING_QUESTION + " without wellbeing access"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and WELLBEING_ANSWER not in denied[1], denied
+    print("Matched subjective wellbeing and withheld changed or unconsented reports")
 
 
 def main():

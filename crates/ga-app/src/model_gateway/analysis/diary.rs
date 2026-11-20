@@ -8,7 +8,7 @@ use ga_db::{
         COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence,
         DailyAnalysisQuery, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION,
         METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY,
-        SLEEP_ANALYSIS, STRESS_HOURS,
+        SLEEP_ANALYSIS, STRESS_HOURS, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -38,6 +38,8 @@ static RANGE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Ran
 static SERIES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MetricSeries));
 static RUNNING: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::RunningEfficiency));
 static STRESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::StressHours));
+static WELLBEING: LazyLock<Value> =
+    LazyLock::new(|| model_description(ReadTool::WellbeingObservations));
 static MIGRAINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MigraineWindows));
 
 fn model_description(tool: ReadTool) -> Value {
@@ -51,6 +53,7 @@ pub struct DiaryAnalysisTools<'a> {
     context: AnalysisSubject<'a>,
     model: ShareDestination<'a>,
     daily_read: Option<(&'a str, StoredInstant, DailyAnalysisAccess)>,
+    wellbeing_read: Option<(&'a str, StoredInstant)>,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
@@ -64,6 +67,7 @@ impl<'a> DiaryAnalysisTools<'a> {
             context: context.into(),
             model: ShareDestination::new(DestinationKind::Model, model_instance)?,
             daily_read: None,
+            wellbeing_read: None,
         })
     }
 
@@ -76,16 +80,27 @@ impl<'a> DiaryAnalysisTools<'a> {
         configured_timezone: &'a str,
         question_at: StoredInstant,
     ) -> Self {
-        let categories = ModelCategories::HEALTH_AND_DIARY;
-        let operation = if uses_voice {
-            ModelOperation::StructuredFromVoice(categories)
-        } else {
-            ModelOperation::Structured(categories)
+        let authorized = |categories| {
+            let operation = if uses_voice {
+                ModelOperation::StructuredFromVoice(categories)
+            } else {
+                ModelOperation::Structured(categories)
+            };
+            authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
         };
-        if authorized_models(binding, policy.configuration, policy.consent, operation, at).is_ok()
+        if authorized(ModelCategories::HEALTH_AND_DIARY)
             && let Some(access) = self.database.analysis_health_access(self.context).await
         {
             self.daily_read = Some((configured_timezone, question_at, access));
+        }
+        let wellbeing = if let Some((_, _, access)) = &self.daily_read {
+            access.wellbeing
+        } else {
+            authorized(ModelCategories::DIARY)
+                && self.database.analysis_wellbeing_access(self.context).await
+        };
+        if wellbeing {
+            self.wellbeing_read = Some((configured_timezone, question_at));
         }
         self
     }
@@ -101,6 +116,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                 description: &GENERIC,
             },
         ];
+        if self.wellbeing_read.is_some() {
+            offered.push(OfferedReadTool {
+                name: WELLBEING_OBSERVATIONS,
+                description: &WELLBEING,
+            });
+        }
         if let Some((_, _, access)) = &self.daily_read {
             offered.extend([
                 OfferedReadTool {
@@ -220,7 +241,14 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
                 Err(_) => None,
             };
         }
-        if let Some(&(timezone, at, _)) = self.daily_read.as_ref()
+        let read_access = if name == WELLBEING_OBSERVATIONS {
+            self.wellbeing_read
+        } else {
+            self.daily_read
+                .as_ref()
+                .map(|&(timezone, at, _)| (timezone, at))
+        };
+        if let Some((timezone, at)) = read_access
             && DailyAnalysisEvidence::is_daily_tool(name)
         {
             let query = DailyAnalysisQuery::from_arguments(name, args)?;

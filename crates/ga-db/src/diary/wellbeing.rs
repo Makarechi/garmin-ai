@@ -6,7 +6,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde_json::{Value, json};
-use sqlx::{FromRow, Postgres, QueryBuilder, Row, postgres::PgRow};
+use sqlx::{FromRow, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -58,109 +58,127 @@ impl Database {
         let work = async {
             let mut txn = self.begin_diary_read().await?;
             if let Some(owner) = model_owner {
-                model_diary_allowed(&mut txn, owner).await?;
-                if model_disallowed_event_kinds(&mut txn)
-                    .await
-                    .map_err(|_| DiaryReadError::Database)?
-                    .contains(&"wellbeing_observation")
-                {
-                    return Err(DiaryReadError::ModelConsent);
-                }
+                require_model_wellbeing_in(&mut txn, owner).await?;
             }
-            let (first, last) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
-            check_range(first, last)?;
-            if last - first > time::Duration::days(31) {
-                return Err(DiaryReadError::TimestampRange);
-            }
-            let after = cursor
-                .map(|cursor| report_cursor(cursor, first, last))
-                .transpose()?;
-            let mut summary_sql = QueryBuilder::<Postgres>::new("SELECT count(*) AS reports");
-            for field in FIELDS {
-                for (aggregate, suffix) in [
-                    ("count", "count"),
-                    ("avg", "mean"),
-                    ("min", "min"),
-                    ("max", "max"),
-                ] {
-                    // Both identifiers come from the fixed report contract above.
-                    summary_sql.push(format!(
-                        ",{aggregate}((payload->>'{field}')::double precision) AS {field}_{suffix}"
-                    ));
-                }
-            }
-            summary_sql.push(" FROM events WHERE ");
-            summary_sql.push(FILTER);
-            let summary: Summary = summary_sql
-                .build_query_as()
-                .bind(first)
-                .bind(last)
-                .fetch_one(&mut *txn)
-                .await?;
-            let mut result = json!({
-                "start":start.to_string(),"end":end.to_string(),
-                "scales":{
-                    "energy":{"min":0,"max":10,"higher_means":"more_reported_energy"},
-                    "restedness":{"min":0,"max":10,"higher_means":"more_reported_rest"},
-                    "pain":{"min":0,"max":10,"higher_means":"more_reported_pain"},
-                    "functional_impact":{"min":0,"max":10,"higher_means":"more_interference_with_daily_life"},
-                },
-                "summary":{"reports":summary.reports,"ratings":summary.ratings,
-                    "scope":"all_confirmed_reports_in_requested_range","notes_analyzed":false},
-                "rows":[],"next_cursor":null,"truncated":false,
-                "evidence_type":"subjective_diary","missingness":"unreported_is_unknown",
-                "limitations":[
-                    "Reported wellbeing and Garmin scores are distinct outcomes; retain disagreement",
-                    "Numeric ratings are recorded only when explicitly reported; notes imply no numeric rating",
-                    "No reports do not establish absence of symptoms or good wellbeing",
-                ],
-            });
-            let mut query = sqlx::query_as::<_, EventSnapshotRow>(include_str!("wellbeing.sql"))
-                .bind(first)
-                .bind(last)
-                .bind(after.map(|(at, _)| at))
-                .bind(after.map(|(_, id)| id))
-                .fetch(&mut *txn);
-            let mut accepted = 0;
-            let mut next_cursor = None;
-            while let Some(row) = query.try_next().await? {
-                if accepted == 200 {
-                    result["truncated"] = json!(true);
-                    break;
-                }
-                let mut event =
-                    event_document(event_snapshot(row).map_err(|_| DiaryReadError::InvalidEvent)?)?;
-                event["omitted_fields"] = json!(["original_text", "idempotency_key"]);
-                result["rows"]
-                    .as_array_mut()
-                    .ok_or(DiaryReadError::InvalidEvent)?
-                    .push(event);
-                if ordered_json(&result)?.len() > 19000 {
-                    result["rows"]
-                        .as_array_mut()
-                        .ok_or(DiaryReadError::InvalidEvent)?
-                        .pop();
-                    result["truncated"] = json!(true);
-                    break;
-                }
-                let event = &result["rows"][accepted];
-                next_cursor = Some(
-                    String::from_utf8(ordered_json(&json!([event["start"], event["id"]]))?)
-                        .map_err(|_| DiaryReadError::InvalidEvent)?,
-                );
-                accepted += 1;
-            }
-            drop(query);
+            let result = wellbeing_observations_in(&mut txn, start, end, cursor).await?;
             txn.commit().await?;
-            if result["truncated"] == true {
-                result["next_cursor"] = json!(next_cursor);
-            }
             Ok(result)
         };
         tokio::time::timeout(Duration::from_millis(1800), work)
             .await
             .map_err(|_| DiaryReadError::Database)?
     }
+}
+
+pub(crate) async fn require_model_wellbeing_in(
+    txn: &mut Transaction<'_, Postgres>,
+    owner: Uuid,
+) -> Result<(), DiaryReadError> {
+    model_diary_allowed(txn, owner).await?;
+    if model_disallowed_event_kinds(txn)
+        .await
+        .map_err(|_| DiaryReadError::Database)?
+        .contains(&"wellbeing_observation")
+    {
+        return Err(DiaryReadError::ModelConsent);
+    }
+    Ok(())
+}
+
+pub(crate) async fn wellbeing_observations_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: StoredInstant,
+    end: StoredInstant,
+    cursor: Option<&str>,
+) -> Result<Value, DiaryReadError> {
+    let (first, last) = (OffsetDateTime::from(start), OffsetDateTime::from(end));
+    check_range(first, last)?;
+    if last - first > time::Duration::days(31) {
+        return Err(DiaryReadError::TimestampRange);
+    }
+    let after = cursor
+        .map(|cursor| report_cursor(cursor, first, last))
+        .transpose()?;
+    let mut summary_sql = QueryBuilder::<Postgres>::new("SELECT count(*) AS reports");
+    for field in FIELDS {
+        for (aggregate, suffix) in [
+            ("count", "count"),
+            ("avg", "mean"),
+            ("min", "min"),
+            ("max", "max"),
+        ] {
+            // Both identifiers come from the fixed report contract above.
+            summary_sql.push(format!(
+                ",{aggregate}((payload->>'{field}')::double precision) AS {field}_{suffix}"
+            ));
+        }
+    }
+    summary_sql.push(" FROM events WHERE ");
+    summary_sql.push(FILTER);
+    let summary: Summary = summary_sql
+        .build_query_as()
+        .bind(first)
+        .bind(last)
+        .fetch_one(&mut **txn)
+        .await?;
+    let mut result = json!({
+        "start":start.to_string(),"end":end.to_string(),
+        "scales":{
+            "energy":{"min":0,"max":10,"higher_means":"more_reported_energy"},
+            "restedness":{"min":0,"max":10,"higher_means":"more_reported_rest"},
+            "pain":{"min":0,"max":10,"higher_means":"more_reported_pain"},
+            "functional_impact":{"min":0,"max":10,"higher_means":"more_interference_with_daily_life"},
+        },
+        "summary":{"reports":summary.reports,"ratings":summary.ratings,
+            "scope":"all_confirmed_reports_in_requested_range","notes_analyzed":false},
+        "rows":[],"next_cursor":null,"truncated":false,
+        "evidence_type":"subjective_diary","missingness":"unreported_is_unknown",
+        "limitations":[
+            "Reported wellbeing and Garmin scores are distinct outcomes; retain disagreement",
+            "Numeric ratings are recorded only when explicitly reported; notes imply no numeric rating",
+            "No reports do not establish absence of symptoms or good wellbeing",
+        ],
+    });
+    let mut query = sqlx::query_as::<_, EventSnapshotRow>(include_str!("wellbeing.sql"))
+        .bind(first)
+        .bind(last)
+        .bind(after.map(|(at, _)| at))
+        .bind(after.map(|(_, id)| id))
+        .fetch(&mut **txn);
+    let mut accepted = 0;
+    let mut next_cursor = None;
+    while let Some(row) = query.try_next().await? {
+        if accepted == 200 {
+            result["truncated"] = json!(true);
+            break;
+        }
+        let mut event =
+            event_document(event_snapshot(row).map_err(|_| DiaryReadError::InvalidEvent)?)?;
+        event["omitted_fields"] = json!(["original_text", "idempotency_key"]);
+        result["rows"]
+            .as_array_mut()
+            .ok_or(DiaryReadError::InvalidEvent)?
+            .push(event);
+        if ordered_json(&result)?.len() > 19000 {
+            result["rows"]
+                .as_array_mut()
+                .ok_or(DiaryReadError::InvalidEvent)?
+                .pop();
+            result["truncated"] = json!(true);
+            break;
+        }
+        let event = &result["rows"][accepted];
+        next_cursor = Some(
+            String::from_utf8(ordered_json(&json!([event["start"], event["id"]]))?)
+                .map_err(|_| DiaryReadError::InvalidEvent)?,
+        );
+        accepted += 1;
+    }
+    drop(query);
+    if result["truncated"] == true {
+        result["next_cursor"] = json!(next_cursor);
+    }
+    Ok(result)
 }
 
 fn ordered_json(value: &Value) -> Result<Vec<u8>, DiaryReadError> {
