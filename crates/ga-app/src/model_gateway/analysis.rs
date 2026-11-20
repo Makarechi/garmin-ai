@@ -6,8 +6,8 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 use ga_db::{
     conversation_memory::AnalysisSubject,
     health_analysis::{
-        DATA_FRESHNESS, DailyAnalysisEvidence, LAGGED_ASSOCIATION, MIGRAINE_WINDOWS,
-        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
+        DATA_FRESHNESS, DailyAnalysisEvidence, HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION,
+        METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -339,6 +339,9 @@ where
                                 | MIGRAINE_WINDOWS
                                 | RUNNING_EFFICIENCY
                                 | STRESS_HOURS
+                                | HEALTH_SNAPSHOT
+                                | HEALTH_RANGE
+                                | METRIC_SERIES
                         )
                 })
                 .map(|tool| tool.description)

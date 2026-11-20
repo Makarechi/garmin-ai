@@ -13,12 +13,20 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, format_description::well_known::Iso8601};
 
 use super::{
-    ActivityReadError, HealthAnalysisError, HealthPeriod, NapPolicy, SeriesReadError,
-    begin_daily_analysis, daily_metric, freshness_report::model_freshness_in,
-    lagged::lagged_association_in, main_sleep_timing_in, migraine::migraine_comparison_in,
+    ActivityReadError, HealthAnalysisError, HealthPeriod, MODEL_HEALTH_PACKS, NapPolicy,
+    SeriesReadError, begin_daily_analysis, daily_metric,
+    freshness_report::model_freshness_in,
+    lagged::lagged_association_in,
+    main_sleep_timing_in,
+    migraine::migraine_comparison_in,
     model_metric_packs, observed_values, owner_timezone, period_comparison, period_document,
-    permits_timing_in, read_daily::model_packs_allowed, require_current_projection,
-    running::running_efficiency_in, sleep_analysis::sleep_analysis_in, stress::stress_hours_in,
+    permits_timing_in,
+    read_daily::{model_packs_allowed, range_in, snapshot_in},
+    require_current_projection,
+    running::running_efficiency_in,
+    series::metric_series_in,
+    sleep_analysis::sleep_analysis_in,
+    stress::stress_hours_in,
 };
 use crate::{
     Database,
@@ -31,6 +39,9 @@ pub const PERIOD_COMPARISON: &str = "analysis_compare_periods";
 pub const SLEEP_ANALYSIS: &str = "analysis_sleep";
 pub const DATA_FRESHNESS: &str = "data_freshness";
 pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
+pub const HEALTH_SNAPSHOT: &str = "health_snapshot";
+pub const HEALTH_RANGE: &str = "health_range";
+pub const METRIC_SERIES: &str = "metric_series";
 pub const RUNNING_EFFICIENCY: &str = "analysis_running_efficiency";
 const RUNNING_MODEL_PACKS: &[&str] = &["training", "sleep", "wellbeing"];
 pub const STRESS_HOURS: &str = "analysis_stress_by_hour";
@@ -71,6 +82,18 @@ pub enum DailyAnalysisQuery {
         start: String,
         end: String,
         lags: Vec<i64>,
+    },
+    #[serde(rename = "health_snapshot")]
+    Snapshot { day: String },
+    #[serde(rename = "health_range")]
+    Range { start: String, end: String },
+    #[serde(rename = "metric_series")]
+    Series {
+        metric: String,
+        start: String,
+        end: String,
+        #[serde(default = "default_series_minutes")]
+        minutes: u16,
     },
     #[serde(rename = "analysis_running_efficiency")]
     RunningEfficiency {
@@ -201,6 +224,39 @@ impl DailyAnalysisQuery {
                 }
                 lagged_association_in(txn, metric_a, metric_b, period(start, end)?, lags).await?
             }
+            Self::Snapshot { day } => {
+                if !model_packs_allowed(txn, context.binding().owner_id, MODEL_HEALTH_PACKS).await?
+                {
+                    return Ok(None);
+                }
+                snapshot_in(txn, parse_day(day)?).await?
+            }
+            Self::Range { start, end } => {
+                if !model_packs_allowed(txn, context.binding().owner_id, MODEL_HEALTH_PACKS).await?
+                {
+                    return Ok(None);
+                }
+                range_in(txn, period(start, end)?).await?
+            }
+            Self::Series {
+                metric,
+                start,
+                end,
+                minutes,
+            } => {
+                if !model_packs_allowed(txn, context.binding().owner_id, model_metric_packs(metric))
+                    .await?
+                {
+                    return Ok(None);
+                }
+                let parse = |value: &str| {
+                    StoredInstant::legacy_input_with_offset(&json!(value))
+                        .ok_or(HealthAnalysisError::InvalidTemporalTimestamp)
+                };
+                metric_series_in(txn, metric, parse(start)?, parse(end)?, *minutes)
+                    .await
+                    .map_err(model_series_error)?
+            }
             Self::RunningEfficiency {
                 start,
                 end,
@@ -241,12 +297,7 @@ impl DailyAnalysisQuery {
                     configured_timezone,
                 )
                 .await
-                .map_err(|error| match error {
-                    SeriesReadError::Analysis(error) => error,
-                    SeriesReadError::Invalid | SeriesReadError::SampleLimit => {
-                        HealthAnalysisError::DateRange
-                    }
-                })?
+                .map_err(model_series_error)?
             }
             Self::Migraine {
                 metric,
@@ -314,6 +365,9 @@ impl DailyAnalysisEvidence {
                 | MIGRAINE_WINDOWS
                 | STRESS_HOURS
                 | RUNNING_EFFICIENCY
+                | HEALTH_SNAPSHOT
+                | HEALTH_RANGE
+                | METRIC_SERIES
         )
     }
 
@@ -410,6 +464,7 @@ pub struct DailyAnalysisAccess {
     pub migraine: bool,
     pub wellbeing: bool,
     pub running: bool,
+    pub summaries: bool,
 }
 
 impl Database {
@@ -429,11 +484,15 @@ impl Database {
             let running = wellbeing
                 && model_packs_allowed(&mut txn, context.binding().owner_id, RUNNING_MODEL_PACKS)
                     .await?;
+            let summaries =
+                model_packs_allowed(&mut txn, context.binding().owner_id, MODEL_HEALTH_PACKS)
+                    .await?;
             txn.commit().await?;
             Ok(Some(DailyAnalysisAccess {
                 migraine,
                 wellbeing,
                 running,
+                summaries,
             }))
         })
         .await
@@ -511,4 +570,15 @@ fn default_hr_min() -> Number {
 
 fn default_hr_max() -> Number {
     250.into()
+}
+
+fn default_series_minutes() -> u16 {
+    5
+}
+
+fn model_series_error(error: SeriesReadError) -> HealthAnalysisError {
+    match error {
+        SeriesReadError::Analysis(error) => error,
+        SeriesReadError::Invalid | SeriesReadError::SampleLimit => HealthAnalysisError::DateRange,
+    }
 }

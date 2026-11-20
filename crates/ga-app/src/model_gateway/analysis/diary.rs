@@ -6,8 +6,8 @@ use ga_db::{
     diary::DiaryEventRange,
     health_analysis::{
         DATA_FRESHNESS, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
-        LAGGED_ASSOCIATION, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE,
-        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
+        HEALTH_RANGE, HEALTH_SNAPSHOT, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
+        PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -30,6 +30,9 @@ static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sle
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
+static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Snapshot));
+static RANGE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Range));
+static SERIES: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MetricSeries));
 static RUNNING: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::RunningEfficiency));
 static STRESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::StressHours));
 static MIGRAINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::MigraineWindows));
@@ -118,6 +121,22 @@ impl<'a> DiaryAnalysisTools<'a> {
                     description: &LAGS,
                 },
             ]);
+            offered.push(OfferedReadTool {
+                name: METRIC_SERIES,
+                description: &SERIES,
+            });
+            if access.summaries {
+                offered.extend([
+                    OfferedReadTool {
+                        name: HEALTH_SNAPSHOT,
+                        description: &SNAPSHOT,
+                    },
+                    OfferedReadTool {
+                        name: HEALTH_RANGE,
+                        description: &RANGE,
+                    },
+                ]);
+            }
             if access.running {
                 offered.push(OfferedReadTool {
                     name: RUNNING_EFFICIENCY,
