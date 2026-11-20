@@ -109,7 +109,11 @@
       "rust_tests": [
         "crates/ga-db/tests/garmin_owner.rs",
         "migration/check_garmin_terminal.py",
-        "migration/check_garmin_web_reauth.py"
+        "migration/check_garmin_web_reauth.py",
+        "migration/check_native_telegram_pairing.py",
+        "migration/check_legacy_telegram_schema.py",
+        "crates/ga-app/tests/http.rs",
+        "migration/evidence/native-owner-binding-linux-arm64.json"
       ],
       "data_contracts": [
         "Internal UUID, singleton owner, explicit account binding, legacy owner confirmation, and account mismatch fencing."
@@ -118,12 +122,10 @@
         "Only its owner can bind an account; a conflicting account cannot read, fetch, archive or write owner data."
       ],
       "resource_scenario": "Startup and gated import with legacy owner",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R07",
-      "known_limits": [
-        "Rehearse the historical owner transition with native Telegram pairing and verify the approved account and device binding cases."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
