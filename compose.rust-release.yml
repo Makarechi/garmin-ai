@@ -48,7 +48,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: [CMD-SHELL, "pg_isready -U garmin -d garmin_ai"]
+      test: [CMD, pg_isready, -h, "127.0.0.1", -U, garmin, -d, garmin_ai]
       interval: 5s
       timeout: 5s
       retries: 20
