@@ -1,9 +1,11 @@
 use serde_json::{Value, json};
-use speedate::{Date, DateTime, ParseError};
-use strum::EnumMessage;
+use speedate::{Date, DateTime};
 
 use super::{AnalysisOperation, valid_key, valid_method};
-use crate::{event_time::LEGACY_TIME, legacy_json::integer_argument};
+use crate::{
+    event_time::{LEGACY_TIME, speedate_error_reason},
+    legacy_json::integer_argument,
+};
 
 const OPERATIONS: &str = "'query_entries', 'query_observations', 'aggregate_metric', 'compare_periods', 'query_completeness', 'threshold_segments' or 'threshold_by_local_hour'";
 const KEY_PATTERN: &str = r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$";
@@ -295,7 +297,7 @@ fn datetime(value: &Value) -> Option<FieldError> {
                         Err(error) => datetime_parsing(
                             "datetime_from_date_parsing",
                             "datetime or date",
-                            parse_reason(&error),
+                            speedate_error_reason(&error),
                         ),
                     });
                 }
@@ -332,17 +334,13 @@ fn datetime(value: &Value) -> Option<FieldError> {
         Err(error) => Some(datetime_parsing(
             "datetime_parsing",
             "datetime",
-            parse_reason(&error),
+            speedate_error_reason(&error),
         )),
     }
 }
 
 fn timezone_aware() -> FieldError {
     FieldError::new("timezone_aware", "Input should have timezone info")
-}
-
-fn parse_reason(error: &ParseError) -> &str {
-    error.get_documentation().unwrap_or("invalid datetime")
 }
 
 fn datetime_parsing(kind: &'static str, expected: &str, reason: &str) -> FieldError {
