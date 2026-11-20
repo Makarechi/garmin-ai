@@ -358,6 +358,30 @@ fn remote_docker_endpoint_cannot_drive_local_retention() -> TestResult {
 }
 
 #[test]
+fn installer_refuses_to_reconfigure_retained_upload_directories() -> TestResult {
+    let host = Host::new()?;
+    host.with_legacy_state()?;
+    let original = fs::read(host.state())?;
+    let other = host.root.join("other-uploads");
+    fs::create_dir(&other)?;
+    let (output, report) = host.run(&[
+        "--apply",
+        "--record-only",
+        "--preserve-archive-dirs",
+        "--archive-dir",
+        other.to_str().ok_or("fixture path must be UTF-8")?,
+    ])?;
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert_eq!(
+        report["error"],
+        "Existing archive directories differ; review state before changing them",
+    );
+    assert_eq!(fs::read(host.state())?, original);
+    assert!(!host.root.join("deletions").exists());
+    Ok(())
+}
+
+#[test]
 fn held_lock_invalid_inventory_and_replaced_tag_prevent_deletion() -> TestResult {
     let host = Host::new()?;
     host.with_legacy_state()?;

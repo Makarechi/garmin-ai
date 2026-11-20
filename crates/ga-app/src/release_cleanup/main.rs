@@ -63,6 +63,10 @@ struct Options {
     #[arg(long)]
     archive_dir: Vec<PathBuf>,
 
+    /// Refuse to change the upload paths of an existing installation.
+    #[arg(long, requires = "archive_dir")]
+    preserve_archive_dirs: bool,
+
     #[arg(long, default_value = "/var/lib/garmin-ai-release-cleanup")]
     state_dir: PathBuf,
 
@@ -126,6 +130,13 @@ async fn retention(
     old: Option<&Retention>,
     current: String,
 ) -> Result<Retention> {
+    if options.preserve_archive_dirs
+        && old.is_some_and(|old| old.archive_dirs != options.archive_dir)
+    {
+        return Err(Failure::message(
+            "Existing archive directories differ; review state before changing them",
+        ));
+    }
     let (rollback, stored_dirs) = match (old, options.initialize_rollback.as_deref()) {
         (None, Some(reference)) => (
             docker::inspect_image(reference).await?,

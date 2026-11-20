@@ -7,6 +7,7 @@ python_bin=${GA_SMOKE_PYTHON:-$root/.venv/bin/python}
 architecture=$(uname -m)
 runtime=${GA_SMOKE_RUNTIME:-python}
 historical=${GA_SMOKE_HISTORICAL:-false}
+gcp=${GA_SMOKE_GCP:-false}
 dockerfile=Dockerfile
 evidence=native-amd64-install.json
 platform=linux/amd64
@@ -33,6 +34,17 @@ if [[ "$historical" == true ]]; then
     fi
     evidence=native-rust-upgrade.json
 fi
+profile=()
+compose_files=(-f compose.release.yml)
+if [[ "$gcp" == true ]]; then
+    if [[ "$runtime" != rust || "$historical" == true ]]; then
+        echo "The GCP smoke requires a clean native installation." >&2
+        exit 2
+    fi
+    profile=(--gcp)
+    compose_files+=(-f compose.gcp.yml)
+    evidence=native-rust-gcp-install.json
+fi
 if [[ ! -x "$python_bin" ]]; then
     echo "Install the locked project environment before the smoke run." >&2
     exit 2
@@ -51,7 +63,7 @@ cleanup() {
         (
             cd "$bundle_dir"
             docker compose -p "$instance" --env-file .env --env-file release.env \
-                -f compose.release.yml down -v --remove-orphans >/dev/null 2>&1
+                "${compose_files[@]}" down -v --remove-orphans >/dev/null 2>&1
         ) || true
     fi
     docker stop "$registry_name" >/dev/null 2>&1 || true
@@ -102,7 +114,7 @@ fi
 
 cd "$bundle_dir"
 compose() {
-    docker compose -p "$instance" --env-file .env --env-file release.env -f compose.release.yml "$@"
+    docker compose -p "$instance" --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 }
 ports=$("$python_bin" - <<'PY'
 import socket
@@ -114,7 +126,7 @@ with socket.socket() as database, socket.socket() as api:
 PY
 )
 read -r db_port api_port <<< "$ports"
-./install.sh setup --instance "$instance" --db-port "$db_port" --api-port "$api_port" \
+./install.sh "${profile[@]}" setup --instance "$instance" --db-port "$db_port" --api-port "$api_port" \
     --locale en --timezone UTC --units metric
 before=$(
     "$python_bin" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' .env
@@ -155,11 +167,11 @@ engine.dispose()
 print("Prepared the historical revision in the disposable installation database.")
 PY
 fi
-./install.sh start
+./install.sh "${profile[@]}" start
 "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
     --state-file "$work/tracker.json" --phase create --url "http://127.0.0.1:$api_port"
-./install.sh stop
-./install.sh setup --instance "$instance" --db-port "$db_port" --api-port "$api_port" \
+./install.sh "${profile[@]}" stop
+./install.sh "${profile[@]}" setup --instance "$instance" --db-port "$db_port" --api-port "$api_port" \
     --locale en --timezone UTC --units metric
 after=$(
     "$python_bin" -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' .env
@@ -168,7 +180,7 @@ if [[ "$before" != "$after" ]]; then
     echo "Repeated setup changed private settings." >&2
     exit 1
 fi
-./install.sh start
+./install.sh "${profile[@]}" start
 "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
     --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
 
@@ -195,10 +207,10 @@ if [[ "$runtime" == rust ]]; then
         '
     done
     compose exec -T api sh -ec 'test -s /etc/ssl/certs/ca-certificates.crt && test -f /usr/share/zoneinfo/Europe/Bratislava'
-    ./install.sh backup
+    ./install.sh "${profile[@]}" backup
     archive=$(find backups -maxdepth 1 -type f -name 'manual-*.enc' -print -quit)
     test -n "$archive"
-    ./install.sh unpack-backup "${archive##*/}"
+    ./install.sh "${profile[@]}" unpack-backup "${archive##*/}"
     recovered=$(find backups -mindepth 2 -name database.jsonl.gz -type f -print -quit)
     test -n "$recovered"
 fi

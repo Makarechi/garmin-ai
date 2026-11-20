@@ -8,6 +8,40 @@ If the host is still starting, a new deployment fails its health check, or anoth
 safety check fails, the service retries after 30 minutes. It keeps both retained
 images throughout partial progress and retries.
 
+## Native release bundle
+
+From the extracted bundle on the dedicated host, tag the digest-pinned
+application image with a unique local `garmin-ai:` release tag. Keep a
+distinct, previously verified `garmin-ai:` tag for rollback.
+The timer tracks the `garmin-ai` Compose project.
+
+```sh
+image=$(sed -n 's/^GA_APP_IMAGE=//p' release.env)
+docker tag "$image" garmin-ai:gcp-RELEASE_ID
+sudo ./deploy/gcp/install-native-cleanup.sh --preview \
+  garmin-ai:PREVIOUS_VERIFIED_TAG /opt/garmin-ai/uploads
+sudo ./deploy/gcp/install-native-cleanup.sh \
+  garmin-ai:PREVIOUS_VERIFIED_TAG /opt/garmin-ai/uploads
+```
+
+Create the upload directory before previewing. Review the selected images and
+archives in the preview. Installation extracts the cleanup binary from the
+digest in `release.env`, verifies or initializes the retained image record, and
+enables the same daily timer. It uses the existing lock and state file, including
+the image identities recorded by the earlier installer. For an existing state
+file, pass the upload directory already recorded on the host.
+
+Use the installed command for subsequent previews and rollout recording:
+
+```sh
+sudo /usr/local/lib/garmin-ai/garmin-ai-release-cleanup
+sudo /usr/local/lib/garmin-ai/garmin-ai-release-cleanup --apply --record-only
+```
+
+The retention rules and deployment lock below apply to both installers.
+
+## Legacy deployment
+
 Before enabling it, confirm that both `api` and `worker` are healthy and identify a
 distinct, previously working rollback image. Preview the exact selection on the VM:
 

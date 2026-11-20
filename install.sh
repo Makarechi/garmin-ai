@@ -39,6 +39,18 @@ case "${runtime:-python}" in
     *) echo "release.env must select the rust or python application runtime." >&2; exit 1 ;;
 esac
 
+install_command=./install.sh
+compose_files=(-f compose.release.yml)
+if [[ "${1:-}" == --gcp ]]; then
+    if [[ "$runtime" != rust || ! -f compose.gcp.yml ]]; then
+        echo "The GCP profile requires a native bundle containing compose.gcp.yml." >&2
+        exit 2
+    fi
+    shift
+    install_command+=' --gcp'
+    compose_files+=(-f compose.gcp.yml)
+fi
+
 compose() (
     # Shell exports override --env-file interpolation. Keep Docker connection
     # settings, but remove every bundle and Compose override in this subshell.
@@ -47,7 +59,7 @@ compose() (
             GA_*|COMPOSE_*) unset "$name" ;;
         esac
     done < <(compgen -e)
-    GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env -f compose.release.yml "$@"
+    GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 )
 
 case "${1:-}" in
@@ -123,14 +135,14 @@ case "${1:-}" in
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
         compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} login "${@:2}"
-        echo "Garmin login finished. Run ./install.sh start to recreate the worker."
+        echo "Garmin login finished. Run $install_command start to recreate the worker."
         ;;
     pair-telegram)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
         compose run --rm --no-deps --workdir "$PWD" \
             -v "$PWD:$PWD" worker ${legacy_entry:+"$legacy_entry"} pair-telegram --env-file "$PWD/.env" --container-runtime
-        echo "Pairing finished. Run ./install.sh start to recreate API and worker with the saved owner ID."
+        echo "Pairing finished. Run $install_command start to recreate API and worker with the saved owner ID."
         ;;
     backup)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
@@ -167,7 +179,7 @@ case "${1:-}" in
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
     *)
-        echo "Usage: ./install.sh demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME" >&2
+        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME}" >&2
         exit 2
         ;;
 esac

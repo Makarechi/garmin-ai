@@ -7,6 +7,8 @@ on:
       - ".github/workflows/native-release-install.yml"
       - "Dockerfile.rust"
       - "compose.rust-release.yml"
+      - "compose.rust-gcp.yml"
+      - "deploy/gcp/**"
       - "install.sh"
       - "scripts/build_release_bundle.py"
       - "scripts/smoke_release_install.sh"
@@ -19,6 +21,8 @@ on:
       - ".github/workflows/native-release-install.yml"
       - "Dockerfile.rust"
       - "compose.rust-release.yml"
+      - "compose.rust-gcp.yml"
+      - "deploy/gcp/**"
       - "install.sh"
       - "scripts/build_release_bundle.py"
       - "scripts/smoke_release_install.sh"
@@ -61,6 +65,12 @@ jobs:
           GA_SMOKE_RUNTIME: rust
           GA_SMOKE_HISTORICAL: "true"
         run: bash scripts/smoke_release_install.sh
+      - name: Install the GCP profile from a source-free native bundle
+        if: matrix.architecture == 'amd64'
+        env:
+          GA_SMOKE_RUNTIME: rust
+          GA_SMOKE_GCP: "true"
+        run: bash scripts/smoke_release_install.sh
       - name: Preserve non-sensitive platform evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,4 +79,5 @@ jobs:
           path: |
             test-results/native-rust-install.json
             test-results/native-rust-upgrade.json
+            test-results/native-rust-gcp-install.json
           if-no-files-found: warn
