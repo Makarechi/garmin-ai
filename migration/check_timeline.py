@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import Activity, TimelineInterval
 from garmin_ai.queries import timeline
+from garmin_ai.scenario_packs import ensure_scenario_packs
 
 START = datetime(2026, 10, 25, 9, tzinfo=UTC)
 MIN = timedelta(minutes=1)
@@ -150,6 +151,10 @@ def seed(engine):
 
 def fixtures(engine):
     seed(engine)
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session, legacy_install=True)
+        for key in ("general_diary", "sleep", "training", "wellbeing"):
+            packs[key].llm_enabled = True
     offset = timezone(2 * HOUR)
     offset_west = timezone(-4 * HOUR)
     cases = [

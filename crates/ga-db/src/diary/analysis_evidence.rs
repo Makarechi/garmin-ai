@@ -14,7 +14,8 @@ use super::{DiaryEventRange, DiaryReadError, analysis_events_in};
 use crate::{
     conversation_memory::{AnalysisReadContext, AnalysisSubject, ConversationBinding, MemoryFence},
     health_analysis::{
-        DailyAnalysisEvidence, HealthAnalysisError,
+        AnalysisTimelineQuery, DailyAnalysisEvidence, HealthAnalysisError, TIMELINE, TimelineError,
+        analysis_timeline_in,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
         owner_timezone,
     },
@@ -36,7 +37,14 @@ pub(crate) struct DiaryAnalysisFence {
 enum AnalysisReadFence {
     Daily(DailyAnalysisEvidence),
     Generic(GenericAnalysisEvidence),
+    Timeline(TimelineReadFence),
     Diary(DiaryReadFence),
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TimelineReadFence {
+    timeline_query: AnalysisTimelineQuery,
+    timeline_result_hash: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -75,6 +83,8 @@ impl DiaryAnalysisFence {
                             read["generic_request_time"].as_str()?,
                         )
                         .map(AnalysisReadFence::Generic)
+                    } else if read["tool"] == TIMELINE {
+                        TimelineReadFence::from_read(read).map(AnalysisReadFence::Timeline)
                     } else if read["tool"]
                         .as_str()
                         .is_some_and(DailyAnalysisEvidence::is_daily_tool)
@@ -118,6 +128,7 @@ impl DiaryAnalysisFence {
                 AnalysisReadFence::Diary(read) => read.specification(),
                 AnalysisReadFence::Daily(read) => read.specification(),
                 AnalysisReadFence::Generic(read) => read.specification(),
+                AnalysisReadFence::Timeline(read) => read.specification(),
             })
             .collect()
     }
@@ -166,6 +177,22 @@ impl DiaryAnalysisFence {
         for read in &self.reads {
             let read = match read {
                 AnalysisReadFence::Diary(read) => read,
+                AnalysisReadFence::Timeline(read) => {
+                    match read.current(txn, context, model).await {
+                        Ok(Some(current)) => versions.extend(current),
+                        Err(
+                            TimelineError::Database
+                            | TimelineError::Health(HealthAnalysisError::Database)
+                            | TimelineError::Diary(DiaryReadError::Database),
+                        ) => {
+                            return Err(sqlx::Error::Protocol(
+                                "Could not validate timeline evidence".into(),
+                            ));
+                        }
+                        Ok(None) | Err(_) => return Ok(None),
+                    }
+                    continue;
+                }
                 AnalysisReadFence::Generic(read) => match read
                     .current(
                         txn,
@@ -215,6 +242,39 @@ impl DiaryAnalysisFence {
             versions.extend(page.channel_versions);
         }
         Ok(Some(versions))
+    }
+}
+
+impl TimelineReadFence {
+    pub fn from_read(evidence: &Value) -> Option<Self> {
+        if evidence["tool"] != TIMELINE || evidence["result"].get("error").is_some() {
+            return None;
+        }
+        Some(Self {
+            timeline_query: AnalysisTimelineQuery::from_arguments(
+                evidence["arguments"].as_object()?,
+            )?,
+            timeline_result_hash: evidence_digest(&evidence["result"])?,
+        })
+    }
+
+    pub(crate) async fn current(
+        &self,
+        txn: &mut Transaction<'_, Postgres>,
+        context: AnalysisSubject<'_>,
+        model: ShareDestination<'_>,
+    ) -> Result<Option<BTreeSet<Uuid>>, TimelineError> {
+        let page = analysis_timeline_in(txn, context, model, &self.timeline_query).await?;
+        Ok(
+            (evidence_digest(&page.value).as_deref() == Some(&self.timeline_result_hash))
+                .then_some(page.tracker_versions),
+        )
+    }
+
+    fn specification(&self) -> Value {
+        json!({
+            "tool": TIMELINE, "arguments": &self.timeline_query, "result_hash": &self.timeline_result_hash,
+        })
     }
 }
 

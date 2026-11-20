@@ -5,11 +5,11 @@ use ga_db::{
     conversation_memory::AnalysisSubject,
     diary::DiaryEventRange,
     health_analysis::{
-        ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
-        DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery, EVENT_WINDOWS,
-        HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST, LAGGED_ASSOCIATION, METRIC_SERIES,
-        MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
-        STRESS_HOURS, WELLBEING_OBSERVATIONS,
+        ACTIVITIES, ACTIVITY_DETAILS, AnalysisTimelineQuery, COFFEE_SLEEP, DATA_FRESHNESS,
+        DEVICE_HISTORY, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
+        EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST, LAGGED_ASSOCIATION,
+        METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY,
+        SLEEP_ANALYSIS, STRESS_HOURS, TIMELINE, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     share_policy::{DestinationKind, ShareDestination, SharePolicyError},
@@ -32,6 +32,7 @@ static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sle
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
+static TIMELINE_TOOL: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Timeline));
 static INSIGHTS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Insights));
 static WINDOWS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::EventWindows));
 static COFFEE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::CoffeeSleep));
@@ -170,6 +171,10 @@ impl<'a> DiaryAnalysisTools<'a> {
                         name: HEALTH_RANGE,
                         description: &RANGE,
                     },
+                    OfferedReadTool {
+                        name: TIMELINE,
+                        description: &TIMELINE_TOOL,
+                    },
                 ]);
             }
             if access.coffee_sleep {
@@ -267,6 +272,19 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
                 }),
                 Err(_) => None,
             };
+        }
+        if name == TIMELINE {
+            self.daily_read.as_ref()?;
+            let query = AnalysisTimelineQuery::from_arguments(args)?;
+            let result = self
+                .database
+                .read_analysis_timeline(self.context, self.model, &query)
+                .await
+                .ok()?;
+            return Some(AnalysisToolRead {
+                value: result.value,
+                tracker_versions: result.tracker_versions,
+            });
         }
         let read_access = if name == WELLBEING_OBSERVATIONS {
             self.wellbeing_read

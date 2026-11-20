@@ -45,6 +45,7 @@ from garmin_ai.models import (
     MetricObservation,
     Person,
     SourcePayload,
+    TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.scenario_packs import configure_scenario_pack, ensure_scenario_packs
@@ -104,6 +105,9 @@ ACTIVITY_ID = "synthetic-chat-activity"
 INSIGHTS_QUESTION = "Which saved synthetic insights are accepted and which are candidates?"
 INSIGHTS_ANSWER = "The stored results distinguish acceptance from candidacy."
 INSIGHTS_START = datetime(2026, 6, 27, 12, tzinfo=UTC)
+TIMELINE_QUESTION = "What overlaps on the synthetic timeline?"
+TIMELINE_ANSWER = "Recorded sleep, a run, a diary point and a plan remain independent."
+TIMELINE_START = datetime(2026, 2, 19, 20, tzinfo=UTC)
 SUMMARIES_QUESTION = "Show my synthetic daily summaries and step observations."
 SUMMARIES_ANSWER = "The saved day and the observed interval are both available."
 SUMMARIES_DAY = date(2026, 10, 12)
@@ -148,6 +152,8 @@ def output(prompt):
             return activities_output(prompt)
         if prompt["question"].startswith(INSIGHTS_QUESTION):
             return insights_output(prompt)
+        if prompt["question"].startswith(TIMELINE_QUESTION):
+            return timeline_output(prompt)
         if prompt["question"].startswith(SUMMARIES_QUESTION):
             return summaries_output(prompt)
         if prompt["question"].startswith(RUNNING_QUESTION):
@@ -198,6 +204,7 @@ def output(prompt):
             DEVICES_QUESTION,
             ACTIVITIES_QUESTION,
             INSIGHTS_QUESTION,
+            TIMELINE_QUESTION,
         )
     ):
         return Interpretation(intent="question", confidence=1, response_language="en")
@@ -578,6 +585,44 @@ def insights_output(prompt):
     )
 
 
+def timeline_output(prompt):
+    name = "timeline"
+    tools = {tool["name"] for tool in prompt["tools"]}
+    if prompt["question"].endswith(" without training access"):
+        assert name not in tools and not prompt["evidence"]
+        return AgentStep(response_language="en")
+    if prompt["evidence"]:
+        [item] = prompt["evidence"]
+        assert item["tool"] == name
+        layers = item["result"]["layers"]
+        counts = {kind: len(rows) for kind, rows in layers.items()}
+        assert counts == {
+            "sleep": 1,
+            "plans": 1,
+            "activity": 1,
+            "context": 1,
+            "wellbeing": 0,
+        }, counts
+        [plan] = layers["plans"]
+        [point] = layers["context"]
+        assert plan["status"] == "planned" and point["start"] == point["end"]
+        assert point["label"] == "Synthetic point on the timeline"
+        assert any(len(segment["annotations"]) >= 2 for segment in item["result"]["segments"])
+        assert all(
+            point["annotation_id"] not in segment["annotations"]
+            for segment in item["result"]["segments"]
+        )
+        return AgentStep(answer=TIMELINE_ANSWER, evidence_ids=[1], response_language="en")
+    assert name in tools
+    arguments = {
+        "start": TIMELINE_START.isoformat(),
+        "end": (TIMELINE_START + timedelta(hours=6)).isoformat(),
+    }
+    return AgentStep(
+        calls=[{"name": name, "arguments_json": json.dumps(arguments)}], response_language="en"
+    )
+
+
 def summaries_output(prompt):
     if prompt["evidence"]:
         first, second, third = prompt["evidence"]
@@ -940,6 +985,7 @@ def exercise(engine, python, native, source_calls, native_calls, active, release
     exercise_devices(engine, python, native)
     exercise_activities(engine, python, native)
     exercise_insights(engine, python, native)
+    exercise_timeline(engine, python, native)
 
     calls_before = len(native_calls)
     withdrawn = submit(native, NOTE + " withdraw during response")
@@ -1996,6 +2042,77 @@ def exercise_insights(engine, python, native):
     assert oversized[0] == oversized[1] and INSIGHTS_ANSWER not in oversized[1], oversized
     print(
         "Matched insight pages, statuses and evidence bounds, withholding changed or disallowed results"
+    )
+
+
+def exercise_timeline(engine, python, native):
+    first = TIMELINE_START
+
+    def at(hours):
+        return first + timedelta(hours=hours)
+
+    with Session(engine) as session, session.begin():
+        packs = ensure_scenario_packs(session)
+        for name in ("general_diary", "sleep", "training", "wellbeing"):
+            packs[name].tracking_enabled = True
+            packs[name].llm_enabled = True
+        session.add_all(
+            [
+                Activity(
+                    id="synthetic-timeline-run",
+                    start=at(2),
+                    end=at(4),
+                    kind="running",
+                    timezone="UTC",
+                ),
+                TimelineInterval(
+                    id="synthetic-timeline-rest",
+                    start=at(1),
+                    end=at(3),
+                    label="sleep",
+                    source="garmin_connect",
+                    confidence=0.9,
+                    confirmed=True,
+                    evidence={"recorded_sleep": True},
+                ),
+                TimelineInterval(
+                    id="synthetic-timeline-plan",
+                    start=at(2),
+                    end=at(5),
+                    label="Synthetic calendar plan",
+                    source="calendar",
+                    confidence=1,
+                    confirmed=True,
+                    evidence={"calendar_event": "synthetic"},
+                ),
+            ]
+        )
+        entry = create_event(
+            session,
+            EventInput(
+                start=at(2.5),
+                timezone="UTC",
+                payload={"type": "note", "description": "Synthetic point on the timeline"},
+            ),
+            actor="synthetic-fixture",
+        )
+        identity = entry.id
+    old, new = [submit(client, TIMELINE_QUESTION)["reply"] for client in (python, native)]
+    assert old is not None and new is not None and old["text"] == new["text"], (old, new)
+    assert TIMELINE_ANSWER in new["text"], (old, new)
+    assert new["text"].endswith("Based on saved Garmin and diary data.")
+    shown = native.get("/web-chat/messages", headers=HEADERS)
+    assert shown.status_code == 200 and new["id"] in {row["id"] for row in shown.json()["replies"]}
+    with Session(engine) as session, session.begin():
+        session.get(Event, identity).deleted = True
+    assert native.post(f"/web-chat/messages/{new['id']}/read", headers=HEADERS).status_code == 409
+    with Session(engine) as session, session.begin():
+        ensure_scenario_packs(session)["training"].llm_enabled = False
+    question = TIMELINE_QUESTION + " without training access"
+    denied = [submit(client, question)["reply"]["text"] for client in (python, native)]
+    assert denied[0] == denied[1] and TIMELINE_ANSWER not in denied[1], denied
+    print(
+        "Matched independent timeline layers, point evidence, stale diary anchors and pack bounds"
     )
 
 

@@ -1,28 +1,70 @@
 mod render;
 
-use std::{error::Error, fmt, io::Read, time::Duration};
+use std::{collections::BTreeSet, error::Error, fmt, io::Read, time::Duration};
 
 use futures_util::TryStreamExt;
 use ga_archive::json_spool::JsonDocument;
 use ga_domain::{
     legacy_json::{Utf8Layout, encode_ascii},
+    model_consent::ModelCategories,
     timestamp::StoredInstant,
 };
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{DailyHealthReader, HealthAnalysisError, check_calendar_bounds};
+use super::{
+    DailyHealthReader, HealthAnalysisError, MODEL_HEALTH_PACKS, begin_daily_analysis,
+    check_calendar_bounds, model_daily::compact_document, read_daily::model_packs_allowed,
+    require_current_projection,
+};
 use crate::{
     Database,
+    conversation_memory::{AnalysisSubject, analysis_channel_in},
     diary::{DiaryReadError, ModelDiaryQuery, model_events_in, owner_events_in},
+    model_gate::onboarding::onboarding_allows_model,
     scenario_packs::model_disallowed_event_kinds,
     share_policy::{DestinationKind, ShareDestination},
 };
 
 const MAX_ANNOTATIONS: u16 = 500;
+pub const TIMELINE: &str = "timeline";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisTimelineQuery {
+    start: Value,
+    end: Value,
+}
+
+impl AnalysisTimelineQuery {
+    pub fn from_arguments(args: &Map<String, Value>) -> Option<Self> {
+        serde_json::from_value(Value::Object(args.clone())).ok()
+    }
+
+    fn window(&self) -> Result<(OffsetDateTime, OffsetDateTime), TimelineError> {
+        let offset = |value| {
+            StoredInstant::legacy_input_with_offset(value).ok_or(TimelineError::TimestampRange)
+        };
+        let start = offset(&self.start)?;
+        let end = offset(&self.end)?;
+        timeline_range(start, end)?;
+        Ok((start, end))
+    }
+}
+
+pub struct ModelTimelineResult {
+    pub value: Value,
+    pub tracker_versions: BTreeSet<Uuid>,
+}
+
+struct TimelineSnapshot {
+    annotations: Vec<Annotation>,
+    events: Value,
+    tracker_versions: BTreeSet<Uuid>,
+}
 
 #[derive(Debug)]
 pub enum TimelineError {
@@ -164,7 +206,7 @@ impl Database {
         end: OffsetDateTime,
     ) -> Result<Vec<u8>, TimelineError> {
         timeline_range(start, end)?;
-        let (annotations, events) = tokio::time::timeout(Duration::from_millis(1500), async {
+        let snapshot = tokio::time::timeout(Duration::from_millis(1500), async {
             self.verified_health_reader()
                 .await
                 .map_err(TimelineError::Health)?
@@ -173,7 +215,12 @@ impl Database {
         })
         .await
         .map_err(|_| TimelineError::Database)??;
-        document_bytes(render_timeline(start, end, annotations, &events)?)
+        document_bytes(render_timeline(
+            start,
+            end,
+            snapshot.annotations,
+            &snapshot.events,
+        )?)
     }
 }
 
@@ -185,13 +232,18 @@ impl DailyHealthReader {
         end: OffsetDateTime,
     ) -> Result<Vec<u8>, TimelineError> {
         timeline_range(start, end)?;
-        let (annotations, events) = tokio::time::timeout(
+        let snapshot = tokio::time::timeout(
             Duration::from_millis(1500),
             self.timeline_snapshot(start, end, None),
         )
         .await
         .map_err(|_| TimelineError::Database)??;
-        document_bytes(render_timeline(start, end, annotations, &events)?)
+        document_bytes(render_timeline(
+            start,
+            end,
+            snapshot.annotations,
+            &snapshot.events,
+        )?)
     }
 
     /// Stream the owner's layered timeline through the shared bounded spool.
@@ -220,13 +272,13 @@ impl DailyHealthReader {
         owner: Option<Uuid>,
     ) -> Result<JsonDocument, TimelineError> {
         timeline_range(start, end)?;
-        let (annotations, events) = tokio::time::timeout(
+        let snapshot = tokio::time::timeout(
             Duration::from_millis(1500),
             self.timeline_snapshot(start, end, owner),
         )
         .await
         .map_err(|_| TimelineError::Database)??;
-        render_timeline(start, end, annotations, &events)
+        render_timeline(start, end, snapshot.annotations, &snapshot.events)
     }
 
     async fn timeline_snapshot(
@@ -234,63 +286,144 @@ impl DailyHealthReader {
         start: OffsetDateTime,
         end: OffsetDateTime,
         model_owner: Option<Uuid>,
-    ) -> Result<(Vec<Annotation>, Value), TimelineError> {
-        let mut annotations = read_intervals(&mut self.0, start, end).await?;
-        let events = match model_owner {
-            Some(owner) => {
+    ) -> Result<TimelineSnapshot, TimelineError> {
+        let query = model_owner
+            .map(|owner| {
                 let model = ShareDestination::new(DestinationKind::Model, "model:mcp:local")
                     .map_err(|_| TimelineError::Database)?;
-                let page = model_events_in(
-                    &mut self.0,
-                    ModelDiaryQuery {
-                        owner_id: owner,
-                        start: StoredInstant::try_from(start)
-                            .map_err(|_| TimelineError::TimestampRange)?,
-                        end: StoredInstant::try_from(end)
-                            .map_err(|_| TimelineError::TimestampRange)?,
-                        kind: None,
-                        limit: MAX_ANNOTATIONS,
-                        model,
-                        channel: None,
-                    },
-                    Some((start, end)),
-                )
+                timeline_diary_query(owner, model, None, start, end)
+            })
+            .transpose()?;
+        let snapshot = timeline_snapshot_in(&mut self.0, start, end, query).await?;
+        self.0.commit().await?;
+        Ok(snapshot)
+    }
+}
+
+impl Database {
+    pub async fn read_analysis_timeline(
+        &self,
+        context: AnalysisSubject<'_>,
+        model: ShareDestination<'_>,
+        query: &AnalysisTimelineQuery,
+    ) -> Result<ModelTimelineResult, TimelineError> {
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            let mut txn = begin_daily_analysis(&self.work)
                 .await
-                .map_err(TimelineError::Diary)?;
-                let denied = model_disallowed_event_kinds(&mut self.0)
-                    .await
-                    .map_err(|_| TimelineError::Database)?;
-                // Python bounds the preliminary SQL candidates before checking grant time.
-                // A future-dated facts grant can therefore still exceed this candidate cap.
-                let overflow: bool =
-                    sqlx::query_scalar(include_str!("timeline/model_candidates.sql"))
-                        .bind(start)
-                        .bind(end)
-                        .bind(denied)
-                        .bind(model.instance())
-                        .fetch_one(&mut *self.0)
-                        .await?;
-                if overflow {
-                    return Err(TimelineError::AnnotationLimit);
-                }
-                page.value
-            }
-            None => owner_events_in(&mut self.0, start, end, None, MAX_ANNOTATIONS)
-                .await
-                .map_err(TimelineError::Diary)?,
-        };
-        let entries = events["rows"].as_array().ok_or(TimelineError::Database)?;
-        if events["truncated"] == true
-            || annotations.len() + entries.len() > usize::from(MAX_ANNOTATIONS)
-        {
+                .map_err(TimelineError::Health)?;
+            let result = analysis_timeline_in(&mut txn, context, model, query).await?;
+            txn.commit().await?;
+            Ok(result)
+        })
+        .await
+        .map_err(|_| TimelineError::Database)?
+    }
+}
+
+pub(crate) async fn analysis_timeline_in(
+    txn: &mut Transaction<'_, Postgres>,
+    context: AnalysisSubject<'_>,
+    model: ShareDestination<'_>,
+    query: &AnalysisTimelineQuery,
+) -> Result<ModelTimelineResult, TimelineError> {
+    require_current_projection(txn)
+        .await
+        .map_err(TimelineError::Health)?;
+    let owner = context.binding().owner_id;
+    if !onboarding_allows_model(txn, ModelCategories::HEALTH_AND_DIARY).await?
+        || !model_packs_allowed(txn, owner, MODEL_HEALTH_PACKS)
+            .await
+            .map_err(TimelineError::Health)?
+    {
+        return Err(TimelineError::Diary(DiaryReadError::ModelConsent));
+    }
+    let channel = analysis_channel_in(txn, context)
+        .await
+        .map_err(|_| TimelineError::Diary(DiaryReadError::ContextChanged))?
+        .ok_or(TimelineError::Diary(DiaryReadError::ContextChanged))?;
+    let channel = ShareDestination::new(DestinationKind::Channel, &channel)
+        .map_err(|_| TimelineError::Diary(DiaryReadError::InvalidDestination))?;
+    let (start, end) = query.window()?;
+    let input = timeline_diary_query(owner, model, Some(channel), start, end)?;
+    let snapshot = timeline_snapshot_in(txn, start, end, Some(input)).await?;
+    let document = render_timeline(start, end, snapshot.annotations, &snapshot.events)?;
+    let value = compact_document(document).map_err(TimelineError::Health)?;
+    let tracker_versions = if value.get("error").is_some() {
+        BTreeSet::new()
+    } else {
+        snapshot.tracker_versions
+    };
+    Ok(ModelTimelineResult {
+        value,
+        tracker_versions,
+    })
+}
+
+fn timeline_diary_query<'a>(
+    owner: Uuid,
+    model: ShareDestination<'a>,
+    channel: Option<ShareDestination<'a>>,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+) -> Result<ModelDiaryQuery<'a>, TimelineError> {
+    Ok(ModelDiaryQuery {
+        owner_id: owner,
+        start: StoredInstant::try_from(start).map_err(|_| TimelineError::TimestampRange)?,
+        end: StoredInstant::try_from(end).map_err(|_| TimelineError::TimestampRange)?,
+        kind: None,
+        limit: MAX_ANNOTATIONS,
+        model,
+        channel,
+    })
+}
+
+async fn timeline_snapshot_in(
+    txn: &mut Transaction<'_, Postgres>,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    model: Option<ModelDiaryQuery<'_>>,
+) -> Result<TimelineSnapshot, TimelineError> {
+    let mut annotations = read_intervals(txn, start, end).await?;
+    let (events, tracker_versions) = if let Some(query) = model {
+        let model = query.model;
+        let page = model_events_in(txn, query, Some((start, end)))
+            .await
+            .map_err(TimelineError::Diary)?;
+        let denied = model_disallowed_event_kinds(txn)
+            .await
+            .map_err(|_| TimelineError::Database)?;
+        // Count preliminary model candidates even when a future-dated grant excludes a row.
+        let overflow: bool = sqlx::query_scalar(include_str!("timeline/model_candidates.sql"))
+            .bind(start)
+            .bind(end)
+            .bind(denied)
+            .bind(model.instance())
+            .fetch_one(&mut **txn)
+            .await?;
+        if overflow {
             return Err(TimelineError::AnnotationLimit);
         }
-        for entry in entries {
-            annotations.push(Annotation::from_event(entry, start, end)?);
-        }
-        self.0.commit().await?;
-        Ok((annotations, events))
+        (page.value, page.tracker_versions)
+    } else {
+        let page = owner_events_in(txn, start, end, None, MAX_ANNOTATIONS)
+            .await
+            .map_err(TimelineError::Diary)?;
+        (page, BTreeSet::new())
+    };
+    let entries = events["rows"].as_array().ok_or(TimelineError::Database)?;
+    if events["truncated"] == true
+        || annotations.len() + entries.len() > usize::from(MAX_ANNOTATIONS)
+    {
+        return Err(TimelineError::AnnotationLimit);
     }
+    for entry in entries {
+        annotations.push(Annotation::from_event(entry, start, end)?);
+    }
+    Ok(TimelineSnapshot {
+        annotations,
+        events,
+        tracker_versions,
+    })
 }
 
 fn timeline_range(start: OffsetDateTime, end: OffsetDateTime) -> Result<(), TimelineError> {

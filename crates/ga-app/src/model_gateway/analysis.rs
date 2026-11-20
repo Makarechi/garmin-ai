@@ -5,11 +5,12 @@ use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::In
 
 use ga_db::{
     conversation_memory::AnalysisSubject,
+    diary::TimelineReadFence,
     health_analysis::{
         ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
         DailyAnalysisEvidence, EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST,
         LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, RUNNING_EFFICIENCY, SLEEP_ANALYSIS,
-        STRESS_HOURS, WELLBEING_OBSERVATIONS,
+        STRESS_HOURS, TIMELINE, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     share_policy::{
@@ -210,7 +211,7 @@ impl ModelGateway<'_> {
             question,
             budget,
             tools,
-            |prompt, versions, daily, generic| {
+            |prompt, versions, daily, generic, timeline| {
                 let policy = &policy;
                 async move {
                     let mut current_requirements = requirements.to_vec();
@@ -238,6 +239,7 @@ impl ModelGateway<'_> {
                             subject: destination.subject,
                             daily: &daily,
                             generic: &generic,
+                            timeline: &timeline,
                         }),
                     });
                     let returned = self
@@ -281,6 +283,7 @@ where
         BTreeSet<Uuid>,
         Vec<DailyAnalysisEvidence>,
         Vec<GenericAnalysisEvidence>,
+        Vec<TimelineReadFence>,
     ) -> Response,
     Response: Future<Output = Result<Value, AnalysisError>>,
 {
@@ -350,6 +353,7 @@ where
                                 | ACTIVITIES
                                 | ACTIVITY_DETAILS
                                 | INSIGHTS_LIST
+                                | TIMELINE
                         )
                 })
                 .map(|tool| tool.description)
@@ -400,9 +404,14 @@ where
                     .ok_or(AnalysisError::InvalidDocument)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let timeline = evidence
+            .iter()
+            .filter(|item| item["tool"] == TIMELINE && item["result"].get("error").is_none())
+            .map(|item| TimelineReadFence::from_read(item).ok_or(AnalysisError::InvalidDocument))
+            .collect::<Result<Vec<_>, _>>()?;
         let output = tokio::time::timeout(
             remaining,
-            call_model(prompt, tracker_versions.clone(), daily, generic),
+            call_model(prompt, tracker_versions.clone(), daily, generic, timeline),
         )
         .await
         .map_err(|_| AnalysisBudgetError::Timeout)??;
@@ -632,7 +641,8 @@ pub(crate) fn format_analysis_answer(
             && (item["tool"]
                 .as_str()
                 .is_some_and(DailyAnalysisEvidence::is_daily_tool)
-                || item["tool"] == GENERIC_ANALYSIS)
+                || item["tool"] == GENERIC_ANALYSIS
+                || item["tool"] == TIMELINE)
     }) {
         sources.push("Garmin");
     }
@@ -644,6 +654,7 @@ pub(crate) fn format_analysis_answer(
             || item["tool"] == COFFEE_SLEEP
             || item["tool"] == EVENT_WINDOWS
             || item["tool"] == INSIGHTS_LIST
+            || item["tool"] == TIMELINE
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
     }) {
