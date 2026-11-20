@@ -1,6 +1,7 @@
 name: Native release installation
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/workflows/native-release-install.yml"
