@@ -39,6 +39,8 @@ use ga_garmin::{
 };
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
+const STORAGE_BUSY_RETRY_MICROSECONDS: i64 = 2_000_000;
+
 pub trait EndpointSource {
     fn fingerprint(&self) -> &str;
 
@@ -133,6 +135,23 @@ impl From<GarminIntegrationError> for EndpointWorkerError {
 
 impl<S: EndpointSource> EndpointWorker<'_, S> {
     pub async fn run(&self, lease: &GarminJobLease) -> Result<EndpointWork, EndpointWorkerError> {
+        match self.run_endpoint(lease).await {
+            Err(EndpointWorkerError::Storage(error)) if error.storage_busy() => {
+                let retry = clock()?.unix_microseconds() + STORAGE_BUSY_RETRY_MICROSECONDS;
+                let retry = StoredInstant::from_unix_microseconds(retry)
+                    .map_err(|_| EndpointWorkerError::InvalidClock)?;
+                self.defer(lease, FailureReason::GarminStorageBusy, Some(retry))
+                    .await
+                    .map(EndpointWork::Deferred)
+            }
+            result => result,
+        }
+    }
+
+    async fn run_endpoint(
+        &self,
+        lease: &GarminJobLease,
+    ) -> Result<EndpointWork, EndpointWorkerError> {
         if !known_timezone(self.timezone) {
             return Err(EndpointError::InvalidScope.into());
         }

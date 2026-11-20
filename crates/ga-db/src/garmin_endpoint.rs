@@ -1,6 +1,6 @@
 mod history_window;
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use ga_archive::{Archive, PutLimits};
 
@@ -10,6 +10,7 @@ use ga_domain::{
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use time::{Date, format_description::well_known::Iso8601};
+use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 use crate::{
@@ -94,6 +95,16 @@ impl fmt::Display for EndpointError {
     }
 }
 impl Error for EndpointError {}
+
+impl EndpointError {
+    pub fn storage_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Capture(CaptureError::Busy)
+                | Self::Projection(DocumentError::Access(CaptureError::Busy))
+        )
+    }
+}
 impl From<sqlx::Error> for EndpointError {
     fn from(_: sqlx::Error) -> Self {
         Self::Database
@@ -322,6 +333,30 @@ impl Database {
     }
 
     async fn begin_endpoint(
+        &self,
+        endpoint: &Endpoint,
+        account: &str,
+        lease: &GarminJobLease,
+        at: StoredInstant,
+        lease_read: LeaseRead,
+    ) -> Result<(Transaction<'static, Postgres>, Eligibility), EndpointError> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let result = self
+                .begin_endpoint_once(endpoint, account, lease, at, lease_read)
+                .await;
+            if !result.as_ref().is_err_and(|error| error.storage_busy())
+                || Instant::now() >= deadline
+            {
+                return result;
+            }
+            // Drop the failed transaction before waiting. Keep the same lease
+            // and any downloaded body during short contention.
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn begin_endpoint_once(
         &self,
         endpoint: &Endpoint,
         account: &str,

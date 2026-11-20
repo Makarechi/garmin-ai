@@ -185,6 +185,108 @@ async fn setup() -> Result<(Fixture, tempfile::TempDir), Box<dyn Error>> {
 
 #[tokio::test]
 #[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
+async fn defers_busy_endpoint_without_spending_its_attempt() -> Result<(), Box<dyn Error>> {
+    let (fixture, _root) = setup().await?;
+    let lease = fixture.queue(20).await?;
+    let source = Source::new(
+        Ok(Some(serde_json::to_vec(&json!({
+            "heartRateValues":[[fixture.start.unix_timestamp() * 1_000,77]]
+        }))?)),
+        Duration::ZERO,
+    );
+    let worker = fixture.worker(&source);
+    let mut blocker = fixture.inspect.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104619::bigint)")
+        .execute(&mut *blocker)
+        .await?;
+    assert_eq!(
+        worker.run(&lease).await?,
+        EndpointWork::Deferred(RecordedJobStatus::Deferred),
+    );
+    assert_eq!(fixture.job(&lease).await?, ("pending".into(), 0));
+    assert_eq!(source.calls.load(Ordering::Relaxed), 0);
+    let state: (bool, bool, bool) = sqlx::query_as(
+        "SELECT lease_token IS NULL, lease_until IS NULL, run_at>clock_timestamp()
+         FROM jobs WHERE id=$1",
+    )
+    .bind(lease.id())
+    .fetch_one(&fixture.inspect)
+    .await?;
+    assert_eq!(state, (true, true, true));
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM measurements)",
+    )
+    .fetch_one(&fixture.inspect)
+    .await?;
+    assert_eq!(counts, (0, 0));
+    blocker.commit().await?;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&fixture.inspect)
+        .await?;
+    let retry = fixture
+        .database
+        .claim_garmin_job(now.try_into()?, now.date(), 20, false)
+        .await?
+        .ok_or("Expected due history retry")?;
+    assert_eq!(retry.id(), lease.id());
+    assert_eq!(
+        worker.run(&retry).await?,
+        EndpointWork::Publication(EndpointPublication::Published(DocumentStatus::Normalized)),
+    );
+    assert_eq!(fixture.job(&retry).await?, ("done".into(), 1));
+    assert_eq!(source.calls.load(Ordering::Relaxed), 1);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM measurements)",
+    )
+    .fetch_one(&fixture.inspect)
+    .await?;
+    assert_eq!(counts, (1, 1));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
+async fn retains_download_during_short_capture_contention() -> Result<(), Box<dyn Error>> {
+    let (fixture, _root) = setup().await?;
+    let lease = fixture.queue(20).await?;
+    let signal = Arc::new(Notify::new());
+    let mut source = Source::new(
+        Ok(Some(serde_json::to_vec(&json!({
+            "heartRateValues":[[fixture.start.unix_timestamp() * 1_000,77]]
+        }))?)),
+        Duration::from_millis(130),
+    );
+    source.started = Some(signal.clone());
+    let hold_capture = async {
+        signal.notified().await;
+        let mut blocker = fixture.inspect.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(72104619::bigint)")
+            .execute(&mut *blocker)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(180)).await;
+        blocker.commit().await
+    };
+    let worker = fixture.worker(&source);
+    let (result, released) = tokio::join!(worker.run(&lease), hold_capture);
+    released?;
+    assert_eq!(
+        result?,
+        EndpointWork::Publication(EndpointPublication::Published(DocumentStatus::Normalized)),
+    );
+    assert_eq!(fixture.job(&lease).await?, ("done".into(), 1));
+    assert_eq!(source.calls.load(Ordering::Relaxed), 1);
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM measurements)",
+    )
+    .fetch_one(&fixture.inspect)
+    .await?;
+    assert_eq!(counts, (1, 1));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "uses disposable TimescaleDB and a synthetic Garmin transport"]
 async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), Box<dyn Error>> {
     let (fixture, _root) = setup().await?;
     // Each statement fits the database's 750ms limit, but together they need more than the lease.
