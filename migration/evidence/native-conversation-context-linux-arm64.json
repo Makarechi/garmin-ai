@@ -1,0 +1,86 @@
+{
+  "scope": "PAR-16",
+  "verification": "e2e_synthetic",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "suite_cases": {
+      "tests/test_analysis_conversation.py": 28,
+      "tests/test_analysis_budget.py": 14,
+      "tests/test_personal_goals.py": 24,
+      "tests/test_numeric_claims.py": 25,
+      "tests/test_timestamp_claims.py": 23,
+      "tests/test_metric_evidence_delivery.py": 10
+    }
+  },
+  "candidate": {
+    "application_platform": "linux/arm64",
+    "domain_checks_platform": "darwin/arm64",
+    "application_source_commit": "3ffba0f01894c13752a6df45cfbb7d5e3f2f2ca6",
+    "image_build_source_tree": "319e3f1e14c29fb9b942485f9ebd12e051d4e70b",
+    "image_digest": "sha256:d5d9799f9fc022a32089b601a71efc3471f0fde21a1062b8985bcc6eeedb8f05",
+    "app_binary_sha256": "340850a897b444af2d8d5d80a05a0c32f593eec37e59dc2111b06c0c9fa70c94"
+  },
+  "comparisons": [
+    {
+      "comparison": "migration/check_web_chat_model.py",
+      "result": "passed",
+      "trace_sha256": "0c70689aa1546653633fbb49045a1b70bad6ddb049a73b08fa4d85b595484b55"
+    },
+    {
+      "comparison": "migration/check_web_language_context.py",
+      "result": "passed",
+      "trace_sha256": "e1d380b4601596c03f765b5eaf18b0b2c874d1e853fb5963e21ba3dcac5ed2d5"
+    },
+    {
+      "comparison": "migration/check_web_sleep_history.py",
+      "result": "passed",
+      "trace_sha256": "37da8ac3bdbe4ec4e4423dbceabb522fd408ad85a0021a8259edea6912bdcdda"
+    },
+    {
+      "comparison": "migration/check_compound_web_sleep_history.py",
+      "result": "passed",
+      "trace_sha256": "53de8b2e8ec060008712dcc8a93c753c522f7e1740d75f5df5c9b342179b7aaa"
+    },
+    {
+      "comparison": "migration/check_personal_goals_http.py",
+      "result": "passed",
+      "trace_sha256": "0a7f1ea72d8bb5a35aa005aa62ca7a33cabda05ce96b7fa529479542d86cac32"
+    },
+    {
+      "comparison": "crates/ga-db/tests/conversation_memory.rs",
+      "result": "passed",
+      "trace_sha256": "d1d4f869cae0674723ced9e53f2a7bd8a2ce40a0dce6daf4116c977e24df2806"
+    },
+    {
+      "comparison": "crates/ga-db/tests/confirmed_analysis.rs",
+      "result": "passed",
+      "trace_sha256": "3ab726105a9f3d1963526a0f109a1068f9362018aa1e6caed2def29fde05cda0"
+    },
+    {
+      "comparison": "crates/ga-app/tests/telegram_model_context.rs",
+      "result": "passed",
+      "trace_sha256": "56e31007854da492c559c7c8a960f41424d0025fa114afa19a444f342d1483a8"
+    },
+    {
+      "comparison": "crates/ga-domain/tests/analysis_budget.rs",
+      "result": "passed",
+      "trace_sha256": "6d7da6600252d2d0eb7f1d41ae7f7b60727aaa1c0c615c8fd745765ef396d1f0"
+    },
+    {
+      "comparison": "crates/ga-domain/tests/analysis_claims.rs",
+      "result": "passed",
+      "trace_sha256": "6d7da6600252d2d0eb7f1d41ae7f7b60727aaa1c0c615c8fd745765ef396d1f0"
+    },
+    {
+      "comparison": "crates/ga-domain/tests/agent_time_evidence.rs",
+      "result": "passed",
+      "trace_sha256": "91979fc59e6faa6f8dba46e6de96513ef7a459e35dff4ea7485cbfec094f6f13"
+    }
+  ],
+  "release_scope": [
+    "Ordinary web and authenticated Telegram context paths used isolated synthetic conversations and canned model outputs.",
+    "Context, claims, goals, language, evidence budgets, replay, stale data, confirmed-delivery, and forget behavior were compared."
+  ]
+}

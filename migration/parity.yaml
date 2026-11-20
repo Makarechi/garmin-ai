@@ -1074,7 +1074,14 @@
         "migration/check_web_chat_model.py",
         "migration/check_web_sleep_history.py",
         "migration/check_conversation_memory.py",
-        "migration/check_confirmed_analysis.py"
+        "migration/check_confirmed_analysis.py",
+        "migration/check_compound_web_sleep_history.py",
+        "migration/check_personal_goals_http.py",
+        "crates/ga-app/tests/telegram_model_context.rs",
+        "crates/ga-domain/tests/analysis_budget.rs",
+        "crates/ga-domain/tests/analysis_claims.rs",
+        "crates/ga-domain/tests/agent_time_evidence.rs",
+        "migration/evidence/native-conversation-context-linux-arm64.json"
       ],
       "data_contracts": [
         "Delivered context only, goals revision, numeric claims, evidence provenance, staleness, expiry and forget fence."
@@ -1083,12 +1090,10 @@
         "Owner-only conversation state; provider context scope and revocation apply before dispatch/delivery."
       ],
       "resource_scenario": "Evidence budget boundary and long conversation history",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R25",
-      "known_limits": [
-        "Complete the native agent health-tool menu, compound evidence and multi-turn comparisons across normal channel workers."
-      ],
+      "known_limits": [],
       "approved_deviations": []
     },
     {
