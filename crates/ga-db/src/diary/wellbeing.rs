@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use futures_util::TryStreamExt;
 use ga_domain::{
+    identity::python_cursor_uuid,
     legacy_json::{Utf8Layout, encode},
     timestamp::StoredInstant,
 };
@@ -213,7 +214,7 @@ fn report_cursor(
     }
     let id = parts[1]
         .as_str()
-        .and_then(|id| Uuid::parse_str(id).ok())
+        .and_then(python_cursor_uuid)
         .ok_or_else(invalid)?;
     Ok((at, id))
 }

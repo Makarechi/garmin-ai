@@ -117,12 +117,30 @@ def exercise(python, native):
         "9999-12-31T23:59:59-01:00",
     ):
         compare({"cursor": stamp + "|" + str(UUID(int=10050))})
+    stamp = (AT + timedelta(microseconds=1)).isoformat()
+    identity = UUID(int=10050).hex
+    reference = compare({"cursor": f"{stamp}|{identity}", "limit": 3})
+    assert reference["rows"][0]["id"] == str(UUID(int=10049))
+    for form in (
+        f"urn:uuid:{{{identity}}}",
+        identity[:7] + "-" + identity[7:],
+        identity[:7] + "uuid:urn:" + identity[7:],
+        "0x_" + identity[3:],
+        "+" + identity[1:],
+        "\u3000" + identity[1:],
+        "".join(chr(ord(digit) + 0xFEE0) for digit in identity),
+    ):
+        assert compare({"cursor": f"{stamp}|{form}", "limit": 3}) == reference
     for cursor in (
         "",
         "bad",
         AT.isoformat() + "|bad",
         "2026-10-25T09:00:00|" + str(UUID(int=10000)),
         "9999-12-31T24:00:00+01:00|" + str(UUID(int=10000)),
+        f"{stamp}|{identity[:3]}__{identity[5:]}",
+        f"{stamp}|{identity[:3]}\u00b2{identity[4:]}",
+        f"{stamp}|\x1c{identity[1:]}",
+        f"{stamp}|URN:UUID:{UUID(int=10050)}",
         "x" * 201,
     ):
         compare({"cursor": cursor}, 422)
@@ -142,8 +160,17 @@ async def capture(command, args, environment, root, label):
             descriptor = next(
                 document(tool) for tool in (await client.list_tools()).tools if tool.name == NAME
             )
+            stamp = (AT + timedelta(microseconds=1)).isoformat()
+            identity = UUID(int=10050)
             responses = []
-            for arguments in [{"limit": 100}, {"limit": -1}, {"limit": 10**100}, {"limit": 1e100}]:
+            for arguments in [
+                {"limit": 100},
+                {"limit": -1},
+                {"limit": 10**100},
+                {"limit": 1e100},
+                {"limit": 3, "cursor": f"{stamp}|urn:uuid:{{{identity}}}"},
+                {"limit": 3, "cursor": f"{stamp}|URN:UUID:{identity}"},
+            ]:
                 response = document(await client.call_tool(NAME, arguments))
                 if not response["isError"]:
                     assert (
@@ -190,6 +217,9 @@ async def mcp_compare(binary, engine, root):
             [r["isError"] for r in actual[1]],
         )
         assert actual[1][0]["isError"] == (phase != "default")
+        if phase == "default":
+            assert actual[1][4]["structuredContent"]["rows"][0]["id"] == str(UUID(int=10049))
+            assert actual[1][5]["isError"]
     print(
         "Matched pinned MCP descriptor, streamed evidence and health/diary/three-pack restrictions"
     )

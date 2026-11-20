@@ -2,7 +2,10 @@ use std::{io::Write, time::Duration};
 
 use futures_util::TryStreamExt;
 use ga_archive::json_spool::{JsonDocument, JsonSpool};
-use ga_domain::timestamp::{StoredInstant, python_isoformat_microseconds};
+use ga_domain::{
+    identity::python_cursor_uuid,
+    timestamp::{StoredInstant, python_isoformat_microseconds},
+};
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -105,7 +108,7 @@ fn parse_cursor(text: &str) -> Result<Cursor, HealthAnalysisError> {
     }
     let (at, id) = text.split_once('|').ok_or_else(invalid)?;
     let micros = python_isoformat_microseconds(at).ok_or_else(invalid)?;
-    let id = Uuid::parse_str(id).map_err(|_| invalid())?;
+    let id = python_cursor_uuid(id).ok_or_else(invalid)?;
     match StoredInstant::from_unix_microseconds(micros) {
         Ok(at) => Ok(Cursor {
             before: Some((at.into(), id)),
@@ -146,6 +149,7 @@ mod tests {
                     id.simple().to_string(),
                     id.braced().to_string(),
                     id.urn().to_string(),
+                    format!("urn:uuid:{{{id}}}"),
                 ] {
                     let cursor = parse_cursor(&format!("{timestamp}|{identifier}"))?;
                     assert_eq!(cursor.before, Some((instant, id)));
@@ -165,6 +169,7 @@ mod tests {
             format!("{timestamp}||{id}"),
             format!("{timestamp}|{id}|"),
             format!("{timestamp}|{id}é"),
+            format!("{timestamp}|URN:UUID:{id}"),
             format!("2026-02-29T00:00:00Z|{id}"),
             format!("2026-10-25T24:00:01Z|{id}"),
             format!("{timestamp}|{}", "中".repeat(201)),

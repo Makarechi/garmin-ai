@@ -1,8 +1,49 @@
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use jiter::JsonValue;
+use uuid::Uuid;
 
-use crate::sha256_hex;
+use crate::{metric_contract::decimal_value, sha256_hex};
+
+/// Parse the UUID spelling accepted by Python for legacy page cursors.
+pub fn python_cursor_uuid(value: &str) -> Option<Uuid> {
+    // Python strips these literals in order before validating the 32 code points.
+    let unwrapped = value.replace("urn:", "").replace("uuid:", "");
+    let mut digits = unwrapped
+        .trim_matches(['{', '}'])
+        .chars()
+        .filter(|&c| c != '-');
+    let mut ascii = [0u8; 32];
+    for byte in &mut ascii {
+        *byte = match digits.next()? {
+            c if c.is_ascii() => c as u8,
+            c if c.is_whitespace() => b' ',
+            c => b'0' + decimal_value(c)?,
+        };
+    }
+    if digits.next().is_some() {
+        return None;
+    }
+    // UUID's constructor parses this normalized string as a base-16 Python integer.
+    let text = str::from_utf8(&ascii)
+        .ok()?
+        .trim_matches(|c| matches!(c, '\t'..='\r' | ' '));
+    let text = text.strip_prefix('+').unwrap_or(text);
+    let digits = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(prefixed) => prefixed.strip_prefix('_').unwrap_or(prefixed),
+        None => text,
+    };
+    let mut identity = 0u128;
+    for group in digits.split('_') {
+        if group.is_empty() {
+            return None;
+        }
+        for digit in group.chars() {
+            identity = identity * 16 + u128::from(digit.to_digit(16)?);
+        }
+    }
+    Some(Uuid::from_u128(identity))
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct GarminProfileId(NonZeroU64);
