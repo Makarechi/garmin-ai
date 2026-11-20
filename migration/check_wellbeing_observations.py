@@ -143,6 +143,21 @@ def exercise(python, native):
         "2026-10-25T09:00:00Z\0",
     ]:
         compare(REQUEST | {"cursor": json.dumps([stamp, str(UUID(int=10000))])})
+    stamp = AT.isoformat()
+    identity = UUID(int=10000).hex
+    reference = compare(REQUEST | {"cursor": json.dumps([stamp, identity])})
+    assert reference["rows"][0]["id"] == str(UUID(int=10001))
+    for form in (
+        "{{" + identity,
+        identity[:8] + "_" + identity[9:],
+        identity[:8] + "urn:uuid:" + identity[8:],
+        "".join(chr(ord(digit) + 0x630) for digit in identity),
+        "0x" + identity[2:],
+    ):
+        assert compare(REQUEST | {"cursor": json.dumps([stamp, form])}) == reference
+    assert compare(REQUEST | {"cursor": json.dumps({stamp: None, "{" + identity: None})}) == (
+        reference
+    )
     compare(REQUEST | {"cursor": json.dumps({AT.isoformat(): None, str(UUID(int=10000)): None})})
     compare(REQUEST | {"start": "2026-10-25T11:00:00+02:00"})
     for cursor in [
@@ -153,6 +168,8 @@ def exercise(python, native):
         "[1,2]",
         json.dumps(["2026-298T09:00:00Z", str(UUID(int=10000))]),
         json.dumps([AT.isoformat(), "bad"]),
+        json.dumps([stamp, identity[:-1] + "_"]),
+        json.dumps([stamp, "{" + identity[:4] + "}" + identity[5:]]),
         json.dumps([AT.replace(tzinfo=None).isoformat(), str(UUID(int=10000))]),
         json.dumps([(AT - timedelta(seconds=1)).isoformat(), str(UUID(int=10000))]),
         json.dumps([(AT + timedelta(days=1)).isoformat(), str(UUID(int=10000))]),
@@ -175,11 +192,21 @@ async def mcp_capture(command, arguments, environment, root, label):
         ):
             await client.initialize()
             catalog = {tool.name: document(tool) for tool in (await client.list_tools()).tools}
-            response = document(await client.call_tool(NAME, REQUEST))
-            if not response["isError"]:
-                assert json.loads(response["content"][0]["text"]) == response["structuredContent"]
-                response["content"][0]["text"] = response["structuredContent"]
-            return catalog[NAME], response
+            stamp, identity = AT.isoformat(), UUID(int=10000)
+            responses = []
+            for request in [
+                REQUEST,
+                REQUEST | {"cursor": json.dumps([stamp, f"urn:uuid:{{{identity}}}"])},
+                REQUEST | {"cursor": json.dumps([stamp, f"URN:UUID:{identity}"])},
+            ]:
+                response = document(await client.call_tool(NAME, request))
+                if not response["isError"]:
+                    assert (
+                        json.loads(response["content"][0]["text"]) == response["structuredContent"]
+                    )
+                    response["content"][0]["text"] = response["structuredContent"]
+                responses.append(response)
+            return catalog[NAME], responses
 
 
 async def check_mcp(binary, engine, root):
@@ -206,7 +233,10 @@ async def check_mcp(binary, engine, root):
         )
         actual = await mcp_capture(str(binary), ["mcp"], environment, root, "native")
         assert expected == actual, (phase, expected, actual)
-        assert actual[1]["isError"] == (phase != "diary_only")
+        assert actual[1][0]["isError"] == (phase != "diary_only")
+        if phase == "diary_only":
+            assert actual[1][1]["structuredContent"]["rows"][0]["id"] == str(UUID(int=10001))
+            assert actual[1][2]["isError"]
     print("Matched pinned MCP descriptor, diary-only access and category/pack refusals")
 
 
