@@ -48,7 +48,12 @@ def test_observation_pins_the_inspected_local_socket(monkeypatch):
 @pytest.fixture
 def docker_installation(monkeypatch):
     config = SimpleNamespace(
-        label=REVISION, port=URL.removeprefix("http://"), api_running=True, oom_kills=0
+        label=REVISION,
+        port=URL.removeprefix("http://"),
+        api_running=True,
+        oom_kills=0,
+        worker_started_at="2026-11-21T08:00:00Z",
+        worker_restarts=0,
     )
 
     def run_docker(*args):
@@ -59,7 +64,10 @@ def docker_installation(monkeypatch):
             return CONTAINERS[service.split("=")[-1]]
         if args[0] == "inspect":
             api_stopped = args[-1] == CONTAINERS["api"] and not config.api_running
-            return f"{IMAGE} {str(not api_stopped).lower()} 0 2026-11-21T08:00:00Z {str(api_stopped).lower()}"
+            worker = args[-1] == CONTAINERS["worker"]
+            restarts = config.worker_restarts if worker else 0
+            started = config.worker_started_at if worker else "2026-11-21T08:00:00Z"
+            return f"{IMAGE} {str(not api_stopped).lower()} {restarts} {started} {str(api_stopped).lower()}"
         if args[0] == "exec":
             fields = dict.fromkeys(observer.CGROUP_FIELDS, "0")
             count = config.oom_kills if args[1] == CONTAINERS["worker"] else 0
@@ -134,6 +142,8 @@ def test_selected_api_receives_http_probes(monkeypatch, docker_installation):
         (4, 1, 0, "oom", "unhealthy_observation", "worker:oom_kills_increased"),
         (4, 1, 0, "reset", "unhealthy_observation", "worker:oom_counter_reset"),
         (4, 1, 5, "oom", "gapped_observation", "worker:oom_kills_increased"),
+        (4, 1, 0, "manual_restart", "unhealthy_observation", "worker:restarted"),
+        (4, 1, 0, "auto_restart", "unhealthy_observation", "worker:restarted"),
     ],
 )
 def test_window_result_requires_contiguous_samples(
@@ -159,6 +169,10 @@ def test_window_result_requires_contiguous_samples(
                 config.oom_kills += 1
             if event == "reset":
                 config.oom_kills = 0
+            if event == "manual_restart":
+                config.worker_started_at = "2026-11-21T08:00:00.600Z"
+            if event == "auto_restart":
+                config.worker_restarts += 1
         now += seconds
 
     def http(url, token=None):

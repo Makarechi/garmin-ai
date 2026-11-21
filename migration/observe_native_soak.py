@@ -210,6 +210,14 @@ def track_oom_kills(current, seen):
         seen[service] = count
 
 
+def track_container_restarts(current, generations):
+    for service, state in current["containers"].items():
+        generation = state["started_at"], state["restarts"]
+        if generation != generations[service]:
+            current["failures"].append(f"{service}:restarted")
+        generations[service] = generation
+
+
 def record(output, kind, **fields):
     value = {"kind": kind, "observed_at": datetime.now(UTC).isoformat(), **fields}
     output.write(json.dumps(value, allow_nan=False, separators=(",", ":")) + "\n")
@@ -220,10 +228,12 @@ def record(output, kind, **fields):
 def observe(args, output, token):
     run_docker = local_docker()
     selected = {name: service_id(run_docker, args.compose_project, name) for name in SERVICES}
-    for name in ("api", "worker"):
+    generations = {}
+    for name in SERVICES:
         state = container_state(run_docker, selected[name])
-        if state["image"] != args.image_id or not state["running"]:
+        if name != "db" and (state["image"] != args.image_id or not state["running"]):
             raise RuntimeError(f"The selected {name} container is not running the supplied image")
+        generations[name] = state["started_at"], state["restarts"]
     verify_api_port(run_docker, selected["api"], args.url)
     label = run_docker(
         "image",
@@ -252,6 +262,7 @@ def observe(args, output, token):
     while True:
         clock, wall = time.monotonic(), time.time()
         current = sample(run_docker, args, selected, token)
+        track_container_restarts(current, generations)
         track_oom_kills(current, oom_counts)
         elapsed = clock - started
         wall_elapsed = wall - started_wall
