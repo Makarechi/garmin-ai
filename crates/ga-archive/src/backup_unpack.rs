@@ -5,7 +5,7 @@ mod format;
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read, Seek},
-    os::fd::OwnedFd,
+    os::{fd::OwnedFd, unix::fs::MetadataExt},
     path::{Component, Path, PathBuf},
 };
 
@@ -19,7 +19,9 @@ use self::format::{Member, invalid};
 use crate::{
     DIRECTORY_MODE, DIRECTORY_READ, FILE_MODE,
     backup_bundle::{MAX_DIRECTORY_DEPTH, normalized},
-    backup_envelope::{BackupDigest, BackupError, authenticate_source, parent_file},
+    backup_envelope::{
+        BackupDigest, BackupError, authenticate_open_source, open_source, parent_file,
+    },
     backup_workspace::{PLAINTEXT_DIRECTORY, PlaintextWorkspace},
     ensure_directory,
     staging::{Stage, remove_contents},
@@ -41,20 +43,20 @@ pub fn unpack_backup(
         .parent()
         .ok_or(BackupError::InvalidPath)?
         .join(PLAINTEXT_DIRECTORY);
-    if target
-        .components()
-        .any(|part| part.as_os_str() == PLAINTEXT_DIRECTORY)
-        || normalized(source)?.starts_with(&scratch)
+    if target.components().any(|part| {
+        part.as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(PLAINTEXT_DIRECTORY.as_bytes())
+    }) || is_within(&normalized(source)?, &scratch)?
     {
         return Err(BackupError::InvalidPath);
     }
     for protected in [data_dir, token_dir] {
         let protected = resolve_protected_root(protected)?;
-        if [&target, &scratch]
-            .into_iter()
-            .any(|path| path.starts_with(&protected) || protected.starts_with(path))
-        {
-            return Err(BackupError::InvalidPath);
+        for path in [&target, &scratch] {
+            if is_within(path, &protected)? || is_within(&protected, path)? {
+                return Err(BackupError::InvalidPath);
+            }
         }
     }
     let (parent, name) = parent_file(destination, true)?;
@@ -63,9 +65,11 @@ pub fn unpack_backup(
         Err(Errno::NOENT) => {}
         Err(error) => return Err(error.into()),
     }
+    // Reject missing or redirected sources before reclaiming interrupted staging.
+    let input = open_source(source)?;
     let workspace = PlaintextWorkspace::for_recovery(&parent).map_err(BackupError::Workspace)?;
     let mut staged = Stage::create_readable(&workspace.active)?;
-    let digest = authenticate_source(source, key, &mut staged.file)?;
+    let digest = authenticate_open_source(source, input, key, &mut staged.file)?;
     staged.file.rewind()?;
     let mut raw = BufReader::with_capacity(64 * 1024, &mut staged.file);
     let recovery = RecoveryTree::create(&workspace.active)?;
@@ -91,6 +95,28 @@ pub fn unpack_backup(
     drop(workspace);
     fs::fsync(parent)?;
     Ok(digest)
+}
+
+fn is_within(path: &Path, directory: &Path) -> io::Result<bool> {
+    if path.starts_with(directory) {
+        return Ok(true);
+    }
+    let identity = |path: &Path| match path.metadata() {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    let Some(parent) = identity(directory)? else {
+        return Ok(false);
+    };
+
+    // Different spellings can resolve to the same directory on the recovery volume.
+    for ancestor in path.ancestors() {
+        if identity(ancestor)? == Some(parent) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn resolve_protected_root(path: &Path) -> Result<PathBuf, BackupError> {

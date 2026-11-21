@@ -53,7 +53,10 @@ Python and Rust coordinate unpacking through a private workspace in the
 recovery destination's parent directory. When unpacking stops partway through,
 retry using the same parent so the application can discard the interrupted
 plaintext and authenticate the archive again. A running unpack owns the lock
-until it exits. Earlier Rust releases used separate `.rust-backup-*` folders.
+until it exits. Native unpack checks for redirects and overlapping live storage
+before cleanup, including alternate path spellings on case-insensitive volumes.
+The `.garmin-ai-plaintext` name is reserved for staging. Earlier Rust releases
+used separate `.rust-backup-*` folders.
 Treat any of those retained folders as private and confirm the old unpack process
 has exited before handling them.
 
