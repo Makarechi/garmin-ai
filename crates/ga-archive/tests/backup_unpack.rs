@@ -224,3 +224,129 @@ fn append(
     header.set_cksum();
     archive.append(&header, bytes)
 }
+
+#[test]
+fn retry_clears_abandoned_plaintext_before_authentication() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let workspace = root.join(".garmin-ai-plaintext");
+    let active = workspace.join("active");
+    fs::create_dir_all(active.join("contents/raw"))?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    fs::write(workspace.join("operation.lock"), b"")?;
+    fs::write(active.join("backup.tar"), b"interrupted plaintext")?;
+    fs::write(active.join("contents/raw/partial"), b"partially restored")?;
+    let retained = root.join("previous-recovery");
+    fs::write(&retained, b"keep verified recovery")?;
+
+    let source = root.join("backup");
+    write_encrypted_backup(&source, &FIXTURE_BYTES, |writer| {
+        let mut archive = Builder::new(writer);
+        append(
+            &mut archive,
+            "database.jsonl.gz",
+            EntryType::Regular,
+            b"verified synthetic export",
+        )?;
+        archive.finish()
+    })?;
+    let destination = root.join("restored");
+    let data = root.join("data");
+    let tokens = root.join("tokens");
+    assert!(matches!(
+        unpack_backup(&source, &destination, &[0; 32], &data, &tokens),
+        Err(BackupError::Authentication)
+    ));
+    assert!(!active.exists(), "interrupted plaintext survived the retry");
+    assert!(!destination.exists());
+    unpack_backup(&source, &destination, &FIXTURE_BYTES, &data, &tokens)?;
+    assert_eq!(
+        fs::read(destination.join("database.jsonl.gz"))?,
+        b"verified synthetic export"
+    );
+    assert_eq!(fs::read(retained)?, b"keep verified recovery");
+    assert!(!active.exists());
+    Ok(())
+}
+
+#[test]
+fn does_not_reap_an_active_recovery() -> Result<(), Box<dyn Error>> {
+    use rustix::fs::FlockOperation;
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let workspace = root.join(".garmin-ai-plaintext");
+    let active = workspace.join("active");
+    fs::create_dir_all(&active)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    let marker = active.join("backup.tar");
+    fs::write(&marker, b"another process is restoring")?;
+    let operation = fs::File::create(workspace.join("operation.lock"))?;
+    rustix::fs::flock(&operation, FlockOperation::NonBlockingLockExclusive)?;
+
+    let source = root.join("backup");
+    write_encrypted_backup(&source, &FIXTURE_BYTES, |writer| {
+        let mut archive = Builder::new(writer);
+        append(
+            &mut archive,
+            "database.jsonl.gz",
+            EntryType::Regular,
+            b"verified synthetic export",
+        )?;
+        archive.finish()
+    })?;
+    let destination = root.join("restored");
+    let data = root.join("data");
+    let tokens = root.join("tokens");
+    assert!(unpack_backup(&source, &destination, &FIXTURE_BYTES, &data, &tokens).is_err());
+    assert_eq!(fs::read(marker)?, b"another process is restoring");
+    assert!(!destination.exists());
+
+    drop(operation);
+    unpack_backup(&source, &destination, &FIXTURE_BYTES, &data, &tokens)?;
+    assert!(destination.join("database.jsonl.gz").is_file());
+    assert!(!active.exists());
+    Ok(())
+}
+
+#[test]
+fn recovery_workspace_never_contains_the_input_output_or_live_storage() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let active = root.join(".garmin-ai-plaintext/active");
+    fs::create_dir_all(&active)?;
+    let nested = active.join("keep");
+    fs::write(&nested, b"private data")?;
+    let source = root.join("archive");
+    fs::write(&source, b"placeholder ciphertext")?;
+    let destination = root.join("recovery");
+    let data = root.join("data");
+    let tokens = root.join("tokens");
+
+    for (input, target, live_data) in [
+        (nested.as_path(), destination.as_path(), data.as_path()),
+        (source.as_path(), active.as_path(), data.as_path()),
+        (source.as_path(), destination.as_path(), active.as_path()),
+    ] {
+        assert!(matches!(
+            unpack_backup(input, target, &FIXTURE_BYTES, live_data, &tokens),
+            Err(BackupError::InvalidPath)
+        ));
+        assert_eq!(fs::read(&nested)?, b"private data");
+        assert!(!destination.exists());
+    }
+
+    // An existing active directory without the operation lock is not managed staging.
+    let workspace = active.parent().ok_or("missing workspace")?;
+    fs::set_permissions(workspace, fs::Permissions::from_mode(0o700))?;
+    assert!(matches!(
+        unpack_backup(&source, &destination, &FIXTURE_BYTES, &data, &tokens),
+        Err(BackupError::Workspace(
+            ga_archive::storage_files::StorageFilesError::Unsafe
+        ))
+    ));
+    assert_eq!(fs::read(nested)?, b"private data");
+    assert!(!workspace.join("operation.lock").exists());
+    Ok(())
+}

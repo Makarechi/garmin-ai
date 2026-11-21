@@ -19,7 +19,7 @@ use rustix::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{ArchiveError, DIRECTORY_READ, staging::Stage};
+use crate::{ArchiveError, DIRECTORY_READ, staging::Stage, storage_files::StorageFilesError};
 
 const MAGIC: &[u8; 9] = b"GARMINAI1";
 const NONCE_BYTES: usize = 12;
@@ -44,6 +44,7 @@ pub enum BackupError {
     InvalidPath,
     Exists,
     Entropy,
+    Workspace(StorageFilesError),
     Filesystem(ArchiveError),
     Io(io::Error),
 }
@@ -58,7 +59,13 @@ impl fmt::Display for BackupError {
             Self::InvalidPath => "Backup path is invalid or redirects",
             Self::Exists => "Backup destination already exists",
             Self::Entropy => "Backup nonce could not be generated",
-            Self::Filesystem(_) | Self::Io(_) => "Backup filesystem operation failed",
+            Self::Workspace(StorageFilesError::Occupied) => {
+                "Backup recovery is already in progress"
+            }
+            Self::Workspace(StorageFilesError::Unsafe) => "Backup path is invalid or redirects",
+            Self::Workspace(_) | Self::Filesystem(_) | Self::Io(_) => {
+                "Backup filesystem operation failed"
+            }
         })
     }
 }
