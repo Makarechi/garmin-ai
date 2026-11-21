@@ -1,0 +1,70 @@
+{
+  "scope": "PAR-15 synthetic functional verification",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2"
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "tested_source_commit": "1cb78dfd8cd81faaa0d4d8fe7aec0b026bfe90f2",
+    "tested_source_tree": "ab622f78fc0466d3885ae3606ddc7ce7d4f16afa",
+    "binary_sha256": "6fe39e188a9ea1acf2ae76ff1742ad78f6cb109793e024935105e06990c1d863"
+  },
+  "named_comparisons": {
+    "passed": 20,
+    "log_sha256": {
+      "check_health_analysis.py": "8bb15c2e9d6623e9c3ec6ff711bb4e0003574b9f05afffbe1034ec18e2571a89",
+      "check_temporal_features.py": "f39912fe6853530347df21a42208c9a064a7b0025fccc1fabf9cd7624396d50e",
+      "check_running_efficiency.py": "8f7edab28921fb431d482ca79a85fa1774a52d4f8b97ebafce3d223aaf361dff",
+      "check_mcp_analytics.py": "954c7486bc2c30922241c812e853f23d0dab5258086abcb990ec51ac4e38d8f2",
+      "check_stress_hours.py": "457b403418b6a0bde3cb27e858350a61285a7528bc0f7bad81343b971d02cf7d",
+      "check_temporal_displays.py": "0119a89884663dfdf937feb028f9b17f9ff5a3fd865e877bc31d732fba702a30",
+      "check_lagged_association.py": "bbc197ac43f03ee44a19e981b35d4cda484e32ba3c044ffe78d1b701cafc18fb",
+      "check_event_windows.py": "ffae8ffd2f6f2646017ae50da58379d95df4a0a19978cc9e40ea9c1352fd2816",
+      "check_sleep_analysis.py": "dffabe38cd321324ce6bcc3eaa4944e8d5cf690b8cb4e84b9ac9f3c373e58c99",
+      "check_coffee_sleep.py": "2f8237801273481f53d217e6fd594cdc201006fa43c2e60b9d6ba8d873de7365",
+      "check_migraine_windows.py": "1be7608e6a7b5775e2a19df28d728a3fa198030162ae220c0fb9b3ba6d1a16e4",
+      "check_generic_observation_history.py": "9b8f863b0acc397ccc0b7b9d140cc95139a5b3a46962cfea2853f364c8799719",
+      "check_generic_entry_history.py": "c9bbd7bd6916a0bb6342e87fc083750b746ea72857cbd03c09a15dee01b80897",
+      "check_generic_compositions.py": "a46912067d63dfc6359c25dccdd4afa7f46fba88b41d956e1f54999c0226c4fb",
+      "check_generic_aggregate_history.py": "983d901d8997c6d3270caf345e828380c4d7fd5dc0b18bee12718e3125dbc406",
+      "check_hypothesis_history.py": "a9162a7e31021702883a0e2344392d190f84485e272251ff31dd34b0faad3da1",
+      "check_hypotheses_http.py": "a06595dd09cb9ea8187150002fff8ae712173e49e7c95562f736f2c3876375f3",
+      "check_generic_thresholds.py": "82d90cd06a74f06860ffbfc86a4da733642de87412a5955a7d54434e7a6bb27a",
+      "check_mcp_generic_nonfinite.py": "fccdd77485b7e852f821c45d7dbb755d97d55b06618c79db2cd5877ced6fe97e",
+      "check_generic_interfaces.py": "f11c8fc7fb2dbd464c4f74c3d9e15f858b5fb74dd97151c587d688092ef9be19"
+    }
+  },
+  "acceptance": {
+    "UT-11": "Two increment intervals summed to 350 with no time-based coverage added.",
+    "UT-46": "The SQL-shaped metric and 367-day window received the reference responses and made no writes.",
+    "AT-13": "The scripted model flow matched source-separated windows, timeline layers and bounded evidence.",
+    "AT-15": "The timeline and model flows preserved sparse observations and permissions.",
+    "AT-16": "The paired analyses matched unit and source comparability and withheld unavailable evidence.",
+    "AT-18": "The scripted model flow matched catalog discovery, granted custom metric evidence and consent withdrawal.",
+    "universal_log_sha256": "8497f9a5b32d658a75a5f5cc4ea5925e5df2f54ffe9dda96ea4c3a852400ab14",
+    "model_flow_log_sha256": "32c17171eac22825b3fce9c4be683cecb9b39af60a6352f97329b93062e682dc"
+  },
+  "nonfinite_stdio": {
+    "read_and_protocol_comparisons": 66,
+    "comparisons_with_writes_enabled": 102,
+    "invalid_inputs_left_diary_and_audit_counts_unchanged": true,
+    "one_mebibyte_original_line_limit": "Verified with fragmentation, a boundary-sized request and recovery after an oversized request.",
+    "read_log_sha256": "6fcb4139dc31b32f493c7f2e70ebbe5f53a91271906b6e2b7ab14873a9a19a14",
+    "write_log_sha256": "e8857a86bf478e917b4032944f4f6a90017695a5f45bc2aacfc67fc0b1ad5cd1",
+    "boundary_test_log_sha256": "0b08dc4c5d989207febe9fba8b9a2888ca98bdbceafce9c6d686931ab220d571"
+  },
+  "resource_checkpoint": {
+    "one_cpu_per_api_workload": true,
+    "memory_limit_mib": 384,
+    "swap_limit_bytes": 0,
+    "iterations": 10,
+    "synthetic_daily_rows": 730,
+    "identical_analytical_results": true,
+    "python_query_seconds": 1.584,
+    "rust_query_seconds": 0.261,
+    "oom_kills": 0,
+    "record_sha256": "67532b21140e7478956828e13bac63c19ae89b1e96dfeafc05cfd08c8ea1a00f"
+  },
+  "whole_runtime_168_hour_observation": "pending"
+}

@@ -1038,7 +1038,8 @@
         "crates/ga-domain/src/hypothesis.rs::tests",
         "crates/ga-db/tests/hypotheses.rs::compares_hypothesis_history",
         "migration/check_mcp_generic_nonfinite.py",
-        "migration/evidence/native-analytics-linux-arm64.json"
+        "migration/evidence/native-analytics-linux-arm64.json",
+        "migration/evidence/native-analytics-compatibility-linux-arm64.json"
       ],
       "data_contracts": [
         "Unit/source comparability, period and bootstrap results, migraine controls, sampling/gaps and association boundaries."
@@ -1047,7 +1048,7 @@
         "Read scopes for inputs; write permission for persistent hypotheses; sensitive metrics may require consent."
       ],
       "resource_scenario": "Long period/lag/migraine/bootstrap and generic custom-metric analysis",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R21",
       "known_limits": [
