@@ -29,7 +29,7 @@ from check_native_schema import (
 from check_telegram_schema import BEFORE_REPAIR as BEFORE_TELEGRAM_REPAIR
 from check_telegram_schema import seed as seed_telegram_repair
 from check_telegram_schema import transported_rows
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -44,6 +44,14 @@ CASES = (
     ("delivery_fence", BEFORE_FENCE),
     ("current", CURRENT),
 )
+
+REJECTED_STATES = (
+    ("occupied", None),
+    ("unknown", ("unrecognized-fixture",)),
+    ("split_ledger", (BEFORE_FENCE, CURRENT)),
+    ("empty_ledger", ()),
+)
+
 
 REGISTRY = (
     """
@@ -80,6 +88,13 @@ REGISTRY = (
 )
 
 
+def database_names(prefix):
+    labels = [f"{label}_{kind}" for label, _ in CASES for kind in ("py", "rs")]
+    labels.extend(("erased", "invalid", "interrupted"))
+    labels.extend(label for label, _ in REJECTED_STATES)
+    return [f"{prefix}_{label}_test" for label in labels]
+
+
 def migration_env(engine, root):
     return {
         "GA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
@@ -101,6 +116,7 @@ def command(binary, engine, root, *args, succeeds=True):
         assert result.returncode == 0, result.stderr
     else:
         assert result.returncode == 1 and not result.stdout
+        return result.stderr.strip()
     return result.stdout.strip()
 
 
@@ -261,11 +277,46 @@ def interrupt_upgrade(binary, engine, root):
     print("Killed a migration before the final schema change, verified rollback, then retried")
 
 
+def verify_rejected_schema(binary, engine, root, revisions):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE unrelated_fixture(id integer PRIMARY KEY)"))
+        connection.execute(text("INSERT INTO unrelated_fixture VALUES (17)"))
+        if revisions is not None:
+            connection.execute(
+                text("CREATE TABLE alembic_version(version_num varchar(32) PRIMARY KEY)")
+            )
+            for revision in revisions:
+                connection.execute(
+                    text("INSERT INTO alembic_version VALUES (:revision)"), {"revision": revision}
+                )
+    reason = (
+        "A database without a Garmin AI revision must be empty"
+        if revisions is None
+        else "The recorded database revision is unsupported"
+    )
+    assert command(binary, engine, root, "--status", succeeds=False) == reason
+    assert not (root / "locks").exists()
+    assert command(binary, engine, root, succeeds=False) == reason
+    tables = {"unrelated_fixture"}
+    with engine.connect() as connection:
+        if revisions is not None:
+            tables.add("alembic_version")
+            assert set(connection.scalars(text("SELECT version_num FROM alembic_version"))) == set(
+                revisions
+            )
+        assert set(inspect(connection).get_table_names(schema="public")) == tables
+        assert connection.execute(text("SELECT id FROM unrelated_fixture")).scalars().all() == [17]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("name_prefix")
+    parser.add_argument("--list-databases", action="store_true")
     args = parser.parse_args()
+    if args.list_databases:
+        print("\n".join(database_names(args.name_prefix)))
+        return
     binary = args.binary.resolve(strict=True)
     opening = make_url(os.environ["GA_TEST_DATABASE_URL"])
     assert opening.database and opening.database.endswith("_test")
@@ -312,6 +363,11 @@ def main():
         seed(interrupted)
         with TemporaryDirectory() as root:
             interrupt_upgrade(binary, interrupted, Path(root).resolve())
+        for label, revisions in REJECTED_STATES:
+            target = engine_for(stack, opening.set(database=f"{args.name_prefix}_{label}_test"))
+            with TemporaryDirectory() as root:
+                verify_rejected_schema(binary, target, Path(root).resolve(), revisions)
+            print(f"The public migrator refused the {label} schema and preserved its records")
     print("Erased storage stayed fenced and invalid history rolled back")
 
 

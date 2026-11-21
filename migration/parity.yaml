@@ -1809,6 +1809,7 @@
         "migration/check_backup_commands.py",
         "migration/check_backup_volume_failure.py",
         "migration/check_native_schema.py",
+        "migration/check_native_migrate_command.py",
         "migration/check_backup_space.py",
         "migration/check_postgres_readiness.py",
         "migration/check_cutover_restore.py",
