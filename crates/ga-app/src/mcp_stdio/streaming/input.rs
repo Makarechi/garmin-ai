@@ -1,7 +1,10 @@
 use std::io;
 
 use rmcp::{
-    model::{CallToolRequest, ClientRequest, JsonRpcVersion2_0, RequestId},
+    model::{
+        CallToolRequest, ClientRequest, JsonRpcVersion2_0, PingRequest, RequestId,
+        RequestMetaObject,
+    },
     service::RxJsonRpcMessage,
     transport::async_rw::{JsonRpcMessageCodec, JsonRpcMessageCodecError},
 };
@@ -53,26 +56,53 @@ pub(super) fn decode(
     let normalized = normalize_nonfinite_numbers(&frame);
     let input = normalized.as_deref().unwrap_or(&frame);
     let json = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
-    // The SDK's general JSON-RPC decoder buffers the full payload for
-    // flattened/untagged variants. Read tool arguments directly into the
-    // SDK's typed request so a dense bounded argument list is parsed once.
+    // Read arguments directly into the SDK's request types. Its general
+    // decoder buffers flattened/untagged payloads, including unused ping data.
     if let Ok(envelope) = serde_json::from_slice::<RequestEnvelope<'_>>(json)
-        && envelope.method == "tools/call"
-        && let (Some(id), Some(params)) = (envelope.id, envelope.params)
-        && params.get().starts_with('{')
+        && let Some(id) = envelope.id
+        && let Some(request) = decode_request(&envelope.method, envelope.params)?
     {
-        let params = serde_json::from_str(params.get())?;
-        let mut request = CallToolRequest::new(params);
-        if let Some(meta) = request.params.meta.take() {
-            request.extensions.insert(meta);
-        }
-        let request = ClientRequest::CallToolRequest(request);
         return Ok(Some(RxJsonRpcMessage::<NativeServer>::request(request, id)));
     }
     if let Some(normalized) = normalized {
         frame = BytesMut::from(normalized.as_slice());
     }
     JsonRpcMessageCodec::new().decode(&mut frame)
+}
+
+fn decode_request(
+    method: &str,
+    params: Option<&RawValue>,
+) -> Result<Option<ClientRequest>, serde_json::Error> {
+    let params = params.map(RawValue::get);
+    if params.is_some_and(|params| !params.starts_with('{')) {
+        return Ok(None);
+    }
+    match (method, params) {
+        ("tools/call", Some(params)) => {
+            let mut request = CallToolRequest::new(serde_json::from_str(params)?);
+            if let Some(meta) = request.params.meta.take() {
+                request.extensions.insert(meta);
+            }
+            Ok(Some(ClientRequest::CallToolRequest(request)))
+        }
+        ("ping", params) => {
+            #[derive(Deserialize)]
+            struct PingParams {
+                #[serde(rename = "_meta")]
+                meta: Option<RequestMetaObject>,
+            }
+
+            let mut request = PingRequest::default();
+            if let Some(params) = params
+                && let Some(meta) = serde_json::from_str::<PingParams>(params)?.meta
+            {
+                request.extensions.insert(meta);
+            }
+            Ok(Some(ClientRequest::PingRequest(request)))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn normalize_nonfinite_numbers(line: &[u8]) -> Option<Vec<u8>> {
@@ -181,8 +211,6 @@ mod tests {
 
     #[test]
     fn tool_call_keeps_the_sdk_request_metadata() -> Result<(), Box<dyn std::error::Error>> {
-        use rmcp::model::RequestMetaObject;
-
         let message = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"events","_meta":{"progressToken":"synthetic"}}}"#;
         let sdk_message: RxJsonRpcMessage<NativeServer> = serde_json::from_slice(message)?;
         let actual = decode(BytesMut::from(message.as_slice()))?.ok_or("Missing MCP request")?;
@@ -195,6 +223,25 @@ mod tests {
         };
         assert_eq!(actual_id, expected_id);
         assert_eq!(actual.params, expected.params);
+        let expected = expected.extensions.get::<RequestMetaObject>();
+        assert!(expected.is_some());
+        assert_eq!(actual.extensions.get::<RequestMetaObject>(), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn ping_keeps_the_sdk_request_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let message = br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"progressToken":44},"unused":[42]}}"#;
+        let sdk_message: RxJsonRpcMessage<NativeServer> = serde_json::from_slice(message)?;
+        let actual = decode(BytesMut::from(message.as_slice()))?.ok_or("Missing MCP request")?;
+        let (
+            Some((ClientRequest::PingRequest(expected), expected_id)),
+            Some((ClientRequest::PingRequest(actual), actual_id)),
+        ) = (sdk_message.into_request(), actual.into_request())
+        else {
+            return Err("Expected a ping request".into());
+        };
+        assert_eq!(actual_id, expected_id);
         let expected = expected.extensions.get::<RequestMetaObject>();
         assert!(expected.is_some());
         assert_eq!(actual.extensions.get::<RequestMetaObject>(), expected);
