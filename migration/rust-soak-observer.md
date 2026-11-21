@@ -27,9 +27,12 @@ heartbeat and backup ages, queue summaries, and container resource counters.
 The default window runs for 604,800 seconds and samples once a minute.
 It measures both monotonic time and wall time, counts gaps and incomplete
 samples, and records an interruption if a selected container is replaced.
+The observer keeps the report, records `gapped_observation` and exits with
+status 1 if sampling missed the allowed cadence. Elapsed wall time by
+itself cannot establish continuous observation.
 Container start times, restart counts and Docker's OOM-killed flag let
-reviewers correlate a recovery with the recorded probes. A shorter smoke run
-uses `--duration-seconds` and records `short_observation` in its end record.
+reviewers correlate a recovery with the recorded probes. Use `--duration-seconds`
+for a shorter smoke run. A continuous smoke run ends with `short_observation`.
 
 Keep the report private, especially if the installation contains real data.
 Before accepting the release, inspect queue progress, nightly and weekly
