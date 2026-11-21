@@ -15,11 +15,20 @@ from uuid import UUID, uuid4
 
 from alembic import command
 from alembic.config import Config
+from check_cutover_restore import (
+    create_native_recovery_edit,
+    native_api,
+    pending_state,
+    prepare_state,
+    verify_python_can_continue,
+)
+from check_database_export import table_values
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+import garmin_ai
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.definitions import (
@@ -67,6 +76,9 @@ def engine_for_empty_test_database():
         if inspect(connection).get_table_names(schema="public"):
             raise ValueError("The test database must be newly created")
         config = Config("alembic.ini")
+        config.set_main_option(
+            "script_location", str(Path(garmin_ai.__file__).resolve().parent / "migrations")
+        )
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
         for table in Base.metadata.sorted_tables:
@@ -84,6 +96,7 @@ def settings(root, key):
         backup_dir=root / "backups",
         lock_dir=root / "locks",
         backup_key=key,
+        database_url=os.environ["GA_TEST_DATABASE_URL"],
     )
 
 
@@ -94,6 +107,20 @@ def boot_id():
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def database_digest(tables):
+    serialized = json.dumps(tables, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def verify_python_reference(expected):
+    package = Path(garmin_ai.__file__).resolve().parent
+    revision, root = subprocess.check_output(
+        ["git", "-C", str(package), "rev-parse", "HEAD", "--show-toplevel"], text=True
+    ).splitlines()
+    if revision != expected or package != Path(root).resolve() / "src" / "garmin_ai":
+        raise ValueError("Imported Python must come from the frozen reference checkout")
 
 
 def native_command(binary, paths, *arguments, succeeds=True):
@@ -118,7 +145,7 @@ def native_command(binary, paths, *arguments, succeeds=True):
     return result.stdout
 
 
-def make_backup(root, sha, *, native=None):
+def make_backup(root, sha, *, native=None, python_reference=None):
     engine = engine_for_empty_test_database()
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     key = base64.urlsafe_b64encode(os.urandom(32)).decode()
@@ -245,6 +272,12 @@ def make_backup(root, sha, *, native=None):
             "ingested_at": observation.ingested_at.isoformat(),
             "source_id": str(archived.id),
         }
+    native_edit = None
+    if native is not None:
+        prepare_state(engine, UUID(identity["source_id"]))
+        with native_api(native, root, paths) as api:
+            native_edit = create_native_recovery_edit(api)
+    database_sha256 = database_digest(table_values(engine))
     backup = root / "synthetic-backup.enc"
     counts = (
         create_backup(engine, paths, backup)
@@ -260,9 +293,12 @@ def make_backup(root, sha, *, native=None):
                 "commit": sha,
                 "source_boot_id": boot_id(),
                 "source_runtime": "python" if native is None else "rust",
+                "source_python_reference": python_reference,
                 "source_binary_sha256": digest(native) if native is not None else None,
                 "counts": counts,
                 "identity": identity,
+                "database_sha256": database_sha256,
+                "native_edit": native_edit,
                 "files": {
                     versioned_file: raw_hash,
                     "tokens/synthetic-token.json": digest(token),
@@ -276,7 +312,16 @@ def make_backup(root, sha, *, native=None):
     print("Synthetic encrypted backup created.")
 
 
-def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, evidence=None):
+def verify_backup(
+    root,
+    work,
+    sha,
+    *,
+    require_distinct_host=True,
+    native=None,
+    evidence=None,
+    python_reference=None,
+):
     manifest = json.loads((root / "synthetic-manifest.json").read_text())
     if manifest["commit"] != sha:
         raise ValueError("Backup and restore must use the same source revision")
@@ -327,6 +372,10 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
     shutil.copytree(restored / "raw", paths.data_dir / "raw")
     shutil.copytree(restored / "tokens", paths.token_dir)
     shutil.copy2(restored / "coverage-report.json", paths.data_dir / "coverage-report.json")
+    tables = table_values(engine)
+    restored_digest = database_digest(tables)
+    if restored_digest != manifest["database_sha256"]:
+        raise ValueError("Restored database contents differ")
     archive = LocalArchive(paths.data_dir / "raw")
     with Session(engine) as session, session.begin():
         ids = manifest["identity"]
@@ -392,6 +441,16 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
     with Session(engine) as restarted:
         assert restarted.get(Event, new_event_id).payload["note"] == "synthetic after restore"
         assert restarted.get(Event, UUID(ids["event_id"])).payload["note"] == "synthetic"
+    verified_revisions = None
+    if manifest["source_runtime"] == "rust" and native is None:
+        resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
+        verified_revisions = [1, manifest["native_edit"]["revision"], resumed["revision"]]
+        pending = pending_state(tables)
+        assert all(pending.values())
+        assert pending_state(table_values(engine)) == pending
+        print(
+            "Python preserved the acknowledged native edits and pending state on the recovery host."
+        )
     engine.dispose()
     if evidence is not None:
         evidence.write_text(
@@ -400,12 +459,16 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
                     "commit": sha,
                     "source_runtime": manifest["source_runtime"],
                     "restore_runtime": "python" if native is None else "rust",
+                    "source_python_reference": manifest["source_python_reference"],
+                    "restore_python_reference": python_reference,
                     "source_binary_sha256": manifest["source_binary_sha256"],
                     "restore_binary_sha256": digest(native) if native is not None else None,
                     "distinct_host": manifest["source_boot_id"] != boot_id(),
                     "backup_sha256": manifest["backup_sha256"],
                     "verified_table_count": len(counts),
                     "verified_file_count": len(manifest["files"]),
+                    "verified_database_sha256": restored_digest,
+                    "verified_event_revisions_after_rollback": verified_revisions,
                     "verified_restore_seconds": round(monotonic() - started, 3),
                 },
                 indent=2,
@@ -421,6 +484,7 @@ def main():
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--work", type=Path)
     parser.add_argument("--native-binary", type=Path)
+    parser.add_argument("--python-reference")
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
@@ -430,8 +494,17 @@ def main():
     ):
         parser.error("commit must identify the checked-out source revision")
     native = args.native_binary.resolve(strict=True) if args.native_binary is not None else None
+    if args.python_reference:
+        if native is not None or not re.fullmatch(r"[0-9a-f]{40}", args.python_reference):
+            parser.error("Specify a complete reference commit for a Python runtime")
+        verify_python_reference(args.python_reference)
     if args.mode == "create":
-        make_backup(args.artifact.resolve(), args.commit, native=native)
+        make_backup(
+            args.artifact.resolve(),
+            args.commit,
+            native=native,
+            python_reference=args.python_reference,
+        )
     else:
         if args.work is None:
             parser.error("restore needs --work")
@@ -441,6 +514,7 @@ def main():
             args.commit,
             native=native,
             evidence=args.evidence,
+            python_reference=args.python_reference,
         )
 
 

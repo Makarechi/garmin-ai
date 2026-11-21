@@ -31,7 +31,7 @@ jobs:
           python-version-file: .python-version
       - run: uv sync --locked
       - name: Create encrypted synthetic backup
-        run: PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py create "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA"
+        run: PYTHONPATH=src:migration uv run python tests/evals/offhost_restore_probe.py create "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA"
       # This artifact and its one-time key contain only data generated in this job.
       - uses: actions/upload-artifact@v4
         with:
@@ -70,4 +70,4 @@ jobs:
           name: synthetic-offhost-fixture
           path: ${{ runner.temp }}/synthetic-offhost
       - name: Authenticate and restore on a separate host
-        run: PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py restore "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" --commit "$GITHUB_SHA"
+        run: PYTHONPATH=src:migration uv run python tests/evals/offhost_restore_probe.py restore "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" --commit "$GITHUB_SHA"
