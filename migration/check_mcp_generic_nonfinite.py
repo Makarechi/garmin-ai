@@ -17,7 +17,7 @@ from check_generic_interfaces import (
 from check_mcp_stdio import PYTHON_SERVER
 from generic_threshold_fixtures import request as threshold_request
 
-INVALID_JSON = (b"NaN", b"Infinity", b"-Infinity")
+LEGACY_NONFINITE = (b"NaN", b"Infinity", b"-Infinity")
 OUT_OF_RANGE = (b"1e400", b"-1e400")
 FINITE = b"20.0"
 
@@ -60,7 +60,7 @@ async def exchange(command, environment):
         await send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         spec = threshold_request(source="measurement:basic", threshold="synthetic_threshold_value")
         outcomes = {}
-        for identity, number in enumerate((*INVALID_JSON, *OUT_OF_RANGE, FINITE), start=2):
+        for identity, number in enumerate((*LEGACY_NONFINITE, *OUT_OF_RANGE, FINITE), start=2):
             identity *= 2
             await send(
                 {
@@ -71,20 +71,15 @@ async def exchange(command, environment):
                 },
                 number,
             )
-            try:
-                response = await asyncio.wait_for(receive(), 2 if number in INVALID_JSON else 10)
-            except TimeoutError:
-                assert number in INVALID_JSON
-                response = None
-            if response is not None:
-                assert response["id"] == identity
-                result = response["result"]
-                if number == FINITE:
-                    assert result["isError"] is False
-                    assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
-                    result["content"][0]["text"] = result["structuredContent"]
-                else:
-                    assert result["isError"] is True
+            response = await asyncio.wait_for(receive(), 10)
+            assert response["id"] == identity
+            result = response["result"]
+            if number == FINITE:
+                assert result["isError"] is False
+                assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
+                result["content"][0]["text"] = result["structuredContent"]
+            else:
+                assert result["isError"] is True
             outcomes[number] = response
             await send({"jsonrpc": "2.0", "id": identity + 1, "method": "ping"})
             ping = await asyncio.wait_for(receive(), 10)
@@ -114,14 +109,11 @@ def main():
         }
         python = asyncio.run(exchange([sys.executable, "-c", PYTHON_SERVER], environment))
         rust = asyncio.run(exchange([args.binary.resolve(strict=True), "mcp"], environment))
-        for number in (*OUT_OF_RANGE, FINITE):
+        for number in (*LEGACY_NONFINITE, *OUT_OF_RANGE, FINITE):
             assert python[number] == rust[number], number
-        for number in INVALID_JSON:
-            assert python[number] is not None and rust[number] is None, number
         print(
-            "Matched both numeric overflows, a finite threshold result and recovery after invalid frames"
+            "Matched three legacy nonfinite tokens, both numeric overflows, a finite threshold and subsequent ping"
         )
-        print("Malformed NaN and Infinity frames retain the documented stdio response difference")
     finally:
         engine.dispose()
 

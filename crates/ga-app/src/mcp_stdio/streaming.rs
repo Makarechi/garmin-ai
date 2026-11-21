@@ -10,10 +10,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{
-    MAX_MESSAGE_BYTES,
-    protocol::{NativeServer, Response},
-};
+use super::protocol::{NativeServer, Response};
+
+mod input;
 
 const CHUNK_BYTES: usize = 16 * 1024;
 
@@ -25,15 +24,22 @@ enum Output {
     CodecError(Vec<u8>),
 }
 
-pub(super) struct StreamingStdio<R: AsyncRead> {
-    input: AsyncRwTransport<NativeServer, R, DuplexStream>,
+pub(super) struct StreamingStdio {
+    input: AsyncRwTransport<NativeServer, DuplexStream, DuplexStream>,
     output: mpsc::Sender<Output>,
+    reader: JoinHandle<io::Result<()>>,
     writer: JoinHandle<io::Result<()>>,
     errors: JoinHandle<()>,
 }
 
-impl<R: AsyncRead + Send + Unpin + 'static> StreamingStdio<R> {
-    pub(super) fn new<W: AsyncWrite + Send + Unpin + 'static>(input: R, output: W) -> Self {
+impl StreamingStdio {
+    pub(super) fn new<R, W>(input: R, output: W) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        let (input_writer, normalized_input) = tokio::io::duplex(CHUNK_BYTES);
+        let reader = tokio::spawn(input::copy_frames(input, input_writer));
         let (codec_writer, codec_reader) = tokio::io::duplex(1024);
         let (send, receive) = mpsc::channel(1);
         let writer = tokio::spawn(write_messages(output, receive));
@@ -54,16 +60,17 @@ impl<R: AsyncRead + Send + Unpin + 'static> StreamingStdio<R> {
             }
         });
         Self {
-            input: AsyncRwTransport::new(input, codec_writer)
-                .with_max_line_length(MAX_MESSAGE_BYTES),
+            input: AsyncRwTransport::new(normalized_input, codec_writer)
+                .with_max_line_length(input::MAX_NORMALIZED_BYTES),
             output: send,
+            reader,
             writer,
             errors,
         }
     }
 }
 
-impl<R: AsyncRead + Send + Unpin + 'static> Transport<NativeServer> for StreamingStdio<R> {
+impl Transport<NativeServer> for StreamingStdio {
     type Error = io::Error;
 
     fn send(
@@ -87,6 +94,7 @@ impl<R: AsyncRead + Send + Unpin + 'static> Transport<NativeServer> for Streamin
 
     async fn close(&mut self) -> io::Result<()> {
         let result = self.input.close().await;
+        self.reader.abort();
         self.errors.abort();
         self.writer.abort();
         result

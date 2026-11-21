@@ -1051,7 +1051,7 @@
       "verification": "e2e_synthetic",
       "owner_task": "R21",
       "known_limits": [
-        "Synthetic HTTP, MCP, timezone, numeric and analytical comparisons passed. The stdio response to malformed JSON containing NaN or Infinity still needs a release decision.",
+        "Synthetic HTTP, MCP, timezone, numeric and analytical comparisons passed, including stdio validation for the frozen reference's nonfinite inputs.",
         "Whole-runtime final-build R37 workloads and the actual seven-day soak remain pending."
       ],
       "approved_deviations": []
