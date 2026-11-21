@@ -104,6 +104,8 @@ jobs:
             target: rust
           - source: rust
             target: python
+          - source: python
+            target: python
     services:
       postgres:
         image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
@@ -131,14 +133,15 @@ jobs:
           ref: ${{ env.FROZEN_PYTHON_COMMIT }}
           path: .offhost-python-reference
           persist-credentials: false
-      - if: matrix.target == 'rust'
+      - if: matrix.target == 'rust' || matrix.source == matrix.target
         run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
       - uses: actions/download-artifact@v4
         with:
           name: native-offhost-fixture-${{ matrix.source }}
           path: ${{ runner.temp }}/synthetic-offhost
-      - name: Verify cross-runtime recovery on a separate host
+      - name: Verify recovery on a separate host
         env:
+          PROBE_SOURCE: ${{ matrix.source }}
           PROBE_RUNTIME: ${{ matrix.target }}
         run: |
           if [[ $PROBE_RUNTIME == rust ]]; then
@@ -147,6 +150,9 @@ jobs:
           else
             project=.offhost-python-reference
             args=(--python-reference "$FROZEN_PYTHON_COMMIT")
+          fi
+          if [[ $PROBE_SOURCE == "$PROBE_RUNTIME" ]]; then
+            args+=(--prewrite-inspector "$RUNNER_TEMP/garmin-ai-rust")
           fi
           PYTHONPATH="$project/src:migration" uv run --locked --project "$project" python tests/evals/offhost_restore_probe.py restore \
             "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" \

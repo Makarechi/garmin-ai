@@ -121,6 +121,12 @@ The pinned Python worker then takes the recovered job, replays its archived inpu
 publishes the expected daily total. The fixture checks the released lease, unchanged delivery
 receipts, and time through job completion. External integrations stay disabled in the fixture.
 
+A separate recovery job restores the pre-switch Python backup on another Linux host.
+The native read-only API sees the retained event, rejects a write, and leaves the
+recovered tables unchanged. The pinned Python release then accepts and deduplicates
+a new diary request and replays a job from the restored queue. The result records the
+native inspector's binary digest and the ordinary delivery and binding checks.
+
 ## Rehearse worker ownership
 
 Run `python migration/check_worker_cutover.py /path/to/garmin-ai /path/to/garmin-ai-rust`
