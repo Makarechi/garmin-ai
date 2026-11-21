@@ -1,4 +1,6 @@
 import io
+import json
+import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
@@ -115,3 +117,61 @@ def test_selected_api_receives_http_probes(monkeypatch, docker_installation):
         (f"{URL}/operations", "synthetic-token"),
     ]
     assert sample["failures"] == [] and sample["operations"]["runtime_heartbeat_age_seconds"] == 1
+
+
+@pytest.mark.parametrize(
+    ("duration", "interval", "missed_seconds", "window"),
+    [
+        (2, 1, 0, "short_observation"),
+        (observer.WEEK_SECONDS, 300, 0, "seven_day_observation"),
+        (observer.WEEK_SECONDS, 60, observer.WEEK_SECONDS, "gapped_observation"),
+    ],
+)
+def test_window_result_requires_contiguous_samples(
+    monkeypatch, tmp_path, docker_installation, duration, interval, missed_seconds, window
+):
+    now = 0
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds + (missed_seconds if now == 0 else 0)
+
+    monkeypatch.setattr(
+        observer, "time", SimpleNamespace(monotonic=lambda: now, time=lambda: now, sleep=sleep)
+    )
+    monkeypatch.setattr(observer, "sample", lambda *_args: {"failures": []})
+    monkeypatch.setenv("GA_SOAK_API_KEY", "synthetic-token")
+    report = tmp_path / "observed.jsonl"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "observe_native_soak.py",
+            "--compose-project",
+            ARGS.compose_project,
+            "--url",
+            URL,
+            "--image-id",
+            IMAGE,
+            "--revision",
+            REVISION,
+            "--report",
+            str(report),
+            "--duration-seconds",
+            str(duration),
+            "--interval-seconds",
+            str(interval),
+        ],
+    )
+
+    if missed_seconds:
+        with pytest.raises(SystemExit) as error:
+            observer.main()
+        assert error.value.code == 1
+    else:
+        observer.main()
+    records = [json.loads(line) for line in report.read_text().splitlines()]
+    assert records[0]["kind"] == "begin" and records[-1]["kind"] == "end"
+    assert records[-1]["observed_seconds"] >= duration
+    assert records[-1]["window"] == window
+    assert records[-1]["excessive_sample_gaps"] == int(bool(missed_seconds))

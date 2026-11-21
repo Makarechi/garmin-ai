@@ -250,6 +250,9 @@ def observe(args, output, token):
             raise RuntimeError("Initial health check failed: " + ", ".join(current["failures"]))
         if min(elapsed, wall_elapsed) >= args.duration_seconds:
             duration = min(elapsed, wall_elapsed)
+            window = "seven_day_observation" if duration >= WEEK_SECONDS else "short_observation"
+            if gap_samples:
+                window = "gapped_observation"
             record(
                 output,
                 "end",
@@ -257,9 +260,9 @@ def observe(args, output, token):
                 total_samples=total_samples,
                 incomplete_samples=incomplete_samples,
                 excessive_sample_gaps=gap_samples,
-                window="seven_day_observation" if duration >= WEEK_SECONDS else "short_observation",
+                window=window,
             )
-            return
+            return gap_samples == 0
         previous, previous_wall = clock, wall
         time.sleep(max(0, clock + args.interval_seconds - time.monotonic()))
 
@@ -298,7 +301,8 @@ def main():
     descriptor = os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
         try:
-            observe(args, output, token)
+            if not observe(args, output, token):
+                parser.exit(1, "Observation contains gaps in the requested window.\n")
         except (
             KeyboardInterrupt,
             OSError,
