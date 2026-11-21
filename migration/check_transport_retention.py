@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import subprocess
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -13,6 +13,7 @@ from uuid import UUID
 from capture_reference import isolated_engine
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
 from garmin_ai.config import Settings
@@ -37,6 +38,8 @@ from garmin_ai.storage_files import exclusive_files
 NOW = datetime.now(UTC).replace(microsecond=0)
 OLD = NOW - timedelta(days=100)
 RECENT = NOW - timedelta(days=5)
+COMPACT_OLD = OLD.strftime("%Y%m%dT%H%M%SZ")
+WEEK_OLD = OLD.strftime("%G-W%V-%uT%H%M%SZ")
 
 
 def seed(engine):
@@ -95,7 +98,7 @@ def seed(engine):
                 AppState(key="outbox:update:-77:0", value={"status": "sent", "message_id": 43}),
                 AppState(
                     key="conversation:pending-old",
-                    value={"created_at": OLD.isoformat(), "text": "synthetic old"},
+                    value={"created_at": COMPACT_OLD, "text": "synthetic old"},
                 ),
                 AppState(
                     key="conversation:pending-naive",
@@ -105,10 +108,14 @@ def seed(engine):
                     key="conversation:pending-recent",
                     value={"created_at": RECENT.isoformat(), "text": "synthetic"},
                 ),
+                AppState(
+                    key="conversation:pending-unknown",
+                    value={"created_at": COMPACT_OLD.replace("Z", "z"), "text": "synthetic"},
+                ),
             ]
         )
         for index, answered in enumerate(
-            [RECENT.isoformat(), "not-a-timestamp", OLD.isoformat(), OLD.isoformat()], 101
+            [RECENT.isoformat(), "not-a-timestamp", COMPACT_OLD, WEEK_OLD], 101
         ):
             session.add(
                 PendingQuestion(
@@ -301,21 +308,103 @@ def run(binary, root, reference, native):
         assert snapshot(reference) == snapshot(native)
         return actual
 
+    def wrapped_uuid(value):
+        return f"urn:uuid:{{{UUID(int=value)}}}"
+
+    offset = timezone(timedelta(hours=-2, microseconds=-500_000))
+    offset_old = OLD.astimezone(offset).isoformat()
+    for date, identity in [
+        (COMPACT_OLD, " +７ "),
+        (WEEK_OLD, 7.75),
+        (offset_old, "0_7"),
+        (OLD.isoformat(), True),
+        (OLD.isoformat(), 2**63 - 1),
+        (OLD.isoformat(), -(2**63)),
+        ((OLD - timedelta(microseconds=1)).isoformat(), 2**63 - 1),
+        ((OLD + timedelta(microseconds=1)).isoformat(), -(2**63)),
+        ("00010101T000000+01", 0),
+        ("99991231T235959-01", 0),
+    ]:
+        compare(cursor=json.dumps([date, identity]), limit=1)
+    compare(cursor=json.dumps({COMPACT_OLD: None, " +７ ": None}), limit=1)
+    compare(neutral_cursor=json.dumps([WEEK_OLD, wrapped_uuid(201)]), limit=1)
+    for date in (offset_old, "00010101T000000+01", "99991231T235959-01"):
+        result = compare(
+            neutral_cursor=json.dumps(
+                {
+                    "inbound_after": [date, wrapped_uuid(203)],
+                    "inbound_done": True,
+                    "orphan_after": {COMPACT_OLD: None, wrapped_uuid(250): None},
+                }
+            ),
+            limit=1,
+        )
+        assert json.loads(result["next_neutral_cursor"])["inbound_after"] == [
+            datetime.fromisoformat(date).isoformat(),
+            str(UUID(int=203)),
+        ]
+
+    for bad in (
+        {"cursor": json.dumps([OLD.isoformat().replace("+00:00", "z"), 7])},
+        {"cursor": json.dumps([OLD.isoformat(), 10**80])},
+        {"cursor": json.dumps([OLD.isoformat(), -(10**80)])},
+        {"neutral_cursor": json.dumps([COMPACT_OLD[:-1], wrapped_uuid(201)])},
+        {"answer_cursor": f"URN:UUID:{UUID(int=103)}"},
+    ):
+        call(binary, root, config, apply=True, succeeds=False, **bad)
+        try:
+            with Session(reference) as session, session.begin():
+                prune_telegram_text(session, now=NOW, apply=True, **bad)
+        except (ValueError, DataError):
+            pass
+        else:
+            raise AssertionError(f"Python accepted an invalid resume position: {bad}")
+
     cursor = {}
     for _ in range(5):
         page = compare(limit=2, **cursor)
         cursor = {key: page["next_" + key] for key in ("cursor", "answer_cursor", "neutral_cursor")}
     assert snapshot(native) == previous
+    resumed = compare(
+        cursor=json.dumps([WEEK_OLD, " +８ "]),
+        answer_cursor=wrapped_uuid(103),
+        neutral_cursor=json.dumps(
+            {
+                "inbound_after": [offset_old, wrapped_uuid(203)],
+                "inbound_done": True,
+                "orphan_after": [COMPACT_OLD, wrapped_uuid(250)],
+            }
+        ),
+        limit=1,
+        apply=True,
+    )
+    assert resumed["eligible_updates"] == 1
+    assert resumed["eligible_neutral_messages"] == 1
+    assert resumed["eligible_proactive_answers"] == 1
+    resumed_snapshot = snapshot(native)
+    assert [row[0] for row in resumed_snapshot["telegram"] if row[2].get("_text_redacted")] == [9]
+    assert [row[0].int for row in resumed_snapshot["outbox"] if row[3].get("_text_redacted")] == [
+        251
+    ]
+    assert [
+        identity.int
+        for identity, evidence in resumed_snapshot["answers"]
+        if "answer_text" not in evidence
+    ] == [104]
     redacted = compare(apply=True)
-    assert redacted["eligible_updates"] == 2
-    assert redacted["eligible_neutral_messages"] == 4
-    assert redacted["eligible_proactive_answers"] == 2
+    assert redacted["eligible_updates"] == 1
+    assert redacted["eligible_neutral_messages"] == 3
+    assert redacted["eligible_proactive_answers"] == 1
     current = snapshot(native)
     assert current["state"]["telegram:reply:-77"]["text"] == REDACTED_REPLY
     assert current["state"]["outbox:update:-77:0"] == previous["state"]["outbox:update:-77:0"]
     assert current["delivery"] == previous["delivery"]
     assert current["facts"] == previous["facts"]
     assert current["audits"] == previous["audits"]
+    assert "conversation:pending-old" not in current["state"]
+    for suffix in ("naive", "recent", "unknown"):
+        key = "conversation:pending-" + suffix
+        assert current["state"][key] == previous["state"][key]
     assert compare(apply=True)["eligible_updates"] == 0
     assert snapshot(native) == current
     print(

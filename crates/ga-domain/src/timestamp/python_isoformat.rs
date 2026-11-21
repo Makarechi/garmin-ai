@@ -1,4 +1,6 @@
-use time::{Date, Weekday};
+use std::fmt;
+
+use time::{Date, Duration, PrimitiveDateTime, Weekday};
 
 // Compatibility details follow CPython 3.15.2 Modules/_datetimemodule.c.
 // This Rust adaptation preserves microsecond positions for the application's aware cursors.
@@ -6,7 +8,7 @@ use time::{Date, Weekday};
 
 /// The legacy cursor uses datetime.fromisoformat, including basic/week dates,
 /// arbitrary one-character separators and fractional-second UTC offsets.
-pub(super) fn parse(text: &str) -> Option<i64> {
+pub(super) fn parse(text: &str) -> Option<ParsedDateTime> {
     let characters: Vec<_> = text.chars().collect();
     let separator = date_length(&characters)?;
     let separator_byte = text.char_indices().nth(separator)?.0;
@@ -25,11 +27,29 @@ pub(super) fn parse(text: &str) -> Option<i64> {
         };
         sign * clock_microseconds(&clock[zone + 1..], false)?
     };
-    if local == 86_400_000_000 {
-        date.next_day()?;
+    Some(ParsedDateTime {
+        local: date.midnight().checked_add(Duration::microseconds(local))?,
+        offset,
+    })
+}
+
+pub(super) struct ParsedDateTime {
+    local: PrimitiveDateTime,
+    offset: i64,
+}
+
+impl ParsedDateTime {
+    pub(super) fn utc_microseconds(&self) -> i64 {
+        self.local.assume_utc().unix_timestamp() * 1_000_000 + i64::from(self.local.microsecond())
+            - self.offset
     }
-    let midnight = date.midnight().assume_utc().unix_timestamp() * 1_000_000;
-    midnight.checked_add(local - offset)
+}
+
+impl fmt::Display for ParsedDateTime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        super::fmt_local(formatter, self.local)?;
+        super::fmt_offset(formatter, self.offset)
+    }
 }
 
 fn date_length(text: &[char]) -> Option<usize> {
