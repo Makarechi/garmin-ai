@@ -113,8 +113,10 @@ recovery on the final image with the independent recovery environment and queue 
 
 The native off-host workflow creates and corrects a record through the Rust API before
 exporting a backup. The recovery job authenticates it on a different Linux host and checks
-the contents of every restored table. The Python API retries the original request, preserves
-the pending work and delivery state, and writes the third revision of the same record.
+the contents of every restored table. The workflow uses the pinned Python checkout and
+locked dependencies for Python backup and recovery. On return to Python the API retries
+the original request, preserves the pending work and delivery state, and writes the third
+revision of the same record.
 
 ## Rehearse worker ownership
 

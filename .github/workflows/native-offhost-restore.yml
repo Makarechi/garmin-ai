@@ -31,6 +31,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FROZEN_PYTHON_COMMIT: ee3a14a48a6ad30c1085951bac2f53c9088c2450
+
 jobs:
   capture:
     name: Off-host backup (${{ matrix.runtime }})
@@ -59,16 +62,26 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version-file: .python-version
-      - run: uv sync --locked
+      - if: matrix.runtime == 'python'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FROZEN_PYTHON_COMMIT }}
+          path: .offhost-python-reference
+          persist-credentials: false
       - if: matrix.runtime == 'rust'
         run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
       - name: Create encrypted synthetic backup
         env:
           PROBE_RUNTIME: ${{ matrix.runtime }}
         run: |
-          args=()
-          if [[ $PROBE_RUNTIME == rust ]]; then args+=(--native-binary "$RUNNER_TEMP/garmin-ai-rust"); fi
-          PYTHONPATH=src:migration uv run python tests/evals/offhost_restore_probe.py create \
+          if [[ $PROBE_RUNTIME == rust ]]; then
+            project=.
+            args=(--native-binary "$RUNNER_TEMP/garmin-ai-rust")
+          else
+            project=.offhost-python-reference
+            args=(--python-reference "$FROZEN_PYTHON_COMMIT")
+          fi
+          PYTHONPATH="$project/src:migration" uv run --locked --project "$project" python tests/evals/offhost_restore_probe.py create \
             "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA" "${args[@]}"
       # The short-lived key and archive contain only data generated in this job.
       - uses: actions/upload-artifact@v4
@@ -110,7 +123,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version-file: .python-version
-      - run: uv sync --locked
+      - if: matrix.target == 'python'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FROZEN_PYTHON_COMMIT }}
+          path: .offhost-python-reference
+          persist-credentials: false
       - if: matrix.target == 'rust'
         run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
       - uses: actions/download-artifact@v4
@@ -121,9 +139,14 @@ jobs:
         env:
           PROBE_RUNTIME: ${{ matrix.target }}
         run: |
-          args=()
-          if [[ $PROBE_RUNTIME == rust ]]; then args+=(--native-binary "$RUNNER_TEMP/garmin-ai-rust"); fi
-          PYTHONPATH=src:migration uv run python tests/evals/offhost_restore_probe.py restore \
+          if [[ $PROBE_RUNTIME == rust ]]; then
+            project=.
+            args=(--native-binary "$RUNNER_TEMP/garmin-ai-rust")
+          else
+            project=.offhost-python-reference
+            args=(--python-reference "$FROZEN_PYTHON_COMMIT")
+          fi
+          PYTHONPATH="$project/src:migration" uv run --locked --project "$project" python tests/evals/offhost_restore_probe.py restore \
             "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" \
             --commit "$GITHUB_SHA" --evidence "$RUNNER_TEMP/native-offhost-result.json" "${args[@]}"
       - uses: actions/upload-artifact@v4

@@ -28,6 +28,7 @@ from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+import garmin_ai
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.definitions import (
@@ -75,6 +76,9 @@ def engine_for_empty_test_database():
         if inspect(connection).get_table_names(schema="public"):
             raise ValueError("The test database must be newly created")
         config = Config("alembic.ini")
+        config.set_main_option(
+            "script_location", str(Path(garmin_ai.__file__).resolve().parent / "migrations")
+        )
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
         for table in Base.metadata.sorted_tables:
@@ -110,6 +114,15 @@ def database_digest(tables):
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
+def verify_python_reference(expected):
+    package = Path(garmin_ai.__file__).resolve().parent
+    revision, root = subprocess.check_output(
+        ["git", "-C", str(package), "rev-parse", "HEAD", "--show-toplevel"], text=True
+    ).splitlines()
+    if revision != expected or package != Path(root).resolve() / "src" / "garmin_ai":
+        raise ValueError("Imported Python must come from the frozen reference checkout")
+
+
 def native_command(binary, paths, *arguments, succeeds=True):
     result = subprocess.run(
         [binary, *map(str, arguments)],
@@ -132,7 +145,7 @@ def native_command(binary, paths, *arguments, succeeds=True):
     return result.stdout
 
 
-def make_backup(root, sha, *, native=None):
+def make_backup(root, sha, *, native=None, python_reference=None):
     engine = engine_for_empty_test_database()
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     key = base64.urlsafe_b64encode(os.urandom(32)).decode()
@@ -280,6 +293,7 @@ def make_backup(root, sha, *, native=None):
                 "commit": sha,
                 "source_boot_id": boot_id(),
                 "source_runtime": "python" if native is None else "rust",
+                "source_python_reference": python_reference,
                 "source_binary_sha256": digest(native) if native is not None else None,
                 "counts": counts,
                 "identity": identity,
@@ -298,7 +312,16 @@ def make_backup(root, sha, *, native=None):
     print("Synthetic encrypted backup created.")
 
 
-def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, evidence=None):
+def verify_backup(
+    root,
+    work,
+    sha,
+    *,
+    require_distinct_host=True,
+    native=None,
+    evidence=None,
+    python_reference=None,
+):
     manifest = json.loads((root / "synthetic-manifest.json").read_text())
     if manifest["commit"] != sha:
         raise ValueError("Backup and restore must use the same source revision")
@@ -436,6 +459,8 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
                     "commit": sha,
                     "source_runtime": manifest["source_runtime"],
                     "restore_runtime": "python" if native is None else "rust",
+                    "source_python_reference": manifest["source_python_reference"],
+                    "restore_python_reference": python_reference,
                     "source_binary_sha256": manifest["source_binary_sha256"],
                     "restore_binary_sha256": digest(native) if native is not None else None,
                     "distinct_host": manifest["source_boot_id"] != boot_id(),
@@ -459,6 +484,7 @@ def main():
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--work", type=Path)
     parser.add_argument("--native-binary", type=Path)
+    parser.add_argument("--python-reference")
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
@@ -468,8 +494,17 @@ def main():
     ):
         parser.error("commit must identify the checked-out source revision")
     native = args.native_binary.resolve(strict=True) if args.native_binary is not None else None
+    if args.python_reference:
+        if native is not None or not re.fullmatch(r"[0-9a-f]{40}", args.python_reference):
+            parser.error("Specify a complete reference commit for a Python runtime")
+        verify_python_reference(args.python_reference)
     if args.mode == "create":
-        make_backup(args.artifact.resolve(), args.commit, native=native)
+        make_backup(
+            args.artifact.resolve(),
+            args.commit,
+            native=native,
+            python_reference=args.python_reference,
+        )
     else:
         if args.work is None:
             parser.error("restore needs --work")
@@ -479,6 +514,7 @@ def main():
             args.commit,
             native=native,
             evidence=args.evidence,
+            python_reference=args.python_reference,
         )
 
 
