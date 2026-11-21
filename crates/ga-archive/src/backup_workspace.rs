@@ -9,6 +9,7 @@ use std::{
 use rustix::{
     fs::{self, AtFlags, Mode},
     io::Errno,
+    process::geteuid,
 };
 
 use crate::{
@@ -17,21 +18,61 @@ use crate::{
     storage_files::{StorageFilesError, acquire_lock, open_directory},
 };
 
+pub(crate) const PLAINTEXT_DIRECTORY: &str = ".garmin-ai-plaintext";
 const ACTIVE: &str = "active";
+const OPERATION: &str = "operation.lock";
 
 pub struct BackupWorkspace {
-    directory: OwnedFd,
-    active: OwnedFd,
+    _workspace: PlaintextWorkspace,
     export: PathBuf,
-    _operation: OwnedFd,
 }
 
 impl BackupWorkspace {
     pub fn acquire(data: &Path) -> Result<Self, StorageFilesError> {
-        let root = data.join("backup-work").join(".garmin-ai-plaintext");
+        let root = data.join("backup-work").join(PLAINTEXT_DIRECTORY);
         let directory = open_directory(&root)?;
         fs::fchmod(&directory, DIRECTORY_MODE)?;
-        let operation = acquire_lock(&directory, "operation.lock")?;
+        Ok(Self {
+            _workspace: PlaintextWorkspace::acquire(directory)?,
+            export: root.join(ACTIVE).join("database.jsonl.gz"),
+        })
+    }
+
+    pub fn export_path(&self) -> &Path {
+        &self.export
+    }
+}
+
+pub(crate) struct PlaintextWorkspace {
+    directory: OwnedFd,
+    pub(crate) active: OwnedFd,
+    _operation: OwnedFd,
+}
+
+impl PlaintextWorkspace {
+    pub(crate) fn for_recovery(parent: &OwnedFd) -> Result<Self, StorageFilesError> {
+        let directory = ensure_directory(parent, PLAINTEXT_DIRECTORY.as_ref())?;
+        let stat = fs::fstat(&directory)?;
+        if stat.st_uid != geteuid().as_raw()
+            || Mode::from_raw_mode(stat.st_mode).intersects(Mode::RWXG | Mode::RWXO)
+        {
+            return Err(StorageFilesError::Unsafe);
+        }
+        // A managed operation creates its persistent lock before the active tree.
+        if fs::statat(&directory, ACTIVE, AtFlags::SYMLINK_NOFOLLOW).is_ok()
+            && matches!(
+                fs::statat(&directory, OPERATION, AtFlags::SYMLINK_NOFOLLOW),
+                Err(Errno::NOENT)
+            )
+        {
+            return Err(StorageFilesError::Unsafe);
+        }
+        Self::acquire(directory)
+    }
+
+    fn acquire(directory: OwnedFd) -> Result<Self, StorageFilesError> {
+        // Python's backup and recovery commands use the same private operation lock.
+        let operation = acquire_lock(&directory, OPERATION)?;
         match fs::openat(&directory, ACTIVE, DIRECTORY_READ, Mode::empty()) {
             Ok(previous) => discard(&directory, &previous).map_err(ArchiveError::from)?,
             Err(Errno::NOENT) => {}
@@ -44,17 +85,12 @@ impl BackupWorkspace {
         Ok(Self {
             directory,
             active,
-            export: root.join(ACTIVE).join("database.jsonl.gz"),
             _operation: operation,
         })
     }
-
-    pub fn export_path(&self) -> &Path {
-        &self.export
-    }
 }
 
-impl Drop for BackupWorkspace {
+impl Drop for PlaintextWorkspace {
     fn drop(&mut self) {
         let _ = discard(&self.directory, &self.active);
     }

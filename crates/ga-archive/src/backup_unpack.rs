@@ -19,9 +19,8 @@ use self::format::{Member, invalid};
 use crate::{
     DIRECTORY_MODE, DIRECTORY_READ, FILE_MODE,
     backup_bundle::{MAX_DIRECTORY_DEPTH, normalized},
-    backup_envelope::{
-        BackupDigest, BackupError, PrivateStageDirectory, authenticate_source, parent_file,
-    },
+    backup_envelope::{BackupDigest, BackupError, authenticate_source, parent_file},
+    backup_workspace::{PLAINTEXT_DIRECTORY, PlaintextWorkspace},
     ensure_directory,
     staging::{Stage, remove_contents},
 };
@@ -38,9 +37,23 @@ pub fn unpack_backup(
     token_dir: &Path,
 ) -> Result<BackupDigest, BackupError> {
     let target = normalized(destination)?;
-    for source in [data_dir, token_dir] {
-        let protected = resolve_protected_root(source)?;
-        if target.starts_with(&protected) || protected.starts_with(&target) {
+    let scratch = target
+        .parent()
+        .ok_or(BackupError::InvalidPath)?
+        .join(PLAINTEXT_DIRECTORY);
+    if target
+        .components()
+        .any(|part| part.as_os_str() == PLAINTEXT_DIRECTORY)
+        || normalized(source)?.starts_with(&scratch)
+    {
+        return Err(BackupError::InvalidPath);
+    }
+    for protected in [data_dir, token_dir] {
+        let protected = resolve_protected_root(protected)?;
+        if [&target, &scratch]
+            .into_iter()
+            .any(|path| path.starts_with(&protected) || protected.starts_with(path))
+        {
             return Err(BackupError::InvalidPath);
         }
     }
@@ -50,12 +63,12 @@ pub fn unpack_backup(
         Err(Errno::NOENT) => {}
         Err(error) => return Err(error.into()),
     }
-    let workspace = PrivateStageDirectory::create(&parent)?;
-    let mut staged = Stage::create_readable(&workspace.handle)?;
+    let workspace = PlaintextWorkspace::for_recovery(&parent).map_err(BackupError::Workspace)?;
+    let mut staged = Stage::create_readable(&workspace.active)?;
     let digest = authenticate_source(source, key, &mut staged.file)?;
     staged.file.rewind()?;
     let mut raw = BufReader::with_capacity(64 * 1024, &mut staged.file);
-    let recovery = RecoveryTree::create(&workspace.handle)?;
+    let recovery = RecoveryTree::create(&workspace.active)?;
     if raw.fill_buf()?.starts_with(&[0x1f, 0x8b]) {
         extract(&mut MultiGzDecoder::new(raw), &recovery.root)?;
     } else {
@@ -63,7 +76,7 @@ pub fn unpack_backup(
     }
     fs::fsync(&recovery.root)?;
     match fs::renameat_with(
-        &workspace.handle,
+        &workspace.active,
         RECOVERY_TREE,
         &parent,
         name,
