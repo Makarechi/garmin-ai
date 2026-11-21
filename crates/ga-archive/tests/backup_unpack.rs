@@ -350,3 +350,117 @@ fn recovery_workspace_never_contains_the_input_output_or_live_storage() -> Resul
     assert!(!workspace.join("operation.lock").exists());
     Ok(())
 }
+
+#[test]
+fn does_not_reap_an_aliased_backup_or_live_directory() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let parent = root.join("Recovery");
+    fs::create_dir(&parent)?;
+    let alias = root.join("RECOVERY");
+    if !alias.exists() {
+        // Exercise the actual lookup behavior when the fixture filesystem folds case.
+        return Ok(());
+    }
+
+    let workspace = parent.join(".garmin-ai-plaintext");
+    let active = workspace.join("active");
+    let aliased_active = alias.join(".GARMIN-AI-PLAINTEXT/ACTIVE");
+    fs::create_dir_all(&active)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    fs::write(workspace.join("operation.lock"), b"")?;
+    let original = active.join("archive");
+    fs::write(&original, b"preserve the selected backup")?;
+    let standalone = root.join("archive");
+    fs::write(&standalone, b"another backup")?;
+    let destination = parent.join("restored");
+    let data = root.join("data");
+    let tokens = root.join("tokens");
+
+    for (input, data, tokens) in [
+        (aliased_active.join("ARCHIVE"), data.clone(), tokens.clone()),
+        (standalone.clone(), aliased_active.clone(), tokens),
+        (standalone, data, aliased_active.join("future-tokens")),
+    ] {
+        let result = unpack_backup(&input, &destination, &FIXTURE_BYTES, &data, &tokens);
+        assert_eq!(fs::read(&original)?, b"preserve the selected backup");
+        assert!(
+            matches!(result, Err(BackupError::InvalidPath)),
+            "{result:?}"
+        );
+        assert!(!destination.exists());
+    }
+    assert!(matches!(
+        unpack_backup(
+            &root.join("archive"),
+            &parent.join("inside-live-storage"),
+            &FIXTURE_BYTES,
+            &alias,
+            &root.join("tokens"),
+        ),
+        Err(BackupError::InvalidPath)
+    ));
+    assert_eq!(fs::read(&original)?, b"preserve the selected backup");
+    Ok(())
+}
+
+#[test]
+fn rejects_a_redirected_source_before_reclaiming_staging() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let workspace = root.join(".garmin-ai-plaintext");
+    let active = workspace.join("active");
+    fs::create_dir_all(&active)?;
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))?;
+    fs::write(workspace.join("operation.lock"), b"")?;
+    let original = active.join("archive");
+    fs::write(&original, b"preserve the selected backup")?;
+    let source = root.join("redirected-backup");
+    symlink(&original, &source)?;
+
+    let destination = root.join("recovered");
+    assert!(matches!(
+        unpack_backup(
+            &source,
+            &destination,
+            &FIXTURE_BYTES,
+            &root.join("data"),
+            &root.join("tokens")
+        ),
+        Err(BackupError::InvalidPath)
+    ));
+    assert_eq!(fs::read(original)?, b"preserve the selected backup");
+    assert!(!destination.exists());
+    Ok(())
+}
+
+#[test]
+fn does_not_publish_into_a_reserved_workspace_name() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let source = root.join("backup");
+    write_encrypted_backup(&source, &FIXTURE_BYTES, |writer| {
+        let mut archive = Builder::new(writer);
+        append(
+            &mut archive,
+            "database.jsonl.gz",
+            EntryType::Regular,
+            b"verified synthetic export",
+        )?;
+        archive.finish()
+    })?;
+
+    let destination = root.join(".GARMIN-AI-PLAINTEXT/active/recovered");
+    assert!(matches!(
+        unpack_backup(
+            &source,
+            &destination,
+            &FIXTURE_BYTES,
+            &root.join("data"),
+            &root.join("tokens"),
+        ),
+        Err(BackupError::InvalidPath)
+    ));
+    assert!(!root.join(".GARMIN-AI-PLAINTEXT").exists());
+    Ok(())
+}

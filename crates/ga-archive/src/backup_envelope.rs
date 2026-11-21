@@ -138,7 +138,15 @@ pub(crate) fn authenticate_source(
     key: &[u8; 32],
     plain: &mut dyn Write,
 ) -> Result<BackupDigest, BackupError> {
-    let mut file = open_source(path)?;
+    authenticate_open_source(path, open_source(path)?, key, plain)
+}
+
+pub(crate) fn authenticate_open_source(
+    path: &Path,
+    mut file: File,
+    key: &[u8; 32],
+    plain: &mut dyn Write,
+) -> Result<BackupDigest, BackupError> {
     let original = revision(&file)?;
     let result = read_authenticated(&mut file, key, plain)?;
     if revision(&file)? != original || revision(&open_source(path)?)? != original {
