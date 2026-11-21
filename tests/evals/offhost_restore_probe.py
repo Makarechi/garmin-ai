@@ -22,10 +22,12 @@ from check_cutover_restore import (
     native_api,
     pending_state,
     prepare_state,
+    previous_api,
     verify_python_can_continue,
     wait_for_runtime_lease_release,
 )
 from check_database_export import table_values
+from check_diary_http import NOTE, PATH, headers
 from check_worker_cutover import lease, ready, wait_for_jobs, worker
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import create_engine, func, inspect, select
@@ -130,7 +132,7 @@ def verify_python_reference(expected):
         raise ValueError("Imported Python must come from the frozen reference checkout")
 
 
-def resume_restored_replay(engine, paths, work, pending, source_id, event_id):
+def resume_restored_replay(engine, paths, work, pending, source_id, event_id, revision):
     (job,) = pending["jobs"]
     assert job["status"] == "pending" and job["attempts"] == 0
     assert job["payload"]["raw_ref"] == str(source_id)
@@ -169,7 +171,7 @@ def resume_restored_replay(engine, paths, work, pending, source_id, event_id):
         assert source.parser_version == PARSER_VERSION and source.status == "normalized"
         assert day.steps == source.payload["totalSteps"]
         assert outcome.value["status"] == "normalized"
-        assert session.get(Event, event_id).revision == 3
+        assert session.get(Event, event_id).revision == revision
         data = LocalArchive(paths.data_dir / "raw").read(source.archive_key)
         assert hashlib.sha256(data).hexdigest() == source.payload_hash
         result = {
@@ -184,6 +186,40 @@ def resume_restored_replay(engine, paths, work, pending, source_id, event_id):
         row for row in after_replay["app_state"] if row["key"] != "replay:source_scan_cursor"
     ] == [row for row in pending["app_state"] if row["key"] != "replay:source_scan_cursor"]
     return {**result, "worker_resume_seconds": resumed_seconds}
+
+
+def inspect_prewrite_recovery(binary, engine, paths, work, event_id, tables):
+    event_path = f"{PATH}/{event_id}"
+    assert lease(engine) is None
+    with native_api(binary, work, paths, read_only=True) as inspector:
+        assert lease(engine) is not None
+        retained = inspector.get(event_path, headers=headers("reader"))
+        assert retained.status_code == 200
+        assert retained.json()["id"] == event_id and retained.json()["revision"] == 1
+        assert inspector.post(PATH, json=NOTE, headers=headers("both")).status_code == 404
+        assert inspector.put(event_path, json=NOTE, headers=headers("both")).status_code == 405
+    wait_for_runtime_lease_release(engine)
+    assert table_values(engine) == tables
+
+
+def verify_prewrite_python_api(engine, paths, event_id):
+    with previous_api(paths, engine) as previous:
+        assert previous.get("/health/ready").status_code == 200
+        retained = previous.get(f"{PATH}/{event_id}", headers=headers("reader"))
+        assert retained.status_code == 200 and retained.json()["revision"] == 1
+        request = headers("both", "synthetic-prewrite-rollback")
+        created = previous.post(PATH, json=NOTE, headers=request)
+        assert created.status_code == 200
+        event = created.json()
+        assert event["revision"] == 1 and event["id"] != event_id
+        repeated = previous.post(PATH, json=NOTE, headers=request)
+        assert repeated.status_code == 200 and repeated.json() == event
+    with Session(engine) as session:
+        identity = UUID(event["id"])
+        assert session.get(Event, identity).revision == 1
+        actions = session.scalars(select(Audit.action).where(Audit.event_id == identity)).all()
+        assert actions == ["create"]
+    return event["revision"]
 
 
 def native_command(binary, paths, *arguments, succeeds=True):
@@ -335,16 +371,16 @@ def make_backup(root, sha, *, native=None, python_reference=None):
             "ingested_at": observation.ingested_at.isoformat(),
             "source_id": str(archived.id),
         }
+    source_id = UUID(identity["source_id"])
+    prepare_state(engine, source_id, account=profile_fingerprint({"profileId": 12345}))
     native_edit = None
     if native is not None:
-        source_id = UUID(identity["source_id"])
-        prepare_state(engine, source_id, account=profile_fingerprint({"profileId": 12345}))
         with native_api(native, root, paths) as api:
             native_edit = create_native_recovery_edit(api)
-        with Session(engine) as session, session.begin():
-            session.get(SourcePayload, source_id).parser_version -= 1
-            session.flush()
-            assert schedule_replay(session, datetime.now(UTC)) == 1
+    with Session(engine) as session, session.begin():
+        session.get(SourcePayload, source_id).parser_version -= 1
+        session.flush()
+        assert schedule_replay(session, datetime.now(UTC)) == 1
     database_sha256 = database_digest(table_values(engine))
     backup = root / "synthetic-backup.enc"
     counts = (
@@ -389,10 +425,21 @@ def verify_backup(
     native=None,
     evidence=None,
     python_reference=None,
+    prewrite_inspector=None,
 ):
     manifest = json.loads((root / "synthetic-manifest.json").read_text())
     if manifest["commit"] != sha:
         raise ValueError("Backup and restore must use the same source revision")
+    if prewrite_inspector is not None and (
+        native is not None
+        or not python_reference
+        or manifest["source_runtime"] != "python"
+        or manifest["source_python_reference"] != python_reference
+        or manifest["native_edit"] is not None
+    ):
+        raise ValueError(
+            "Pre-write recovery requires a backup and restore from the same frozen Python runtime"
+        )
     if require_distinct_host and manifest["source_boot_id"] == boot_id():
         raise ValueError("Restore must run on a different host")
     backup = root / "synthetic-backup.enc"
@@ -444,9 +491,16 @@ def verify_backup(
     restored_digest = database_digest(tables)
     if restored_digest != manifest["database_sha256"]:
         raise ValueError("Restored database contents differ")
+    ids = manifest["identity"]
+    prewrite_result = None
+    if prewrite_inspector is not None:
+        inspect_prewrite_recovery(prewrite_inspector, engine, paths, work, ids["event_id"], tables)
+        prewrite_result = {
+            "native_inspector_sha256": digest(prewrite_inspector),
+            "python_new_event_revision": verify_prewrite_python_api(engine, paths, ids["event_id"]),
+        }
     archive = LocalArchive(paths.data_dir / "raw")
     with Session(engine) as session, session.begin():
-        ids = manifest["identity"]
         definition = session.get(EventDefinition, UUID(ids["definition_id"]))
         event = session.get(Event, UUID(ids["event_id"]))
         observation = session.get(MetricObservation, UUID(ids["observation_id"]))
@@ -511,18 +565,19 @@ def verify_backup(
         assert restarted.get(Event, UUID(ids["event_id"])).payload["note"] == "synthetic"
     verified_revisions = None
     restored_replay = None
-    if manifest["source_runtime"] == "rust" and native is None:
-        resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
-        verified_revisions = [1, manifest["native_edit"]["revision"], resumed["revision"]]
+    if native is None and (manifest["source_runtime"] == "rust" or prewrite_result is not None):
+        event_id, revision = UUID(ids["event_id"]), 1
+        if manifest["source_runtime"] == "rust":
+            resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
+            event_id, revision = UUID(resumed["id"]), resumed["revision"]
+            verified_revisions = [1, manifest["native_edit"]["revision"], revision]
         pending = pending_state(tables)
         assert all(pending.values())
         assert pending_state(table_values(engine)) == pending
         restored_replay = resume_restored_replay(
-            engine, paths, work, pending, UUID(ids["source_id"]), UUID(resumed["id"])
+            engine, paths, work, pending, UUID(ids["source_id"]), event_id, revision
         )
-        print(
-            "Python preserved the acknowledged native edits and pending state on the recovery host."
-        )
+        print("Python resumed the archived job and preserved retained work on the recovery host.")
     engine.dispose()
     if evidence is not None:
         evidence.write_text(
@@ -542,6 +597,7 @@ def verify_backup(
                     "verified_database_sha256": restored_digest,
                     "verified_event_revisions_after_rollback": verified_revisions,
                     "verified_replay_after_rollback": restored_replay,
+                    "verified_prewrite_rollback": prewrite_result,
                     "verified_restore_seconds": round(monotonic() - started, 3),
                 },
                 indent=2,
@@ -558,6 +614,7 @@ def main():
     parser.add_argument("--work", type=Path)
     parser.add_argument("--native-binary", type=Path)
     parser.add_argument("--python-reference")
+    parser.add_argument("--prewrite-inspector", type=Path)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--commit", required=True)
     args = parser.parse_args()
@@ -571,6 +628,10 @@ def main():
         if native is not None or not re.fullmatch(r"[0-9a-f]{40}", args.python_reference):
             parser.error("Specify a complete reference commit for a Python runtime")
         verify_python_reference(args.python_reference)
+    if args.prewrite_inspector is not None and (
+        args.mode != "restore" or not args.python_reference
+    ):
+        parser.error("--prewrite-inspector needs a restore using the frozen Python runtime")
     if args.mode == "create":
         make_backup(
             args.artifact.resolve(),
@@ -588,6 +649,9 @@ def main():
             native=native,
             evidence=args.evidence,
             python_reference=args.python_reference,
+            prewrite_inspector=(
+                args.prewrite_inspector.resolve(strict=True) if args.prewrite_inspector else None
+            ),
         )
 
 
