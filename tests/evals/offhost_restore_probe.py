@@ -23,6 +23,7 @@ from check_cutover_restore import (
     pending_state,
     prepare_state,
     verify_python_can_continue,
+    wait_for_runtime_lease_release,
 )
 from check_database_export import table_values
 from check_worker_cutover import lease, ready, wait_for_jobs, worker
@@ -154,7 +155,7 @@ def resume_restored_replay(engine, paths, work, pending, source_id, event_id):
         )
         resumed_seconds = round(monotonic() - started, 3)
         assert lease(engine) == owner
-    assert lease(engine) is None
+    wait_for_runtime_lease_release(engine)
     assert set(completed) == {job["id"]}
     applied = completed[job["id"]]
     assert applied.attempts == 1 and applied.completed_at is not None

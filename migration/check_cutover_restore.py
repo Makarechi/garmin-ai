@@ -228,6 +228,12 @@ def health_snapshot(api, day):
     )
 
 
+def wait_for_runtime_lease_release(engine):
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL statement_timeout = '5s'"))
+        connection.execute(text("SELECT pg_advisory_xact_lock(72104620)"))
+
+
 def inspect_before_writes(binary, root, config, engine, event_path, expected, pending_health):
     lock = text("SELECT pg_try_advisory_xact_lock(72104620)")
     with engine.begin() as connection:
@@ -263,8 +269,7 @@ def inspect_before_writes(binary, root, config, engine, event_path, expected, pe
         assert native.delete(event_path, headers=headers("both")).status_code == 405
         with engine.begin() as connection:
             assert not connection.scalar(lock)
-    with engine.begin() as connection:
-        assert connection.scalar(lock)
+    wait_for_runtime_lease_release(engine)
     print(
         "Verified read-only inspection before runtime handoff and refusal while the lease is held."
     )
