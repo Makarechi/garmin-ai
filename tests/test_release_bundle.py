@@ -7,7 +7,9 @@ import os
 import posixpath
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tarfile
 from contextlib import nullcontext
 from importlib.util import module_from_spec, spec_from_file_location
@@ -226,6 +228,69 @@ def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
     assert (archive.read_bytes(), checksum.read_bytes()) != previous
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     assert checksum.read_text() == f"{digest}  {archive.name}\n"
+
+
+@pytest.mark.parametrize("interruption", ["archive", "checksum"])
+def test_rebuild_recovers_after_interrupted_publication(tmp_path, monkeypatch, interruption):
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: None)
+    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime="rust")
+    original = archive.read_bytes(), checksum.read_bytes()
+    replacement = IMAGE.split("@")[0] + "@sha256:" + "c" * 64
+    child = """
+import os
+import signal
+import sys
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+builder, output, revision, image, stop_at = sys.argv[1:]
+spec = spec_from_file_location("release_builder", builder)
+module = module_from_spec(spec)
+spec.loader.exec_module(module)
+module.verify_native_image = lambda *_: None
+replace = Path.replace
+
+def replace_then_kill(path, target):
+    result = replace(path, target)
+    if target.name == stop_at:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
+
+Path.replace = replace_then_kill
+module.build_bundle(image, sha=revision, output=Path(output), runtime="rust")
+"""
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child,
+            str(ROOT / "scripts/build_release_bundle.py"),
+            str(tmp_path),
+            SHA,
+            replacement,
+            (archive if interruption == "archive" else checksum).name,
+        ],
+        timeout=20,
+        check=False,
+    )
+    assert interrupted.returncode == -signal.SIGKILL
+    expected = (
+        original if interruption == "archive" else (archive.read_bytes(), checksum.read_bytes())
+    )
+
+    def full_volume(*_args):
+        raise OSError(errno.ENOSPC, "synthetic volume full during retry")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(bundle_module, "_add", full_volume)
+        with pytest.raises(OSError) as failed:
+            build_bundle(replacement, sha=SHA, output=tmp_path, runtime="rust")
+        assert failed.value.errno == errno.ENOSPC
+    assert (archive.read_bytes(), checksum.read_bytes()) == expected
+    assert (
+        checksum.read_text()
+        == f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
+    )
 
 
 def test_bundled_markdown_links_resolve_within_bundle():

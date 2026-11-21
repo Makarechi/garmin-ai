@@ -10,6 +10,7 @@ import re
 import subprocess
 import tarfile
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -181,7 +182,11 @@ def build_bundle(
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{prefix}.tar.gz"
     checksum = output / f"{archive.name}.sha256"
-    with TemporaryDirectory(prefix=".release-", dir=output) as temporary:
+    previous = archive.with_name(f".{archive.name}.previous")
+    with (
+        _recoverable_output(archive, checksum, previous) as directory,
+        TemporaryDirectory(prefix=".release-", dir=output) as temporary,
+    ):
         staging = Path(temporary)
         staged_archive = staging / archive.name
         staged_checksum = staging / checksum.name
@@ -218,33 +223,72 @@ def build_bundle(
             stream.write(f"{digest}  {archive.name}\n")
             stream.flush()
             os.fsync(stream.fileno())
-        _publish(staged_archive, staged_checksum, archive, checksum)
+        _publish(staged_archive, staged_checksum, archive, checksum, previous, directory)
     return archive, checksum
 
 
-def _publish(staged_archive: Path, staged_checksum: Path, archive: Path, checksum: Path) -> None:
-    # Lock the output directory so concurrent builds publish one complete pair at a time.
+def _matches_checksum(path: Path, recorded: str, name: str) -> bool:
+    try:
+        with path.open("rb") as contents:
+            digest = hashlib.file_digest(contents, "sha256").hexdigest()
+    except FileNotFoundError:
+        return False
+    return recorded == f"{digest}  {name}\n"
+
+
+@contextmanager
+def _recoverable_output(archive: Path, checksum: Path, previous: Path):
+    # Serialize recovery and publication with other builds using this output directory.
     directory = os.open(archive.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(directory, fcntl.LOCK_EX)
-        previous = staged_archive.parent / ".previous-archive"
-        try:
-            os.link(archive, previous, follow_symlinks=False)
-        except FileNotFoundError:
-            had_previous = False
-        else:
-            had_previous = True
-        staged_archive.replace(archive)
-        try:
-            staged_checksum.replace(checksum)
-        except OSError:
-            if had_previous:
+        if previous.exists() or previous.is_symlink():
+            if not checksum.exists():
                 previous.replace(archive)
             else:
-                archive.unlink()
-            raise
+                recorded = checksum.read_text()
+                if _matches_checksum(archive, recorded, archive.name):
+                    previous.unlink()
+                elif _matches_checksum(previous, recorded, archive.name):
+                    previous.replace(archive)
+                else:
+                    raise ValueError(
+                        f"Could not recover the interrupted publication of {archive.name}"
+                    )
+            os.fsync(directory)
+        yield directory
     finally:
         os.close(directory)
+
+
+def _publish(
+    staged_archive: Path,
+    staged_checksum: Path,
+    archive: Path,
+    checksum: Path,
+    previous: Path,
+    directory: int,
+) -> None:
+    try:
+        os.link(archive, previous, follow_symlinks=False)
+    except FileNotFoundError:
+        had_previous = False
+    else:
+        had_previous = True
+        os.fsync(directory)
+    staged_archive.replace(archive)
+    try:
+        staged_checksum.replace(checksum)
+    except OSError:
+        if had_previous:
+            previous.replace(archive)
+        else:
+            archive.unlink()
+        os.fsync(directory)
+        raise
+    os.fsync(directory)
+    if had_previous:
+        previous.unlink()
 
 
 def _add(tar: tarfile.TarFile, name: str, data: bytes, mode: int) -> None:

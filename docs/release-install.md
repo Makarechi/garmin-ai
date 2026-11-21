@@ -35,9 +35,11 @@ produces a `.tar.gz` and a SHA-256 checksum in `dist/`. The archive contains no
 credentials, health records or original data. The manifest records the exact Git
 SHA, application and database image digests, schema revision and candidate
 status. The builder writes the archive and checksum to a temporary directory
-before replacing any previous output. The manifest keeps `validated_platforms`
-empty until each platform is tested against the exact image digest. The checksum
-does not authenticate an untrusted download source.
+before replacing any previous output. After an interrupted replacement, a retry
+recovers the pair that matches the published checksum before staging new output.
+The manifest keeps `validated_platforms` empty until each platform is tested
+against the exact image digest. The checksum does not authenticate an untrusted
+download source.
 
 Before public distribution, collect third-party license texts and required
 notices for the final image and database image, test the actual target platforms,
