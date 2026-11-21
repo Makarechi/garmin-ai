@@ -16,8 +16,9 @@ use rustix::{
 };
 
 use crate::{
-    ArchiveError, DIRECTORY_READ, FILE_MODE, backup_bundle::normalized, ensure_directory,
+    ArchiveError, DIRECTORY_READ, FILE_MODE, ensure_directory,
     staging::Stage,
+    storage_path::{normalized, storage_overlaps},
 };
 
 const LOCK: &str = "storage.lock";
@@ -81,12 +82,7 @@ pub fn validate_backup_layout(
     let [data, tokens, locks, backups] =
         [data, tokens, locks, backups].map(|path| normalized(path).map_err(ArchiveError::from));
     let (data, tokens, locks, backups) = (data?, tokens?, locks?, backups?);
-    if data.starts_with(&tokens)
-        || tokens.starts_with(&data)
-        || [&locks, &backups]
-            .iter()
-            .any(|path| path.starts_with(&data) || path.starts_with(&tokens))
-    {
+    if storage_overlaps(&data, &tokens, &locks, &backups).map_err(ArchiveError::from)? {
         return Err(StorageFilesError::Overlap);
     }
     Ok(())
