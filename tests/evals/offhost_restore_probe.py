@@ -8,13 +8,15 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import UTC, datetime, timedelta
+import sys
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from uuid import UUID, uuid4
 
 from alembic import command
 from alembic.config import Config
+from check_backup_commands import cli_environment
 from check_cutover_restore import (
     create_native_recovery_edit,
     native_api,
@@ -23,12 +25,14 @@ from check_cutover_restore import (
     verify_python_can_continue,
 )
 from check_database_export import table_values
+from check_worker_cutover import lease, ready, wait_for_jobs, worker
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 import garmin_ai
+from garmin_ai.accounts import profile_fingerprint
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.definitions import (
@@ -40,10 +44,12 @@ from garmin_ai.definitions import (
 )
 from garmin_ai.metric_definitions import aggregate_metric, record_observation
 from garmin_ai.models import (
+    AppState,
     Audit,
     Base,
     Event,
     EventDefinition,
+    HealthDay,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -51,7 +57,7 @@ from garmin_ai.models import (
     SourcePayload,
 )
 from garmin_ai.operations import create_backup, restore_database, unpack_backup
-from garmin_ai.replay import PARSER_VERSION
+from garmin_ai.replay import PARSER_VERSION, schedule_replay
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share, version_sharing_allowed
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -121,6 +127,62 @@ def verify_python_reference(expected):
     ).splitlines()
     if revision != expected or package != Path(root).resolve() / "src" / "garmin_ai":
         raise ValueError("Imported Python must come from the frozen reference checkout")
+
+
+def resume_restored_replay(engine, paths, work, pending, source_id, event_id):
+    (job,) = pending["jobs"]
+    assert job["status"] == "pending" and job["attempts"] == 0
+    assert job["payload"]["raw_ref"] == str(source_id)
+    assert lease(engine) is None
+    environment = {
+        **cli_environment(paths),
+        "GA_BACKUP_KEY": "",
+        "GA_INTEGRATIONS": "[]",
+        "GA_TIMEZONE": "UTC",
+        "PYTHONPATH": str(Path(garmin_ai.__file__).resolve().parents[1]),
+    }
+    command = Path(sys.executable).with_name("garmin-ai").resolve(strict=True)
+    started = monotonic()
+    with worker(command, work, environment) as process:
+        owner = ready(engine, process, native=False)
+        completed = wait_for_jobs(
+            engine,
+            process,
+            lambda jobs: job["id"] in jobs and jobs[job["id"]].status == "done",
+            seconds=25,
+            failure="The Python worker did not finish the restored replay",
+        )
+        resumed_seconds = round(monotonic() - started, 3)
+        assert lease(engine) == owner
+    assert lease(engine) is None
+    assert set(completed) == {job["id"]}
+    applied = completed[job["id"]]
+    assert applied.attempts == 1 and applied.completed_at is not None
+    assert (
+        applied.lease_token is None and applied.lease_until is None and applied.last_error is None
+    )
+    with Session(engine) as session:
+        source = session.get(SourcePayload, source_id)
+        day = session.get(HealthDay, date.fromisoformat(source.source_key))
+        outcome = session.get(AppState, f"replay:{source_id}:{PARSER_VERSION}")
+        assert source.parser_version == PARSER_VERSION and source.status == "normalized"
+        assert day.steps == source.payload["totalSteps"]
+        assert outcome.value["status"] == "normalized"
+        assert session.get(Event, event_id).revision == 3
+        data = LocalArchive(paths.data_dir / "raw").read(source.archive_key)
+        assert hashlib.sha256(data).hexdigest() == source.payload_hash
+        result = {
+            "attempts": applied.attempts,
+            "parser_version": source.parser_version,
+            "steps": day.steps,
+        }
+    after_replay = pending_state(table_values(engine))
+    for table in pending.keys() - {"jobs", "app_state"}:
+        assert after_replay[table] == pending[table], table
+    assert [
+        row for row in after_replay["app_state"] if row["key"] != "replay:source_scan_cursor"
+    ] == [row for row in pending["app_state"] if row["key"] != "replay:source_scan_cursor"]
+    return {**result, "worker_resume_seconds": resumed_seconds}
 
 
 def native_command(binary, paths, *arguments, succeeds=True):
@@ -274,9 +336,14 @@ def make_backup(root, sha, *, native=None, python_reference=None):
         }
     native_edit = None
     if native is not None:
-        prepare_state(engine, UUID(identity["source_id"]))
+        source_id = UUID(identity["source_id"])
+        prepare_state(engine, source_id, account=profile_fingerprint({"profileId": 12345}))
         with native_api(native, root, paths) as api:
             native_edit = create_native_recovery_edit(api)
+        with Session(engine) as session, session.begin():
+            session.get(SourcePayload, source_id).parser_version -= 1
+            session.flush()
+            assert schedule_replay(session, datetime.now(UTC)) == 1
     database_sha256 = database_digest(table_values(engine))
     backup = root / "synthetic-backup.enc"
     counts = (
@@ -442,12 +509,16 @@ def verify_backup(
         assert restarted.get(Event, new_event_id).payload["note"] == "synthetic after restore"
         assert restarted.get(Event, UUID(ids["event_id"])).payload["note"] == "synthetic"
     verified_revisions = None
+    restored_replay = None
     if manifest["source_runtime"] == "rust" and native is None:
         resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
         verified_revisions = [1, manifest["native_edit"]["revision"], resumed["revision"]]
         pending = pending_state(tables)
         assert all(pending.values())
         assert pending_state(table_values(engine)) == pending
+        restored_replay = resume_restored_replay(
+            engine, paths, work, pending, UUID(ids["source_id"]), UUID(resumed["id"])
+        )
         print(
             "Python preserved the acknowledged native edits and pending state on the recovery host."
         )
@@ -469,6 +540,7 @@ def verify_backup(
                     "verified_file_count": len(manifest["files"]),
                     "verified_database_sha256": restored_digest,
                     "verified_event_revisions_after_rollback": verified_revisions,
+                    "verified_replay_after_rollback": restored_replay,
                     "verified_restore_seconds": round(monotonic() - started, 3),
                 },
                 indent=2,

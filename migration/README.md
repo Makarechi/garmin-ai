@@ -117,6 +117,9 @@ the contents of every restored table. The workflow uses the pinned Python checko
 locked dependencies for Python backup and recovery. On return to Python the API retries
 the original request, preserves the pending work and delivery state, and writes the third
 revision of the same record.
+The pinned Python worker then takes the recovered job, replays its archived input once and
+publishes the expected daily total. The fixture checks the released lease, unchanged delivery
+receipts, and time through job completion. External integrations stay disabled in the fixture.
 
 ## Rehearse worker ownership
 
