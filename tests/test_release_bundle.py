@@ -8,9 +8,11 @@ import re
 import shutil
 import subprocess
 import tarfile
+from contextlib import nullcontext
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -29,9 +31,45 @@ verification_spec = spec_from_file_location(
 )
 verification_module = module_from_spec(verification_spec)
 verification_spec.loader.exec_module(verification_module)
+inspect_spec = spec_from_file_location(
+    "verify_release_install", ROOT / "scripts/verify_release_install.py"
+)
+inspect_module = module_from_spec(inspect_spec)
+inspect_spec.loader.exec_module(inspect_module)
 
 IMAGE = "ghcr.io/example/garmin-ai@sha256:" + "a" * 64
 SHA = "b" * 40
+
+
+def test_inspection_retries_connection_reset_while_the_api_starts(monkeypatch):
+    paths = []
+
+    def request(_url, path, _key, _body=None):
+        paths.append(path)
+        if path == "/health/ready":
+            if len(paths) == 1:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return {"status": "ready"}
+        if path == "/tools":
+            return [{"name": "events"}]
+        assert path == "/events"
+        raise HTTPError(path, 404, "Not Found", {}, None)
+
+    process = SimpleNamespace(pid=1234, poll=lambda: None, wait=lambda **_options: 0)
+    monkeypatch.setattr(
+        inspect_module,
+        "subprocess",
+        SimpleNamespace(
+            Popen=lambda *_args, **_options: nullcontext(process),
+            DEVNULL=subprocess.DEVNULL,
+        ),
+    )
+    monkeypatch.setattr(inspect_module, "dotenv_values", lambda _path: {"GA_API_KEY": "synthetic"})
+    monkeypatch.setattr(inspect_module, "request", request)
+    monkeypatch.setattr(inspect_module, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(inspect_module, "os", SimpleNamespace(killpg=lambda *_args: None))
+    inspect_module.inspect_bundle("http://127.0.0.1:8080", ["./install.sh"])
+    assert paths == ["/health/ready", "/health/ready", "/tools", "/events"]
 
 
 def native_config(revision, entrypoint=None):
