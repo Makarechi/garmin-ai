@@ -47,7 +47,9 @@ def test_observation_pins_the_inspected_local_socket(monkeypatch):
 
 @pytest.fixture
 def docker_installation(monkeypatch):
-    config = SimpleNamespace(label=REVISION, port=URL.removeprefix("http://"), api_running=True)
+    config = SimpleNamespace(
+        label=REVISION, port=URL.removeprefix("http://"), api_running=True, oom_kills=0
+    )
 
     def run_docker(*args):
         if args[0] == "ps":
@@ -59,7 +61,10 @@ def docker_installation(monkeypatch):
             api_stopped = args[-1] == CONTAINERS["api"] and not config.api_running
             return f"{IMAGE} {str(not api_stopped).lower()} 0 2026-11-21T08:00:00Z {str(api_stopped).lower()}"
         if args[0] == "exec":
-            return "\n".join(f"{field}\n0" for field in observer.CGROUP_FIELDS)
+            fields = dict.fromkeys(observer.CGROUP_FIELDS, "0")
+            count = config.oom_kills if args[1] == CONTAINERS["worker"] else 0
+            fields["memory.events"] = f"low 0\noom_kill {count}"
+            return "\n".join(f"{field}\n{value}" for field, value in fields.items())
         if args[0] == "port":
             return config.port
         if args[:2] == ("image", "inspect"):
@@ -84,7 +89,7 @@ def test_stopped_api_records_oom_and_skips_http(monkeypatch, docker_installation
     config.api_running = False
     monkeypatch.setattr(observer, "http_json", lambda *_args: pytest.fail("Unexpected HTTP probe"))
     sample = observer.sample(docker, ARGS, CONTAINERS, "synthetic-token")
-    assert sample["failures"] == ["api:stopped"]
+    assert set(sample["failures"]) == {"api:stopped", "api:oom_killed"}
     assert sample["containers"]["api"]["oom_killed"] is True
     assert sample["probe_ms"] == {} and sample["operations"] is None
 
@@ -120,26 +125,55 @@ def test_selected_api_receives_http_probes(monkeypatch, docker_installation):
 
 
 @pytest.mark.parametrize(
-    ("duration", "interval", "missed_seconds", "window"),
+    ("duration", "interval", "missed_seconds", "event", "window", "failure"),
     [
-        (2, 1, 0, "short_observation"),
-        (observer.WEEK_SECONDS, 300, 0, "seven_day_observation"),
-        (observer.WEEK_SECONDS, 60, observer.WEEK_SECONDS, "gapped_observation"),
+        (2, 1, 0, None, "short_observation", None),
+        (observer.WEEK_SECONDS, 300, 0, None, "seven_day_observation", None),
+        (observer.WEEK_SECONDS, 60, observer.WEEK_SECONDS, None, "gapped_observation", None),
+        (4, 1, 0, "readiness", "unhealthy_observation", "ready:OSError"),
+        (4, 1, 0, "oom", "unhealthy_observation", "worker:oom_kills_increased"),
+        (4, 1, 0, "reset", "unhealthy_observation", "worker:oom_counter_reset"),
+        (4, 1, 5, "oom", "gapped_observation", "worker:oom_kills_increased"),
     ],
 )
 def test_window_result_requires_contiguous_samples(
-    monkeypatch, tmp_path, docker_installation, duration, interval, missed_seconds, window
+    monkeypatch,
+    tmp_path,
+    docker_installation,
+    duration,
+    interval,
+    missed_seconds,
+    event,
+    window,
+    failure,
 ):
     now = 0
+    _, config = docker_installation
+    config.oom_kills = 4
 
     def sleep(seconds):
         nonlocal now
-        now += seconds + (missed_seconds if now == 0 else 0)
+        if now == 0:
+            now += missed_seconds
+            if event == "oom":
+                config.oom_kills += 1
+            if event == "reset":
+                config.oom_kills = 0
+        now += seconds
+
+    def http(url, token=None):
+        if url.endswith("/operations"):
+            operations = dict.fromkeys(observer.OPERATIONS_FIELDS)
+            operations["runtime_heartbeat_age_seconds"] = 2
+            return operations, 0.5
+        if url.endswith("/ready") and now == interval and event == "readiness":
+            raise OSError("Synthetic API outage")
+        return {"status": "alive" if url.endswith("/live") else "ready"}, 0.5
 
     monkeypatch.setattr(
         observer, "time", SimpleNamespace(monotonic=lambda: now, time=lambda: now, sleep=sleep)
     )
-    monkeypatch.setattr(observer, "sample", lambda *_args: {"failures": []})
+    monkeypatch.setattr(observer, "http_json", http)
     monkeypatch.setenv("GA_SOAK_API_KEY", "synthetic-token")
     report = tmp_path / "observed.jsonl"
     monkeypatch.setattr(
@@ -164,7 +198,7 @@ def test_window_result_requires_contiguous_samples(
         ],
     )
 
-    if missed_seconds:
+    if missed_seconds or event:
         with pytest.raises(SystemExit) as error:
             observer.main()
         assert error.value.code == 1
@@ -175,3 +209,7 @@ def test_window_result_requires_contiguous_samples(
     assert records[-1]["observed_seconds"] >= duration
     assert records[-1]["window"] == window
     assert records[-1]["excessive_sample_gaps"] == int(bool(missed_seconds))
+    assert records[-1]["incomplete_samples"] == int(bool(failure))
+    assert [issue for sample in records[1:-1] for issue in sample["failures"]] == (
+        [failure] if failure else []
+    )
