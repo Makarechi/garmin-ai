@@ -1,14 +1,17 @@
 """Build a source-free, digest-pinned Docker Compose installation candidate."""
 
 import argparse
+import fcntl
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import tarfile
 import tomllib
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from garmin_ai.operations import REVISION
 
@@ -177,35 +180,71 @@ def build_bundle(
     prefix = f"garmin-ai-{version}{native_suffix}-{sha[:8]}"
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{prefix}.tar.gz"
-    with archive.open("wb") as raw:
-        with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-            for name in NATIVE_CONTENTS if native else CONTENTS:
-                source = compose_source if name == "compose.release.yml" else ROOT / name
-                if native and name == "compose.gcp.yml":
-                    source = ROOT / "compose.rust-gcp.yml"
-                data = source.read_bytes()
-                executable = name in {
-                    "install.sh",
-                    "deploy/gcp/bootstrap.sh",
-                    "deploy/gcp/install-native-cleanup.sh",
-                }
-                _add(tar, f"{prefix}/{name}", data, 0o755 if executable else 0o644)
-            runtime_setting = "GA_APP_RUNTIME=rust\n" if native else ""
-            _add(
-                tar,
-                f"{prefix}/release.env",
-                f"GA_APP_IMAGE={app_image}\n{runtime_setting}".encode(),
-                0o644,
-            )
-            _add(
-                tar,
-                f"{prefix}/release-manifest.json",
-                (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
-                0o644,
-            )
     checksum = output / f"{archive.name}.sha256"
-    checksum.write_text(f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
+    with TemporaryDirectory(prefix=".release-", dir=output) as temporary:
+        staging = Path(temporary)
+        staged_archive = staging / archive.name
+        staged_checksum = staging / checksum.name
+        with staged_archive.open("wb") as raw:
+            with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+                for name in NATIVE_CONTENTS if native else CONTENTS:
+                    source = compose_source if name == "compose.release.yml" else ROOT / name
+                    if native and name == "compose.gcp.yml":
+                        source = ROOT / "compose.rust-gcp.yml"
+                    data = source.read_bytes()
+                    executable = name in {
+                        "install.sh",
+                        "deploy/gcp/bootstrap.sh",
+                        "deploy/gcp/install-native-cleanup.sh",
+                    }
+                    _add(tar, f"{prefix}/{name}", data, 0o755 if executable else 0o644)
+                runtime_setting = "GA_APP_RUNTIME=rust\n" if native else ""
+                _add(
+                    tar,
+                    f"{prefix}/release.env",
+                    f"GA_APP_IMAGE={app_image}\n{runtime_setting}".encode(),
+                    0o644,
+                )
+                _add(
+                    tar,
+                    f"{prefix}/release-manifest.json",
+                    (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
+                    0o644,
+                )
+            raw.flush()
+            os.fsync(raw.fileno())
+        digest = hashlib.sha256(staged_archive.read_bytes()).hexdigest()
+        with staged_checksum.open("w") as stream:
+            stream.write(f"{digest}  {archive.name}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish(staged_archive, staged_checksum, archive, checksum)
     return archive, checksum
+
+
+def _publish(staged_archive: Path, staged_checksum: Path, archive: Path, checksum: Path) -> None:
+    # Lock the output directory so concurrent builds publish one complete pair at a time.
+    directory = os.open(archive.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        previous = staged_archive.parent / ".previous-archive"
+        try:
+            os.link(archive, previous, follow_symlinks=False)
+        except FileNotFoundError:
+            had_previous = False
+        else:
+            had_previous = True
+        staged_archive.replace(archive)
+        try:
+            staged_checksum.replace(checksum)
+        except OSError:
+            if had_previous:
+                previous.replace(archive)
+            else:
+                archive.unlink()
+            raise
+    finally:
+        os.close(directory)
 
 
 def _add(tar: tarfile.TarFile, name: str, data: bytes, mode: int) -> None:

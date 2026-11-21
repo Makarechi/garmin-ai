@@ -1,5 +1,6 @@
 """Verify the source-free installation candidate and its Compose graph."""
 
+import errno
 import hashlib
 import json
 import os
@@ -184,6 +185,47 @@ def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path):
             "community-pilot-kit.md",
         ):
             assert any(name.endswith("docs/" + doc) for name in bundle.getnames())
+
+
+@pytest.mark.parametrize("failure", ["archive_write", "checksum_publish"])
+def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
+    tmp_path, monkeypatch, failure
+):
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: None)
+    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime="rust")
+    previous = archive.read_bytes(), checksum.read_bytes()
+    replacement = IMAGE.split("@")[0] + "@sha256:" + "c" * 64
+    add = bundle_module._add
+    replace = Path.replace
+
+    def fail_during_archive(tar, name, data, mode):
+        add(tar, name, data, mode)
+        raise OSError(errno.ENOSPC, "synthetic volume full")
+
+    def fail_when_publishing_checksum(path, target):
+        if target == checksum:
+            raise OSError(errno.ENOSPC, "synthetic volume full")
+        return replace(path, target)
+
+    with monkeypatch.context() as patch:
+        if failure == "archive_write":
+            patch.setattr(bundle_module, "_add", fail_during_archive)
+        else:
+            patch.setattr(Path, "replace", fail_when_publishing_checksum)
+        with pytest.raises(OSError) as failed:
+            build_bundle(replacement, sha=SHA, output=tmp_path, runtime="rust")
+        assert failed.value.errno == errno.ENOSPC
+
+    assert set(tmp_path.iterdir()) == {archive, checksum}
+    assert (archive.read_bytes(), checksum.read_bytes()) == previous
+
+    assert build_bundle(replacement, sha=SHA, output=tmp_path, runtime="rust") == (
+        archive,
+        checksum,
+    )
+    assert (archive.read_bytes(), checksum.read_bytes()) != previous
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert checksum.read_text() == f"{digest}  {archive.name}\n"
 
 
 def test_bundled_markdown_links_resolve_within_bundle():
