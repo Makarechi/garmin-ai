@@ -1,25 +1,31 @@
 use std::io;
 
-use rmcp::service::RxJsonRpcMessage;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use rmcp::{
+    model::{CallToolRequest, ClientRequest, JsonRpcVersion2_0, RequestId},
+    service::RxJsonRpcMessage,
+    transport::async_rw::{JsonRpcMessageCodec, JsonRpcMessageCodecError},
+};
+use serde::Deserialize;
+use serde_json::value::RawValue;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, BufReader},
+    sync::mpsc,
+};
+use tokio_util::{bytes::BytesMut, codec::Decoder};
 
 use super::super::{MAX_MESSAGE_BYTES, protocol::NativeServer};
 
-// A three-byte legacy token becomes a five-byte JSON number. Apply the
-// public limit to the original frame and keep the SDK's internal limit bounded.
-pub(super) const MAX_NORMALIZED_BYTES: usize = MAX_MESSAGE_BYTES.div_ceil(3) * 5;
-
-pub(super) async fn copy_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+pub(super) async fn copy_frames<R: AsyncRead + Unpin>(
     input: R,
-    mut output: W,
+    output: mpsc::Sender<BytesMut>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(input);
-    let mut line = Vec::new();
+    let mut line = BytesMut::new();
     let mut oversized = false;
     loop {
         let data = reader.fill_buf().await?;
         if data.is_empty() {
-            return output.shutdown().await;
+            return Ok(());
         }
         let newline = data.iter().position(|byte| *byte == b'\n');
         let count = newline.map_or(data.len(), |index| index + 1);
@@ -33,16 +39,40 @@ pub(super) async fn copy_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         reader.consume(count);
         if newline.is_some() {
-            if !oversized {
-                let normalized = normalize_nonfinite_numbers(&line);
-                output
-                    .write_all(normalized.as_deref().unwrap_or(&line))
-                    .await?;
-                line.clear();
+            if !oversized && output.send(line.split()).await.is_err() {
+                return Ok(());
             }
             oversized = false;
         }
     }
+}
+
+pub(super) fn decode(
+    mut frame: BytesMut,
+) -> Result<Option<RxJsonRpcMessage<NativeServer>>, JsonRpcMessageCodecError> {
+    let normalized = normalize_nonfinite_numbers(&frame);
+    let input = normalized.as_deref().unwrap_or(&frame);
+    let json = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
+    // The SDK's general JSON-RPC decoder buffers the full payload for
+    // flattened/untagged variants. Read tool arguments directly into the
+    // SDK's typed request so a dense bounded argument list is parsed once.
+    if let Ok(envelope) = serde_json::from_slice::<RequestEnvelope<'_>>(json)
+        && envelope.method == "tools/call"
+        && let (Some(id), Some(params)) = (envelope.id, envelope.params)
+        && params.get().starts_with('{')
+    {
+        let params = serde_json::from_str(params.get())?;
+        let mut request = CallToolRequest::new(params);
+        if let Some(meta) = request.params.meta.take() {
+            request.extensions.insert(meta);
+        }
+        let request = ClientRequest::CallToolRequest(request);
+        return Ok(Some(RxJsonRpcMessage::<NativeServer>::request(request, id)));
+    }
+    if let Some(normalized) = normalized {
+        frame = BytesMut::from(normalized.as_slice());
+    }
+    JsonRpcMessageCodec::new().decode(&mut frame)
 }
 
 fn normalize_nonfinite_numbers(line: &[u8]) -> Option<Vec<u8>> {
@@ -98,8 +128,26 @@ fn normalize_nonfinite_numbers(line: &[u8]) -> Option<Vec<u8>> {
     let frame = normalized
         .strip_prefix(b"\xef\xbb\xbf")
         .unwrap_or(&normalized);
-    serde_json::from_slice::<RxJsonRpcMessage<NativeServer>>(frame).ok()?;
+    serde_json::from_slice::<RequestEnvelope<'_>>(frame).ok()?;
     Some(normalized)
+}
+
+#[derive(Deserialize)]
+struct RequestEnvelope<'a> {
+    #[serde(rename = "jsonrpc")]
+    _version: JsonRpcVersion2_0,
+    id: Option<RequestId>,
+    method: String,
+    #[serde(borrow)]
+    params: Option<&'a RawValue>,
+    #[serde(rename = "result", default, deserialize_with = "reject_response_field")]
+    _result: (),
+    #[serde(rename = "error", default, deserialize_with = "reject_response_field")]
+    _error: (),
+}
+
+fn reject_response_field<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom("Not a JSON-RPC request"))
 }
 
 fn json_whitespace(byte: u8) -> bool {
@@ -108,7 +156,7 @@ fn json_whitespace(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -131,10 +179,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_call_keeps_the_sdk_request_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        use rmcp::model::RequestMetaObject;
+
+        let message = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"events","_meta":{"progressToken":"synthetic"}}}"#;
+        let sdk_message: RxJsonRpcMessage<NativeServer> = serde_json::from_slice(message)?;
+        let actual = decode(BytesMut::from(message.as_slice()))?.ok_or("Missing MCP request")?;
+        let (
+            Some((ClientRequest::CallToolRequest(expected), expected_id)),
+            Some((ClientRequest::CallToolRequest(actual), actual_id)),
+        ) = (sdk_message.into_request(), actual.into_request())
+        else {
+            return Err("Expected a tool request".into());
+        };
+        assert_eq!(actual_id, expected_id);
+        assert_eq!(actual.params, expected.params);
+        let expected = expected.extensions.get::<RequestMetaObject>();
+        assert!(expected.is_some());
+        assert_eq!(actual.extensions.get::<RequestMetaObject>(), expected);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn enforces_the_original_line_limit_across_fragmented_input() -> io::Result<()> {
         let (mut send, input) = tokio::io::duplex(512);
-        let (output, mut receive) = tokio::io::duplex(512);
+        let (output, mut receive) = mpsc::channel(1);
         let copy = tokio::spawn(copy_frames(input, output));
         let spaces = vec![b' '; MAX_MESSAGE_BYTES - REQUEST.len() - 1];
         let send_all = async {
@@ -151,12 +221,17 @@ mod tests {
             send.write_all(REQUEST).await?;
             send.shutdown().await
         };
-        let mut wire = Vec::new();
-        let (send, received) = tokio::join!(send_all, receive.read_to_end(&mut wire));
+        let read_all = async {
+            let mut wire = Vec::new();
+            while let Some(frame) = receive.recv().await {
+                wire.extend_from_slice(&frame);
+            }
+            wire
+        };
+        let (send, wire) = tokio::join!(send_all, read_all);
         send?;
-        received?;
         copy.await.map_err(io::Error::other)??;
-        let expected = [NORMALIZED, spaces.as_slice(), b"\n", NORMALIZED, b"\n"].concat();
+        let expected = [REQUEST, spaces.as_slice(), b"\n", REQUEST, b"\n"].concat();
         assert_eq!(wire, expected);
         Ok(())
     }
