@@ -101,11 +101,15 @@ initial copy for the Python reader. It then creates and corrects a diary record 
 stops that API, and makes a second encrypted copy. Recovery places the raw files and tokens
 in the restored installation and compares every table, including pending work, polling and
 replay cursors, bindings and the uncertain delivery receipt. A retry on the restored native
-installation returns the same corrected record. The initial copy predates that record.
+installation returns the same corrected record. The restored Python API also returns that
+record on retry, rejects a stale edit, and records a third revision that Rust reads back.
+The audit contains the original create and both corrections in order. The initial copy
+predates that record.
 
-The reported timings cover archive authentication, database restore and file placement for
-the fixture. Release rehearsal also needs the final image, queue drain and the independent
-recovery environment.
+The fixture reports archive authentication, database restore and file placement times.
+It also measures through a verified Python read on the earlier backup and through a verified
+Python write on the later state. The latter includes the new backup. Measure operational
+recovery on the final image with the independent recovery environment and queue drain.
 
 ## Rehearse worker ownership
 
