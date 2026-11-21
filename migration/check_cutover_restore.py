@@ -9,6 +9,7 @@ import shutil
 import subprocess
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
+from itertools import pairwise
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -241,6 +242,45 @@ def inspect_before_writes(binary, root, config, engine, event_path, expected, pe
     )
 
 
+def verify_python_can_continue(engine, config, path, native_event, correction, request_headers):
+    with previous_api(config, engine) as previous:
+        assert previous.get("/health/ready").status_code == 200
+        restored = previous.get(path, headers=headers("reader"))
+        assert restored.status_code == 200 and restored.json() == native_event
+        repeated = previous.post(PATH, json=NOTE, headers=request_headers)
+        assert repeated.status_code == 200 and repeated.json() == native_event
+        stale_edit = previous.put(
+            path, json={"revision": 1, "event": correction}, headers=request_headers
+        )
+        assert stale_edit.status_code == 409
+
+        python_correction = {
+            **correction,
+            "payload": {
+                **correction["payload"],
+                "description": "Synthetic correction after the return to Python",
+            },
+        }
+        edited = previous.put(
+            path, json={"revision": 2, "event": python_correction}, headers=request_headers
+        )
+        assert edited.status_code == 200
+        event = edited.json()
+        assert event["id"] == native_event["id"] and event["revision"] == 3
+        assert event["payload"]["description"] == python_correction["payload"]["description"]
+        assert previous.post(PATH, json=NOTE, headers=request_headers).json() == event
+
+    with engine.connect() as connection:
+        audit = connection.execute(
+            text("SELECT action, before, after FROM audit_log WHERE event_id=:id ORDER BY id"),
+            {"id": UUID(native_event["id"])},
+        ).all()
+    assert [entry.action for entry in audit] == ["create", "update", "update"]
+    assert [entry.after["revision"] for entry in audit] == [1, 2, 3]
+    assert all(new.before == old.after for old, new in pairwise(audit))
+    return event
+
+
 def verify(binary, root, source, before_target, after_target):
     origin = settings(root / "source", source)
     before = settings(root / "before", before_target)
@@ -277,9 +317,12 @@ def verify(binary, root, source, before_target, after_target):
         binary, root, origin, source, old_path, original_event, pending_health.json()
     )
     assert table_values(source) == initial
+    started_before = monotonic()
     first_seconds = restore(binary, root, before, first_archive, initial, origin, before_target)
     with previous_api(before, before_target) as recovered_previous:
+        assert recovered_previous.get("/health/ready").status_code == 200
         assert recovered_previous.get(old_path, headers=headers("reader")).json() == original_event
+    before_ready_seconds = round(monotonic() - started_before, 3)
 
     request_headers = headers("both", "synthetic-post-cutover-note")
     with native_api(binary, root, origin) as native:
@@ -296,6 +339,7 @@ def verify(binary, root, source, before_target, after_target):
         final_event = saved.json()
 
     # Freeze the native API first, keeping the old archive intact and making a fresh recovery copy.
+    started_after = monotonic()
     current = table_values(source)
     second_archive = origin.backup_dir / "after.enc"
     run_cli(binary, root, origin, "backup", second_archive)
@@ -314,6 +358,13 @@ def verify(binary, root, source, before_target, after_target):
             == 409
         )
     check_rows(after_target, current)
+    python_event = verify_python_can_continue(
+        after_target, after, path, final_event, correction, request_headers
+    )
+    after_writable_seconds = round(monotonic() - started_after, 3)
+    with native_api(binary, root, after, read_only=True) as returned_native:
+        assert returned_native.get(path, headers=headers("reader")).json() == python_event
+    after_python = table_values(after_target)
     for table in (
         "jobs",
         "outbox_messages",
@@ -322,6 +373,7 @@ def verify(binary, root, source, before_target, after_target):
         "channel_bindings",
     ):
         assert current[table] and current[table] == initial[table], table
+        assert after_python[table] == current[table], table
     for store in (source, before_target, after_target):
         with store.connect() as connection:
             rows = connection.execute(
@@ -329,9 +381,17 @@ def verify(binary, root, source, before_target, after_target):
             ).all()
             assert rows == [("queued", 0), ("uncertain", 1)], rows
     print("Verified queued and uncertain outbound receipts across both recovery boundaries.")
+    print("Verified the resumed Python writer kept the native event, audit and request identity.")
     print(
         json.dumps(
-            {"before_restore_seconds": first_seconds, "after_restore_seconds": second_seconds}
+            {
+                "before_restore_seconds": first_seconds,
+                "after_restore_seconds": second_seconds,
+                "before_restore_and_verified_python_read_seconds": before_ready_seconds,
+                "after_backup_restore_and_verified_python_write_seconds": after_writable_seconds,
+                "acknowledged_native_writes_preserved_after_rollback": 2,
+                "event_revisions_across_runtimes": [1, 2, 3],
+            }
         )
     )
     print(
