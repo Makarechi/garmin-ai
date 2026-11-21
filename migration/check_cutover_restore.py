@@ -32,6 +32,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from garmin_ai.accounts import bind_account
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.models import (
@@ -68,20 +69,34 @@ def pending_state(tables):
     return {table: tables[table] for table in PENDING_STATE_TABLES} | {"app_state": cursors}
 
 
-def prepare_state(engine, source_id=SOURCE):
+def prepare_state(engine, source_id=SOURCE, *, account=None):
     with Session(engine) as session, session.begin():
         owner = session.scalar(select(Person.id).where(Person.singleton))
         conversation = UUID(int=870)
         reply = UUID(int=871)
+        if account is None:
+            session.add_all(
+                [
+                    SourceConnection(
+                        owner_id=owner,
+                        provider="garmin",
+                        namespace="garmin_connect",
+                        external_id="synthetic-owner",
+                        confirmation_method="fixture",
+                    ),
+                    Job(
+                        kind="raw_replay",
+                        payload={"raw_ref": str(source_id), "target_version": 9, "backfill": True},
+                        dedup_key=f"raw-replay:{source_id}:9",
+                        run_at=AT + timedelta(days=1),
+                        attempts=2,
+                    ),
+                ]
+            )
+        else:
+            bind_account(session, account, confirm_existing_owner=True)
         session.add_all(
             [
-                SourceConnection(
-                    owner_id=owner,
-                    provider="garmin",
-                    namespace="garmin_connect",
-                    external_id="synthetic-owner",
-                    confirmation_method="fixture",
-                ),
                 ChannelBinding(
                     owner_id=owner,
                     channel="telegram",
@@ -106,13 +121,6 @@ def prepare_state(engine, source_id=SOURCE):
                 AppState(
                     key="replay:source_scan_cursor",
                     value={"fetched_at": AT.isoformat(), "id": str(source_id)},
-                ),
-                Job(
-                    kind="raw_replay",
-                    payload={"raw_ref": str(source_id), "target_version": 9, "backfill": True},
-                    dedup_key=f"raw-replay:{source_id}:9",
-                    run_at=AT + timedelta(days=1),
-                    attempts=2,
                 ),
             ]
         )
@@ -220,6 +228,12 @@ def health_snapshot(api, day):
     )
 
 
+def wait_for_runtime_lease_release(engine):
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL statement_timeout = '5s'"))
+        connection.execute(text("SELECT pg_advisory_xact_lock(72104620)"))
+
+
 def inspect_before_writes(binary, root, config, engine, event_path, expected, pending_health):
     lock = text("SELECT pg_try_advisory_xact_lock(72104620)")
     with engine.begin() as connection:
@@ -255,8 +269,7 @@ def inspect_before_writes(binary, root, config, engine, event_path, expected, pe
         assert native.delete(event_path, headers=headers("both")).status_code == 405
         with engine.begin() as connection:
             assert not connection.scalar(lock)
-    with engine.begin() as connection:
-        assert connection.scalar(lock)
+    wait_for_runtime_lease_release(engine)
     print(
         "Verified read-only inspection before runtime handoff and refusal while the lease is held."
     )
