@@ -15,6 +15,14 @@ from uuid import UUID, uuid4
 
 from alembic import command
 from alembic.config import Config
+from check_cutover_restore import (
+    create_native_recovery_edit,
+    native_api,
+    pending_state,
+    prepare_state,
+    verify_python_can_continue,
+)
+from check_database_export import table_values
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.engine import make_url
@@ -84,6 +92,7 @@ def settings(root, key):
         backup_dir=root / "backups",
         lock_dir=root / "locks",
         backup_key=key,
+        database_url=os.environ["GA_TEST_DATABASE_URL"],
     )
 
 
@@ -94,6 +103,11 @@ def boot_id():
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def database_digest(tables):
+    serialized = json.dumps(tables, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 def native_command(binary, paths, *arguments, succeeds=True):
@@ -245,6 +259,12 @@ def make_backup(root, sha, *, native=None):
             "ingested_at": observation.ingested_at.isoformat(),
             "source_id": str(archived.id),
         }
+    native_edit = None
+    if native is not None:
+        prepare_state(engine, UUID(identity["source_id"]))
+        with native_api(native, root, paths) as api:
+            native_edit = create_native_recovery_edit(api)
+    database_sha256 = database_digest(table_values(engine))
     backup = root / "synthetic-backup.enc"
     counts = (
         create_backup(engine, paths, backup)
@@ -263,6 +283,8 @@ def make_backup(root, sha, *, native=None):
                 "source_binary_sha256": digest(native) if native is not None else None,
                 "counts": counts,
                 "identity": identity,
+                "database_sha256": database_sha256,
+                "native_edit": native_edit,
                 "files": {
                     versioned_file: raw_hash,
                     "tokens/synthetic-token.json": digest(token),
@@ -327,6 +349,10 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
     shutil.copytree(restored / "raw", paths.data_dir / "raw")
     shutil.copytree(restored / "tokens", paths.token_dir)
     shutil.copy2(restored / "coverage-report.json", paths.data_dir / "coverage-report.json")
+    tables = table_values(engine)
+    restored_digest = database_digest(tables)
+    if restored_digest != manifest["database_sha256"]:
+        raise ValueError("Restored database contents differ")
     archive = LocalArchive(paths.data_dir / "raw")
     with Session(engine) as session, session.begin():
         ids = manifest["identity"]
@@ -392,6 +418,16 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
     with Session(engine) as restarted:
         assert restarted.get(Event, new_event_id).payload["note"] == "synthetic after restore"
         assert restarted.get(Event, UUID(ids["event_id"])).payload["note"] == "synthetic"
+    verified_revisions = None
+    if manifest["source_runtime"] == "rust" and native is None:
+        resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
+        verified_revisions = [1, manifest["native_edit"]["revision"], resumed["revision"]]
+        pending = pending_state(tables)
+        assert all(pending.values())
+        assert pending_state(table_values(engine)) == pending
+        print(
+            "Python preserved the acknowledged native edits and pending state on the recovery host."
+        )
     engine.dispose()
     if evidence is not None:
         evidence.write_text(
@@ -406,6 +442,8 @@ def verify_backup(root, work, sha, *, require_distinct_host=True, native=None, e
                     "backup_sha256": manifest["backup_sha256"],
                     "verified_table_count": len(counts),
                     "verified_file_count": len(manifest["files"]),
+                    "verified_database_sha256": restored_digest,
+                    "verified_event_revisions_after_rollback": verified_revisions,
                     "verified_restore_seconds": round(monotonic() - started, 3),
                 },
                 indent=2,

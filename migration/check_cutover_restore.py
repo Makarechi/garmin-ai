@@ -47,8 +47,28 @@ from garmin_ai.models import (
 )
 from garmin_ai.operations import create_backup
 
+NATIVE_EDIT_KEY = "synthetic-post-cutover-note"
+NATIVE_CORRECTION = {
+    **NOTE,
+    "payload": {**NOTE["payload"], "description": "Synthetic post-transition correction"},
+}
+PENDING_STATE_TABLES = (
+    "jobs",
+    "outbox_messages",
+    "message_delivery_receipts",
+    "source_connections",
+    "channel_bindings",
+)
+PENDING_STATE_KEYS = {"telegram:offset", "conversation:pending", "replay:source_scan_cursor"}
 
-def prepare_state(engine):
+
+def pending_state(tables):
+    cursors = [row for row in tables["app_state"] if row["key"] in PENDING_STATE_KEYS]
+    assert {row["key"] for row in cursors} == PENDING_STATE_KEYS
+    return {table: tables[table] for table in PENDING_STATE_TABLES} | {"app_state": cursors}
+
+
+def prepare_state(engine, source_id=SOURCE):
     with Session(engine) as session, session.begin():
         owner = session.scalar(select(Person.id).where(Person.singleton))
         conversation = UUID(int=870)
@@ -85,12 +105,12 @@ def prepare_state(engine):
                 ),
                 AppState(
                     key="replay:source_scan_cursor",
-                    value={"fetched_at": AT.isoformat(), "id": str(SOURCE)},
+                    value={"fetched_at": AT.isoformat(), "id": str(source_id)},
                 ),
                 Job(
                     kind="raw_replay",
-                    payload={"raw_ref": str(SOURCE), "target_version": 9, "backfill": True},
-                    dedup_key=f"raw-replay:{SOURCE}:9",
+                    payload={"raw_ref": str(source_id), "target_version": 9, "backfill": True},
+                    dedup_key=f"raw-replay:{source_id}:9",
                     run_at=AT + timedelta(days=1),
                     attempts=2,
                 ),
@@ -242,7 +262,23 @@ def inspect_before_writes(binary, root, config, engine, event_path, expected, pe
     )
 
 
-def verify_python_can_continue(engine, config, path, native_event, correction, request_headers):
+def create_native_recovery_edit(native):
+    request_headers = headers("both", NATIVE_EDIT_KEY)
+    first = native.post(PATH, json=NOTE, headers=request_headers)
+    assert first.status_code == 200
+    identity = first.json()["id"]
+    saved = native.put(
+        f"{PATH}/{identity}",
+        json={"revision": 1, "event": NATIVE_CORRECTION},
+        headers=request_headers,
+    )
+    assert saved.status_code == 200 and saved.json()["revision"] == 2
+    return saved.json()
+
+
+def verify_python_can_continue(engine, config, native_event):
+    path = f"{PATH}/{native_event['id']}"
+    request_headers = headers("both", NATIVE_EDIT_KEY)
     with previous_api(config, engine) as previous:
         assert previous.get("/health/ready").status_code == 200
         restored = previous.get(path, headers=headers("reader"))
@@ -250,14 +286,14 @@ def verify_python_can_continue(engine, config, path, native_event, correction, r
         repeated = previous.post(PATH, json=NOTE, headers=request_headers)
         assert repeated.status_code == 200 and repeated.json() == native_event
         stale_edit = previous.put(
-            path, json={"revision": 1, "event": correction}, headers=request_headers
+            path, json={"revision": 1, "event": NATIVE_CORRECTION}, headers=request_headers
         )
         assert stale_edit.status_code == 409
 
         python_correction = {
-            **correction,
+            **NATIVE_CORRECTION,
             "payload": {
-                **correction["payload"],
+                **NATIVE_CORRECTION["payload"],
                 "description": "Synthetic correction after the return to Python",
             },
         }
@@ -324,19 +360,10 @@ def verify(binary, root, source, before_target, after_target):
         assert recovered_previous.get(old_path, headers=headers("reader")).json() == original_event
     before_ready_seconds = round(monotonic() - started_before, 3)
 
-    request_headers = headers("both", "synthetic-post-cutover-note")
+    request_headers = headers("both", NATIVE_EDIT_KEY)
     with native_api(binary, root, origin) as native:
-        first = native.post(PATH, json=NOTE, headers=request_headers)
-        assert first.status_code == 200
-        identity = first.json()["id"]
-        path = f"{PATH}/{identity}"
-        correction = {
-            **NOTE,
-            "payload": {**NOTE["payload"], "description": "Synthetic post-transition correction"},
-        }
-        saved = native.put(path, json={"revision": 1, "event": correction}, headers=request_headers)
-        assert saved.status_code == 200 and saved.json()["revision"] == 2
-        final_event = saved.json()
+        final_event = create_native_recovery_edit(native)
+    path = f"{PATH}/{final_event['id']}"
 
     # Freeze the native API first, keeping the old archive intact and making a fresh recovery copy.
     started_after = monotonic()
@@ -353,27 +380,18 @@ def verify(binary, root, source, before_target, after_target):
         assert replay.status_code == 200 and replay.json() == final_event
         assert (
             restored_after.put(
-                path, json={"revision": 1, "event": correction}, headers=request_headers
+                path, json={"revision": 1, "event": NATIVE_CORRECTION}, headers=request_headers
             ).status_code
             == 409
         )
     check_rows(after_target, current)
-    python_event = verify_python_can_continue(
-        after_target, after, path, final_event, correction, request_headers
-    )
+    python_event = verify_python_can_continue(after_target, after, final_event)
     after_writable_seconds = round(monotonic() - started_after, 3)
     with native_api(binary, root, after, read_only=True) as returned_native:
         assert returned_native.get(path, headers=headers("reader")).json() == python_event
-    after_python = table_values(after_target)
-    for table in (
-        "jobs",
-        "outbox_messages",
-        "message_delivery_receipts",
-        "source_connections",
-        "channel_bindings",
-    ):
-        assert current[table] and current[table] == initial[table], table
-        assert after_python[table] == current[table], table
+    pending = pending_state(initial)
+    assert all(pending.values())
+    assert pending_state(current) == pending == pending_state(table_values(after_target))
     for store in (source, before_target, after_target):
         with store.connect() as connection:
             rows = connection.execute(

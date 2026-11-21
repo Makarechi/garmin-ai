@@ -111,6 +111,11 @@ It also measures through a verified Python read on the earlier backup and throug
 Python write on the later state. The latter includes the new backup. Measure operational
 recovery on the final image with the independent recovery environment and queue drain.
 
+The native off-host workflow creates and corrects a record through the Rust API before
+exporting a backup. The recovery job authenticates it on a different Linux host and checks
+the contents of every restored table. The Python API retries the original request, preserves
+the pending work and delivery state, and writes the third revision of the same record.
+
 ## Rehearse worker ownership
 
 Run `python migration/check_worker_cutover.py /path/to/garmin-ai /path/to/garmin-ai-rust`

@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/workflows/native-offhost-restore.yml"
       - "tests/evals/offhost_restore_probe.py"
+      - "migration/check_cutover_restore.py"
       - "scripts/extract_native_test_binary.sh"
       - "Dockerfile.rust"
       - "crates/ga-app/src/backup.rs"
@@ -18,6 +19,7 @@ on:
     paths:
       - ".github/workflows/native-offhost-restore.yml"
       - "tests/evals/offhost_restore_probe.py"
+      - "migration/check_cutover_restore.py"
       - "scripts/extract_native_test_binary.sh"
       - "Dockerfile.rust"
       - "crates/ga-app/src/backup.rs"
@@ -66,7 +68,7 @@ jobs:
         run: |
           args=()
           if [[ $PROBE_RUNTIME == rust ]]; then args+=(--native-binary "$RUNNER_TEMP/garmin-ai-rust"); fi
-          PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py create \
+          PYTHONPATH=src:migration uv run python tests/evals/offhost_restore_probe.py create \
             "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA" "${args[@]}"
       # The short-lived key and archive contain only data generated in this job.
       - uses: actions/upload-artifact@v4
@@ -121,7 +123,7 @@ jobs:
         run: |
           args=()
           if [[ $PROBE_RUNTIME == rust ]]; then args+=(--native-binary "$RUNNER_TEMP/garmin-ai-rust"); fi
-          PYTHONPATH=src uv run python tests/evals/offhost_restore_probe.py restore \
+          PYTHONPATH=src:migration uv run python tests/evals/offhost_restore_probe.py restore \
             "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" \
             --commit "$GITHUB_SHA" --evidence "$RUNNER_TEMP/native-offhost-result.json" "${args[@]}"
       - uses: actions/upload-artifact@v4
