@@ -153,8 +153,15 @@ def sample(run_docker, args, selected, token):
             states[service] = state
             if state["running"]:
                 state["cgroup"] = container_cgroup(run_docker, container)
+                count = re.search(r"(?m)^oom_kill ([0-9]+)$", state["cgroup"]["memory.events"])
+                if count is None:
+                    failures.append(f"{service}:oom_counter_unavailable")
+                else:
+                    state["oom_kills"] = int(count[1])
             else:
                 failures.append(f"{service}:stopped")
+            if state["oom_killed"]:
+                failures.append(f"{service}:oom_killed")
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             failures.append(f"{service}:{type(error).__name__}")
     probes, snapshot = {}, None
@@ -189,6 +196,18 @@ def sample_http(url, token, failures):
         snapshot = None
         failures.append(f"operations:{type(error).__name__}")
     return probes, snapshot
+
+
+def track_oom_kills(current, seen):
+    for service, state in current["containers"].items():
+        if (count := state.get("oom_kills")) is None:
+            continue
+        previous = seen.get(service, count)
+        if count > previous:
+            current["failures"].append(f"{service}:oom_kills_increased")
+        elif count < previous:
+            current["failures"].append(f"{service}:oom_counter_reset")
+        seen[service] = count
 
 
 def record(output, kind, **fields):
@@ -229,9 +248,11 @@ def observe(args, output, token):
     started, started_wall = time.monotonic(), time.time()
     previous, previous_wall = started, started_wall
     total_samples = incomplete_samples = gap_samples = 0
+    oom_counts = {}
     while True:
         clock, wall = time.monotonic(), time.time()
         current = sample(run_docker, args, selected, token)
+        track_oom_kills(current, oom_counts)
         elapsed = clock - started
         wall_elapsed = wall - started_wall
         spacing = max(clock - previous, wall - previous_wall)
@@ -253,6 +274,8 @@ def observe(args, output, token):
             window = "seven_day_observation" if duration >= WEEK_SECONDS else "short_observation"
             if gap_samples:
                 window = "gapped_observation"
+            elif incomplete_samples:
+                window = "unhealthy_observation"
             record(
                 output,
                 "end",
@@ -262,7 +285,7 @@ def observe(args, output, token):
                 excessive_sample_gaps=gap_samples,
                 window=window,
             )
-            return gap_samples == 0
+            return gap_samples == 0 and incomplete_samples == 0
         previous, previous_wall = clock, wall
         time.sleep(max(0, clock + args.interval_seconds - time.monotonic()))
 
@@ -302,7 +325,7 @@ def main():
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
         try:
             if not observe(args, output, token):
-                parser.exit(1, "Observation contains gaps in the requested window.\n")
+                parser.exit(1, "Observation contains incomplete samples or gaps.\n")
         except (
             KeyboardInterrupt,
             OSError,
