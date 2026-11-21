@@ -7,6 +7,11 @@ port published by that project. Set `GA_SOAK_API_KEY` in the observer's
 environment through the same private credential source used by the test
 installation.
 
+Run the observer on the Docker host with its Unix socket. The observer pins
+that socket for the session and checks that the running image carries the
+bundle's Git revision label. Before sending each probe it confirms that the
+selected API container is running and publishes the supplied loopback port.
+
 ```sh
 python migration/observe_native_soak.py \
   --compose-project "$GARMIN_SOAK_PROJECT" \
@@ -22,9 +27,9 @@ heartbeat and backup ages, queue summaries, and container resource counters.
 The default window runs for 604,800 seconds and samples once a minute.
 It measures both monotonic time and wall time, counts gaps and incomplete
 samples, and records an interruption if a selected container is replaced.
-Container start times and restart counts let reviewers correlate a recovery
-with the recorded probes. A shorter smoke run uses `--duration-seconds` and
-records `short_observation` in its end record.
+Container start times, restart counts and Docker's OOM-killed flag let
+reviewers correlate a recovery with the recorded probes. A shorter smoke run
+uses `--duration-seconds` and records `short_observation` in its end record.
 
 Keep the report private, especially if the installation contains real data.
 Before accepting the release, inspect queue progress, nightly and weekly

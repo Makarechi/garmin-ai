@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -50,8 +51,22 @@ def docker(*args):
     ).stdout.strip()
 
 
-def service_id(project, service):
-    matches = docker(
+def local_docker():
+    endpoint = docker("context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+    target = urlsplit(endpoint)
+    if (
+        target.scheme != "unix"
+        or target.netloc
+        or target.query
+        or target.fragment
+        or not Path(target.path).is_absolute()
+    ):
+        raise RuntimeError("Loopback observation requires Docker on this host via a Unix socket")
+    return partial(docker, "--host", endpoint)
+
+
+def service_id(run_docker, project, service):
+    matches = run_docker(
         "ps",
         "--all",
         "--quiet",
@@ -68,11 +83,11 @@ def service_id(project, service):
     return matches[0]
 
 
-def container_state(container):
-    image, state, restarts, started = docker(
+def container_state(run_docker, container):
+    image, state, restarts, started, oom_killed = run_docker(
         "inspect",
         "--format",
-        "{{.Image}} {{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}",
+        "{{.Image}} {{.State.Running}} {{.RestartCount}} {{.State.StartedAt}} {{.State.OOMKilled}}",
         container,
     ).split()
     return {
@@ -80,11 +95,12 @@ def container_state(container):
         "running": state == "true",
         "restarts": int(restarts),
         "started_at": started,
+        "oom_killed": oom_killed == "true",
     }
 
 
-def container_cgroup(container):
-    parts = docker(
+def container_cgroup(run_docker, container):
+    parts = run_docker(
         "exec",
         container,
         "sh",
@@ -117,35 +133,53 @@ def http_json(url, token=None):
     return json.loads(payload), round((time.monotonic() - start) * 1000, 3)
 
 
-def sample(args, selected, token):
+def verify_api_port(run_docker, container, url):
+    ports = run_docker("port", container, "8080/tcp").splitlines()
+    if urlsplit(url).netloc not in ports:
+        raise RuntimeError("The supplied address is not bound to the selected API container")
+
+
+def sample(run_docker, args, selected, token):
     states = {}
     failures = []
     for service in SERVICES:
         try:
-            container = service_id(args.compose_project, service)
+            container = service_id(run_docker, args.compose_project, service)
             if container != selected[service]:
                 raise RuntimeError(f"Compose replaced the selected {service} container")
-            state = container_state(container)
+            state = container_state(run_docker, container)
             if service != "db" and state["image"] != args.image_id:
                 raise RuntimeError("The application image changed")
+            states[service] = state
             if state["running"]:
-                state["cgroup"] = container_cgroup(container)
+                state["cgroup"] = container_cgroup(run_docker, container)
             else:
                 failures.append(f"{service}:stopped")
-            states[service] = state
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             failures.append(f"{service}:{type(error).__name__}")
+    probes, snapshot = {}, None
+    if states.get("api", {}).get("running"):
+        try:
+            verify_api_port(run_docker, selected["api"], args.url)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            failures.append(f"api:port:{type(error).__name__}")
+        else:
+            probes, snapshot = sample_http(args.url, token, failures)
+    return {"containers": states, "probe_ms": probes, "operations": snapshot, "failures": failures}
+
+
+def sample_http(url, token, failures):
     probes = {}
     for route, wanted in (("live", "alive"), ("ready", "ready")):
         try:
-            value, elapsed = http_json(f"{args.url}/health/{route}")
+            value, elapsed = http_json(f"{url}/health/{route}")
             if value != {"status": wanted}:
                 raise ValueError("Unrecognized health response")
             probes[route] = elapsed
         except (OSError, ValueError) as error:
             failures.append(f"{route}:{type(error).__name__}")
     try:
-        operations, elapsed = http_json(f"{args.url}/operations", token)
+        operations, elapsed = http_json(f"{url}/operations", token)
         probes["operations"] = elapsed
         snapshot = {field: operations[field] for field in OPERATIONS_FIELDS}
         heartbeat = snapshot["runtime_heartbeat_age_seconds"]
@@ -154,7 +188,7 @@ def sample(args, selected, token):
     except (KeyError, OSError, TypeError, ValueError) as error:
         snapshot = None
         failures.append(f"operations:{type(error).__name__}")
-    return {"containers": states, "probe_ms": probes, "operations": snapshot, "failures": failures}
+    return probes, snapshot
 
 
 def record(output, kind, **fields):
@@ -165,29 +199,28 @@ def record(output, kind, **fields):
 
 
 def observe(args, output, token):
-    selected = {name: service_id(args.compose_project, name) for name in SERVICES}
+    run_docker = local_docker()
+    selected = {name: service_id(run_docker, args.compose_project, name) for name in SERVICES}
     for name in ("api", "worker"):
-        state = container_state(selected[name])
+        state = container_state(run_docker, selected[name])
         if state["image"] != args.image_id or not state["running"]:
             raise RuntimeError(f"The selected {name} container is not running the supplied image")
-    ports = docker("port", selected["api"], "8080/tcp").splitlines()
-    if urlsplit(args.url).netloc not in ports:
-        raise RuntimeError("The supplied address is not bound to the selected API container")
-    label = docker(
+    verify_api_port(run_docker, selected["api"], args.url)
+    label = run_docker(
         "image",
         "inspect",
         "--format",
         '{{index .Config.Labels "org.opencontainers.image.revision"}}',
         args.image_id,
     )
-    if label not in (args.revision, "", "<no value>"):
-        raise RuntimeError("The supplied revision conflicts with the image metadata")
+    if label != args.revision:
+        raise RuntimeError("The selected image must carry the supplied Git revision label")
     record(
         output,
         "begin",
         revision=args.revision,
         image=args.image_id,
-        image_revision=label or None,
+        image_revision=label,
         compose_project=args.compose_project,
         containers=selected,
         interval_seconds=args.interval_seconds,
@@ -198,7 +231,7 @@ def observe(args, output, token):
     total_samples = incomplete_samples = gap_samples = 0
     while True:
         clock, wall = time.monotonic(), time.time()
-        current = sample(args, selected, token)
+        current = sample(run_docker, args, selected, token)
         elapsed = clock - started
         wall_elapsed = wall - started_wall
         spacing = max(clock - previous, wall - previous_wall)
