@@ -80,8 +80,9 @@ def inspect_bundle(url: str, installer: list[str]) -> None:
                 try:
                     if request(url, "/health/ready", key) == {"status": "ready"}:
                         break
-                except URLError:
-                    sleep(0.2)
+                except (URLError, ConnectionError, TimeoutError):
+                    pass
+                sleep(0.2)
             else:
                 raise RuntimeError("Bundle inspection did not reach readiness")
             if not request(url, "/tools", key):
