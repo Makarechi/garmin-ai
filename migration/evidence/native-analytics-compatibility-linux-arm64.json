@@ -1,0 +1,89 @@
+{
+  "scope": "PAR-15 synthetic functional verification",
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2"
+  },
+  "candidate": {
+    "platform": "linux/arm64",
+    "tested_source_commit": "584888f21f21b0fb9964355ea4c087ff5d4ba3ac",
+    "tested_source_tree": "35152346f45d64e9e7f48ce4b0900705c88c166f",
+    "binary_sha256": "d928b26b9868fb603de147785d9a549d03a33e088b03138de6c1ab426bce590c",
+    "matching_data_layer_test_source": "1cb78dfd8cd81faaa0d4d8fe7aec0b026bfe90f2"
+  },
+  "named_comparisons": {
+    "passed": 20,
+    "log_sha256": {
+      "check_health_analysis.py": "f54ee79aa2af1b5720f8da86bc3fcba62e1824061b385d28d3c0dc91c6a3333d",
+      "check_temporal_features.py": "f39912fe6853530347df21a42208c9a064a7b0025fccc1fabf9cd7624396d50e",
+      "check_running_efficiency.py": "8f7edab28921fb431d482ca79a85fa1774a52d4f8b97ebafce3d223aaf361dff",
+      "check_mcp_analytics.py": "954c7486bc2c30922241c812e853f23d0dab5258086abcb990ec51ac4e38d8f2",
+      "check_stress_hours.py": "457b403418b6a0bde3cb27e858350a61285a7528bc0f7bad81343b971d02cf7d",
+      "check_temporal_displays.py": "0119a89884663dfdf937feb028f9b17f9ff5a3fd865e877bc31d732fba702a30",
+      "check_event_windows.py": "ffae8ffd2f6f2646017ae50da58379d95df4a0a19978cc9e40ea9c1352fd2816",
+      "check_lagged_association.py": "bbc197ac43f03ee44a19e981b35d4cda484e32ba3c044ffe78d1b701cafc18fb",
+      "check_sleep_analysis.py": "a317455b952c3c0ae400543f5ad840f5d673c3f66d3f1ad2ca2a69bbe2d60286",
+      "check_coffee_sleep.py": "2f8237801273481f53d217e6fd594cdc201006fa43c2e60b9d6ba8d873de7365",
+      "check_migraine_windows.py": "1be7608e6a7b5775e2a19df28d728a3fa198030162ae220c0fb9b3ba6d1a16e4",
+      "check_generic_observation_history.py": "b33ed62bdd84a57b0e1a2dce6b9859472d98a5f84844b8e9c2081bb451961522",
+      "check_generic_entry_history.py": "7461ac3add28016b138803984813c42b5bfd3020c905e900b45a77e60486deab",
+      "check_generic_compositions.py": "2a8bba466e32284249d5bc7dbe46ca782b4dc84c61e2da0a373ea0f10f1a8ffe",
+      "check_generic_aggregate_history.py": "b6032afbf853b7550ff57568dc4afd5fb06ad41b14c11296f6eb45037b7e2ab3",
+      "check_hypothesis_history.py": "e355ff814d32f0ade48022583bbe2c55d4b56c00c6f9fe794d5d192274ac03f7",
+      "check_hypotheses_http.py": "a06595dd09cb9ea8187150002fff8ae712173e49e7c95562f736f2c3876375f3",
+      "check_generic_thresholds.py": "6d585e796163cc474d560903ed05a8a9a9c05923dbee2dd38598943c1c9e761b",
+      "check_mcp_generic_nonfinite.py": "fccdd77485b7e852f821c45d7dbb755d97d55b06618c79db2cd5877ced6fe97e",
+      "check_generic_interfaces.py": "f11c8fc7fb2dbd464c4f74c3d9e15f858b5fb74dd97151c587d688092ef9be19"
+    }
+  },
+  "acceptance": {
+    "UT-11": "Two increment intervals summed to 350 with no time-based coverage added.",
+    "UT-46": "The SQL-shaped metric and 367-day window received the reference responses and made no writes.",
+    "AT-13": "The scripted model flow matched source-separated windows, timeline layers and bounded evidence.",
+    "AT-15": "The timeline and model flows preserved sparse observations and permissions.",
+    "AT-16": "The paired analyses matched unit and source comparability and withheld unavailable evidence.",
+    "AT-18": "The scripted model flow matched catalog discovery, granted custom metric evidence and consent withdrawal.",
+    "universal_log_sha256": "dee2d8688bf66e3f86716df141dab07032c336f605f72ea5f8f9bfe596ff509e",
+    "model_flow_log_sha256": "32c17171eac22825b3fce9c4be683cecb9b39af60a6352f97329b93062e682dc"
+  },
+  "nonfinite_stdio": {
+    "read_and_protocol_comparisons": 66,
+    "comparisons_with_writes_enabled": 102,
+    "invalid_inputs_left_diary_and_audit_counts_unchanged": true,
+    "one_mebibyte_original_line_limit": "Verified with fragmentation, a boundary-sized request and recovery after an oversized request.",
+    "read_log_sha256": "6fcb4139dc31b32f493c7f2e70ebbe5f53a91271906b6e2b7ab14873a9a19a14",
+    "write_log_sha256": "e8857a86bf478e917b4032944f4f6a90017695a5f45bc2aacfc67fc0b1ad5cd1",
+    "boundary_test_log_sha256": "dbd7299b2ed131b461e74e6018ac729432d9c2ac08ded30fb9190ed7122a872b",
+    "paired_large_requests": {
+      "memory_limit_mib": 384,
+      "oom_kills": 0,
+      "tool_call": {
+        "replies_matched": 10,
+        "bytes_per_request": 1048576,
+        "rust_process_peak_rss_kib": 45468,
+        "reference_log_sha256": "9889e7d29778fb4ba9218fbd72c2b4ccc99ee9bc484ae2e309b826ad24593949",
+        "rust_log_sha256": "ec65aad5fe354fba4c36df9237fa17b2ba10b09ee348da97a452e4a752da72ac"
+      },
+      "ping": {
+        "replies_matched": 10,
+        "bytes_per_request": 1048576,
+        "rust_process_peak_rss_kib": 17880,
+        "reference_log_sha256": "1e1ba63d4efd23dc70b875294c894ba7d89e76b0449416fb707029be1184cbcb",
+        "rust_log_sha256": "e75e45222531c116a7db0ef9153d8e8526c546f4448163a66f8e241ade68ea32"
+      }
+    }
+  },
+  "resource_checkpoint": {
+    "one_cpu_per_api_workload": true,
+    "memory_limit_mib": 384,
+    "swap_limit_bytes": 0,
+    "iterations": 10,
+    "synthetic_daily_rows": 730,
+    "identical_analytical_results": true,
+    "python_query_seconds": 2.768,
+    "rust_query_seconds": 0.489,
+    "oom_kills": 0,
+    "record_sha256": "f3527e372768cfaf05205220e1f3993420c3b1c80bf529b3c0cfa76910b31556"
+  },
+  "whole_runtime_168_hour_observation": "pending"
+}

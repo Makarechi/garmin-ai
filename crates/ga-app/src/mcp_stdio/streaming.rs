@@ -1,19 +1,20 @@
 use std::io::{self, Write};
 
 use rmcp::{
+    ErrorData,
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
-    transport::{Transport, async_rw::AsyncRwTransport},
+    transport::{Transport, async_rw::JsonRpcMessageCodecError},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tokio_util::bytes::BytesMut;
 
-use super::{
-    MAX_MESSAGE_BYTES,
-    protocol::{NativeServer, Response},
-};
+use super::protocol::{NativeServer, Response};
+
+mod input;
 
 const CHUNK_BYTES: usize = 16 * 1024;
 
@@ -22,48 +23,42 @@ enum Output {
         Box<TxJsonRpcMessage<NativeServer>>,
         oneshot::Sender<io::Result<()>>,
     ),
-    CodecError(Vec<u8>),
 }
 
-pub(super) struct StreamingStdio<R: AsyncRead> {
-    input: AsyncRwTransport<NativeServer, R, DuplexStream>,
+enum ProtocolError {
+    Queue,
+    Writing(oneshot::Receiver<io::Result<()>>),
+}
+
+pub(super) struct StreamingStdio {
+    input: mpsc::Receiver<BytesMut>,
     output: mpsc::Sender<Output>,
+    reader: JoinHandle<io::Result<()>>,
     writer: JoinHandle<io::Result<()>>,
-    errors: JoinHandle<()>,
+    protocol_error: Option<ProtocolError>,
 }
 
-impl<R: AsyncRead + Send + Unpin + 'static> StreamingStdio<R> {
-    pub(super) fn new<W: AsyncWrite + Send + Unpin + 'static>(input: R, output: W) -> Self {
-        let (codec_writer, codec_reader) = tokio::io::duplex(1024);
+impl StreamingStdio {
+    pub(super) fn new<R, W>(input: R, output: W) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        let (frames, receive_frames) = mpsc::channel(1);
+        let reader = tokio::spawn(input::copy_frames(input, frames));
         let (send, receive) = mpsc::channel(1);
         let writer = tokio::spawn(write_messages(output, receive));
-        let error_output = send.clone();
-        let errors = tokio::spawn(async move {
-            let mut reader = BufReader::new(codec_reader);
-            loop {
-                // The SDK emits fixed, redacted protocol errors on this private pipe.
-                let mut line = Vec::new();
-                match reader.read_until(b'\n', &mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if error_output.send(Output::CodecError(line)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
         Self {
-            input: AsyncRwTransport::new(input, codec_writer)
-                .with_max_line_length(MAX_MESSAGE_BYTES),
+            input: receive_frames,
             output: send,
+            reader,
             writer,
-            errors,
+            protocol_error: None,
         }
     }
 }
 
-impl<R: AsyncRead + Send + Unpin + 'static> Transport<NativeServer> for StreamingStdio<R> {
+impl Transport<NativeServer> for StreamingStdio {
     type Error = io::Error;
 
     fn send(
@@ -82,14 +77,42 @@ impl<R: AsyncRead + Send + Unpin + 'static> Transport<NativeServer> for Streamin
     }
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<NativeServer>> {
-        self.input.receive().await
+        loop {
+            if let Some(error) = self.protocol_error.as_mut() {
+                if matches!(error, ProtocolError::Queue) {
+                    let permit = self.output.reserve().await.ok()?;
+                    let response = TxJsonRpcMessage::<NativeServer>::error(
+                        ErrorData::invalid_request("Invalid request", None),
+                        None,
+                    );
+                    let (done, written) = oneshot::channel();
+                    permit.send(Output::Message(Box::new(response), done));
+                    *error = ProtocolError::Writing(written);
+                }
+                if let ProtocolError::Writing(written) = error {
+                    written.await.ok()?.ok()?;
+                }
+                self.protocol_error = None;
+            }
+            match input::decode(self.input.recv().await?) {
+                Ok(Some(message)) => return Some(message),
+                Err(JsonRpcMessageCodecError::Serde(error))
+                    if matches!(
+                        error.classify(),
+                        serde_json::error::Category::Data | serde_json::error::Category::Io
+                    ) =>
+                {
+                    self.protocol_error = Some(ProtocolError::Queue);
+                }
+                Ok(None) | Err(_) => {}
+            }
+        }
     }
 
     async fn close(&mut self) -> io::Result<()> {
-        let result = self.input.close().await;
-        self.errors.abort();
+        self.reader.abort();
         self.writer.abort();
-        result
+        Ok(())
     }
 }
 
@@ -99,7 +122,6 @@ async fn write_messages<W: AsyncWrite + Send + Unpin>(
 ) -> io::Result<()> {
     while let Some(message) = messages.recv().await {
         match message {
-            Output::CodecError(bytes) => output.write_all(&bytes).await?,
             Output::Message(message, done) => {
                 let (send, mut chunks) = mpsc::channel(2);
                 let encoder = tokio::task::spawn_blocking(move || {

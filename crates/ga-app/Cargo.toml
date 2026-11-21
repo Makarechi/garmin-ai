@@ -50,6 +50,7 @@ time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 tempfile = "3.27.0"
 tar = { version = "0.4.46", default-features = false }
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["codec"] }
 rmcp = { version = "=3.11.0", default-features = false, features = ["server", "transport-io"] }
 
 [lints]

@@ -13,6 +13,7 @@ on:
       - 'migration/check_file_json.py'
       - 'migration/check_cutover_restore.py'
       - 'migration/check_insights_list.py'
+      - 'migration/check_mcp_generic_nonfinite.py'
       - 'migration/check_postgres_readiness.py'
       - 'migration/check_transport_retention.py'
       - 'migration/check_wellbeing_observations.py'
@@ -36,6 +37,7 @@ on:
       - 'migration/check_file_json.py'
       - 'migration/check_cutover_restore.py'
       - 'migration/check_insights_list.py'
+      - 'migration/check_mcp_generic_nonfinite.py'
       - 'migration/check_postgres_readiness.py'
       - 'migration/check_transport_retention.py'
       - 'migration/check_wellbeing_observations.py'
@@ -132,6 +134,11 @@ jobs:
       - run: cargo test --locked -p ga-db --test job_leases -- --ignored
       - run: cargo test --locked -p ga-db --test garmin_owner -- --ignored
       - run: cargo test --locked -p ga-db --test raw_capture -- --ignored
+      - name: Compare legacy nonfinite numbers over MCP
+        run: |
+          docker exec "${{ job.services.postgres.id }}" createdb -U garmin garmin_mcp_nonfinite_test
+          GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/garmin_mcp_nonfinite_test" \
+            uv run python migration/check_mcp_generic_nonfinite.py target/release/garmin-ai-rust
       - name: Rehearse read-only inspection and recovery before and after writes
         run: |
           for phase in source before after; do
