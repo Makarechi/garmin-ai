@@ -1,9 +1,16 @@
 import io
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from migration import observe_native_soak as observer
+spec = spec_from_file_location(
+    "observe_native_soak", Path(__file__).resolve().parents[1] / "migration/observe_native_soak.py"
+)
+assert spec is not None and spec.loader is not None
+observer = module_from_spec(spec)
+spec.loader.exec_module(observer)
 
 IMAGE = "sha256:" + "a" * 64
 REVISION = "b" * 40
