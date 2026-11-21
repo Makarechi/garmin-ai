@@ -187,14 +187,19 @@ case "${1:-}" in
     backup)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose config --quiet
+        worker_identity=$(compose run --rm --no-deps -T --entrypoint sh worker \
+            -ec 'printf "%s:%s\n" "$(id -u)" "$(id -g)"')
+        if [[ ! "$worker_identity" =~ ^[1-9][0-9]*:[0-9]+$ ]]; then
+            echo "Could not determine the non-root backup worker identity." >&2
+            exit 1
+        fi
         compose stop worker
         backup_name="manual-$(date -u +%Y%m%dT%H%M%SZ)-$$.enc"
         compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} backup "/app/backups/$backup_name"
-        verify_volume="garmin-ai-verify-$(date -u +%Y%m%d%H%M%S)-$$"
-        docker volume create "$verify_volume" >/dev/null
+        verify_volume=$(docker volume create)
         trap 'docker volume rm -f "$verify_volume" >/dev/null' EXIT
-        docker run --rm --user 0 -v "$verify_volume:/verification" --entrypoint chown \
-            "$image" "$(id -u):$(id -g)" /verification
+        docker run --rm --network none --user 0 -v "$verify_volume:/verification" --entrypoint chown \
+            "$image" "$worker_identity" /verification
         if [ -z "$legacy_entry" ]; then
             compose run --rm --no-deps -v "$verify_volume:/verification" worker \
                 unpack-backup "/app/backups/$backup_name" /verification/extracted

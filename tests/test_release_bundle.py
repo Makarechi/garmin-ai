@@ -535,3 +535,58 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
     assert all(
         "db= | data= | project=" in line for line in lines if line.startswith("compose --env-file")
     )
+
+
+@pytest.mark.parametrize("runtime", ["python", "rust"])
+@pytest.mark.parametrize("unpack_status", [0, 1])
+def test_backup_uses_worker_identity_and_removes_verification_volume(
+    tmp_path, runtime, unpack_status
+):
+    shutil.copy2(ROOT / "install.sh", tmp_path / "install.sh")
+    (tmp_path / "release.env").write_text(f"GA_APP_IMAGE={IMAGE}\nGA_APP_RUNTIME={runtime}\n")
+    worker_identity = f"{os.getuid() + 1}:{os.getgid() + 1}"
+    (tmp_path / ".env").write_text(f"GA_APP_UID={os.getuid() + 1}\nGA_APP_GID={os.getgid() + 1}\n")
+    docker = tmp_path / "docker"
+    docker.write_text(
+        """#!/bin/sh
+case "$*" in
+    'compose version --short') echo 'v2.24.0'; exit 0 ;;
+    'compose version') exit 0 ;;
+esac
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+case "$*" in
+    *'--entrypoint sh worker'*) printf '%s\n' "$WORKER_IDENTITY" ;;
+    'volume create'*) printf '%s\n' "$VERIFICATION_VOLUME" ;;
+    *' worker unpack-backup '*|*' python /setup/scripts/verify_release_backup.py '*)
+        exit "$UNPACK_STATUS" ;;
+esac
+"""
+    )
+    docker.chmod(0o755)
+    calls = tmp_path / "calls"
+    scratch = "a" * 64
+    result = subprocess.run(
+        ["bash", "./install.sh", "backup"],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "DOCKER_CALLS": str(calls),
+            "WORKER_IDENTITY": worker_identity,
+            "VERIFICATION_VOLUME": scratch,
+            "UNPACK_STATUS": str(unpack_status),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == unpack_status, result.stderr
+    recorded = calls.read_text().splitlines()
+    assert [command for command in recorded if "--entrypoint chown" in command] == [
+        f"run --rm --network none --user 0 -v {scratch}:/verification --entrypoint chown "
+        f"{IMAGE} {worker_identity} /verification"
+    ]
+    assert [command for command in recorded if command.startswith("volume ")] == [
+        "volume create",
+        f"volume rm {'-f ' if unpack_status else ''}{scratch}",
+    ]
+    assert ("Verified encrypted backup:" in result.stdout) == (unpack_status == 0)

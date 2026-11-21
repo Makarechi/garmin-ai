@@ -110,8 +110,8 @@ running, create and authenticate a backup:
 This stops only the worker, runs the backup inside the pinned application image,
 unpacks it to a temporary local Docker volume outside the backup directory to
 verify its authenticated contents, removes that temporary copy and volume, and
-leaves the worker stopped. The printed encrypted
-filename is in `GA_BACKUP_DIR` from `.env`. Copy that file outside the host and
+leaves the worker stopped. The configured worker owns the verification volume.
+The printed encrypted filename is in `GA_BACKUP_DIR` from `.env`. Copy that file outside the host and
 keep the backup key separately. Do not copy plaintext recovery files into the
 new bundle. For a deliberate recovery inspection, run `./install.sh
 unpack-backup FILENAME.enc`; it creates a private recovery directory inside
