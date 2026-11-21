@@ -72,12 +72,26 @@ impl From<sqlx::Error> for ReadinessError {
 
 impl Database {
     pub fn connect_lazy(url: &str) -> Result<Self, ReadinessError> {
+        Self::connect(url, false)
+    }
+
+    /// Keep all database sessions read-only while inspecting an installation.
+    pub fn connect_lazy_read_only(url: &str) -> Result<Self, ReadinessError> {
+        Self::connect(url, true)
+    }
+
+    fn connect(url: &str, read_only: bool) -> Result<Self, ReadinessError> {
         let address = url
             .strip_prefix("postgresql+psycopg://")
             .ok_or(ReadinessError::Unavailable)?;
         let options = PgConnectOptions::from_str(&format!("postgresql://{address}"))?
             .disable_statement_logging()
             .application_name("garmin-ai-rust");
+        let options = if read_only {
+            options.options([("default_transaction_read_only", "on")])
+        } else {
+            options
+        };
         Ok(Self {
             control: small_pool(options.clone()),
             work: small_pool(options.clone()),

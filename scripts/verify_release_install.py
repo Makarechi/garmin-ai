@@ -2,7 +2,13 @@
 
 import argparse
 import json
+import os
+import signal
+import subprocess
+from contextlib import suppress
 from pathlib import Path
+from time import monotonic, sleep
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from dotenv import dotenv_values
@@ -59,6 +65,44 @@ def tracker_entry(url: str, key: str, action_id: str):
         },
     )
     return request(url, f"/events/{result['id']}", key)
+
+
+def inspect_bundle(url: str, installer: list[str]) -> None:
+    key = dotenv_values(".env")["GA_API_KEY"]
+    with subprocess.Popen(
+        [*installer, "inspect"], start_new_session=True, stdin=subprocess.DEVNULL
+    ) as process:
+        try:
+            deadline = monotonic() + 25
+            while monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError("Bundle inspection exited before readiness")
+                try:
+                    if request(url, "/health/ready", key) == {"status": "ready"}:
+                        break
+                except URLError:
+                    sleep(0.2)
+            else:
+                raise RuntimeError("Bundle inspection did not reach readiness")
+            if not request(url, "/tools", key):
+                raise RuntimeError("Bundle inspection did not expose the read tools")
+            try:
+                request(url, "/events", key, {})
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+            else:
+                raise RuntimeError("Bundle inspection exposed the diary write route")
+        finally:
+            if process.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGINT)
+                try:
+                    process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    raise
+    print("Read-only bundle inspection passed")
 
 
 def main() -> None:

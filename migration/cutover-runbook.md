@@ -44,9 +44,10 @@ installation to measure the operational recovery interval.
    change record. Preserve unresolved deliveries and pending clarifications.
 2. Pause scheduled initiators and remove write access at the installation
    boundary. Freeze imports, wearable ingestion, Telegram webhook or polling,
-   web/HTTP writes, source adapters and backup jobs. Wait for active work to
-   complete or for its recovery state to be durably recorded. Keep one
-   explicitly identified owner of the runtime lease.
+   web/HTTP writes, MCP writers, source adapters and backup jobs. Wait for
+   active work to complete or for its recovery state to be durably recorded.
+   Stop the old API and worker and disable their automatic restart. Keep the
+   database available for backup and the schema check.
 3. From the original bundle, run `./install.sh backup` with the API write
    boundary closed. The command stops the worker and verifies the encrypted
    archive. Record the completed archive's digest and timestamp. Copy and
@@ -56,22 +57,25 @@ installation to measure the operational recovery interval.
 4. Confirm the old worker and all old sending or polling loops have stopped.
    Use the native bundle's preserved instance settings and volume mapping.
    Verify the image reference in `release.env`, run `./install.sh setup` to check
-   the preserved mounts and settings, and use the bundled
-   `./install.sh start` for the authorized upgrade. Check the recorded schema
-   status through the migrated application image and the same connection.
-5. Verify liveness, readiness, worker heartbeat and exclusive ownership.
-   Compare the post-switch binding, cursors and frozen-work inventory against
-   the pre-switch record. Confirm source replay status, read scopes and
-   visibility through the native application. Check app and database
-   resource pressure and that the previous verified backup is still
-   recoverable.
-6. Resume only the routes and consumers enabled for this installation. Track
+   the preserved mounts and settings, and record `./install.sh migrate --status`
+   against the authorized database. Apply the prepared upgrade with
+   `./install.sh migrate` and confirm the current revision with `--status`.
+5. Run `./install.sh inspect` for the loopback read-only API. Check liveness,
+   readiness, owner and source binding, raw archive hashes, and representative
+   diary and health reads. Compare cursors and frozen work against the
+   pre-switch record. The inspection process holds the database runtime lease
+   so neither worker can start during the review. Keep external access and
+   other writer processes stopped. Exit inspection with Ctrl-C when finished.
+6. Start the verified bundle with `./install.sh start`. Confirm worker
+   heartbeat, source replay and exclusive ownership before reopening access.
+   Check resource pressure and that the previous verified backup is still
+   recoverable. Resume only enabled routes and consumers. Track
    the first acknowledged write and the first post-switch lease. Verify
    distinct successful, pending and uncertain deliveries and an ordinary
    archive write/read. Observe committed job counts, queue age, retransmission
    and backup health during the authorized window.
 
-The bundled start command runs the bundled migration. The current
+The bundled start command also checks and applies the bundled migration. The current
 installation's [release procedure](../docs/release-install.md) defines its
 directory layout and environment. If a startup, consistency or ownership
 check fails, keep writes closed and follow the selected recovery path.

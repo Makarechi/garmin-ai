@@ -28,7 +28,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::any,
+    routing::{any, get},
 };
 use ga_db::{Database, ReadinessError};
 use ga_domain::access::Scope;
@@ -48,12 +48,18 @@ struct AppState {
     diary_writes: Arc<diary::WriteQueue>,
 }
 
-fn router(state: AppState) -> Router {
+fn read_routes() -> Router<AppState> {
     Router::new()
         .route("/health/live", any(liveness))
         .route("/health/ready", any(readiness))
         .route("/metrics", any(operations::metrics))
         .route("/operations", any(operations::snapshot))
+        .route("/tools", any(tools::list))
+        .route("/tools/{name}", any(tools::execute))
+}
+
+fn router(state: AppState) -> Router {
+    read_routes()
         .route("/capabilities", any(capabilities))
         .route("/context/calendar", any(calendar_context::plans))
         .route("/context/calendar/import", any(calendar_context::import))
@@ -95,8 +101,6 @@ fn router(state: AppState) -> Router {
         .route("/exports/diary", any(exports::diary))
         .route("/entries", any(diary::create_custom))
         .route("/entries/{event_id}", any(diary::edit_custom))
-        .route("/tools", any(tools::list))
-        .route("/tools/{name}", any(tools::execute))
         .route("/hypotheses", any(hypotheses::collection))
         .route("/hypotheses/{identity}", any(hypotheses::item))
         .route("/hypotheses/{identity}/recheck", any(hypotheses::recheck))
@@ -209,13 +213,17 @@ fn private_cache(mut response: Response, request: &HeaderMap) -> Response {
 }
 
 #[tokio::main(flavor = "current_thread")]
-pub async fn serve(host: &str, port: u16) -> io::Result<()> {
+pub async fn serve(host: &str, port: u16, read_only: bool) -> io::Result<()> {
     let authorization = Authorization::configured()?;
     let listener = TcpListener::bind((host, port)).await?;
 
-    let database = env::var("GA_DATABASE_URL")
-        .ok()
-        .and_then(|url| Database::connect_lazy(&url).ok());
+    let database = env::var("GA_DATABASE_URL").ok().and_then(|url| {
+        if read_only {
+            Database::connect_lazy_read_only(&url).ok()
+        } else {
+            Database::connect_lazy(&url).ok()
+        }
+    });
     let configured_timezone = env::var("GA_TIMEZONE")
         .ok()
         .or_else(|| {
@@ -231,21 +239,38 @@ pub async fn serve(host: &str, port: u16) -> io::Result<()> {
         .ok()
         .and_then(|[value]| value)
         .unwrap_or_else(|| "ru".into());
-    let webhook = TelegramWebhook::configured(database.clone()).router();
-    let garmin_auth = garmin_auth::router(database.clone());
     let diary_writes = Arc::new(diary::WriteQueue::new());
+    let state = AppState {
+        database,
+        authorization,
+        configured_timezone: configured_timezone.into(),
+        configured_locale: configured_locale.into(),
+        diary_writes: diary_writes.clone(),
+    };
+    if read_only {
+        let database = state.database.as_ref().ok_or_else(|| {
+            io::Error::other("An existing database is required for read-only inspection")
+        })?;
+        let mut lease = database
+            .acquire_runtime_lease()
+            .await
+            .map_err(io::Error::other)?;
+        let app = read_routes()
+            .route("/events/{event_id}", get(diary::entry))
+            .fallback(missing)
+            .with_state(state);
+        println!("Listening on http://{}", listener.local_addr()?);
+        return lease
+            .while_held(accept(listener, app, || {}))
+            .await
+            .map_err(io::Error::other)?;
+    }
+    let webhook = TelegramWebhook::configured(state.database.clone()).router();
+    let garmin_auth = garmin_auth::router(state.database.clone());
     println!("Listening on http://{}", listener.local_addr()?);
     accept(
         listener,
-        router(AppState {
-            database,
-            authorization,
-            configured_timezone: configured_timezone.into(),
-            configured_locale: configured_locale.into(),
-            diary_writes: diary_writes.clone(),
-        })
-        .merge(webhook)
-        .merge(garmin_auth),
+        router(state).merge(webhook).merge(garmin_auth),
         move || diary_writes.close(),
     )
     .await

@@ -62,6 +62,15 @@ compose() (
     GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 )
 
+stop_inspection() {
+    if docker container inspect "$inspection_name" >/dev/null 2>&1 &&
+        ! docker container stop "$inspection_name" >/dev/null 2>&1 &&
+        docker container inspect "$inspection_name" >/dev/null 2>&1; then
+        echo "Could not stop the read-only inspection container." >&2
+        return 1
+    fi
+}
+
 case "${1:-}" in
     demo)
         shift
@@ -125,6 +134,35 @@ case "${1:-}" in
         compose config --quiet
         compose up -d --wait
         ;;
+    migrate|inspect)
+        test "$runtime" = rust || { echo "This command requires a native bundle." >&2; exit 2; }
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        if [[ "$1" == migrate && $# -eq 2 && "$2" == --status ]]; then
+            compose run --rm --no-deps migrate migrate --status
+            exit
+        fi
+        test "$#" -eq 1 || { echo "Unexpected command arguments." >&2; exit 2; }
+        active=$(compose ps --status running --status restarting --status paused --quiet api worker)
+        if [[ -n "$active" ]]; then
+            echo "Stop the API and worker before preparing a cutover." >&2
+            exit 1
+        fi
+        if [[ "$1" == migrate ]]; then
+            compose up -d --wait db
+            compose run --rm --no-deps migrate
+        else
+            inspection_name="garmin-ai-inspect-$$-$RANDOM-$RANDOM"
+            if docker container inspect "$inspection_name" >/dev/null 2>&1; then
+                echo "The inspection container name is already in use." >&2
+                exit 1
+            fi
+            trap stop_inspection EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            compose run --rm --no-deps --name "$inspection_name" --service-ports api \
+                serve --read-only --host 0.0.0.0 --port 8080
+        fi
+        ;;
     status)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose ps
@@ -181,7 +219,7 @@ case "${1:-}" in
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
     *)
-        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME}" >&2
+        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME | migrate [--status] | inspect}" >&2
         exit 2
         ;;
 esac
