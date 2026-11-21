@@ -1,4 +1,6 @@
-use time::{Date, Weekday};
+use std::fmt;
+
+use time::{Date, Duration, PrimitiveDateTime, Weekday};
 
 // Compatibility details follow CPython 3.15.2 Modules/_datetimemodule.c.
 // This Rust adaptation preserves microsecond positions for the application's aware cursors.
@@ -6,13 +8,12 @@ use time::{Date, Weekday};
 
 /// The legacy cursor uses datetime.fromisoformat, including basic/week dates,
 /// arbitrary one-character separators and fractional-second UTC offsets.
-pub(super) fn parse(text: &str) -> Option<i64> {
-    let characters: Vec<_> = text.chars().collect();
-    let separator = date_length(&characters)?;
-    let separator_byte = text.char_indices().nth(separator)?.0;
-    let after_separator = separator_byte + characters[separator].len_utf8();
-    let date = date(&text[..separator_byte])?;
-    let clock = &text[after_separator..];
+pub(super) fn parse(text: &str) -> Option<ParsedDateTime> {
+    let separator = date_length(text.as_bytes())?;
+    let date = date(text.get(..separator)?)?;
+    let mut clock = text.get(separator..)?.chars();
+    clock.next()?;
+    let clock = clock.as_str();
     let zone = clock.find(['+', '-', 'Z'])?;
     let local = clock_microseconds(&clock[..zone], true)?;
     let offset = if &clock[zone..] == "Z" || clock[zone..].starts_with("Z\0") {
@@ -25,21 +26,39 @@ pub(super) fn parse(text: &str) -> Option<i64> {
         };
         sign * clock_microseconds(&clock[zone + 1..], false)?
     };
-    if local == 86_400_000_000 {
-        date.next_day()?;
-    }
-    let midnight = date.midnight().assume_utc().unix_timestamp() * 1_000_000;
-    midnight.checked_add(local - offset)
+    Some(ParsedDateTime {
+        local: date.midnight().checked_add(Duration::microseconds(local))?,
+        offset,
+    })
 }
 
-fn date_length(text: &[char]) -> Option<usize> {
-    if text.len() < 8 || !text[..4].iter().all(char::is_ascii_digit) {
+pub(super) struct ParsedDateTime {
+    local: PrimitiveDateTime,
+    offset: i64,
+}
+
+impl ParsedDateTime {
+    pub(super) fn utc_microseconds(&self) -> i64 {
+        self.local.assume_utc().unix_timestamp() * 1_000_000 + i64::from(self.local.microsecond())
+            - self.offset
+    }
+}
+
+impl fmt::Display for ParsedDateTime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        super::fmt_local(formatter, self.local)?;
+        super::fmt_offset(formatter, self.offset)
+    }
+}
+
+fn date_length(text: &[u8]) -> Option<usize> {
+    if text.len() < 8 || !text[..4].iter().all(u8::is_ascii_digit) {
         return None;
     }
     match (text[4], text[5]) {
-        ('-', 'W') => {
-            if text.get(8) == Some(&'-') {
-                if text.get(10).is_some_and(char::is_ascii_digit) {
+        (b'-', b'W') => {
+            if text.get(8) == Some(&b'-') {
+                if text.get(10).is_some_and(u8::is_ascii_digit) {
                     Some(8)
                 } else {
                     Some(10)
@@ -48,8 +67,8 @@ fn date_length(text: &[char]) -> Option<usize> {
                 Some(8)
             }
         }
-        ('-', _) => Some(10),
-        ('W', _) => {
+        (b'-', _) => Some(10),
+        (b'W', _) => {
             let digits = text[7..]
                 .iter()
                 .take_while(|value| value.is_ascii_digit())

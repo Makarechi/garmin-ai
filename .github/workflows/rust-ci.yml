@@ -15,6 +15,7 @@ on:
       - 'migration/check_insights_list.py'
       - 'migration/check_mcp_generic_nonfinite.py'
       - 'migration/check_postgres_readiness.py'
+      - 'migration/check_transport_retention.py'
       - 'migration/check_wellbeing_observations.py'
       - 'migration/capture_reference.py'
       - 'src/garmin_ai/api.py'
@@ -38,6 +39,7 @@ on:
       - 'migration/check_insights_list.py'
       - 'migration/check_mcp_generic_nonfinite.py'
       - 'migration/check_postgres_readiness.py'
+      - 'migration/check_transport_retention.py'
       - 'migration/check_wellbeing_observations.py'
       - 'migration/capture_reference.py'
       - 'src/garmin_ai/api.py'
@@ -155,6 +157,15 @@ jobs:
             GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/$database" \
               uv run python "migration/check_${tool}.py" target/release/garmin-ai-rust
           done
+      - name: Compare retention review, resume and apply with Python
+        run: |
+          for side in python native; do
+            docker exec "${{ job.services.postgres.id }}" createdb -U garmin "retention_${side}_test"
+          done
+          database_url_prefix="${GA_TEST_DATABASE_URL%/*}"
+          GA_TEST_DATABASE_URL="$database_url_prefix/retention_python_test" \
+            GA_TEST_NATIVE_URL="$database_url_prefix/retention_native_test" \
+            uv run python migration/check_transport_retention.py target/release/garmin-ai-rust
       - name: Exercise the Rust HTTP server and demo in Chromium
         env:
           GA_REQUIRE_TEST_DB: "1"

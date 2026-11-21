@@ -3,12 +3,15 @@
 mod legacy;
 mod neutral;
 
-use std::{error::Error, fmt};
+use std::{borrow::Cow, error::Error, fmt};
 
-use ga_domain::timestamp::StoredInstant;
+use ga_domain::{
+    identity::python_cursor_uuid,
+    timestamp::{StoredInstant, python_isoformat_microseconds},
+};
 use serde::Serialize;
-use serde_json::{Value, json};
-use sqlx::{Postgres, Transaction};
+use serde_json::Value;
+use sqlx::{Postgres, Transaction, postgres::types::PgInterval};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -104,9 +107,8 @@ impl Database {
             .to_string();
         let answer_after = selection
             .answer_cursor
-            .map(str::parse::<Uuid>)
-            .transpose()
-            .map_err(|_| RetentionError::Cursor)?;
+            .map(|value| python_cursor_uuid(value).ok_or(RetentionError::Cursor))
+            .transpose()?;
         let legacy_after = selection.cursor.map(legacy::cursor).transpose()?;
         let neutral_after = neutral::Cursor::parse(selection.neutral_cursor)?;
         let window = RetentionWindow {
@@ -229,20 +231,18 @@ async fn prune_answers(
 }
 
 fn older(text: Option<&str>, cutoff: OffsetDateTime) -> bool {
-    text.and_then(parse_timestamp)
-        .is_some_and(|instant| instant < cutoff)
+    text.and_then(python_isoformat_microseconds)
+        .is_some_and(|instant| i128::from(instant) * 1_000 < cutoff.unix_timestamp_nanos())
 }
 
-fn parse_timestamp(text: &str) -> Option<OffsetDateTime> {
-    // Archived timestamps always have a date and an explicit offset. Do not infer
-    // an age from a number or a timestamp that cannot be interpreted safely.
-    if text.as_bytes().get(4) != Some(&b'-') || text.len() < 17 {
-        return None;
+fn cursor_interval(microseconds: i64) -> PgInterval {
+    // PostgreSQL accepts cursor instants outside Rust's storage calendar. An
+    // interval from the UTC epoch binds the exact microsecond without a float.
+    PgInterval {
+        months: 0,
+        days: 0,
+        microseconds,
     }
-    text.parse::<StoredInstant>()
-        .ok()
-        .or_else(|| StoredInstant::from_legacy_input(&json!(text)))
-        .map(OffsetDateTime::from)
 }
 
 fn parse_cursor(value: &str) -> Result<Value, RetentionError> {
@@ -250,6 +250,26 @@ fn parse_cursor(value: &str) -> Result<Value, RetentionError> {
         return Err(RetentionError::Cursor);
     }
     serde_json::from_str(value).map_err(|_| RetentionError::Cursor)
+}
+
+fn cursor_pair(value: &Value) -> Option<(&str, Cow<'_, Value>)> {
+    // Python unpacking also accepts a two-key object, in insertion order.
+    match value {
+        Value::Array(values) => {
+            let [stamp, id] = values.as_slice() else {
+                return None;
+            };
+            Some((stamp.as_str()?, Cow::Borrowed(id)))
+        }
+        Value::Object(values) if values.len() == 2 => {
+            let mut keys = values.keys();
+            Some((
+                keys.next()?,
+                Cow::Owned(Value::String(keys.next()?.clone())),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn stamp(at: OffsetDateTime) -> Result<String, RetentionError> {

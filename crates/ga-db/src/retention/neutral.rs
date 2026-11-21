@@ -1,10 +1,14 @@
 use std::collections::BTreeSet;
 
+use ga_domain::{identity::python_cursor_uuid, timestamp::python_isoformat_with_display};
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{PgTransaction, RetentionError, RetentionWindow, parse_cursor, parse_timestamp, stamp};
+use super::{
+    PgTransaction, RetentionError, RetentionWindow, cursor_interval, cursor_pair, parse_cursor,
+    stamp,
+};
 
 const TERMINAL: &[&str] = &[
     "provider_accepted",
@@ -15,7 +19,40 @@ const TERMINAL: &[&str] = &[
     "failed",
 ];
 
-type Position = (OffsetDateTime, Uuid);
+struct Position {
+    microseconds: i64,
+    display: String,
+    id: Uuid,
+}
+
+impl Position {
+    fn parse(value: &Value) -> Result<Self, RetentionError> {
+        let (date, id) = cursor_pair(value).ok_or(RetentionError::Cursor)?;
+        let (microseconds, display) =
+            python_isoformat_with_display(date).ok_or(RetentionError::Cursor)?;
+        let id = id
+            .as_str()
+            .and_then(python_cursor_uuid)
+            .ok_or(RetentionError::Cursor)?;
+        Ok(Self {
+            microseconds,
+            display,
+            id,
+        })
+    }
+
+    fn from_row((at, id): (OffsetDateTime, Uuid)) -> Result<Self, RetentionError> {
+        Ok(Self {
+            microseconds: at.unix_timestamp() * 1_000_000 + i64::from(at.microsecond()),
+            display: stamp(at)?,
+            id,
+        })
+    }
+
+    fn render(&self) -> String {
+        format!("[\"{}\", \"{}\"]", self.display, self.id)
+    }
+}
 
 #[derive(Default)]
 pub(super) struct Cursor {
@@ -32,7 +69,7 @@ impl Cursor {
         let value = parse_cursor(raw)?;
         if value.is_array() {
             return Ok(Self {
-                inbound_after: Some(position(&value)?),
+                inbound_after: Some(Position::parse(&value)?),
                 ..Self::default()
             });
         }
@@ -41,7 +78,7 @@ impl Cursor {
             object
                 .get(name)
                 .filter(|value| !value.is_null())
-                .map(position)
+                .map(Position::parse)
                 .transpose()
         };
         Ok(Self {
@@ -51,40 +88,19 @@ impl Cursor {
         })
     }
 
-    fn render(&self) -> Result<String, RetentionError> {
-        Ok(format!(
+    fn render(&self) -> String {
+        let render = |position: Option<&Position>| {
+            position
+                .map(Position::render)
+                .unwrap_or_else(|| "null".into())
+        };
+        format!(
             "{{\"inbound_after\": {}, \"inbound_done\": {}, \"orphan_after\": {}}}",
-            render_position(self.inbound_after)?,
+            render(self.inbound_after.as_ref()),
             self.inbound_done,
-            render_position(self.orphan_after)?,
-        ))
+            render(self.orphan_after.as_ref()),
+        )
     }
-}
-
-fn position(value: &Value) -> Result<Position, RetentionError> {
-    let [date, id] = value
-        .as_array()
-        .map(Vec::as_slice)
-        .ok_or(RetentionError::Cursor)?
-    else {
-        return Err(RetentionError::Cursor);
-    };
-    let date = date
-        .as_str()
-        .and_then(parse_timestamp)
-        .ok_or(RetentionError::Cursor)?;
-    let id = id
-        .as_str()
-        .and_then(|id| id.parse().ok())
-        .ok_or(RetentionError::Cursor)?;
-    Ok((date, id))
-}
-
-fn render_position(value: Option<Position>) -> Result<String, RetentionError> {
-    let Some((date, id)) = value else {
-        return Ok("null".into());
-    };
-    Ok(format!("[\"{}\", \"{id}\"]", stamp(date)?))
 }
 
 pub(super) struct Page {
@@ -98,19 +114,25 @@ pub(super) async fn prune(
     window: &RetentionWindow,
     mut cursor: Cursor,
 ) -> Result<Page, RetentionError> {
-    let inbound: Vec<Position> = if cursor.inbound_done {
+    let inbound: Vec<(OffsetDateTime, Uuid)> = if cursor.inbound_done {
         Vec::new()
     } else {
         sqlx::query_as(
             "SELECT received_at,id FROM inbound_messages
              WHERE status IN ('processed','invalid') AND received_at<$1
                AND envelope->>'_text_redacted' IS DISTINCT FROM 'true'
-               AND ($2::timestamptz IS NULL OR (received_at,id)>($2,$3))
+               AND ($2::interval IS NULL OR
+                    (received_at,id)>(('1970-01-01'::timestamp + $2) AT TIME ZONE 'UTC',$3))
              ORDER BY received_at,id LIMIT $4 FOR UPDATE",
         )
         .bind(window.cutoff)
-        .bind(cursor.inbound_after.map(|(at, _)| at))
-        .bind(cursor.inbound_after.map(|(_, id)| id))
+        .bind(
+            cursor
+                .inbound_after
+                .as_ref()
+                .map(|at| cursor_interval(at.microseconds)),
+        )
+        .bind(cursor.inbound_after.as_ref().map(|at| at.id))
         .bind(window.limit)
         .fetch_all(&mut **txn)
         .await?
@@ -130,18 +152,24 @@ pub(super) async fn prune(
         .collect();
 
     let remaining = window.limit - inbound.len() as i64;
-    let mut orphan: Vec<Position> = if remaining > 0 {
+    let mut orphan: Vec<(OffsetDateTime, Uuid)> = if remaining > 0 {
         sqlx::query_as(
             "SELECT created_at,id FROM outbox_messages
              WHERE inbound_message_id IS NULL AND created_at<$1 AND state=ANY($2)
                AND intent->>'_text_redacted' IS DISTINCT FROM 'true'
-               AND ($3::timestamptz IS NULL OR (created_at,id)>($3,$4))
+               AND ($3::interval IS NULL OR
+                    (created_at,id)>(('1970-01-01'::timestamp + $3) AT TIME ZONE 'UTC',$4))
              ORDER BY created_at,id LIMIT $5 FOR UPDATE",
         )
         .bind(window.cutoff)
         .bind(TERMINAL)
-        .bind(cursor.orphan_after.map(|(at, _)| at))
-        .bind(cursor.orphan_after.map(|(_, id)| id))
+        .bind(
+            cursor
+                .orphan_after
+                .as_ref()
+                .map(|at| cursor_interval(at.microseconds)),
+        )
+        .bind(cursor.orphan_after.as_ref().map(|at| at.id))
         .bind(remaining + 1)
         .fetch_all(&mut **txn)
         .await?
@@ -156,10 +184,14 @@ pub(super) async fn prune(
     }
     let inbound_more = !cursor.inbound_done && inbound.len() as i64 == window.limit;
     let next = if inbound_more || orphan_more {
-        cursor.inbound_after = inbound.last().copied().or(cursor.inbound_after);
-        cursor.orphan_after = orphan.last().copied().or(cursor.orphan_after);
+        if let Some(row) = inbound.last().copied() {
+            cursor.inbound_after = Some(Position::from_row(row)?);
+        }
+        if let Some(row) = orphan.last().copied() {
+            cursor.orphan_after = Some(Position::from_row(row)?);
+        }
         cursor.inbound_done = !inbound_more;
-        Some(cursor.render()?)
+        Some(cursor.render())
     } else {
         None
     };

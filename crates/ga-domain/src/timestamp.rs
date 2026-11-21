@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, PrimitiveDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 mod python_isoformat;
 
@@ -78,7 +78,13 @@ impl TryFrom<OffsetDateTime> for StoredInstant {
 
 /// Parse a legacy cursor's UTC position, including offsets crossing the storage calendar bounds.
 pub fn python_isoformat_microseconds(value: &str) -> Option<i64> {
-    python_isoformat::parse(value)
+    Some(python_isoformat::parse(value)?.utc_microseconds())
+}
+
+/// Parse the UTC position and retain Python's ISO spelling for a carried-forward cursor.
+pub fn python_isoformat_with_display(value: &str) -> Option<(i64, String)> {
+    let parsed = python_isoformat::parse(value)?;
+    Some((parsed.utc_microseconds(), parsed.to_string()))
 }
 
 impl From<StoredInstant> for OffsetDateTime {
@@ -108,30 +114,41 @@ pub struct OffsetTimestamp(pub OffsetDateTime);
 
 impl fmt::Display for OffsetTimestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = self.0;
-        write!(
-            f,
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-            value.year(),
-            u8::from(value.month()),
-            value.day(),
-            value.hour(),
-            value.minute(),
-            value.second()
-        )?;
-        let micros = value.microsecond();
-        if micros != 0 {
-            write!(f, ".{micros:06}")?;
-        }
-        let offset = value.offset().whole_seconds();
-        let sign = if offset < 0 { '-' } else { '+' };
-        let seconds = offset.unsigned_abs();
-        write!(f, "{sign}{:02}:{:02}", seconds / 3600, seconds / 60 % 60)?;
-        if !seconds.is_multiple_of(60) {
-            write!(f, ":{:02}", seconds % 60)?;
-        }
-        Ok(())
+        fmt_local(f, PrimitiveDateTime::new(self.0.date(), self.0.time()))?;
+        fmt_offset(f, i64::from(self.0.offset().whole_seconds()) * 1_000_000)
     }
+}
+
+fn fmt_local(f: &mut fmt::Formatter<'_>, value: PrimitiveDateTime) -> fmt::Result {
+    write!(
+        f,
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second()
+    )?;
+    let micros = value.microsecond();
+    if micros != 0 {
+        write!(f, ".{micros:06}")?;
+    }
+    Ok(())
+}
+
+fn fmt_offset(f: &mut fmt::Formatter<'_>, offset: i64) -> fmt::Result {
+    let sign = if offset < 0 { '-' } else { '+' };
+    let seconds = offset.unsigned_abs() / 1_000_000;
+    let micros = offset.unsigned_abs() % 1_000_000;
+    write!(f, "{sign}{:02}:{:02}", seconds / 3600, seconds / 60 % 60)?;
+    if !seconds.is_multiple_of(60) || micros != 0 {
+        write!(f, ":{:02}", seconds % 60)?;
+    }
+    if micros != 0 {
+        write!(f, ".{micros:06}")?;
+    }
+    Ok(())
 }
 
 /// Resolve a regional wall clock using Python's first-fold and pre-gap offsets.

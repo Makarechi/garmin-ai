@@ -1,32 +1,59 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use ga_domain::{metric_contract::decimal_value, timestamp::python_isoformat_microseconds};
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{PgTransaction, RetentionError, RetentionWindow, parse_cursor, parse_timestamp, stamp};
+use super::{
+    PgTransaction, RetentionError, RetentionWindow, cursor_interval, cursor_pair, parse_cursor,
+    stamp,
+};
 
 const REDACTED_REPLY: &str = "Срок хранения технического текста этого ответа истёк. Записи дневника доступны через /history.";
 
-type Position = (OffsetDateTime, i64);
+pub(super) struct Position {
+    microseconds: i64,
+    id: i64,
+}
 
 pub(super) fn cursor(raw: &str) -> Result<Position, RetentionError> {
     let value = parse_cursor(raw)?;
-    let [date, identity] = value
-        .as_array()
-        .map(Vec::as_slice)
-        .ok_or(RetentionError::Cursor)?
-    else {
-        return Err(RetentionError::Cursor);
-    };
-    let at = date
-        .as_str()
-        .and_then(parse_timestamp)
-        .ok_or(RetentionError::Cursor)?;
-    let id = identity
-        .as_i64()
-        .or_else(|| identity.as_str()?.parse().ok())
-        .ok_or(RetentionError::Cursor)?;
-    Ok((at, id))
+    let (date, identity) = cursor_pair(&value).ok_or(RetentionError::Cursor)?;
+    let microseconds = python_isoformat_microseconds(date).ok_or(RetentionError::Cursor)?;
+    let id = python_integer(&identity).ok_or(RetentionError::Cursor)?;
+    Ok(Position { microseconds, id })
+}
+
+fn python_integer(value: &Value) -> Option<i64> {
+    match value {
+        Value::Bool(value) => Some(i64::from(*value)),
+        Value::Number(number) if number.as_str().contains(['.', 'e', 'E']) => {
+            i64::try_from(number.as_f64()?.trunc() as i128).ok()
+        }
+        Value::Number(number) => decimal_integer(number.as_str()),
+        Value::String(text) => decimal_integer(text.trim_matches(|ch: char| {
+            matches!(ch, '\t'..='\r' | ' ') || (!ch.is_ascii() && ch.is_whitespace())
+        })),
+        _ => None,
+    }
+}
+
+fn decimal_integer(text: &str) -> Option<i64> {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let sign = if text.starts_with('-') { -1 } else { 1 };
+    let mut integer = 0i64;
+    for group in digits.split('_') {
+        if group.is_empty() {
+            return None;
+        }
+        for digit in group.chars() {
+            integer = integer
+                .checked_mul(10)?
+                .checked_add(sign * i64::from(decimal_value(digit)?))?;
+        }
+    }
+    Some(integer)
 }
 
 pub(super) struct Page {
@@ -52,12 +79,13 @@ pub(super) async fn prune(
         "SELECT id,received_at,jsonb_typeof(payload)='object' FROM telegram_updates
          WHERE status IN ('processed','invalid') AND received_at<$1
            AND payload->>'_text_redacted' IS DISTINCT FROM 'true'
-           AND ($2::timestamptz IS NULL OR (received_at,id)>($2,$3))
+           AND ($2::interval IS NULL OR
+                (received_at,id)>(('1970-01-01'::timestamp + $2) AT TIME ZONE 'UTC',$3))
          ORDER BY received_at,id LIMIT $4 FOR UPDATE",
     )
     .bind(window.cutoff)
-    .bind(after.map(|(at, _)| at))
-    .bind(after.map(|(_, id)| id))
+    .bind(after.as_ref().map(|at| cursor_interval(at.microseconds)))
+    .bind(after.as_ref().map(|at| at.id))
     .bind(window.limit)
     .fetch_all(&mut **txn)
     .await?;
