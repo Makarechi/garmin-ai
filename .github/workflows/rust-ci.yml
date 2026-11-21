@@ -13,8 +13,12 @@ on:
       - 'migration/check_file_json.py'
       - 'migration/check_cutover_restore.py'
       - 'migration/check_insights_list.py'
+      - 'migration/check_legacy_telegram_schema.py'
       - 'migration/check_mcp_generic_nonfinite.py'
+      - 'migration/check_native_migrate_command.py'
+      - 'migration/check_native_schema.py'
       - 'migration/check_postgres_readiness.py'
+      - 'migration/check_telegram_schema.py'
       - 'migration/check_transport_retention.py'
       - 'migration/check_wellbeing_observations.py'
       - 'migration/capture_reference.py'
@@ -37,8 +41,12 @@ on:
       - 'migration/check_file_json.py'
       - 'migration/check_cutover_restore.py'
       - 'migration/check_insights_list.py'
+      - 'migration/check_legacy_telegram_schema.py'
       - 'migration/check_mcp_generic_nonfinite.py'
+      - 'migration/check_native_migrate_command.py'
+      - 'migration/check_native_schema.py'
       - 'migration/check_postgres_readiness.py'
+      - 'migration/check_telegram_schema.py'
       - 'migration/check_transport_retention.py'
       - 'migration/check_wellbeing_observations.py'
       - 'migration/capture_reference.py'
@@ -134,6 +142,15 @@ jobs:
       - run: cargo test --locked -p ga-db --test job_leases -- --ignored
       - run: cargo test --locked -p ga-db --test garmin_owner -- --ignored
       - run: cargo test --locked -p ga-db --test raw_capture -- --ignored
+      - name: Verify the public migration command for every supported schema
+        run: |
+          binary=target/release/garmin-ai-rust
+          prefix=schema_cli
+          databases=$(uv run python migration/check_native_migrate_command.py "$binary" "$prefix" --list-databases)
+          while IFS= read -r database; do
+            docker exec "${{ job.services.postgres.id }}" createdb -U garmin "$database"
+          done <<< "$databases"
+          uv run python migration/check_native_migrate_command.py "$binary" "$prefix"
       - name: Compare legacy nonfinite numbers over MCP
         run: |
           docker exec "${{ job.services.postgres.id }}" createdb -U garmin garmin_mcp_nonfinite_test

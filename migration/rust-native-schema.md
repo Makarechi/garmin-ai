@@ -26,3 +26,6 @@ schema and synthetic records against the pinned Python command, repeats the
 upgrade and checks the Rust HTTP readiness endpoint. An interruption test kills
 the migrator while its final schema change is blocked, verifies that the earlier
 ledger and measurement survived, then reruns the migration to a ready service.
+Rust CI also verifies that the public status and migration commands refuse
+unversioned occupied storage and unknown, empty or split ledgers, preserving
+the existing rows.
