@@ -14,13 +14,13 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 WEEK_SECONDS = 7 * 24 * 60 * 60
 SERVICES = ("api", "worker", "db")
+RESOURCE_LIMIT_FIELDS = ("cpu.max", "cpuset.cpus.effective", "memory.max", "memory.swap.max")
 CGROUP_FIELDS = (
+    *RESOURCE_LIMIT_FIELDS,
     "memory.current",
     "memory.peak",
-    "memory.max",
     "memory.events",
     "memory.swap.current",
-    "memory.swap.max",
     "memory.pressure",
     "cpu.stat",
     "io.stat",
@@ -218,6 +218,16 @@ def track_container_restarts(current, generations):
         generations[service] = generation
 
 
+def track_resource_limits(current, previous_limits):
+    for service, state in current["containers"].items():
+        if (cgroup := state.get("cgroup")) is None:
+            continue
+        limits = tuple(cgroup[field] for field in RESOURCE_LIMIT_FIELDS)
+        if previous_limits.get(service, limits) != limits:
+            current["failures"].append(f"{service}:resource_limits_changed")
+        previous_limits[service] = limits
+
+
 def record(output, kind, **fields):
     value = {"kind": kind, "observed_at": datetime.now(UTC).isoformat(), **fields}
     output.write(json.dumps(value, allow_nan=False, separators=(",", ":")) + "\n")
@@ -259,11 +269,13 @@ def observe(args, output, token):
     previous, previous_wall = started, started_wall
     total_samples = incomplete_samples = gap_samples = 0
     oom_counts = {}
+    resource_limits = {}
     while True:
         clock, wall = time.monotonic(), time.time()
         current = sample(run_docker, args, selected, token)
         track_container_restarts(current, generations)
         track_oom_kills(current, oom_counts)
+        track_resource_limits(current, resource_limits)
         elapsed = clock - started
         wall_elapsed = wall - started_wall
         spacing = max(clock - previous, wall - previous_wall)
