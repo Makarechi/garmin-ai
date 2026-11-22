@@ -71,6 +71,13 @@ compose() (
     docker compose -p "$instance" --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 )
 
+check_native_database_languages() {
+    compose exec -T db psql -X -v ON_ERROR_STOP=1 -U garmin -d garmin_ai -At -c \
+        "SELECT NOT EXISTS (SELECT FROM pg_language WHERE lanname LIKE 'plpython%')
+            AND NOT EXISTS (SELECT FROM pg_extension WHERE extname LIKE 'plpython%')" \
+        | grep -Fx t
+}
+
 cleanup() {
     exit_code=$?
     trap - EXIT
@@ -324,6 +331,7 @@ compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
     --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
 
 if [[ "$runtime" == rust ]]; then
+    check_native_database_languages
     if [[ "$historical" == true ]]; then
         compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
             "SELECT current_database(),version_num,value->>'retained' FROM alembic_version CROSS JOIN app_state WHERE key='synthetic:release-upgrade'" \
@@ -429,6 +437,7 @@ assert len(counts) == 30 and counts["events"] == 1
     ./install.sh "${profile[@]}" start
     "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
         --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
+    check_native_database_languages
     if [[ "$historical" == true ]]; then
         compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
             "SELECT value->>'retained' FROM app_state WHERE key='synthetic:release-upgrade'" | grep -Fx true
@@ -462,6 +471,7 @@ Path(sys.argv[1]).write_text(
             "portable_database_export_verified": True,
             "garmin_enrollment_requires_confirmation_and_saved_session": True,
             "native_runtime_processes_verified": sys.argv[5] == "rust",
+            "native_database_without_plpython_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
             "native_bundle_restore_verified": sys.argv[5] == "rust",
             "native_mounted_erasure_verified": sys.argv[5] == "rust",

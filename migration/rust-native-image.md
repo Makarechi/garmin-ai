@@ -10,6 +10,11 @@ both Linux architectures. It verifies that each service starts
 Python interpreter. The installation result records this alongside setup,
 upgrade and backup checks.
 
+The pinned TimescaleDB image includes optional PL/Python files for PostgreSQL.
+The native installation smoke checks that the tested database has no PL/Python
+language or extension registered after clean setup or historical upgrade and
+again after restoration.
+
 Both image architectures passed the core-only probe on a read-only filesystem with Linux capabilities dropped and networking disabled. A separate run installed an empty TimescaleDB, upgraded a database at `f103aa712b44`, confirmed `c54f8a72d130`, repeated migration, and checked HTTP readiness. The local ARM64 Docker VM ran AMD64 through emulation.
 
 ## Local configuration
