@@ -24,6 +24,7 @@ replace the placeholder below with its actual registry digest:
 
 ```sh
 uv run python scripts/build_release_bundle.py \
+  --runtime rust \
   --app-image ghcr.io/OWNER/garmin-ai@sha256:FULL_64_CHARACTER_DIGEST
 ```
 
@@ -153,3 +154,9 @@ tracker persistence across restart and unchanged private settings after repeated
 setup. Its evidence file records the exact source SHA and image digest. This
 isolated CI run does not validate a published image digest, arm64 release image,
 third-party notices, external providers or long-running operation.
+
+To verify an existing native candidate image, run the Native release installation
+workflow at the image's Git revision and supply its immutable registry reference
+in `app_image`. The same digest is used for the clean, historical upgrade and
+small-host checks on the applicable physical Linux runners. The reports record
+the tested digest and source revision.
