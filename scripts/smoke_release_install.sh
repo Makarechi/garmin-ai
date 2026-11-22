@@ -6,6 +6,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 python_bin=${GA_SMOKE_PYTHON:-$root/.venv/bin/python}
 architecture=$(uname -m)
 runtime=${GA_SMOKE_RUNTIME:-python}
+image_ref=${GA_SMOKE_NATIVE_IMAGE:-}
 historical=${GA_SMOKE_HISTORICAL:-false}
 gcp=${GA_SMOKE_GCP:-false}
 dockerfile=Dockerfile
@@ -25,6 +26,10 @@ elif [[ "$runtime" != python ]]; then
     exit 2
 elif [[ "$architecture" != x86_64 && "${1:-}" != --allow-emulated ]]; then
     echo "Native amd64 smoke requires an x86_64 host." >&2
+    exit 2
+fi
+if [[ -n "$image_ref" && "$runtime" != rust ]]; then
+    echo "An existing image can be selected only for the native installation smoke." >&2
     exit 2
 fi
 if [[ "$historical" == true ]]; then
@@ -51,23 +56,36 @@ if [[ ! -x "$python_bin" ]]; then
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/garmin-release-smoke.XXXXXX")
-registry_name="garmin-ai-native-smoke-$$"
+registry_name=
 instance="garmin-ci-$$"
-image_tag=garmin-ai-install-smoke:$$
+image_tag=
 registry_tag=
 bundle_dir=
+compose() (
+    # Use the disposable bundle's settings for both verification and cleanup.
+    while IFS= read -r name; do
+        case "$name" in
+            GA_*|COMPOSE_*) unset "$name" ;;
+        esac
+    done < <(compgen -e)
+    docker compose -p "$instance" --env-file .env --env-file release.env "${compose_files[@]}" "$@"
+)
+
 cleanup() {
     exit_code=$?
     trap - EXIT
     if [[ -n "$bundle_dir" && -f "$bundle_dir/.env" ]]; then
         (
             cd "$bundle_dir"
-            docker compose -p "$instance" --env-file .env --env-file release.env \
-                "${compose_files[@]}" down -v --remove-orphans >/dev/null 2>&1
+            compose down -v --remove-orphans >/dev/null 2>&1
         ) || true
     fi
-    docker stop "$registry_name" >/dev/null 2>&1 || true
-    docker image rm "$image_tag" >/dev/null 2>&1 || true
+    if [[ -n "$registry_name" ]]; then
+        docker stop "$registry_name" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$image_tag" ]]; then
+        docker image rm "$image_tag" >/dev/null 2>&1 || true
+    fi
     if [[ -n "$registry_tag" ]]; then
         docker image rm "$registry_tag" >/dev/null 2>&1 || true
     fi
@@ -77,31 +95,36 @@ cleanup() {
 trap cleanup EXIT
 
 revision=$(git -C "$root" rev-parse HEAD)
-docker buildx build --load --platform "$platform" -f "$root/$dockerfile" \
-    --label "org.opencontainers.image.revision=$revision" -t "$image_tag" "$root" >"$work/build.log" 2>&1 || {
-    tail -40 "$work/build.log" >&2
-    exit 1
-}
-if [[ "$runtime" == rust ]]; then
-    docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
-        --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_tag" --help >/dev/null
+image_source=provided
+if [[ -z "$image_ref" ]]; then
+    image_source=local-build
+    image_tag=garmin-ai-install-smoke:$$
+    registry_name="garmin-ai-native-smoke-$$"
+    docker buildx build --load --platform "$platform" -f "$root/$dockerfile" \
+        --label "org.opencontainers.image.revision=$revision" -t "$image_tag" "$root" >"$work/build.log" 2>&1 || {
+        tail -40 "$work/build.log" >&2
+        exit 1
+    }
+    docker run -d --rm -p 127.0.0.1::5000 --name "$registry_name" registry:2 >/dev/null
+    registry_port=$(docker port "$registry_name" 5000/tcp | sed -n 's/.*://p')
+    registry_tag="127.0.0.1:$registry_port/garmin-ai:smoke"
+    docker tag "$image_tag" "$registry_tag"
+    docker push "$registry_tag" >"$work/push.log" 2>&1 || {
+        tail -40 "$work/push.log" >&2
+        exit 1
+    }
+    digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' "$work/push.log" | tail -1)
+    if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+        echo "Could not identify the registry image digest." >&2
+        exit 1
+    fi
+    image_ref="127.0.0.1:$registry_port/garmin-ai@$digest"
 fi
-docker run -d --rm -p 127.0.0.1::5000 --name "$registry_name" registry:2 >/dev/null
-registry_port=$(docker port "$registry_name" 5000/tcp | sed -n 's/.*://p')
-registry_tag="127.0.0.1:$registry_port/garmin-ai:smoke"
-docker tag "$image_tag" "$registry_tag"
-docker push "$registry_tag" >"$work/push.log" 2>&1 || {
-    tail -40 "$work/push.log" >&2
-    exit 1
-}
-digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' "$work/push.log" | tail -1)
-if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-    echo "Could not identify the registry image digest." >&2
-    exit 1
-fi
-image_ref="127.0.0.1:$registry_port/garmin-ai@$digest"
 PYTHONPATH="$root/src" "$python_bin" "$root/scripts/build_release_bundle.py" \
     --runtime "$runtime" --app-image "$image_ref" --output "$work/bundle"
+if [[ "$image_source" == provided ]]; then
+    docker pull --platform "$platform" "$image_ref"
+fi
 mkdir "$work/install"
 tar -xzf "$work"/bundle/*.tar.gz -C "$work/install"
 bundle_dir=$(find "$work/install" -mindepth 1 -maxdepth 1 -type d -print -quit)
@@ -112,6 +135,8 @@ fi
 
 cd "$bundle_dir"
 if [[ "$runtime" == rust ]]; then
+    docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
+        --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_ref" --help >/dev/null
     ./install.sh "${profile[@]}" licenses >"$work/notices.txt"
     grep -Fxq 'Rust dependency license files bundled with this application image' "$work/notices.txt"
     docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
@@ -128,9 +153,6 @@ assert "pyo3" not in names
 assert all(crate["license_files"] or crate["review_required"] for crate in inventory)
 '
 fi
-compose() {
-    docker compose -p "$instance" --env-file .env --env-file release.env "${compose_files[@]}" "$@"
-}
 ports=$("$python_bin" - <<'PY'
 import socket
 
@@ -335,7 +357,7 @@ fi
 
 mkdir -p "$root/test-results"
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
-    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" <<'PY'
+    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -349,6 +371,7 @@ Path(sys.argv[1]).write_text(
             "native_amd64": sys.argv[2] == "x86_64" and sys.argv[6] == "linux/amd64",
             "git_sha": sys.argv[3],
             "app_image": sys.argv[4],
+            "app_image_source": sys.argv[9],
             "runtime": sys.argv[5],
             "platform": sys.argv[6],
             "setup_preserved_settings": True,

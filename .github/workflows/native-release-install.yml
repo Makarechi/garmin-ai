@@ -2,6 +2,11 @@ name: Native release installation
 
 on:
   workflow_dispatch:
+    inputs:
+      app_image:
+        description: Optional digest-pinned native image matching the selected Git revision
+        type: string
+        required: false
   pull_request:
     paths:
       - ".github/workflows/native-release-install.yml"
@@ -52,6 +57,8 @@ jobs:
             architecture: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
+    env:
+      GA_SMOKE_NATIVE_IMAGE: ${{ inputs.app_image }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
