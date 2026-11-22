@@ -8,6 +8,8 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select, text
@@ -337,6 +339,17 @@ def create_app(settings: Settings | None = None, engine=None):
             status_code=422,
             content={"detail": "Form validation failed", "errors": exc.errors},
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(request: Request, exc: RequestValidationError):
+        route = getattr(request.scope.get("route"), "path", None)
+        if route in ("/garmin-auth/start", "/garmin-auth/complete"):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "Invalid arguments"},
+                headers={"Cache-Control": "no-store"},
+            )
+        return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(ValueError)
     async def invalid_handler(request: Request, exc: ValueError):

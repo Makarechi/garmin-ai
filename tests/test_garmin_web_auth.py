@@ -509,6 +509,31 @@ def test_disabled_auth_route_does_not_import_garmin_sdk(db_engine, monkeypatch):
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize("route", ["start", "complete"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"init_data": "synthetic-session-" + "a" * 8192},
+        {"init_data": "synthetic-session", "code": "synthetic-code-" + "1" * 20},
+        {"init_data": "synthetic-session", "extra": "synthetic-secret"},
+        ["synthetic-session", "synthetic-code"],
+    ],
+)
+def test_garmin_auth_validation_never_echoes_session_or_code(db, db_engine, route, payload):
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token=SecretStr("telegram-secret"),
+        telegram_user_id=42,
+        garmin_auth_url="https://example.test/garmin-auth",
+    )
+    client = TestClient(create_app(settings, db_engine), root_path="/pilot")
+    response = client.post(f"/pilot/garmin-auth/{route}", json=payload)
+    assert response.status_code == 422
+    redacted = response.json() == {"detail": "Invalid arguments"}
+    assert redacted
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_auth_state_check_reports_temporary_database_failure(db, db_engine, monkeypatch):
     from garmin_ai import api
 
