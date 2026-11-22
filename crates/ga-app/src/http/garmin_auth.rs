@@ -25,6 +25,7 @@ use serde_json::json;
 
 use super::{
     method_not_allowed,
+    request_json::decode_json,
     tools::{detail, invalid_arguments},
 };
 use crate::configuration;
@@ -155,8 +156,10 @@ async fn change(app: MiniApp, request: Request, completing: bool) -> Response {
 
 async fn parse_request(body: Body) -> Option<AuthRequest> {
     let bytes = to_bytes(body, REQUEST_LIMIT).await.ok()?;
-    let request: AuthRequest = serde_json::from_slice(&bytes).ok()?;
-    (request.init_data.len() <= 8192 && request.code.chars().count() <= 20).then_some(request)
+    let document = decode_json(&bytes)?;
+    let request: AuthRequest = serde_json::from_str(&document).ok()?;
+    (request.init_data.chars().count() <= 8192 && request.code.chars().count() <= 20)
+        .then_some(request)
 }
 
 fn failure(error: GarminMiniAppError, completing: bool) -> Response {

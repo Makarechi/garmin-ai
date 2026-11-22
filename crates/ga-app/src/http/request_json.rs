@@ -55,7 +55,7 @@ pub(super) fn parse_object(input: &[u8], headers: &HeaderMap) -> Result<Value, P
     }
 }
 
-fn decode_json(input: &[u8]) -> Option<Cow<'_, str>> {
+pub(super) fn decode_json(input: &[u8]) -> Option<Cow<'_, str>> {
     match input {
         [0, 0, 0xfe, 0xff, rest @ ..] => utf32(rest, u32::from_be_bytes),
         [0xff, 0xfe, 0, 0, rest @ ..] => utf32(rest, u32::from_le_bytes),
