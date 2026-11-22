@@ -31,11 +31,15 @@ uv run python scripts/build_release_bundle.py \
 The builder rejects uncommitted changes, images without a full digest, and a
 release Compose file that has drifted from the development service layout. It
 uses Docker Buildx to check that every image in a native registry digest starts
-the native application and records the checkout's Git revision. It
-produces a `.tar.gz` and a SHA-256 checksum in `dist/`. The archive contains no
-credentials, health records or original data. The manifest records the exact Git
-SHA, application and database image digests, schema revision and candidate
-status. The builder writes the archive and checksum to a temporary directory
+the native application, matches its declared architecture and records the
+checkout's Git revision. A native index must resolve to one image per
+architecture. The builder produces a `.tar.gz` and a SHA-256 checksum in
+`dist/`. The archive contains no credentials, health records or original data.
+The manifest records the exact Git SHA, application and database image digests,
+schema revision and candidate status. Native manifests also record each platform's image manifest and
+configuration digests in `app_platform_images`. The installation smoke checks
+the running API and worker against the expected platform configuration digest.
+The builder writes the archive and checksum to a temporary directory
 before replacing any previous output. After an interrupted replacement, a retry
 recovers the pair that matches the published checksum before staging new output.
 The manifest keeps `validated_platforms` empty until each platform is tested

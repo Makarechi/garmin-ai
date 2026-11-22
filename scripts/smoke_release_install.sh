@@ -454,8 +454,26 @@ assert len(counts) == 30 and counts["events"] == 1
 fi
 
 mkdir -p "$root/test-results"
+app_platform_image='null'
+if [[ "$runtime" == rust ]]; then
+    api_image=$(docker inspect --format '{{.Image}}' "$(compose ps -q api)")
+    worker_image=$(docker inspect --format '{{.Image}}' "$(compose ps -q worker)")
+    app_platform_image=$("$python_bin" - "$platform" "$api_image" "$worker_image" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+platform, api, worker = sys.argv[1:]
+image = json.loads(Path("release-manifest.json").read_text())["app_platform_images"][platform]
+if api != worker or api != image["config_digest"]:
+    raise SystemExit("Running API and worker do not match the bundled platform image.")
+print(json.dumps(image))
+PY
+)
+fi
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
-    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" <<'PY'
+    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" \
+    "$app_platform_image" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -470,6 +488,7 @@ Path(sys.argv[1]).write_text(
             "git_sha": sys.argv[3],
             "app_image": sys.argv[4],
             "app_image_source": sys.argv[9],
+            **({"app_platform_image": json.loads(sys.argv[10])} if sys.argv[5] == "rust" else {}),
             "runtime": sys.argv[5],
             "platform": sys.argv[6],
             "setup_preserved_settings": True,
