@@ -3,10 +3,10 @@
 The [native release checkpoint](evidence/native-release-checkpoint-44617c2.json)
 records the verified synthetic runs for `44617c219d262292c7487a37ee6794a9e4c8bc7e`.
 
-- The strict parity check has nine open areas. Four decisions concern
-  overlapping storage paths, which intraday observation remains current, diary
-  write admission under load, and the extreme JSON nesting boundary. Record
-  the decisions and rerun the required comparisons on the accepted candidate.
+- The owner approved the four documented differences on 2026-11-22. Five areas
+  remain open in the strict parity check. Four require live Garmin, Telegram
+  and model-provider verification. The operations area requires the sustained
+  observation and authorized release checks.
   [Compatibility register](deviations.md)
 - The pinned Python 3.15.2 run passed 4,342 of 4,369 collected cases. The 27
   exclusions include 23 explicitly live cases and four cases covered by
