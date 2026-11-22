@@ -70,13 +70,15 @@
         "Onboarding requires its management scope or admin."
       ],
       "resource_scenario": "Clean core-only install and cold startup",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R34",
       "known_limits": [
-        "Source-free installation, historical upgrade and owner onboarding passed on both physical Linux architectures. The case-insensitive storage setup difference still needs a release decision."
+        "Source-free installation, historical upgrade and owner onboarding passed on both physical Linux architectures. The approved difference covers failed setup on case-insensitive filesystems."
       ],
-      "approved_deviations": []
+      "approved_deviations": [
+        "migration/deviations.md#par-01-overlapping-storage-paths"
+      ]
     },
     {
       "id": "PAR-02",
@@ -350,19 +352,21 @@
         "migration/evidence/native-intraday-recovery-linux-arm64.json"
       ],
       "data_contracts": [
-        "Legacy serialized JSON and untouched binary, immutable identity bytes, A\u2013B\u2013A revisions, timestamp order."
+        "Legacy serialized JSON and untouched binary, immutable identity bytes, A–B–A revisions, timestamp order."
       ],
       "permissions": [
         "Private storage and bound source; safe path and permission checks."
       ],
       "resource_scenario": "Streaming ingest plus archive write and staging",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R08",
       "known_limits": [
-        "The mixed acquisition, backup and replay matched across both runtimes. The newer overlapping measurement ordering in the deviations register still needs a release decision."
+        "The mixed acquisition, backup and replay matched across both runtimes, with the approved newer-value ordering for overlapping measurements."
       ],
-      "approved_deviations": []
+      "approved_deviations": [
+        "migration/deviations.md#par-06-current-intraday-measurement"
+      ]
     },
     {
       "id": "PAR-07",
@@ -617,13 +621,15 @@
         "Owner or scoped diary mutation with audit; revision conflict on stale writes."
       ],
       "resource_scenario": "Concurrent retries and grouped undo",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R17",
       "known_limits": [
-        "Synthetic HTTP, MCP and Telegram mutations matched the data, revisions and audit. Admitted HTTP mutations now wait on a busy diary writer. The native limit on concurrent pending HTTP mutations still needs a release decision."
+        "Synthetic HTTP, MCP and Telegram mutations matched the data, revisions and audit. Admitted HTTP mutations wait on a busy diary writer. The approved limits apply to pending HTTP writes."
       ],
-      "approved_deviations": []
+      "approved_deviations": [
+        "migration/deviations.md#par-10-diary-writes-under-load"
+      ]
     },
     {
       "id": "PAR-11",
@@ -953,13 +959,15 @@
         "Owner/admin confirms mapping changes or the local import preview digest; plugins cannot directly write facts."
       ],
       "resource_scenario": "Paginated imports and repeated mapping corrections",
-      "status": "implemented",
+      "status": "verified",
       "verification": "e2e_synthetic",
       "owner_task": "R20",
       "known_limits": [
-        "Synthetic source import, retries, correction, erasure and replay matched the reference. The platform-dependent boundary for extreme JSON nesting still needs a release decision."
+        "Synthetic source import, retries, correction, erasure and replay matched the reference, with the approved platform-specific boundary for extreme JSON nesting."
       ],
-      "approved_deviations": []
+      "approved_deviations": [
+        "migration/deviations.md#par-14-deep-json-imports"
+      ]
     },
     {
       "id": "PAR-15",

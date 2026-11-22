@@ -17,7 +17,9 @@ The recorded images came from disposable test registries.
   installations verified the encrypted backup, portable export and native
   recovery. The checkpoint includes the installed license archives' hashes.
 - R36. The inventory covers 459 surfaces across 25 areas. The strict check has
-  nine open areas. The Python-based CI suite passed 4,385 cases and recorded
+  nine open areas at this checkpoint. The owner approved the four documented
+  differences on 2026-11-22, leaving five open in the current inventory.
+  The Python-based CI suite passed 4,385 cases and recorded
   80 skips. A separate CI step passed the same 54 skipped extension cases.
   The checkpoint records the remaining filesystem and live model-provider skips.
 - R38–R39. Four recoveries on independent Linux hosts verified 30 tables and
@@ -69,7 +71,7 @@ that produced it.
 | R33 | Native retention and erase/resume preserve lifecycle and separate backups. Cross-process checks include active workers, later source pages, scoped API and MCP writes, re-enrollment, and recovery after interruption. #392 #394 #402 #403 #417 #535 | Repeat the complete writer and recovery matrix on the final release package. |
 | R34 | The source-free native package passed clean installation and historical upgrade on physical AMD64 and ARM64 runners. Standard installation also passed the synthetic AMD64 GCP test. [Installation evidence](evidence/native-install-recovery-linux.json) | Repeat the release matrix for the final accepted source tree. |
 | R35 | The native schema chain verified supported historical revisions and a clean install. Physical AMD64 and ARM64 packages passed historical upgrade, and independent recovery hosts restored both backup formats. [Installation evidence](evidence/native-install-recovery-linux.json) | Repeat the candidate upgrade and recovery checks together. |
-| R36 | The pinned reference, contract inventory, and focused paired checks cover the local synthetic scope recorded in the evidence. | Require every mandatory parity, user flow, and fault scenario to pass. Resolve the differences and complete authorized account, channel, and provider checks. |
+| R36 | The pinned reference, contract inventory, and focused paired checks cover the local synthetic scope recorded in the evidence. | Require every mandatory parity, user flow, and fault scenario to pass. Complete authorized account, channel, and provider checks. |
 | R37 | The short Linux host comparison and capped replay record resource peaks, capped database events, and response times. The observer records actual samples and gaps. [Resource checkpoints](evidence/native-resource-checkpoints-linux-arm64.json), [observer](rust-soak-observer.md) | After R36, observe the stable final candidate unattended for 168 hours. |
 | R38 | Synthetic worker handover and rollback retained pending work, prior and new writes, and confirmed or uncertain receipts. Separate Linux hosts restored 30 tables and three files in both directions. [Recovery evidence](evidence/native-install-recovery-linux.json) | Run the final rehearsal after the acceptance gates and measure recovery in the authorized target class. |
 | R39 | The packaged standard API and worker ran as native processes, and installation, upgrade and recovery succeeded without Python in those runtime containers. [Installation evidence](evidence/native-install-recovery-linux.json) | Close R36 through R38 before completing the Python exit gate. |
