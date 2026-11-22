@@ -78,7 +78,7 @@ receipt states when processing the remaining queue.
 
 Measure recovery time from detection to verified service readiness and
 resumed work. Record the last acknowledged operation and the preserved or
-reconciled result for each post-switch operation. The synthetic
-[recovery checks](README.md#rehearse-recovery-before-and-after-native-writes)
-measure archive authentication, database restore and file placement in the
-fixture. Measure readiness and backlog recovery on the actual rehearsal host.
+reconciled result for each post-switch operation. The synthetic recovery
+checks in the matching source checkout's `migration/README.md` measure archive
+authentication, database restore and file placement in the fixture. Measure
+readiness and backlog recovery on the actual rehearsal host.

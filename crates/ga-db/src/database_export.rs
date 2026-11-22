@@ -22,7 +22,8 @@ use crate::{
     runtime_lease::{RuntimeLease, RuntimeLeaseError, RuntimeWorkerIdentity},
 };
 
-pub(crate) const FORMAT: &str = "garmin-ai-jsonl-v1";
+/// Format identifier written to logical database export headers.
+pub const FORMAT: &str = "garmin-ai-jsonl-v1";
 
 // Dependency order used by the current Python restore. The differential fixture
 // compares this inventory against the pinned SQLAlchemy metadata.

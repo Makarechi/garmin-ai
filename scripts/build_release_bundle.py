@@ -58,6 +58,8 @@ NATIVE_CONTENTS = tuple(name for name in CONTENTS if not name.startswith(("scrip
     "deploy/gcp/install-native-cleanup.sh",
     "docs/gcp-deployment.md",
     "docs/release-cleanup.md",
+    "migration/cutover-runbook.md",
+    "migration/rollback-runbook.md",
     "migration/rust-native-image.md",
     "migration/rust-native-schema.md",
 )

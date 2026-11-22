@@ -8,6 +8,7 @@ pub use export::{
     ActivityExport, ExportFrame, ExportInventory, ExportLimits, ExportProjectionInventory,
     ExportProjectionMessage, verify_activity_export, visit_activity_projection,
 };
+pub use profile::FIT_PROFILE_VERSION;
 pub use projection::{FitProjectionMessage, visit_fit_projection};
 pub use value::RawFitValue;
 
