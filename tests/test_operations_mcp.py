@@ -187,6 +187,8 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
             unit="bpm",
         )
     )
+    db.add(TelegramUpdate(id=31, payload={"synthetic": True}))
+    audit_id = db.scalar(text("SELECT max(id) FROM audit_log"))
     db.commit()
     exported = tmp_path / "export.gz"
     counts = export_database(db_engine, exported)
@@ -196,6 +198,9 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     with db_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
     assert restore_database(db_engine, exported) == counts
+    with db_engine.connect() as connection:
+        assert connection.scalar(text("SELECT nextval('audit_log_id_seq')")) == audit_id + 1
+        assert connection.scalar(text("SELECT nextval('telegram_updates_id_seq')")) == 32
     db.expire_all()
     assert db.get(Event, identity).payload["severity"] == 5
     assert db.scalar(select(func.count()).select_from(Measurement)) == 1
@@ -1439,6 +1444,8 @@ def test_activation_commit_failure_restores_local_fence(
     export_database(db_engine, source)
     if previously_erased:
         db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.execute(text("ALTER SEQUENCE audit_log_id_seq RESTART WITH 101"))
+    db.execute(text("ALTER SEQUENCE telegram_updates_id_seq RESTART WITH 201"))
     db.commit()
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -1468,6 +1475,13 @@ def test_activation_commit_failure_restores_local_fence(
         event.remove(db_engine, "commit", fail_commit)
     db.expire_all()
     assert db.get(AppState, "maintenance:erased") is not None
+    positions = db.execute(
+        text(
+            "SELECT audit.last_value, audit.is_called, telegram.last_value, telegram.is_called "
+            "FROM audit_log_id_seq AS audit CROSS JOIN telegram_updates_id_seq AS telegram"
+        )
+    ).one()
+    assert positions == (101, False, 201, False)
     assert marker.exists() and marker.stat().st_mode & 0o777 == 0o600
     with pytest.raises(ValueError):
         with standalone_files(settings):

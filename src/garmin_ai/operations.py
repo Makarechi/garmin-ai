@@ -786,7 +786,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             footer["app_state"] += counts["app_state"] - imported_app_state_count
         if footer != counts:
             raise ValueError("Incomplete export")
-        # Explicit IDs from the snapshot must not collide with subsequent inserts.
+        # Restart the sequences in the same transaction as the restored rows.
+        quote_identifier = conn.dialect.identifier_preparer.quote_identifier
         for table in tables.values():
             for column in table.primary_key.columns:
                 if column.autoincrement is True or (
@@ -795,19 +796,23 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     and column.type.python_type is int
                     and len(table.primary_key.columns) == 1
                 ):
-                    sequence = conn.scalar(
-                        text("SELECT pg_get_serial_sequence(:table, :column)"),
+                    sequence = conn.execute(
+                        text(
+                            "SELECT namespace.nspname, relation.relname "
+                            "FROM pg_catalog.pg_class AS relation "
+                            "JOIN pg_catalog.pg_namespace AS namespace "
+                            "ON namespace.oid = relation.relnamespace "
+                            "WHERE relation.oid = CAST(pg_catalog.pg_get_serial_sequence("
+                            ":table, :column) AS pg_catalog.regclass)"
+                        ),
                         {"table": table.name, "column": column.name},
-                    )
-                    if sequence:
+                    ).one_or_none()
+                    if sequence is not None:
                         maximum = conn.scalar(select(func.max(column)))
-                        conn.execute(
-                            text("SELECT setval(CAST(:sequence AS regclass), :value, :called)"),
-                            {
-                                "sequence": sequence,
-                                "value": maximum or 1,
-                                "called": maximum is not None,
-                            },
+                        start = max(0, maximum or 0) + 1
+                        qualified = ".".join(quote_identifier(name) for name in sequence)
+                        conn.exec_driver_sql(
+                            f"ALTER SEQUENCE {qualified} RESTART WITH {start:d}",
                         )
         if before_activate is not None:
             before_activate()
