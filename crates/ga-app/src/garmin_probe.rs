@@ -39,7 +39,10 @@ const FIT_LIMITS: PutLimits = PutLimits {
     max_bytes: ga_fit::MAX_FIT_BYTES,
     ..JSON_LIMITS
 };
-const ACTIVITY_LIST_LIMIT: NonZeroU16 = NonZeroU16::new(100).unwrap();
+pub(crate) const MAX_PROBE_DAYS: usize = 31;
+pub(crate) const MAX_SCOPED_ACTIVITIES: usize = 99;
+const ACTIVITY_LIST_LIMIT: NonZeroU16 =
+    NonZeroU16::new((MAX_SCOPED_ACTIVITIES + 1) as u16).unwrap();
 
 #[derive(Debug)]
 pub(crate) struct InvalidRange;
@@ -93,7 +96,7 @@ pub(crate) async fn run(
         .filter(|day| day.year() >= 1)
         .ok_or(InvalidRange)?;
     let days = (end - start).whole_days();
-    if !(0..31).contains(&days) {
+    if !(0..MAX_PROBE_DAYS as i64).contains(&days) {
         return Err(InvalidRange.into());
     }
     let activity_dates = if activities_in_range {
