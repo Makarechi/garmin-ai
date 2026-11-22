@@ -695,7 +695,7 @@ def test_extended_language_tags_work_for_generated_actions_and_forms(db, db_engi
         assert client.get("/actions?locale=en-a", headers=headers).status_code == 422
 
 
-@pytest.mark.parametrize("phase", ["preview", "confirm"])
+@pytest.mark.parametrize("phase", ["preview", "confirm", "submit"])
 def test_tracker_setup_reports_failed_commit_before_success(db, db_engine, monkeypatch, phase):
     from sqlalchemy import event
     from sqlalchemy.exc import SQLAlchemyError
@@ -717,6 +717,23 @@ def test_tracker_setup_reports_failed_commit_before_success(db, db_engine, monke
         path = "/tracker-setups"
         body = {"draft": draft, "confirmation_token": preview.json()["confirmation_token"]}
         target = "confirm_tracker"
+    elif phase == "submit":
+        install(db)
+        db.commit()
+        action = client.get("/actions", headers=headers).json()["actions"][0]
+        form = client.get(f"/forms/{action['id']}", headers=headers).json()
+        path = f"/forms/{action['id']}/submit"
+        body = {
+            "action_id": action["id"],
+            "schema_hash": form["schema_hash"],
+            "submission_id": form["submission_id"],
+            "start": NOW.isoformat(),
+            "end": (NOW + timedelta(minutes=25)).isoformat(),
+            "timezone": "UTC",
+            "values": {"focus": 4},
+            "units": {"focus": "score_1-5"},
+        }
+        target = "submit_form"
 
     original = getattr(api, target)
 
@@ -736,6 +753,14 @@ def test_tracker_setup_reports_failed_commit_before_success(db, db_engine, monke
     finally:
         event.remove(Session, "before_commit", fail_commit)
     assert response.status_code == 503
+    if phase == "submit":
+        assert db.scalar(select(Event.id)) is None
+        retried = client.post(path, json=body, headers=headers)
+        assert retried.status_code == 200
+        saved = client.get(f"/events/{retried.json()['id']}", headers=headers)
+        assert saved.status_code == 200
+        assert [str(event_id) for event_id in db.scalars(select(Event.id))] == [saved.json()["id"]]
+        return
     assert (
         db.scalar(select(EventDefinition.id).where(EventDefinition.key == "user.focus_session"))
         is None

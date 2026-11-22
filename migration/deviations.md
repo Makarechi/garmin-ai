@@ -1,11 +1,20 @@
 # Approved deviations from the Python baseline
 
-Approval remains pending for each candidate below.
+Approval remains pending for the changes in the candidate section.
 
 For each proposed change, identify the parity entry, baseline behavior, intended observable
 behavior, impacted data and callers, regression case, approval and recovery implications.
 Record evidence for the original and candidate behaviors. Preserve the baseline until the
 change has a documented decision.
+
+## Corrected acknowledgement timing
+
+The frozen Python API can acknowledge a generated tracker form before its
+database transaction commits. An immediate read can miss the record, and a
+failed commit can leave a success response without a saved entry. Both the
+current Python fallback and the native API complete the transaction before
+acknowledging the submission. The Python regression test forces a commit failure,
+checks the retryable response and verifies that a retry saves one entry.
 
 ## Candidate differences to resolve before release
 

@@ -755,7 +755,9 @@ def create_app(settings: Settings | None = None, engine=None):
         "/forms/{action_id}/submit",
         dependencies=[Depends(require("read:diary", "write:diary"))],
     )
-    def submit_generated_form(action_id: str, body: FormSubmission, session=Depends(db)):
+    def submit_generated_form(
+        action_id: str, body: FormSubmission, session=Depends(db, scope="function")
+    ):
         return serialize_event(submit_form(session, action_id, body, actor="api"))
 
     @app.post("/natural-language/trackers", dependencies=[Depends(authorize)])
