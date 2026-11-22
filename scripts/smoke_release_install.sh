@@ -465,7 +465,8 @@ import sys
 from pathlib import Path
 
 platform, inspected = sys.argv[1:]
-image = json.loads(Path("release-manifest.json").read_text())["app_platform_images"][platform]
+architecture = "/".join(platform.split("/")[:2])
+image = json.loads(Path("release-manifest.json").read_text())["app_platform_images"][architecture]
 running = [line.split() for line in inspected.splitlines()]
 expected = {1: image["config_digest"], 2: image["manifest_digest"]}
 if len(running) != 2 or any(
