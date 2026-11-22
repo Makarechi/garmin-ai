@@ -244,6 +244,58 @@ fi
 "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
     --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
 
+running_services() {
+    for service in api worker; do
+        docker inspect --format '{{.Id}} {{.State.Running}} {{.State.StartedAt}}' "$(compose ps -q "$service")"
+    done
+}
+running_before=$(running_services)
+./install.sh "${profile[@]}" backup-space | "$python_bin" -c '
+import json
+import sys
+
+report = json.load(sys.stdin)
+assert report["estimate_only"] is True and report["reserve_bytes"] == 256 * 1024 * 1024
+assert {volume["role"] for volume in report["volumes"]} in ({"shared"}, {"staging", "destination"})
+assert all(volume["free_bytes"] >= 0 and volume["required_bytes"] > 0 for volume in report["volumes"])
+ready = all(volume["free_bytes"] >= volume["required_bytes"] for volume in report["volumes"])
+assert report["status"] == ("ready" if ready else "insufficient")
+'
+snapshot_name=portable-smoke.jsonl.gz
+if ./install.sh "${profile[@]}" export "../$snapshot_name" >"$work/export-refusal.log" 2>&1; then
+    echo "Export unexpectedly accepted a directory path." >&2
+    exit 1
+fi
+grep -Fx 'Choose a new .jsonl.gz filename for the export in GA_DATA_DIR.' "$work/export-refusal.log"
+./install.sh "${profile[@]}" export "$snapshot_name" >"$work/export-counts.json"
+snapshot="data/$snapshot_name"
+snapshot_sha=$("$python_bin" - "$snapshot" "$work/export-counts.json" "$work/tracker.json" <<'PY'
+import gzip
+import hashlib
+import json
+import stat
+import sys
+from pathlib import Path
+
+path, counts_file, tracker_file = map(Path, sys.argv[1:])
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+counts = json.loads(counts_file.read_text())
+tracker_id = json.loads(tracker_file.read_text())["entry"]["id"]
+with gzip.open(path, "rt", encoding="utf-8") as archive:
+    header, *rows, footer = map(json.loads, archive)
+assert (header["format"], header["revision"]) == ("garmin-ai-jsonl-v1", "c54f8a72d130")
+assert len(counts) == 30 and counts["events"] == 1 and footer == {"counts": counts}
+assert [row["row"]["id"] for row in rows if row["table"] == "events"] == [tracker_id]
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+)
+if ./install.sh "${profile[@]}" export "$snapshot_name" >"$work/duplicate-export.log" 2>&1; then
+    echo "Export unexpectedly replaced its previous destination." >&2
+    exit 1
+fi
+test "$snapshot_sha" = "$("$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$snapshot")"
+test "$running_before" = "$(running_services)"
+
 if [[ "$runtime" == rust ]]; then
     if [[ "$historical" == true ]]; then
         compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
@@ -287,6 +339,7 @@ if [[ "$runtime" == rust ]]; then
     test -n "$recovered"
     recovery_dir=${recovered%/*}
     recovery_name=${recovery_dir##*/}
+    test ! -e "$recovery_dir/$snapshot_name"
 
     reject_restore() {
         if ./install.sh "${profile[@]}" restore-db "$recovery_name" >"$work/restore-refusal.log" 2>&1; then
@@ -378,6 +431,8 @@ Path(sys.argv[1]).write_text(
             "owner_onboarding_without_integrations_verified": True,
             "fictional_tracker_survived_restart": True,
             "fictional_tracker_entry_survived_preference_change": True,
+            "backup_capacity_verified": True,
+            "portable_database_export_verified": True,
             "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
             "native_bundle_restore_verified": sys.argv[5] == "rust",

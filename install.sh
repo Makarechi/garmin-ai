@@ -189,6 +189,19 @@ case "${1:-}" in
             -v "$PWD:$PWD" worker ${legacy_entry:+"$legacy_entry"} pair-telegram --env-file "$PWD/.env" --container-runtime
         echo "Pairing finished. Run $install_command start to recreate API and worker with the saved owner ID."
         ;;
+    backup-space)
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        test "$#" -eq 1 || { echo "Unexpected command arguments." >&2; exit 2; }
+        compose run --rm --no-deps -T worker ${legacy_entry:+"$legacy_entry"} backup-space /app/backups/backup.enc
+        ;;
+    export)
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        if [[ $# -ne 2 || ! "${2:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*\.jsonl\.gz$ ]]; then
+            echo "Choose a new .jsonl.gz filename for the export in GA_DATA_DIR." >&2
+            exit 2
+        fi
+        compose run --rm --no-deps -T worker ${legacy_entry:+"$legacy_entry"} export "/app/data/$2"
+        ;;
     backup)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose config --quiet
@@ -239,7 +252,7 @@ case "${1:-}" in
         compose run --rm --no-deps -T worker restore-db "/app/backups/$2/database.jsonl.gz"
         ;;
     *)
-        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME | restore-db RECOVERY_DIRECTORY | migrate [--status] | inspect}" >&2
+        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup-space | export FILENAME.jsonl.gz | backup | unpack-backup FILENAME | restore-db RECOVERY_DIRECTORY | migrate [--status] | inspect}" >&2
         exit 2
         ;;
 esac

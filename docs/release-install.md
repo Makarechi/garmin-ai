@@ -120,6 +120,15 @@ unpack-backup FILENAME.enc`; it creates a private recovery directory inside
 [backup guidance](operations.md#backup-and-restore) still applies to data
 handling, while its `uv` and bare Compose commands are for source installations.
 
+Run `./install.sh backup-space` with the database running to estimate the
+space needed in the configured data and backup locations. The estimate leaves
+the API and worker running and reserves no space.
+
+Run `./install.sh export FILENAME.jsonl.gz` to create a database-only export
+inside `GA_DATA_DIR` while the service is running. Choose a new filename and
+keep the unencrypted file private. An encrypted backup also captures raw files
+and Garmin tokens for recovery.
+
 For a native recovery, work from the isolated target bundle. Confirm the target
 database against the installation settings, check its schema with
 `./install.sh migrate --status`, and keep the API and worker stopped. Restore
