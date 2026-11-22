@@ -21,6 +21,11 @@ APP_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 REVISION_LABEL = "org.opencontainers.image.revision"
 NATIVE_ENTRYPOINTS = (["garmin-ai-rust"], ["/usr/local/bin/garmin-ai-rust"])
+NATIVE_VERSION_PATTERNS = {
+    "fit_profile_version": r"[0-9]+(?:\.[0-9]+)+",
+    "database_export_format": r"garmin-ai-[a-z0-9]+-v[0-9]+",
+    "backup_envelope": r"GARMINAI[0-9]+",
+}
 LOCAL_IMAGE = "${COMPOSE_PROJECT_NAME:-garmin-ai}:local"
 RELEASE_IMAGE = "${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}"
 CONTENTS = (
@@ -180,8 +185,79 @@ def verify_native_image(image: str, revision: str) -> dict[str, dict[str, str]]:
     return platform_images
 
 
+def validate_release_info(info: object, manifest: dict) -> None:
+    fixed = {
+        "application_version": manifest["version"],
+        "database_revision": manifest["database_revision"],
+        "archive_json": "Python-compatible UTF-8 JSON",
+    }
+    parsers = ("garmin_parser_version", "fit_parser_version")
+    expected = set(fixed) | set(parsers) | NATIVE_VERSION_PATTERNS.keys()
+    if not (
+        isinstance(info, dict)
+        and info.keys() == expected
+        and all(info[key] == value for key, value in fixed.items())
+        and all(type(info[key]) is int and info[key] >= 0 for key in parsers)
+        and all(
+            isinstance(info[key], str) and re.fullmatch(pattern, info[key])
+            for key, pattern in NATIVE_VERSION_PATTERNS.items()
+        )
+    ):
+        raise ValueError("Native installation report has invalid release versions")
+
+
+def attach_native_versions(manifest: dict, reports: tuple[Path, ...]) -> None:
+    platform_images = manifest["app_platform_images"]
+    version_info = {}
+    hashes: dict[str, set[str]] = {}
+    for path in reports:
+        try:
+            document = path.read_bytes()
+            receipt = json.loads(document)
+        except (OSError, ValueError):
+            raise ValueError(f"Could not read native installation report {path.name}") from None
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("platform"), str):
+            raise ValueError("Invalid native installation report")
+        platform = "/".join(receipt["platform"].split("/")[:2])
+        image = platform_images.get(platform)
+        if (
+            receipt.get("runtime") != "rust"
+            or receipt.get("git_sha") != manifest["git_sha"]
+            or receipt.get("app_image") != manifest["app_image"]
+            or image is None
+            or receipt.get("app_platform_image") != image
+        ):
+            raise ValueError("Native installation report does not match the release image")
+        if not all(
+            receipt.get(check) is True
+            for check in (
+                "native_runtime_processes_verified",
+                "portable_database_export_verified",
+                "native_backup_and_recovery_verified",
+            )
+        ):
+            raise ValueError("Native installation report is missing storage verification")
+        info = receipt.get("release_info")
+        validate_release_info(info, manifest)
+        if version_info and info != version_info:
+            raise ValueError("Native installation reports disagree on release versions")
+        version_info = info
+        hashes.setdefault(platform, set()).add(hashlib.sha256(document).hexdigest())
+    if hashes.keys() != platform_images.keys():
+        raise ValueError("Native installation reports must cover every image platform")
+    manifest["release_info"] = version_info
+    manifest["native_installation_report_sha256"] = {
+        platform: sorted(values) for platform, values in hashes.items()
+    }
+
+
 def build_bundle(
-    app_image: str, *, sha: str, output: Path, runtime: str = "python"
+    app_image: str,
+    *,
+    sha: str,
+    output: Path,
+    runtime: str = "python",
+    native_installation_reports: tuple[Path, ...] = (),
 ) -> tuple[Path, Path]:
     if not APP_IMAGE_RE.fullmatch(app_image):
         raise ValueError("Application image must include a full sha256 digest")
@@ -190,6 +266,8 @@ def build_bundle(
     if runtime not in ("python", "rust"):
         raise ValueError("Unsupported application runtime")
     native = runtime == "rust"
+    if native_installation_reports and not native:
+        raise ValueError("Native installation reports require the Rust runtime")
     if not native:
         check_compose()
     compose_source = ROOT / ("compose.rust-release.yml" if native else "compose.release.yml")
@@ -214,6 +292,8 @@ def build_bundle(
     if native:
         manifest["app_platform_images"] = verify_native_image(app_image, sha)
         manifest["runtime"] = "rust"
+        if native_installation_reports:
+            attach_native_versions(manifest, native_installation_reports)
     native_suffix = "-native" if native else ""
     prefix = f"garmin-ai-{version}{native_suffix}-{sha[:8]}"
     output.mkdir(parents=True, exist_ok=True)
@@ -342,6 +422,7 @@ def main() -> None:
     parser.add_argument("--check-compose", action="store_true")
     parser.add_argument("--app-image")
     parser.add_argument("--runtime", choices=("python", "rust"), default="python")
+    parser.add_argument("--native-installation-report", action="append", type=Path, default=[])
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     if args.check_compose:
@@ -359,7 +440,11 @@ def main() -> None:
     ).stdout.strip()
     try:
         archive, checksum = build_bundle(
-            args.app_image, sha=sha, output=args.output, runtime=args.runtime
+            args.app_image,
+            sha=sha,
+            output=args.output,
+            runtime=args.runtime,
+            native_installation_reports=tuple(args.native_installation_report),
         )
     except ValueError as error:
         raise SystemExit(str(error)) from None

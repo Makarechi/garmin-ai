@@ -203,6 +203,130 @@ def test_registry_manifest_bytes_match_the_requested_digest(monkeypatch):
         bundle_module.registry_document(IMAGE, "--raw")
 
 
+@pytest.fixture
+def native_version_reports(tmp_path, monkeypatch):
+    known_images = {
+        f"linux/{arch}": {
+            "manifest_digest": f"sha256:{digest * 64}",
+            "config_digest": f"sha256:{digest * 63}0",
+        }
+        for arch, digest in (("amd64", "b"), ("arm64", "c"))
+    }
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: known_images)
+    release_info = {
+        "application_version": "0.1.0",
+        "database_revision": bundle_module.REVISION,
+        "archive_json": "Python-compatible UTF-8 JSON",
+        "fit_parser_version": 9,
+        "garmin_parser_version": 9,
+        "fit_profile_version": "21.171",
+        "database_export_format": "garmin-ai-jsonl-v1",
+        "backup_envelope": "GARMINAI1",
+    }
+    reports = []
+    for platform in ("linux/amd64", "linux/arm64/v8"):
+        parts = platform.split("/")
+        document = {
+            "runtime": "rust",
+            "git_sha": SHA,
+            "app_image": IMAGE,
+            "platform": platform,
+            "app_platform_image": known_images["/".join(parts[:2])],
+            "native_runtime_processes_verified": True,
+            "portable_database_export_verified": True,
+            "native_backup_and_recovery_verified": True,
+            "release_info": release_info,
+            "private_example": "should-not-enter-the-release-archive",
+        }
+        report = tmp_path / f"{parts[1]}.json"
+        report.write_text(json.dumps(document))
+        reports.append(report)
+    return tuple(reports), release_info
+
+
+def test_native_bundle_attaches_versions_for_exact_images(tmp_path, native_version_reports):
+    reports, release_info = native_version_reports
+    archive, checksum = build_bundle(
+        IMAGE,
+        sha=SHA,
+        output=tmp_path / "output",
+        runtime="rust",
+        native_installation_reports=reports[::-1],
+    )
+    with tarfile.open(archive) as release:
+        files = [name for name in release.getnames() if name.endswith("release-manifest.json")]
+        (manifest_file,) = files
+        raw = release.extractfile(manifest_file).read()
+        assert b"should-not-enter-the-release-archive" not in raw
+        manifest = json.loads(raw)
+    assert manifest["release_info"] == release_info
+    assert manifest["native_installation_report_sha256"] == {
+        f"linux/{path.stem}": [hashlib.sha256(path.read_bytes()).hexdigest()] for path in reports
+    }
+    assert manifest["validated_platforms"] == []
+    assert manifest["release_status"].startswith("candidate")
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
+
+
+@pytest.mark.parametrize(
+    ("variation", "error"),
+    [
+        ("other_revision", "does not match the release image"),
+        ("other_image", "does not match the release image"),
+        ("other_platform_image", "does not match the release image"),
+        ("failed_backup", "missing storage verification"),
+        ("unknown_version_field", "invalid release versions"),
+        ("wrong_database_revision", "invalid release versions"),
+        ("different_parser", "disagree on release versions"),
+        ("missing_platform", "must cover every image platform"),
+        ("missing_file", "Could not read native installation report"),
+    ],
+)
+def test_native_bundle_rejects_incompatible_version_reports(
+    tmp_path, native_version_reports, variation, error
+):
+    reports, _ = native_version_reports
+    receipt = reports[1]
+    document = json.loads(receipt.read_text())
+    if variation == "other_revision":
+        document["git_sha"] = "d" * 40
+    elif variation == "other_image":
+        document["app_image"] = IMAGE.replace("example", "different")
+    elif variation == "other_platform_image":
+        document["app_platform_image"]["config_digest"] = "sha256:" + "d" * 64
+    elif variation == "failed_backup":
+        document["native_backup_and_recovery_verified"] = False
+    elif variation == "unknown_version_field":
+        document["release_info"]["unknown"] = "synthetic-secret-marker"
+    elif variation == "wrong_database_revision":
+        document["release_info"]["database_revision"] = "a" * 12
+    elif variation == "different_parser":
+        document["release_info"]["garmin_parser_version"] += 1
+    elif variation == "missing_platform":
+        reports = reports[:1]
+    elif variation == "missing_file":
+        reports = (reports[0], tmp_path / "missing.json")
+    receipt.write_text(json.dumps(document))
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match=error):
+        build_bundle(
+            IMAGE, sha=SHA, output=output, runtime="rust", native_installation_reports=reports
+        )
+    assert not output.exists()
+
+
+def test_python_bundle_cannot_attach_native_versions(tmp_path):
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="require the Rust runtime"):
+        build_bundle(
+            IMAGE,
+            sha=SHA,
+            output=output,
+            native_installation_reports=(tmp_path / "receipt.json",),
+        )
+    assert not output.exists()
+
+
 def test_release_compose_tracks_the_reviewed_service_layout():
     check_compose()
     content = (ROOT / "compose.release.yml").read_text()
