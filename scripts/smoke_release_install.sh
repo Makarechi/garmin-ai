@@ -456,23 +456,26 @@ fi
 mkdir -p "$root/test-results"
 app_platform_image='null'
 if [[ "$runtime" == rust ]]; then
-    running_images=$(docker inspect --type=container \
-        --format '{{.Image}}{{with .ImageManifestDescriptor}} {{.Digest}}{{end}}' \
-        "$(compose ps -q api)" "$(compose ps -q worker)")
-    app_platform_image=$("$python_bin" - "$platform" "$running_images" <<'PY'
+    app_platform_image=$("$python_bin" - "$platform" "$(compose ps -q api)" "$(compose ps -q worker)" <<'PY'
 import json
+import subprocess
 import sys
 from pathlib import Path
 
-platform, inspected = sys.argv[1:]
+platform, api, worker = sys.argv[1:]
 architecture = "/".join(platform.split("/")[:2])
 image = json.loads(Path("release-manifest.json").read_text())["app_platform_images"][architecture]
-running = [line.split() for line in inspected.splitlines()]
-expected = {1: image["config_digest"], 2: image["manifest_digest"]}
-if len(running) != 2 or any(
-    not fields or fields[-1] != expected.get(len(fields)) for fields in running
-):
-    raise SystemExit("The running API and worker must match the bundled platform image.")
+running = json.loads(subprocess.check_output(["docker", "inspect", "--type=container", api, worker]))
+if len(running) != 2:
+    raise SystemExit("Expected the running API and worker containers.")
+for container in running:
+    descriptor = container.get("ImageManifestDescriptor")
+    if descriptor is None:
+        matches = container.get("Image") == image["config_digest"]
+    else:
+        matches = descriptor.get("digest") == image["manifest_digest"]
+    if not matches:
+        raise SystemExit("The running API and worker must match the bundled platform image.")
 print(json.dumps(image))
 PY
 )
