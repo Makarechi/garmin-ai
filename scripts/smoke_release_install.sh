@@ -257,6 +257,41 @@ if [[ "$runtime" == rust ]]; then
     ./install.sh "${profile[@]}" unpack-backup "${archive##*/}"
     recovered=$(find backups -mindepth 2 -name database.jsonl.gz -type f -print -quit)
     test -n "$recovered"
+
+    compose stop api worker
+    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+        "SELECT current_database(), EXISTS (SELECT FROM events)" | grep -Fx 'garmin_ai|t'
+    compose run --rm --no-deps -T --entrypoint sh worker -ec '
+        umask 077
+        printf "synthetic file\n" > "$GA_DATA_DIR/erase-fixture"
+        printf "synthetic token\n" > "$GA_TOKEN_DIR/erase-fixture"
+    '
+    archive_sha=$(
+        "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
+    )
+    for _ in 1 2; do
+        compose run --rm --no-deps -T worker erase-all --confirm 'ERASE ALL LOCAL HEALTH DATA' \
+            | "$python_bin" -c 'import json,sys; assert json.load(sys.stdin)["erased"] is True'
+    done
+    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+        "SELECT NOT EXISTS (SELECT FROM events), EXISTS (SELECT FROM app_state WHERE key='maintenance:erased')" \
+        | grep -Fx 't|t'
+    compose run --rm --no-deps -T --entrypoint sh worker -ec '
+        test -z "$(ls -A "$GA_DATA_DIR")"
+        test -z "$(ls -A "$GA_TOKEN_DIR")"
+        test -f "$GA_LOCK_DIR/erased"
+        test ! -e "$GA_LOCK_DIR/erasing"
+    '
+    compose run --rm --no-deps -T worker resume-storage | grep -Fx 'Storage re-enabled.'
+    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+        "SELECT NOT EXISTS (SELECT FROM app_state WHERE key='maintenance:erased')" | grep -Fx t
+    compose run --rm --no-deps -T --entrypoint sh worker -ec '
+        test ! -e "$GA_LOCK_DIR/erased"
+        test ! -e "$GA_LOCK_DIR/activating"
+    '
+    test "$archive_sha" = "$(
+        "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
+    )"
 fi
 
 mkdir -p "$root/test-results"
@@ -283,6 +318,7 @@ Path(sys.argv[1]).write_text(
             "fictional_tracker_entry_survived_preference_change": True,
             "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
+            "native_mounted_erasure_verified": sys.argv[5] == "rust",
             "historical_upgrade_verified": sys.argv[7] == "true",
             "staged_read_only_upgrade_verified": sys.argv[7] == "true",
             "deployment_profile": "gcp" if sys.argv[8] == "true" else "standard",
