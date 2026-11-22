@@ -182,6 +182,16 @@ case "${1:-}" in
         compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} login "${@:2}"
         echo "Garmin login finished. Run $install_command start to recreate the worker."
         ;;
+    enroll-account)
+        if [[ $# -ne 2 || "${2:-}" != --confirm-existing-owner ]]; then
+            echo "enroll-account requires --confirm-existing-owner after you verify the original owner." >&2
+            exit 2
+        fi
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        compose stop worker
+        echo "The worker is stopped. Run $install_command start when ready to resume." >&2
+        compose run --rm --no-deps -T worker ${legacy_entry:+"$legacy_entry"} enroll-account "$2"
+        ;;
     pair-telegram)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
@@ -252,7 +262,7 @@ case "${1:-}" in
         compose run --rm --no-deps -T worker restore-db "/app/backups/$2/database.jsonl.gz"
         ;;
     *)
-        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup-space | export FILENAME.jsonl.gz | backup | unpack-backup FILENAME | restore-db RECOVERY_DIRECTORY | migrate [--status] | inspect}" >&2
+        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | enroll-account --confirm-existing-owner | pair-telegram | backup-space | export FILENAME.jsonl.gz | backup | unpack-backup FILENAME | restore-db RECOVERY_DIRECTORY | migrate [--status] | inspect}" >&2
         exit 2
         ;;
 esac

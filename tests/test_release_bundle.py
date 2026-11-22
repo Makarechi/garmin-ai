@@ -490,8 +490,10 @@ def test_backup_verification_uses_separate_scratch_and_removes_plaintext(tmp_pat
     assert list(backup_dir.iterdir()) == [source]
 
 
-def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
-    archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path)
+@pytest.mark.parametrize("runtime", ["python", "rust"])
+def test_bundle_account_commands_use_source_free_worker(tmp_path, monkeypatch, runtime):
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: None)
+    archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
     with tarfile.open(archive) as bundle:
         bundle.extractall(tmp_path, filter="data")
     root = next(tmp_path.glob("garmin-ai-*/install.sh")).parent
@@ -506,6 +508,7 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
         "printf '%s | image=%s | db=%s | data=%s | project=%s\\n' "
         '"$*" "${GA_APP_IMAGE:-}" "${GA_CONTAINER_DATABASE_URL:-}" '
         '"${GA_DATA_DIR:-}" "${COMPOSE_PROJECT_NAME:-}" >> "$DOCKER_CALLS"\n'
+        'case "$*" in *" run "*" enroll-account "*) exit "${ENROLL_STATUS:-0}";; esac\n'
     )
     docker.chmod(0o755)
     calls = tmp_path / "docker-calls"
@@ -517,19 +520,44 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
         "GA_DATA_DIR": "/synthetic/untrusted/data",
         "COMPOSE_PROJECT_NAME": "wrong-project",
     }
-    for command in ("login", "pair-telegram"):
-        result = subprocess.run(
-            ["bash", "./install.sh", command], cwd=root, env=env, capture_output=True, text=True
+
+    def install(*args, **overrides):
+        return subprocess.run(
+            ["bash", "./install.sh", *args],
+            cwd=root,
+            env={**env, **overrides},
+            capture_output=True,
+            text=True,
         )
+
+    for args in ((), ("--help",), ("--confirm-existing-owner", "extra")):
+        result = install("enroll-account", *args)
+        assert result.returncode == 2
+        assert "enroll-account requires --confirm-existing-owner" in result.stderr
+        assert not calls.exists()
+
+    for command in ("login", "pair-telegram"):
+        result = install(command)
         assert result.returncode == 0, result.stderr
+    result = install("enroll-account", "--confirm-existing-owner")
+    assert result.returncode == 0, result.stderr
+    result = install("enroll-account", "--confirm-existing-owner", ENROLL_STATUS="1")
+    assert result.returncode == 1
+    assert "./install.sh start" in result.stderr
     lines = calls.read_text().splitlines()
-    assert sum(" stop worker" in line for line in lines) == 2
-    assert any(" run --rm --no-deps worker garmin-ai login" in line for line in lines)
+    entry = "garmin-ai " if runtime == "python" else ""
+    assert any(f" run --rm --no-deps worker {entry}login" in line for line in lines)
     assert any(
         " run --rm --no-deps --workdir " in line
-        and " worker garmin-ai pair-telegram --env-file " in line
+        and f" worker {entry}pair-telegram --env-file " in line
         and " --container-runtime" in line
         for line in lines
+    )
+    assert len(lines) == 8
+    assert all(" stop worker | " in line for line in lines[::2])
+    assert all(
+        f" run --rm --no-deps -T worker {entry}enroll-account --confirm-existing-owner | " in line
+        for line in lines[5::2]
     )
     assert all(f"image={IMAGE}" in line for line in lines if line.startswith("compose --env-file"))
     assert all(
