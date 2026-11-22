@@ -1,27 +1,28 @@
-use std::os::fd::OwnedFd;
+use std::{io, os::fd::AsFd, path::Path};
 
 use rustix::{
     fs::{self, AtFlags, FileType},
+    io::Errno,
     path::Arg,
 };
 
-use super::ErasureFilesError;
+use crate::DIRECTORY_READ;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct Identity {
+pub(crate) struct Identity {
     device: (u32, u32),
     inode: u64,
 }
 
 #[derive(PartialEq, Eq)]
-pub(super) struct Entry {
+pub(crate) struct Entry {
     pub identity: Identity,
     pub mount: u64,
     pub kind: FileType,
 }
 
 impl Entry {
-    pub fn opened(directory: &OwnedFd) -> Result<Self, ErasureFilesError> {
+    pub fn opened(directory: impl AsFd + Copy) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         return linux_entry(directory, "", AtFlags::EMPTY_PATH);
 
@@ -29,7 +30,7 @@ impl Entry {
         Ok(Self::from_stat(fs::fstat(directory)?))
     }
 
-    pub fn lookup(directory: &OwnedFd, name: impl Arg + Copy) -> Result<Self, ErasureFilesError> {
+    pub fn lookup(directory: impl AsFd + Copy, name: impl Arg + Copy) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         return linux_entry(directory, name, AtFlags::SYMLINK_NOFOLLOW);
 
@@ -56,16 +57,13 @@ impl Entry {
 
 #[cfg(target_os = "linux")]
 fn linux_entry(
-    directory: &OwnedFd,
+    directory: impl AsFd + Copy,
     name: impl Arg + Copy,
     flags: AtFlags,
-) -> Result<Entry, ErasureFilesError> {
+) -> io::Result<Entry> {
     use std::os::fd::AsRawFd;
 
-    use rustix::{
-        fs::{Mode, OFlags, StatxFlags},
-        io::Errno,
-    };
+    use rustix::fs::{Mode, OFlags, StatxFlags};
 
     let mask = StatxFlags::TYPE | StatxFlags::INO | StatxFlags::MNT_ID;
     match fs::statx(directory, name, flags, mask) {
@@ -86,7 +84,7 @@ fn linux_entry(
     // Older kernels expose the mount ID through fdinfo even without STATX_MNT_ID.
     let file;
     let opened = if flags.contains(AtFlags::EMPTY_PATH) {
-        directory
+        directory.as_fd()
     } else {
         file = fs::openat(
             directory,
@@ -94,14 +92,13 @@ fn linux_entry(
             OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
-        &file
+        file.as_fd()
     };
-    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", opened.as_raw_fd()))
-        .map_err(crate::ArchiveError::from)?;
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", opened.as_raw_fd()))?;
     let mount = info
         .lines()
         .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse().ok())
-        .ok_or(ErasureFilesError::UnsafePath)?;
+        .ok_or_else(|| io::Error::other("Filesystem mount identity is unavailable"))?;
     let stat = fs::fstat(opened)?;
     Ok(Entry {
         identity: Identity {
@@ -111,4 +108,19 @@ fn linux_entry(
         mount,
         kind: FileType::from_raw_mode(stat.st_mode),
     })
+}
+
+/// Inspect a configured directory through any aliases without changing it.
+pub(crate) fn directory_identity(path: &Path) -> io::Result<Option<Identity>> {
+    use rustix::fs::{Mode, OFlags};
+
+    match fs::open(
+        path,
+        DIRECTORY_READ.difference(OFlags::NOFOLLOW),
+        Mode::empty(),
+    ) {
+        Ok(directory) => Ok(Some(Entry::opened(&directory)?.identity)),
+        Err(Errno::NOENT) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }

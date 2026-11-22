@@ -1,16 +1,13 @@
 //! Validate the private file roots before the database is erased.
 
-mod entry;
-
 use std::{
     env,
     error::Error,
-    fmt,
+    fmt, io,
     os::fd::OwnedFd,
     path::{Path, PathBuf},
 };
 
-use entry::{Entry, Identity};
 use rustix::{
     fs::{self, AtFlags, Dir, FileType, Mode},
     io::Errno,
@@ -21,6 +18,7 @@ use crate::{
     ArchiveError, DIRECTORY_READ,
     backup_space::existing_directory,
     backup_unpack::resolve_protected_root,
+    filesystem_entry::{Entry, Identity, directory_identity},
     storage_path::{is_within, normalized, storage_overlaps},
 };
 
@@ -46,6 +44,18 @@ impl fmt::Display for ErasureFilesError {
 }
 
 impl Error for ErasureFilesError {}
+
+impl From<io::Error> for ErasureFilesError {
+    fn from(error: io::Error) -> Self {
+        if error.raw_os_error().is_some_and(|code| {
+            code == Errno::LOOP.raw_os_error() || code == Errno::NOTDIR.raw_os_error()
+        }) {
+            Self::UnsafePath
+        } else {
+            ArchiveError::from(error).into()
+        }
+    }
+}
 
 impl From<ArchiveError> for ErasureFilesError {
     fn from(error: ArchiveError) -> Self {
@@ -129,7 +139,7 @@ impl ErasureFiles {
     fn protected_identities(&self) -> Result<[Option<Identity>; 4], ErasureFilesError> {
         let [locks, backups] = self.protected_paths.each_ref();
         let [data, tokens] = [self.roots[0].identity()?, self.roots[1].identity()?];
-        let [locks, backups] = [protected_identity(locks)?, protected_identity(backups)?];
+        let [locks, backups] = [directory_identity(locks)?, directory_identity(backups)?];
         if (data.is_some() && data == tokens)
             || [data, tokens]
                 .into_iter()
@@ -223,15 +233,6 @@ impl ErasureRoot {
 
 fn protected(path: &Path) -> Result<PathBuf, ErasureFilesError> {
     resolve_protected_root(path).map_err(|_| ErasureFilesError::UnsafePath)
-}
-
-fn protected_identity(path: &Path) -> Result<Option<Identity>, ErasureFilesError> {
-    let (directory, exists) = existing_directory(&protected(path)?)?;
-    if exists {
-        Ok(Some(Entry::opened(&directory)?.identity))
-    } else {
-        Ok(None)
-    }
 }
 
 fn open_parent(path: &Path) -> Result<OwnedFd, ErasureFilesError> {

@@ -13,6 +13,7 @@ pub mod backup_envelope;
 pub mod backup_unpack;
 pub mod backup_workspace;
 pub mod erasure_files;
+mod filesystem_entry;
 
 use std::{
     env,

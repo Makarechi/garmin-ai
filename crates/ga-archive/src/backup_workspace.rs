@@ -1,7 +1,6 @@
 //! Exclusive private database staging shared with Python backup operations.
 
 use std::{
-    io,
     os::fd::OwnedFd,
     path::{Path, PathBuf},
 };
@@ -14,13 +13,16 @@ use rustix::{
 
 use crate::{
     ArchiveError, DIRECTORY_MODE, DIRECTORY_READ, ensure_directory,
-    staging::remove_contents,
+    filesystem_entry::{Entry, Identity, directory_identity},
+    staging::discard_directory,
     storage_files::{StorageFilesError, acquire_lock, open_directory},
 };
 
 pub(crate) const PLAINTEXT_DIRECTORY: &str = ".garmin-ai-plaintext";
 const ACTIVE: &str = "active";
+const BACKUP_WORK: &str = "backup-work";
 const OPERATION: &str = "operation.lock";
+type Protected = [Option<Identity>; 3];
 
 pub struct BackupWorkspace {
     _workspace: PlaintextWorkspace,
@@ -28,12 +30,24 @@ pub struct BackupWorkspace {
 }
 
 impl BackupWorkspace {
-    pub fn acquire(data: &Path) -> Result<Self, StorageFilesError> {
-        let root = data.join("backup-work").join(PLAINTEXT_DIRECTORY);
-        let directory = open_directory(&root)?;
+    pub fn acquire(data: &Path, tokens: &Path) -> Result<Self, StorageFilesError> {
+        let root = data.join(BACKUP_WORK).join(PLAINTEXT_DIRECTORY);
+        let data = open_directory(data)?;
+        let protected = [
+            Some(Entry::opened(&data).map_err(ArchiveError::from)?.identity),
+            directory_identity(tokens).map_err(ArchiveError::from)?,
+            None,
+        ];
+        let parent = ensure_directory(&data, BACKUP_WORK.as_ref())?;
+        if protected.contains(&Some(
+            Entry::opened(&parent).map_err(ArchiveError::from)?.identity,
+        )) {
+            return Err(StorageFilesError::Unsafe);
+        }
+        let directory = private_child(&parent, PLAINTEXT_DIRECTORY, &protected)?;
         fs::fchmod(&directory, DIRECTORY_MODE)?;
         Ok(Self {
-            _workspace: PlaintextWorkspace::acquire(directory)?,
+            _workspace: PlaintextWorkspace::acquire(directory, protected)?,
             export: root.join(ACTIVE).join("database.jsonl.gz"),
         })
     }
@@ -47,11 +61,15 @@ pub(crate) struct PlaintextWorkspace {
     directory: OwnedFd,
     pub(crate) active: OwnedFd,
     _operation: OwnedFd,
+    protected: Protected,
 }
 
 impl PlaintextWorkspace {
-    pub(crate) fn for_recovery(parent: &OwnedFd) -> Result<Self, StorageFilesError> {
-        let directory = ensure_directory(parent, PLAINTEXT_DIRECTORY.as_ref())?;
+    pub(crate) fn for_recovery(
+        parent: &OwnedFd,
+        protected: Protected,
+    ) -> Result<Self, StorageFilesError> {
+        let directory = private_child(parent, PLAINTEXT_DIRECTORY, &protected)?;
         let stat = fs::fstat(&directory)?;
         if stat.st_uid != geteuid().as_raw()
             || Mode::from_raw_mode(stat.st_mode).intersects(Mode::RWXG | Mode::RWXO)
@@ -67,43 +85,48 @@ impl PlaintextWorkspace {
         {
             return Err(StorageFilesError::Unsafe);
         }
-        Self::acquire(directory)
+        Self::acquire(directory, protected)
     }
 
-    fn acquire(directory: OwnedFd) -> Result<Self, StorageFilesError> {
+    fn acquire(directory: OwnedFd, protected: Protected) -> Result<Self, StorageFilesError> {
         // Python's backup and recovery commands use the same private operation lock.
         let operation = acquire_lock(&directory, OPERATION)?;
         match fs::openat(&directory, ACTIVE, DIRECTORY_READ, Mode::empty()) {
-            Ok(previous) => discard(&directory, &previous).map_err(ArchiveError::from)?,
+            Ok(previous) => discard_directory(&directory, ACTIVE, &previous, &protected)
+                .map_err(ArchiveError::from)?,
             Err(Errno::NOENT) => {}
             Err(error) => return Err(error.into()),
         }
         fs::fsync(&directory)?;
-        let active = ensure_directory(&directory, ACTIVE.as_ref())?;
+        let active = private_child(&directory, ACTIVE, &protected)?;
         fs::fchmod(&active, DIRECTORY_MODE)?;
         fs::fsync(&active)?;
         Ok(Self {
             directory,
             active,
             _operation: operation,
+            protected,
         })
     }
 }
 
 impl Drop for PlaintextWorkspace {
     fn drop(&mut self) {
-        let _ = discard(&self.directory, &self.active);
+        let _ = discard_directory(&self.directory, ACTIVE, &self.active, &self.protected);
     }
 }
 
-fn discard(directory: &OwnedFd, active: &OwnedFd) -> io::Result<()> {
-    let opened = fs::fstat(active)?;
-    let current = fs::statat(directory, ACTIVE, AtFlags::SYMLINK_NOFOLLOW)?;
-    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) {
-        return Err(io::Error::other("Backup staging directory changed"));
+fn private_child(
+    parent: &OwnedFd,
+    name: &str,
+    protected: &Protected,
+) -> Result<OwnedFd, StorageFilesError> {
+    let directory = ensure_directory(parent, name.as_ref())?;
+    let entry = Entry::opened(&directory).map_err(ArchiveError::from)?;
+    if entry.mount != Entry::opened(parent).map_err(ArchiveError::from)?.mount
+        || protected.contains(&Some(entry.identity))
+    {
+        return Err(StorageFilesError::Unsafe);
     }
-    remove_contents(active)?;
-    fs::unlinkat(directory, ACTIVE, AtFlags::REMOVEDIR)?;
-    fs::fsync(directory)?;
-    Ok(())
+    Ok(directory)
 }

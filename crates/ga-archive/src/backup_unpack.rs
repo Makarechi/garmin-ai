@@ -24,7 +24,8 @@ use crate::{
     },
     backup_workspace::{PLAINTEXT_DIRECTORY, PlaintextWorkspace},
     ensure_directory,
-    staging::{Stage, remove_contents},
+    filesystem_entry::{Entry, directory_identity},
+    staging::{Stage, discard_directory},
     storage_path::{is_within, normalized},
 };
 
@@ -68,7 +69,13 @@ pub fn unpack_backup(
     }
     // Reject missing or redirected sources before reclaiming interrupted staging.
     let input = open_source(source)?;
-    let workspace = PlaintextWorkspace::for_recovery(&parent).map_err(BackupError::Workspace)?;
+    let protected = [
+        Some(Entry::opened(&input)?.identity),
+        directory_identity(data_dir)?,
+        directory_identity(token_dir)?,
+    ];
+    let workspace =
+        PlaintextWorkspace::for_recovery(&parent, protected).map_err(BackupError::Workspace)?;
     let mut staged = Stage::create_readable(&workspace.active)?;
     let digest = authenticate_open_source(source, input, key, &mut staged.file)?;
     staged.file.rewind()?;
@@ -187,13 +194,6 @@ impl<'a> RecoveryTree<'a> {
 
 impl Drop for RecoveryTree<'_> {
     fn drop(&mut self) {
-        if let (Ok(entry), Ok(open)) = (
-            fs::statat(self.parent, RECOVERY_TREE, AtFlags::SYMLINK_NOFOLLOW),
-            fs::fstat(&self.root),
-        ) && (entry.st_dev, entry.st_ino) == (open.st_dev, open.st_ino)
-        {
-            let _ = remove_contents(&self.root);
-            let _ = fs::unlinkat(self.parent, RECOVERY_TREE, AtFlags::REMOVEDIR);
-        }
+        let _ = discard_directory(self.parent, RECOVERY_TREE, &self.root, &[]);
     }
 }

@@ -134,7 +134,7 @@ fn create_with_source(
         }
         None => runtime.block_on(database.acquire_backup_sources())?,
     };
-    let workspace = BackupWorkspace::acquire(&settings.data)?;
+    let workspace = BackupWorkspace::acquire(&settings.data, &settings.tokens)?;
     let size = runtime
         .block_on(database.backup_database_bytes())
         .map_err(|_| "Backup database size is unavailable")?;
