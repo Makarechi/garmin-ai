@@ -127,7 +127,6 @@ the directory name printed by `unpack-backup` to
 `./install.sh restore-db RECOVERY_DIRECTORY` to load the logical database export.
 The command expects an empty database at the supported schema and uses the
 target bundle's settings.
-Follow the [rollback procedure](../migration/rollback-runbook.md#restore-and-verify).
 
 Copy the existing `.env` to the new private bundle directory with owner-only
 permissions. If the old bundle has `.plugin.env`, copy it with owner-only
