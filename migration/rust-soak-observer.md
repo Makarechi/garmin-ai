@@ -38,6 +38,10 @@ If the API, worker, or database container restarts, the observer marks that
 sample incomplete even when the service is healthy again before the next probe.
 It checks the container start time and restart count. The report keeps the
 subsequent samples, including the recovered service's measurements.
+Every sample rechecks the selected containers after collecting the probes.
+An in-sample state change leaves both states in the report and invalidates
+that sample, including the final sample of the window. A replacement of
+one of the selected containers interrupts the observation.
 
 The first sample establishes each container's cgroup out-of-memory kill
 counter. A later increase records a kill even if the container stays running

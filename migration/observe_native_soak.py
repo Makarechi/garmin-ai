@@ -99,6 +99,12 @@ def container_state(run_docker, container):
     }
 
 
+def selected_state(run_docker, project, service, container):
+    if service_id(run_docker, project, service) != container:
+        raise RuntimeError(f"Compose replaced the selected {service} container")
+    return container_state(run_docker, container)
+
+
 def container_cgroup(run_docker, container):
     parts = run_docker(
         "exec",
@@ -144,10 +150,8 @@ def sample(run_docker, args, selected, token):
     failures = []
     for service in SERVICES:
         try:
-            container = service_id(run_docker, args.compose_project, service)
-            if container != selected[service]:
-                raise RuntimeError(f"Compose replaced the selected {service} container")
-            state = container_state(run_docker, container)
+            container = selected[service]
+            state = selected_state(run_docker, args.compose_project, service, container)
             if service != "db" and state["image"] != args.image_id:
                 raise RuntimeError("The application image changed")
             states[service] = state
@@ -172,6 +176,15 @@ def sample(run_docker, args, selected, token):
             failures.append(f"api:port:{type(error).__name__}")
         else:
             probes, snapshot = sample_http(args.url, token, failures)
+    for service, state in states.items():
+        try:
+            after = selected_state(run_docker, args.compose_project, service, selected[service])
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            failures.append(f"{service}:end_state:{type(error).__name__}")
+        else:
+            if any(state[field] != value for field, value in after.items()):
+                state["after_probes"] = after
+                failures.append(f"{service}:changed_during_sample")
     return {"containers": states, "probe_ms": probes, "operations": snapshot, "failures": failures}
 
 
@@ -215,7 +228,8 @@ def track_container_restarts(current, generations):
         generation = state["started_at"], state["restarts"]
         if generation != generations[service]:
             current["failures"].append(f"{service}:restarted")
-        generations[service] = generation
+        end_state = state.get("after_probes", state)
+        generations[service] = end_state["started_at"], end_state["restarts"]
 
 
 def track_resource_limits(current, previous_limits):

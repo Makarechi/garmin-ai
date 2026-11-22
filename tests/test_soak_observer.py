@@ -55,6 +55,7 @@ def docker_installation(monkeypatch):
         worker_started_at="2026-11-21T08:00:00Z",
         worker_restarts=0,
         worker_limits={},
+        worker_container=CONTAINERS["worker"],
     )
 
     def run_docker(*args):
@@ -62,7 +63,8 @@ def docker_installation(monkeypatch):
             service = next(
                 part for part in args if part.startswith("label=com.docker.compose.service=")
             )
-            return CONTAINERS[service.split("=")[-1]]
+            name = service.split("=")[-1]
+            return config.worker_container if name == "worker" else CONTAINERS[name]
         if args[0] == "inspect":
             api_stopped = args[-1] == CONTAINERS["api"] and not config.api_running
             worker = args[-1] == CONTAINERS["worker"]
@@ -144,6 +146,24 @@ def test_selected_api_receives_http_probes(monkeypatch, docker_installation):
     assert sample["failures"] == [] and sample["operations"]["runtime_heartbeat_age_seconds"] == 1
 
 
+def test_worker_replacement_during_probe_interrupts_the_observation(
+    monkeypatch, docker_installation
+):
+    docker, config = docker_installation
+
+    def http(url, token=None):
+        if url.endswith("/operations"):
+            config.worker_container = "d" * 64
+            operations = dict.fromkeys(observer.OPERATIONS_FIELDS)
+            operations["runtime_heartbeat_age_seconds"] = 1
+            return operations, 0.5
+        return {"status": "alive" if url.endswith("/live") else "ready"}, 0.5
+
+    monkeypatch.setattr(observer, "http_json", http)
+    with pytest.raises(RuntimeError, match="replaced the selected worker"):
+        observer.sample(docker, ARGS, CONTAINERS, "synthetic-token")
+
+
 @pytest.mark.parametrize(
     ("duration", "interval", "missed_seconds", "event", "window", "failure"),
     [
@@ -156,6 +176,22 @@ def test_selected_api_receives_http_probes(monkeypatch, docker_installation):
         (4, 1, 5, "oom", "gapped_observation", "worker:oom_kills_increased"),
         (4, 1, 0, "manual_restart", "unhealthy_observation", "worker:restarted"),
         (4, 1, 0, "auto_restart", "unhealthy_observation", "worker:restarted"),
+        (
+            4,
+            1,
+            0,
+            "restart_during_last_probe",
+            "unhealthy_observation",
+            "worker:changed_during_sample",
+        ),
+        (
+            4,
+            1,
+            0,
+            "restart_during_middle_probe",
+            "unhealthy_observation",
+            "worker:changed_during_sample",
+        ),
         (
             4,
             1,
@@ -223,6 +259,11 @@ def test_window_result_requires_contiguous_samples(
 
     def http(url, token=None):
         if url.endswith("/operations"):
+            if (now, event) in (
+                (duration, "restart_during_last_probe"),
+                (interval, "restart_during_middle_probe"),
+            ):
+                config.worker_started_at = "2026-11-21T08:00:04.600Z"
             operations = dict.fromkeys(observer.OPERATIONS_FIELDS)
             operations["runtime_heartbeat_age_seconds"] = 2
             return operations, 0.5
@@ -273,3 +314,11 @@ def test_window_result_requires_contiguous_samples(
     assert [issue for sample in records[1:-1] for issue in sample["failures"]] == (
         [failure] if failure else []
     )
+    if event in ("restart_during_last_probe", "restart_during_middle_probe"):
+        (changed,) = [record for record in records[1:-1] if record["failures"]]
+        assert changed["elapsed_seconds"] == (
+            duration if event == "restart_during_last_probe" else interval
+        )
+        worker_before = changed["containers"]["worker"]
+        assert worker_before["started_at"] != worker_before["after_probes"]["started_at"]
+        assert worker_before["running"] and worker_before["after_probes"]["running"]
