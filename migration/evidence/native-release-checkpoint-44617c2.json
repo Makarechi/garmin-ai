@@ -1,0 +1,346 @@
+{
+  "schema_version": 1,
+  "scope": "synthetic_checkpoint",
+  "release_status": "verification_pending",
+  "tested_source": {
+    "commit": "44617c219d262292c7487a37ee6794a9e4c8bc7e",
+    "tree": "700c80e5b96566ae9ff6fe39223fd0baca724449"
+  },
+  "python_reference": {
+    "commit": "ee3a14a48a6ad30c1085951bac2f53c9088c2450",
+    "version": "3.15.2",
+    "junit_sha256": "7bda0b137024b5672d4b9364abfda2943a351149ccf3f840671b86011174d233",
+    "total": 4369,
+    "passed": 4342,
+    "skipped": 27
+  },
+  "workflow_runs": {
+    "ci": {
+      "id": 45033270609,
+      "definition": ".github/workflows/ci.yml",
+      "tested_commit": "44617c219d262292c7487a37ee6794a9e4c8bc7e"
+    },
+    "native_install": {
+      "id": 45033270559,
+      "definition": ".github/workflows/native-release-install.yml",
+      "tested_commit": "44617c219d262292c7487a37ee6794a9e4c8bc7e"
+    },
+    "native_recovery": {
+      "id": 45033290556,
+      "definition": ".github/workflows/native-offhost-restore.yml",
+      "tested_commit": "44617c219d262292c7487a37ee6794a9e4c8bc7e"
+    },
+    "legacy_recovery": {
+      "id": 45033270630,
+      "definition": ".github/workflows/synthetic-offhost-restore.yml",
+      "tested_commit": "44617c219d262292c7487a37ee6794a9e4c8bc7e"
+    },
+    "rust_ci": {
+      "id": 45033004860,
+      "definition": ".github/workflows/rust-ci.yml",
+      "tested_commit": "c1b8c600800935bf9da40345b65f57736278cfb0"
+    }
+  },
+  "inventory": {
+    "surfaces": 459,
+    "areas": 25,
+    "required_parity": "pending",
+    "open_areas": [
+      "PAR-01",
+      "PAR-03",
+      "PAR-04",
+      "PAR-06",
+      "PAR-10",
+      "PAR-14",
+      "PAR-17",
+      "PAR-18",
+      "PAR-25"
+    ]
+  },
+  "python_ci": {
+    "artifact": {
+      "id": 14759150975,
+      "name": "pytest-results",
+      "archive_sha256": "de964deb10e953f234beb67f29b8d04d4b74c6d2917b170f1e94774773be854d"
+    },
+    "junit_sha256": "ade9ccb5e15005e62bf8ada7b5793ebcd50bca4cb5324785f662ed2547d92df6",
+    "total": 4465,
+    "passed": 4385,
+    "skipped": 80,
+    "release_bundle_cases_passed": 45,
+    "installed_extensions": {
+      "junit_sha256": "834515ec9cbf77646ba6683bc45efd5c3404c794b6f0b82ba809908ff5b8fb69",
+      "skipped_cases_passed_in_separate_run": {
+        "tests.test_extension_tck": 27,
+        "tests.test_source_metric_plugin": 1,
+        "tests.test_source_runtime": 18,
+        "tests.test_synthetic_plugin": 8
+      }
+    },
+    "live_provider_skip_tests": {
+      "tests.test_anthropic_live": [
+        {
+          "function": "test_selected_anthropic_model_handles_synthetic_safety_screen",
+          "case_id_sha256": "8468c944f3de2325d492c3fc5c5d06ac6f72da6fd85eec263ca4f6bd3f3cd79a"
+        }
+      ],
+      "tests.test_gemini_live": [
+        {
+          "function": "test_live_button_refinement_changes_existing_episode",
+          "case_id_sha256": "96a21c967946e3d6b518d1ba5171b5cfa19fdff137dd8f31214871ae30d5bf73"
+        },
+        {
+          "function": "test_live_close_and_correction",
+          "case_id_sha256": "4f4001a98c4895d1883f5af4454b6b28aefac260ae831dd6b2f205a8f20e128f"
+        },
+        {
+          "function": "test_live_close_selects_bounded_candidates_in_large_diary",
+          "case_id_sha256": "72fcf767cc95126f941cc67c0b757deba0557bf475cd342d35afc5a217fea282"
+        },
+        {
+          "function": "test_live_english_diary",
+          "case_id_sha256": "741e53dd956b64eb79d9e40ce1d2e0a2882bf0ef0eaf0c0b2247b0dae2daae46"
+        },
+        {
+          "function": "test_live_english_diary",
+          "case_id_sha256": "80ae477f585bc30d6b1b542fb6dc086f977f05dea16f719128af7332c9dafd00"
+        },
+        {
+          "function": "test_live_informal_english_sleep_question_selects_a_valid_sleep_read",
+          "case_id_sha256": "0ca3e705e669f0de2c27d9f2a5c27696016603670c6e4052128e6b7a611d3c2e"
+        },
+        {
+          "function": "test_live_oversized_transcript_detects_urgent_report",
+          "case_id_sha256": "53773955780dac5db88ce61db66c2c599dc186714d4c4612ddc600b92e83fdfc"
+        },
+        {
+          "function": "test_live_russian_diary",
+          "case_id_sha256": "7443611a81a76829c736f3d346afceceaf865fffa7887f05858a445a0dacfd58"
+        },
+        {
+          "function": "test_live_russian_diary",
+          "case_id_sha256": "1c448c4bbf5da4948c6c0a7aa7ece18a01f231993176bc7ae4074baefe1ebf2c"
+        },
+        {
+          "function": "test_live_russian_diary",
+          "case_id_sha256": "5d9b039da5eefd84a701fedf3da8b8ab6e112d26b77d552dfbfe1acba7ee20c8"
+        },
+        {
+          "function": "test_live_russian_diary",
+          "case_id_sha256": "bdd1bb8e4b78075a6a4f67d5e6955e792a7387f9679f5fc33f863e25d3de99b3"
+        },
+        {
+          "function": "test_live_russian_diary",
+          "case_id_sha256": "ff36da777a1bf74380fb36ce9e547aebd97c46e5e184caab69e978d6ba58ae0f"
+        },
+        {
+          "function": "test_live_russian_diary",
+          "case_id_sha256": "37993953d03a558e3d8f71e7c3e83dc4a85a1cd7e9e478f2e522999e2a7f5acf"
+        },
+        {
+          "function": "test_live_sleep_time_uses_one_night_and_verified_timestamp",
+          "case_id_sha256": "0aee0772f2cabc8f340afa8ac2b89ccd5443a144b14433d712b2f6c695f76033"
+        },
+        {
+          "function": "test_live_sleep_time_uses_one_night_and_verified_timestamp",
+          "case_id_sha256": "0f77ca5ede1da87a69e01af77c85f8162394a5118c114315f198fdc423b19c5f"
+        },
+        {
+          "function": "test_live_sleep_time_uses_one_night_and_verified_timestamp",
+          "case_id_sha256": "3ef2a243c9aa4737d4d2f2e9a233068d061526ef215d458adeeeb3d8f4370065"
+        },
+        {
+          "function": "test_live_sleep_time_uses_one_night_and_verified_timestamp",
+          "case_id_sha256": "6f7973b8d16fa87dbc1e8893a53bcca6a2ada389d603ce89173b0edc04a70665"
+        },
+        {
+          "function": "test_live_sleep_time_uses_one_night_and_verified_timestamp",
+          "case_id_sha256": "6841cbb400ed9751aba1d2f2bb04ffc37303edfce851920276df30600bbd30f5"
+        },
+        {
+          "function": "test_live_sleep_time_uses_one_night_and_verified_timestamp",
+          "case_id_sha256": "e1b5b839c76762b4065c8f7a800ad6f82567d32e9c7406dea2ca9df0cd73e041"
+        },
+        {
+          "function": "test_live_urgent_report_bypasses_stalled_diary",
+          "case_id_sha256": "3cc2f55c51f45722816005f37a77ce8a728dd920e69e228631d5045e03f6e00f"
+        },
+        {
+          "function": "test_live_voice_transcription",
+          "case_id_sha256": "35a5159bf0fbf5994426c97f2680c49eda562486626a82ecda4322bf7db585e8"
+        }
+      ],
+      "tests.test_openai_live": [
+        {
+          "function": "test_selected_openai_model_handles_synthetic_safety_screen",
+          "case_id_sha256": "e692b536d8be1abd9ff8b41a41b33bf65626fec33ed1852482170a478a2a1582"
+        }
+      ]
+    },
+    "filesystem_skip_tests": [
+      "test_setup_detects_case_aliases_in_storage_roots[GA_BACKUP_DIR]",
+      "test_setup_detects_case_aliases_in_storage_roots[GA_LOCK_DIR]",
+      "test_setup_detects_case_aliases_in_storage_roots[GA_TOKEN_DIR]"
+    ]
+  },
+  "native_package": {
+    "image_origin": "disposable test registries",
+    "release_info": {
+      "application_version": "0.1.0",
+      "archive_json": "Python-compatible UTF-8 JSON",
+      "backup_envelope": "GARMINAI1",
+      "database_export_format": "garmin-ai-jsonl-v1",
+      "database_revision": "c54f8a72d130",
+      "fit_parser_version": 9,
+      "fit_profile_version": "21.171",
+      "garmin_parser_version": 9
+    },
+    "platforms": {
+      "linux/amd64": {
+        "artifact": {
+          "id": 14758489835,
+          "name": "native-rust-install-amd64",
+          "archive_sha256": "beea2d988fb20232f864c4addc78204f1b5a8df9881ff5225d613f9bab732bcd"
+        },
+        "registry_digest": "sha256:c700834cd62d8b4f37e1c08c613eef37fc40191a77deb54308a6b2c48ac4fe82",
+        "platform_manifest_digest": "sha256:c700834cd62d8b4f37e1c08c613eef37fc40191a77deb54308a6b2c48ac4fe82",
+        "image_config_digest": "sha256:22d4ea59d0450aae18caaa8c95d6149993fa2b4d7f0439bc6f175663f3d3e0a5",
+        "receipts": {
+          "install": {
+            "file": "native-rust-install.json",
+            "sha256": "e740eb596e291a2ce3e24ad947f46d5b4115bd5146ccc6893f96884dcccb17d0"
+          },
+          "upgrade": {
+            "file": "native-rust-upgrade.json",
+            "sha256": "bbef1f2f2aaae28936ac1d4f86c1a4926a697c89e0e660e562212980426a6ca5"
+          },
+          "gcp-install": {
+            "file": "native-rust-gcp-install.json",
+            "sha256": "82f6fd61bd42c02f3e5f96e1b3a6ab95379bc5aa19a2cbb2fe515926041396bb"
+          }
+        },
+        "license_archive": {
+          "archive_sha256": "0e07df1a4193c16ea120f739747852428ae7e212282023c677f28c7d8a2e699b",
+          "debian_packages": 91,
+          "rust_dependencies": 241,
+          "rust_packages_for_review": []
+        }
+      },
+      "linux/arm64": {
+        "artifact": {
+          "id": 14758783567,
+          "name": "native-rust-install-arm64",
+          "archive_sha256": "82373303a98aa0f92e88201bf385715745446f7b86c071a778ce87f48b235716"
+        },
+        "registry_digest": "sha256:d69f8c0de401cff0f414b72baf2084b07aa3f2d058a3ea1baba9b7234047844d",
+        "platform_manifest_digest": "sha256:d69f8c0de401cff0f414b72baf2084b07aa3f2d058a3ea1baba9b7234047844d",
+        "image_config_digest": "sha256:93aa1df6153184f3df374079799bcb34661e3c82ac346f33884f5319a555fcd5",
+        "receipts": {
+          "install": {
+            "file": "native-rust-install.json",
+            "sha256": "85e33c541e2b8a31c0ff2c3bc2fadb42ef8c3cc97671fbd05db7fbb305403807"
+          },
+          "upgrade": {
+            "file": "native-rust-upgrade.json",
+            "sha256": "6f858ee89a3edc23041f57e02a64a603f8654cfb80daf4eecd3b3141d31e8b99"
+          }
+        },
+        "license_archive": {
+          "archive_sha256": "3e552dabe70fec38efe770d6e80e9d2fc03425005bc75125684f2331a017188d",
+          "debian_packages": 91,
+          "rust_dependencies": 241,
+          "rust_packages_for_review": []
+        }
+      }
+    }
+  },
+  "independent_host_recovery": {
+    "native_executable_sha256": "37bf4e7fadaf0095741680ae3b90b5a13368bad2936bf6c225e4131cfc7aa5b7",
+    "cases": {
+      "python_to_python": {
+        "artifact": {
+          "id": 14758493526,
+          "name": "native-offhost-result-python-to-python",
+          "archive_sha256": "0d28993e138ddec7f1df42693ee90d7456a34aed9c6def4b6a767170978212d5"
+        },
+        "receipt_sha256": "8ace97419029f791431eeb100e073c36244462d782d0aa1b02d42fc9cda4f3a3",
+        "verified_tables": 30,
+        "verified_files": 3,
+        "fixture_restore_seconds": 4.325,
+        "replay_attempts": 1,
+        "worker_resume_seconds": 1.883
+      },
+      "python_to_rust": {
+        "artifact": {
+          "id": 14758838855,
+          "name": "native-offhost-result-python-to-rust",
+          "archive_sha256": "3ba85550b9154f8866d0f83e7478cfa3b1ba21a3d64b84434c94900a870204ea"
+        },
+        "receipt_sha256": "8bd992345e33427331622cddb087ea87227d0a2f780dca0be813896d5003b9f3",
+        "verified_tables": 30,
+        "verified_files": 3,
+        "fixture_restore_seconds": 0.487,
+        "replay_attempts": 1,
+        "worker_resume_seconds": 0.106,
+        "api_ready_after_restore_seconds": 0.3
+      },
+      "rust_to_python": {
+        "artifact": {
+          "id": 14759030835,
+          "name": "native-offhost-result-rust-to-python",
+          "archive_sha256": "7411e72c5ead9d78e316b965769f4f5e2f9b44d5a56a993d0def6facd275c07a"
+        },
+        "receipt_sha256": "282c785fb7127e1218bf2075c9e312dabfa5c3e2dc4150306a7f3a0bf161ddd0",
+        "verified_tables": 30,
+        "verified_files": 3,
+        "fixture_restore_seconds": 3.816,
+        "replay_attempts": 1,
+        "worker_resume_seconds": 1.862,
+        "verified_event_revisions": [
+          1,
+          2,
+          3
+        ]
+      },
+      "rust_to_rust": {
+        "artifact": {
+          "id": 14759290561,
+          "name": "native-offhost-result-rust-to-rust",
+          "archive_sha256": "6b4720df518f292609c561b7fa0e0e6a2dfacd2076bf02d3403dacf835b1000a"
+        },
+        "receipt_sha256": "8f9a8698ed137807b8c5f010d727ef0376249f467217ffab9b0040f5f3756e67",
+        "verified_tables": 30,
+        "verified_files": 3,
+        "fixture_restore_seconds": 1.135,
+        "replay_attempts": 1,
+        "worker_resume_seconds": 0.311,
+        "api_ready_after_restore_seconds": 0.493,
+        "verified_event_revisions": [
+          1,
+          2,
+          3
+        ]
+      }
+    }
+  },
+  "remaining": {
+    "compatibility_decisions": [
+      "PAR-01",
+      "PAR-06",
+      "PAR-10",
+      "PAR-14"
+    ],
+    "authorized_live_checks": {
+      "garmin": "pending",
+      "telegram": "pending",
+      "model_providers": "pending"
+    },
+    "representative_unattended_observation": {
+      "status": "pending",
+      "required_hours": 168
+    },
+    "final_cutover_rehearsal": "pending",
+    "public_distribution_review": "pending",
+    "production_cutover": "authorization_pending"
+  }
+}
