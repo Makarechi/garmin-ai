@@ -1,5 +1,7 @@
 //! Validate the private file roots before the database is erased.
 
+mod entry;
+
 use std::{
     env,
     error::Error,
@@ -8,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use entry::{Entry, Identity};
 use rustix::{
     fs::{self, AtFlags, Dir, FileType, Mode},
     io::Errno,
@@ -25,6 +28,7 @@ use crate::{
 pub enum ErasureFilesError {
     UnsafePath,
     Overlap,
+    NestedMount,
     Filesystem(ArchiveError),
 }
 
@@ -35,6 +39,7 @@ impl fmt::Display for ErasureFilesError {
             Self::Overlap => {
                 "Erasure directories overlap each other, backups, or the state directory"
             }
+            Self::NestedMount => "Erasure directories must not contain nested mounts",
             Self::Filesystem(_) => "Private files could not be erased",
         })
     }
@@ -64,6 +69,7 @@ impl From<Errno> for ErasureFilesError {
 /// storage locks and commits the database erasure before removing these files.
 pub struct ErasureFiles {
     roots: [ErasureRoot; 2],
+    protected_paths: [PathBuf; 2],
 }
 
 impl ErasureFiles {
@@ -81,28 +87,58 @@ impl ErasureFiles {
             ErasureRoot::open(data, &cwd, &home)?,
             ErasureRoot::open(tokens, &cwd, &home)?,
         ];
-        let [locks, backups] = [protected(locks)?, protected(backups)?];
-        if storage_overlaps(&roots[0].path, &roots[1].path, &locks, &backups)
-            .map_err(ArchiveError::from)?
+        if storage_overlaps(
+            &roots[0].path,
+            &roots[1].path,
+            &protected(locks)?,
+            &protected(backups)?,
+        )
+        .map_err(ArchiveError::from)?
         {
             return Err(ErasureFilesError::Overlap);
         }
-        for root in &roots {
+        let files = Self {
+            roots,
+            protected_paths: [locks.to_path_buf(), backups.to_path_buf()],
+        };
+        let identities = files.protected_identities()?;
+        for root in &files.roots {
             if let Some(directory) = &root.directory {
-                walk(directory, false)?;
+                walk(
+                    directory,
+                    Entry::opened(directory)?.mount,
+                    &identities,
+                    false,
+                )?;
             }
         }
-        Ok(Self { roots })
+        Ok(files)
     }
 
     pub fn remove(self) -> Result<(), ErasureFilesError> {
         for root in &self.roots {
             root.check_current()?;
         }
+        let identities = self.protected_identities()?;
         for root in &self.roots {
-            root.remove()?;
+            root.remove(&identities)?;
         }
         Ok(())
+    }
+
+    fn protected_identities(&self) -> Result<[Option<Identity>; 4], ErasureFilesError> {
+        let [locks, backups] = self.protected_paths.each_ref();
+        let [data, tokens] = [self.roots[0].identity()?, self.roots[1].identity()?];
+        let [locks, backups] = [protected_identity(locks)?, protected_identity(backups)?];
+        if (data.is_some() && data == tokens)
+            || [data, tokens]
+                .into_iter()
+                .flatten()
+                .any(|identity| [locks, backups].contains(&Some(identity)))
+        {
+            return Err(ErasureFilesError::Overlap);
+        }
+        Ok([data, tokens, locks, backups])
     }
 }
 
@@ -124,9 +160,16 @@ impl ErasureRoot {
         } else {
             normalized(path).map_err(ArchiveError::from)?
         };
-        if path.components().count() < 4
-            || is_within(cwd, &path).map_err(ArchiveError::from)?
+        if is_within(cwd, &path).map_err(ArchiveError::from)?
             || is_within(home, &path).map_err(ArchiveError::from)?
+        {
+            return Err(ErasureFilesError::UnsafePath);
+        }
+        let depth = path.components().count();
+        if depth < 4
+            && !(depth == 3
+                && exists
+                && Entry::opened(&directory)?.mount != Entry::opened(&open_parent(&path)?)?.mount)
         {
             return Err(ErasureFilesError::UnsafePath);
         }
@@ -137,14 +180,19 @@ impl ErasureRoot {
         })
     }
 
+    fn identity(&self) -> Result<Option<Identity>, ErasureFilesError> {
+        self.directory
+            .as_ref()
+            .map(|directory| Ok(Entry::opened(directory)?.identity))
+            .transpose()
+    }
+
     fn check_current(&self) -> Result<(), ErasureFilesError> {
         let (directory, exists) = existing_directory(&self.source)?;
         match (exists, &self.directory) {
             (false, None) => Ok(()),
             (true, Some(original)) => {
-                let original = fs::fstat(original)?;
-                let found = fs::fstat(directory)?;
-                if (original.st_dev, original.st_ino) == (found.st_dev, found.st_ino) {
+                if Entry::opened(original)? == Entry::opened(&directory)? {
                     Ok(())
                 } else {
                     Err(ErasureFilesError::UnsafePath)
@@ -154,22 +202,21 @@ impl ErasureRoot {
         }
     }
 
-    fn remove(&self) -> Result<(), ErasureFilesError> {
+    fn remove(&self, protected: &[Option<Identity>; 4]) -> Result<(), ErasureFilesError> {
         let Some(directory) = &self.directory else {
             return Ok(());
         };
-        let parent_path = self.path.parent().ok_or(ErasureFilesError::UnsafePath)?;
+        let parent = open_parent(&self.path)?;
         let name = self.path.file_name().ok_or(ErasureFilesError::UnsafePath)?;
-        let (parent, exists) = existing_directory(parent_path)?;
-        if !exists {
-            return Err(ErasureFilesError::UnsafePath);
+        let before = Entry::opened(directory)?;
+        verify_entry(&parent, name, &before)?;
+        walk(directory, before.mount, protected, true)?;
+        verify_entry(&parent, name, &before)?;
+        // Compose owns the mount point. Keep the emptied directory attached.
+        if before.mount == Entry::opened(&parent)?.mount {
+            fs::unlinkat(&parent, name, AtFlags::REMOVEDIR)?;
+            fs::fsync(parent)?;
         }
-        let before = fs::fstat(directory)?;
-        verify_entry(&parent, name, before)?;
-        walk(directory, true)?;
-        verify_entry(&parent, name, before)?;
-        fs::unlinkat(&parent, name, AtFlags::REMOVEDIR)?;
-        fs::fsync(parent)?;
         Ok(())
     }
 }
@@ -178,41 +225,68 @@ fn protected(path: &Path) -> Result<PathBuf, ErasureFilesError> {
     resolve_protected_root(path).map_err(|_| ErasureFilesError::UnsafePath)
 }
 
+fn protected_identity(path: &Path) -> Result<Option<Identity>, ErasureFilesError> {
+    let (directory, exists) = existing_directory(&protected(path)?)?;
+    if exists {
+        Ok(Some(Entry::opened(&directory)?.identity))
+    } else {
+        Ok(None)
+    }
+}
+
+fn open_parent(path: &Path) -> Result<OwnedFd, ErasureFilesError> {
+    let parent = path.parent().ok_or(ErasureFilesError::UnsafePath)?;
+    let (directory, exists) = existing_directory(parent)?;
+    if !exists {
+        return Err(ErasureFilesError::UnsafePath);
+    }
+    Ok(directory)
+}
+
 fn verify_entry(
     parent: &OwnedFd,
-    name: impl Arg,
-    opened: fs::Stat,
+    name: impl Arg + Copy,
+    opened: &Entry,
 ) -> Result<(), ErasureFilesError> {
-    let found = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
-    if (opened.st_dev, opened.st_ino) != (found.st_dev, found.st_ino) {
+    if *opened != Entry::lookup(parent, name)? {
         return Err(ErasureFilesError::UnsafePath);
     }
     Ok(())
 }
 
-fn walk(root: &OwnedFd, remove: bool) -> Result<(), ErasureFilesError> {
+fn walk(
+    root: &OwnedFd,
+    mount: u64,
+    protected: &[Option<Identity>; 4],
+    remove: bool,
+) -> Result<(), ErasureFilesError> {
     for entry in Dir::read_from(root)? {
         let entry = entry?;
         let name = entry.file_name();
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
-        let stat = fs::statat(root, name, AtFlags::SYMLINK_NOFOLLOW)?;
-        let flags = match FileType::from_raw_mode(stat.st_mode) {
+        let entry = Entry::lookup(root, name)?;
+        if entry.mount != mount {
+            return Err(ErasureFilesError::NestedMount);
+        }
+        if protected.contains(&Some(entry.identity)) {
+            return Err(ErasureFilesError::Overlap);
+        }
+        let flags = match entry.kind {
             FileType::Directory => {
                 let child = fs::openat(root, name, DIRECTORY_READ, Mode::empty())?;
-                let opened = fs::fstat(&child)?;
-                if (stat.st_dev, stat.st_ino) != (opened.st_dev, opened.st_ino) {
+                if entry != Entry::opened(&child)? {
                     return Err(ErasureFilesError::UnsafePath);
                 }
-                walk(&child, remove)?;
+                walk(&child, mount, protected, remove)?;
                 AtFlags::REMOVEDIR
             }
             FileType::Symlink => return Err(ErasureFilesError::UnsafePath),
             _ => AtFlags::empty(),
         };
         if remove {
-            verify_entry(root, name, stat)?;
+            verify_entry(root, name, &entry)?;
             fs::unlinkat(root, name, flags)?;
         }
     }

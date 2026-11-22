@@ -4,4 +4,6 @@
 
 Backups and maintenance files must live outside both private data roots. The native checks compare the actual directories and reject an overlap even when the configured paths use different capitalization on the volume. This check happens before erasure changes the database or creates a local marker.
 
+The native Compose containers empty the mounted data and token directories and keep the mount points attached. Erasure rejects nested mounts and paths whose contents include the configured backup or maintenance directory through another mount. Ordinary data and token directories are still removed after their contents are erased.
+
 The native Linux ARM64 commands matched pinned Python on disposable TimescaleDB. `check_erasure_commands.py` killed the native process at the erasure checkpoint, ran a partial removal with an injected redirect, and then resumed erasure. Recovery and resume were refused during the partial operation. An injected activation failure kept the database fenced until a successful retry. All 30 tables, both sequences, and the independently stored backup matched the reference outcomes.
