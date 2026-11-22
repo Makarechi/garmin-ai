@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     os::{fd::OwnedFd, unix::ffi::OsStrExt},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use flate2::{Compression, write::GzEncoder};
@@ -24,6 +24,7 @@ use crate::{
     },
     backup_space::existing_directory,
     open_regular,
+    storage_path::{is_within, normalized},
 };
 
 const DATABASE_MEMBER: &str = "database.jsonl.gz";
@@ -64,8 +65,8 @@ pub fn write_backup_bundle_cancellable(
     before_publish: impl FnOnce() -> io::Result<()>,
 ) -> Result<BackupDigest, BackupError> {
     let target = normalized(destination)?;
-    if target.starts_with(normalized(bundle.data_dir)?)
-        || target.starts_with(normalized(bundle.token_dir)?)
+    if is_within(&target, &normalized(bundle.data_dir)?)?
+        || is_within(&target, &normalized(bundle.token_dir)?)?
     {
         return Err(BackupError::InvalidPath);
     }
@@ -253,18 +254,6 @@ impl<R: Read> Read for VerifiedReader<R> {
         }
         Ok(bytes)
     }
-}
-
-pub(crate) fn normalized(path: &Path) -> io::Result<PathBuf> {
-    let mut resolved = PathBuf::new();
-    for component in std::path::absolute(path)?.components() {
-        if component == Component::ParentDir {
-            resolved.pop();
-        } else {
-            resolved.push(component.as_os_str());
-        }
-    }
-    Ok(resolved)
 }
 
 fn changed() -> io::Error {

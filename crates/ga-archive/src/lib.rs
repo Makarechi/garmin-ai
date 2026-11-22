@@ -5,6 +5,7 @@ mod key;
 pub mod scheduled_backup;
 mod staging;
 pub mod storage_files;
+mod storage_path;
 mod token_file;
 
 pub mod backup_bundle;

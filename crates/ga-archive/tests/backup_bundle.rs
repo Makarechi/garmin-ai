@@ -9,7 +9,7 @@ use std::{
 use ga_archive::{
     ArchiveKey,
     backup_bundle::{BackupBundle, write_backup_bundle},
-    backup_envelope::verify_encrypted_backup,
+    backup_envelope::{BackupError, verify_encrypted_backup},
 };
 use sha2::{Digest, Sha256};
 
@@ -130,5 +130,36 @@ fn refuses_missing_changed_or_redirected_sources_without_replacing_prior_bundle(
         verify_encrypted_backup(&existing, &FIXTURE_BYTES)?,
         previous
     );
+    Ok(())
+}
+
+#[test]
+fn rejects_a_backup_destination_under_an_aliased_source() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let data = root.join("Data");
+    let tokens = root.join("Tokens");
+    fs::create_dir_all(data.join("raw"))?;
+    fs::create_dir(&tokens)?;
+    let snapshot = root.join("database.jsonl.gz");
+    fs::write(&snapshot, b"synthetic staged database")?;
+    let folds_case = root.join("DATA").exists();
+    for parent in [root.join("DATA/nested"), root.join("TOKENS/nested")] {
+        let output = parent.join("backup.enc");
+        let result = write_backup_bundle(
+            &output,
+            &FIXTURE_BYTES,
+            bundle(&data, &tokens, &snapshot, &[]),
+        );
+        if folds_case {
+            assert!(
+                matches!(result, Err(BackupError::InvalidPath)),
+                "{result:?}"
+            );
+            assert!(!parent.exists());
+        } else {
+            assert_eq!(result?, verify_encrypted_backup(&output, &FIXTURE_BYTES)?);
+        }
+    }
     Ok(())
 }

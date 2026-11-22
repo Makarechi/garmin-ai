@@ -1,6 +1,9 @@
 use std::{error::Error, fs, os::unix::fs::symlink};
 
-use ga_archive::erasure_files::{ErasureFiles, ErasureFilesError};
+use ga_archive::{
+    erasure_files::{ErasureFiles, ErasureFilesError},
+    storage_files::{StorageFilesError, validate_backup_layout},
+};
 
 #[test]
 fn removes_only_the_prepared_private_roots_and_can_retry() -> Result<(), Box<dyn Error>> {
@@ -125,5 +128,44 @@ fn resumes_after_only_one_root_was_removed() -> Result<(), Box<dyn Error>> {
     ErasureFiles::prepare(&data, &tokens, &locks, &backups)?.remove()?;
     assert!(!data.exists() && !tokens.exists());
     assert_eq!(fs::read(backups.join("snapshot"))?, b"independent backup");
+    Ok(())
+}
+
+#[test]
+fn rejects_aliased_backups_and_maintenance_state_before_erasure() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?.join("fixture");
+    let data = root.join("Data");
+    let tokens = root.join("Tokens");
+    let locks = root.join("locks");
+    let backups = root.join("backups");
+    fs::create_dir_all(data.join("backups"))?;
+    fs::create_dir_all(tokens.join("state"))?;
+    let snapshot = data.join("backups/confirmed.enc");
+    let lock = tokens.join("state/storage.lock");
+    fs::write(&snapshot, b"confirmed backup")?;
+    fs::write(&lock, b"maintenance state")?;
+    let alias = root.join("DATA");
+    if !alias.exists() {
+        return Ok(());
+    }
+
+    for (tokens, locks, backups) in [
+        (tokens.clone(), locks.clone(), alias.join("BACKUPS")),
+        (tokens, root.join("TOKENS/STATE"), backups.clone()),
+        (alias.clone(), locks.clone(), backups.clone()),
+        (alias.join("missing"), locks, backups),
+    ] {
+        assert!(matches!(
+            ErasureFiles::prepare(&data, &tokens, &locks, &backups),
+            Err(ErasureFilesError::Overlap)
+        ));
+        assert!(matches!(
+            validate_backup_layout(&data, &tokens, &locks, &backups),
+            Err(StorageFilesError::Overlap)
+        ));
+    }
+    assert_eq!(fs::read(&snapshot)?, b"confirmed backup");
+    assert_eq!(fs::read(&lock)?, b"maintenance state");
     Ok(())
 }

@@ -5,7 +5,7 @@ mod format;
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read, Seek},
-    os::{fd::OwnedFd, unix::fs::MetadataExt},
+    os::fd::OwnedFd,
     path::{Component, Path, PathBuf},
 };
 
@@ -18,13 +18,14 @@ use rustix::{
 use self::format::{Member, invalid};
 use crate::{
     DIRECTORY_MODE, DIRECTORY_READ, FILE_MODE,
-    backup_bundle::{MAX_DIRECTORY_DEPTH, normalized},
+    backup_bundle::MAX_DIRECTORY_DEPTH,
     backup_envelope::{
         BackupDigest, BackupError, authenticate_open_source, open_source, parent_file,
     },
     backup_workspace::{PLAINTEXT_DIRECTORY, PlaintextWorkspace},
     ensure_directory,
     staging::{Stage, remove_contents},
+    storage_path::{is_within, normalized},
 };
 
 const RECOVERY_TREE: &str = "contents";
@@ -95,28 +96,6 @@ pub fn unpack_backup(
     drop(workspace);
     fs::fsync(parent)?;
     Ok(digest)
-}
-
-fn is_within(path: &Path, directory: &Path) -> io::Result<bool> {
-    if path.starts_with(directory) {
-        return Ok(true);
-    }
-    let identity = |path: &Path| match path.metadata() {
-        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    };
-    let Some(parent) = identity(directory)? else {
-        return Ok(false);
-    };
-
-    // Different spellings can resolve to the same directory on the recovery volume.
-    for ancestor in path.ancestors() {
-        if identity(ancestor)? == Some(parent) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 pub(crate) fn resolve_protected_root(path: &Path) -> Result<PathBuf, BackupError> {

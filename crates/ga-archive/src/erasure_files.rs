@@ -15,8 +15,10 @@ use rustix::{
 };
 
 use crate::{
-    ArchiveError, DIRECTORY_READ, backup_bundle::normalized, backup_space::existing_directory,
+    ArchiveError, DIRECTORY_READ,
+    backup_space::existing_directory,
     backup_unpack::resolve_protected_root,
+    storage_path::{is_within, normalized, storage_overlaps},
 };
 
 #[derive(Debug)]
@@ -80,11 +82,8 @@ impl ErasureFiles {
             ErasureRoot::open(tokens, &cwd, &home)?,
         ];
         let [locks, backups] = [protected(locks)?, protected(backups)?];
-        if roots[0].path.starts_with(&roots[1].path)
-            || roots[1].path.starts_with(&roots[0].path)
-            || roots
-                .iter()
-                .any(|root| locks.starts_with(&root.path) || backups.starts_with(&root.path))
+        if storage_overlaps(&roots[0].path, &roots[1].path, &locks, &backups)
+            .map_err(ArchiveError::from)?
         {
             return Err(ErasureFilesError::Overlap);
         }
@@ -125,7 +124,10 @@ impl ErasureRoot {
         } else {
             normalized(path).map_err(ArchiveError::from)?
         };
-        if path.components().count() < 4 || cwd.starts_with(&path) || path == home {
+        if path.components().count() < 4
+            || is_within(cwd, &path).map_err(ArchiveError::from)?
+            || is_within(home, &path).map_err(ArchiveError::from)?
+        {
             return Err(ErasureFilesError::UnsafePath);
         }
         Ok(Self {
