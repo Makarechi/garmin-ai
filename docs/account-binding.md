@@ -29,6 +29,8 @@ uv run garmin-ai enroll-account --confirm-existing-owner
 ```
 
 Verify that the current token cache belongs to the original owner before using it.
+When enrollment refreshes the saved session, it publishes the refreshed tokens
+only after verifying the account against the local owner binding.
 If those tokens must be renewed first, `login --confirm-existing-owner` performs
 the same explicit legacy enrollment with the newly authenticated candidate.
 For another person, create a separate instance. These commands do not provide

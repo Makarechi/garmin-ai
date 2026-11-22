@@ -26,6 +26,12 @@ class _LazyGarminReader:
 
         return Reader.restore(path)
 
+    @classmethod
+    def stage_saved_session(cls, path):
+        from garmin_ai.garmin import GarminReader as Reader
+
+        return Reader.stage_saved_session(path)
+
 
 GarminReader = _LazyGarminReader
 
@@ -249,12 +255,13 @@ def main():
             with standalone_files(settings):
                 engine = make_engine(settings)
                 try:
-                    reader = GarminReader.restore(settings.token_dir)
+                    reader, publish = GarminReader.stage_saved_session(settings.token_dir)
                     ensure_account(
                         engine,
                         reader.account_fingerprint(),
                         confirm_existing_owner=True,
                         archive_root=settings.data_dir / "raw",
+                        before_commit=publish,
                     )
                     from garmin_ai.integration import resume_after_login
 

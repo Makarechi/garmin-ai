@@ -307,6 +307,70 @@ def test_login_mismatch_preserves_existing_tokens_and_neutralizes_ambient_cache(
     assert ensure_account(db_engine, A)["fingerprint"] == A
 
 
+@pytest.mark.parametrize("profile_id", [101, 202])
+def test_enrollment_only_publishes_refreshed_session_for_the_bound_owner(
+    db, db_engine, tmp_path, monkeypatch, profile_id
+):
+    from pathlib import Path
+
+    from garmin_ai import cli, garmin
+
+    settings = Settings(
+        database_url=db_engine.url.render_as_string(hide_password=False),
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    settings.token_dir.mkdir()
+    token_file = settings.token_dir / "garmin_tokens.json"
+    original = {"di_token": "synthetic-original"}
+    refreshed = {"di_token": "synthetic-refreshed"}
+    token_file.write_text(json.dumps(original))
+    ensure_account(db_engine, A)
+
+    class SavedSession:
+        def __init__(self):
+            self.client = self
+            self.session = None
+
+        def load(self, directory):
+            self.session = json.loads((Path(directory) / "garmin_tokens.json").read_text())
+
+        def dumps(self):
+            return json.dumps(self.session)
+
+        def login(self, tokenstore):
+            if tokenstore.startswith("{"):
+                self.session = json.loads(tokenstore)
+                assert self.session == original
+                self.session = refreshed
+            else:
+                self.load(tokenstore)
+                assert self.session == original
+                self.session = refreshed
+                # The SDK persists refreshes automatically when given a directory.
+                (Path(tokenstore) / "garmin_tokens.json").write_text(self.dumps())
+
+        def connectapi(self, path):
+            assert path == "/userprofile-service/socialProfile"
+            return {"profileId": profile_id}
+
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(garmin, "Garmin", SavedSession)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "enroll-account", "--confirm-existing-owner"])
+
+    if profile_id == 101:
+        cli.main()
+        assert json.loads(token_file.read_text()) == refreshed
+    else:
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert token_file.read_text() == json.dumps(original)
+    assert ensure_account(db_engine, A)["fingerprint"] == A
+
+
 def test_setup_before_migration_and_after_erasure_does_not_enroll_or_resume(db, db_engine):
     from sqlalchemy import create_engine
 
