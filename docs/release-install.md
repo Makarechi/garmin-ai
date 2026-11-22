@@ -97,6 +97,14 @@ without source or Python. Credentials must be entered on the private host,
 never in a public chat or repository. A custom Python plugin requires a
 separately built trusted image; it is not silently installed by this bundle.
 
+For retained Garmin data without an owner binding, verify that the saved
+Garmin session belongs to the original owner. With the database running, run
+`./install.sh enroll-account --confirm-existing-owner` in the bundle directory.
+If the session needs to be renewed, use
+`./install.sh login --confirm-existing-owner` with the original account instead.
+The account check cannot replace an existing binding. The worker stays stopped
+after enrollment. Run `./install.sh start` when ready to resume.
+
 ## Update safely
 
 The archive does not perform an unattended update or rollback. Before moving to

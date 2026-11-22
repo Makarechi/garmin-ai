@@ -250,6 +250,13 @@ running_services() {
     done
 }
 running_before=$(running_services)
+if ./install.sh "${profile[@]}" enroll-account >"$work/enrollment-refusal.log" 2>&1; then
+    echo "Enrollment unexpectedly proceeded without explicit confirmation." >&2
+    exit 1
+fi
+grep -F 'enroll-account requires --confirm-existing-owner' "$work/enrollment-refusal.log"
+test "$running_before" = "$(running_services)"
+
 ./install.sh "${profile[@]}" backup-space | "$python_bin" -c '
 import json
 import sys
@@ -295,6 +302,26 @@ if ./install.sh "${profile[@]}" export "$snapshot_name" >"$work/duplicate-export
 fi
 test "$snapshot_sha" = "$("$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$snapshot")"
 test "$running_before" = "$(running_services)"
+
+test -d tokens/garmin
+test -z "$(ls -A tokens/garmin)"
+if ./install.sh "${profile[@]}" enroll-account --confirm-existing-owner >"$work/enrollment-no-session.log" 2>&1; then
+    echo "Enrollment unexpectedly proceeded without a saved Garmin session." >&2
+    exit 1
+fi
+if ! grep -E 'Garmin authentication is required|Operation failed \(AuthenticationRequired\)' "$work/enrollment-no-session.log"; then
+    cat "$work/enrollment-no-session.log" >&2
+    exit 1
+fi
+grep -F 'The worker is stopped.' "$work/enrollment-no-session.log"
+test -z "$(compose ps --status running --quiet worker)"
+test -d tokens/garmin
+test -z "$(ls -A tokens/garmin)"
+compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+    "SELECT NOT EXISTS (SELECT FROM app_state WHERE key='account:garmin')" | grep -Fx t
+./install.sh "${profile[@]}" start
+"$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
+    --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
 
 if [[ "$runtime" == rust ]]; then
     if [[ "$historical" == true ]]; then
@@ -433,6 +460,7 @@ Path(sys.argv[1]).write_text(
             "fictional_tracker_entry_survived_preference_change": True,
             "backup_capacity_verified": True,
             "portable_database_export_verified": True,
+            "garmin_enrollment_requires_confirmation_and_saved_session": True,
             "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
             "native_bundle_restore_verified": sys.argv[5] == "rust",
