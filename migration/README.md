@@ -121,6 +121,14 @@ The pinned Python worker then takes the recovered job, replays its archived inpu
 publishes the expected daily total. The fixture checks the released lease, unchanged delivery
 receipts, and time through job completion. External integrations stay disabled in the fixture.
 
+For a Python backup restored to Rust, the native API must reach readiness and read
+the retained diary event. The native worker must take the restored replay job once,
+publish its daily total and release the runtime lease on exit. The fixture checks
+that the API stays ready, the event is unchanged, and the pending clarification,
+delivery receipts, and account bindings are preserved. The result records the
+time from archive unpack to API readiness and the time from worker startup to
+replay completion.
+
 A separate recovery job restores the pre-switch Python backup on another Linux host.
 The native read-only API sees the retained event, rejects a write, and leaves the
 recovered tables unchanged. The pinned Python release then accepts and deduplicates

@@ -132,7 +132,9 @@ def verify_python_reference(expected):
         raise ValueError("Imported Python must come from the frozen reference checkout")
 
 
-def resume_restored_replay(engine, paths, work, pending, source_id, event_id, revision):
+def resume_restored_replay(
+    engine, paths, work, pending, source_id, event_id, revision, *, native=None
+):
     (job,) = pending["jobs"]
     assert job["status"] == "pending" and job["attempts"] == 0
     assert job["payload"]["raw_ref"] == str(source_id)
@@ -144,16 +146,20 @@ def resume_restored_replay(engine, paths, work, pending, source_id, event_id, re
         "GA_TIMEZONE": "UTC",
         "PYTHONPATH": str(Path(garmin_ai.__file__).resolve().parents[1]),
     }
-    command = Path(sys.executable).with_name("garmin-ai").resolve(strict=True)
+    command = (
+        native
+        if native is not None
+        else Path(sys.executable).with_name("garmin-ai").resolve(strict=True)
+    )
     started = monotonic()
     with worker(command, work, environment) as process:
-        owner = ready(engine, process, native=False)
+        owner = ready(engine, process, native=native is not None)
         completed = wait_for_jobs(
             engine,
             process,
             lambda jobs: job["id"] in jobs and jobs[job["id"]].status == "done",
             seconds=25,
-            failure="The Python worker did not finish the restored replay",
+            failure="The recovered worker did not finish the restored replay",
         )
         resumed_seconds = round(monotonic() - started, 3)
         assert lease(engine) == owner
@@ -186,6 +192,30 @@ def resume_restored_replay(engine, paths, work, pending, source_id, event_id, re
         row for row in after_replay["app_state"] if row["key"] != "replay:source_scan_cursor"
     ] == [row for row in pending["app_state"] if row["key"] != "replay:source_scan_cursor"]
     return {**result, "worker_resume_seconds": resumed_seconds}
+
+
+def verify_native_resume(binary, engine, paths, work, pending, identity, *, started):
+    event_id = UUID(identity["event_id"])
+    with native_api(binary, work, paths) as api:
+        api_ready_seconds = round(monotonic() - started, 3)
+        event_path = f"{PATH}/{event_id}"
+        retained = api.get(event_path, headers=headers("reader"))
+        assert retained.status_code == 200
+        event = retained.json()
+        assert event["id"] == str(event_id) and event["revision"] == 1
+        replay = resume_restored_replay(
+            engine,
+            paths,
+            work,
+            pending,
+            UUID(identity["source_id"]),
+            event_id,
+            event["revision"],
+            native=binary,
+        )
+        assert api.get("/health/ready").status_code == 200
+        assert api.get(event_path, headers=headers("reader")).json() == event
+    return {"api_ready_after_restore_seconds": api_ready_seconds, **replay}
 
 
 def inspect_prewrite_recovery(binary, engine, paths, work, event_id, tables):
@@ -565,14 +595,21 @@ def verify_backup(
         assert restarted.get(Event, UUID(ids["event_id"])).payload["note"] == "synthetic"
     verified_revisions = None
     restored_replay = None
-    if native is None and (manifest["source_runtime"] == "rust" or prewrite_result is not None):
+    native_resume = None
+    pending = pending_state(tables)
+    assert all(pending.values())
+    if native is not None:
+        assert pending_state(table_values(engine)) == pending
+        native_resume = verify_native_resume(
+            native, engine, paths, work, pending, ids, started=started
+        )
+        print("Rust resumed the archived job and preserved retained work on the recovery host.")
+    elif manifest["source_runtime"] == "rust" or prewrite_result is not None:
         event_id, revision = UUID(ids["event_id"]), 1
         if manifest["source_runtime"] == "rust":
             resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
             event_id, revision = UUID(resumed["id"]), resumed["revision"]
             verified_revisions = [1, manifest["native_edit"]["revision"], revision]
-        pending = pending_state(tables)
-        assert all(pending.values())
         assert pending_state(table_values(engine)) == pending
         restored_replay = resume_restored_replay(
             engine, paths, work, pending, UUID(ids["source_id"]), event_id, revision
@@ -598,6 +635,7 @@ def verify_backup(
                     "verified_event_revisions_after_rollback": verified_revisions,
                     "verified_replay_after_rollback": restored_replay,
                     "verified_prewrite_rollback": prewrite_result,
+                    "verified_native_resume_after_restore": native_resume,
                     "verified_restore_seconds": round(monotonic() - started, 3),
                 },
                 indent=2,
