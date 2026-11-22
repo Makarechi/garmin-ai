@@ -18,6 +18,7 @@ from garmin_ai.operations import REVISION
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 REVISION_LABEL = "org.opencontainers.image.revision"
 NATIVE_ENTRYPOINTS = (["garmin-ai-rust"], ["/usr/local/bin/garmin-ai-rust"])
 LOCAL_IMAGE = "${COMPOSE_PROJECT_NAME:-garmin-ai}:local"
@@ -100,14 +101,17 @@ def registry_document(image: str, *options: str) -> dict:
     return value
 
 
-def verify_native_image(image: str, revision: str) -> None:
+def verify_native_image(image: str, revision: str) -> dict[str, dict[str, str]]:
     repository = image.split("@", 1)[0]
-    pending = [image]
-    verified = set()
+    pending: list[tuple[str, tuple[str, str] | None]] = [(image, None)]
+    seen = set()
+    platform_images: dict[str, dict[str, str]] = {}
     while pending:
-        reference = pending.pop()
-        if reference in verified:
+        item = pending.pop()
+        if item in seen:
             continue
+        seen.add(item)
+        reference, expected_platform = item
         manifest = registry_document(reference, "--raw")
         if "manifests" in manifest:
             try:
@@ -122,7 +126,20 @@ def verify_native_image(image: str, revision: str) -> None:
                     member = f"{repository}@{descriptor['digest']}"
                     if not APP_IMAGE_RE.fullmatch(member):
                         raise ValueError("Registry image index contains an invalid member digest")
-                    pending.append(member)
+                    declared_platform = (
+                        (platform["os"], platform["architecture"]) if platform else None
+                    )
+                    if declared_platform and not all(
+                        isinstance(part, str) for part in declared_platform
+                    ):
+                        raise ValueError("Registry returned an invalid image index platform")
+                    if (
+                        expected_platform is not None
+                        and declared_platform is not None
+                        and declared_platform != expected_platform
+                    ):
+                        raise ValueError("Native image platform does not match its index")
+                    pending.append((member, declared_platform or expected_platform))
             except (AttributeError, KeyError, TypeError):
                 raise ValueError("Registry returned an invalid image index") from None
             continue
@@ -131,15 +148,34 @@ def verify_native_image(image: str, revision: str) -> None:
             settings = config["config"]
             label = (settings.get("Labels") or {}).get(REVISION_LABEL)
             entrypoint = settings.get("Entrypoint")
+            config_digest = manifest["config"]["digest"]
         except (AttributeError, KeyError, TypeError):
             raise ValueError("Registry returned an invalid image configuration") from None
         if config.get("os") != "linux" or entrypoint not in NATIVE_ENTRYPOINTS:
             raise ValueError("The pinned image must start the native Garmin AI application")
         if label != revision:
             raise ValueError("The pinned native image revision does not match the bundle checkout")
-        verified.add(reference)
-    if not verified:
+        architecture = config.get("architecture")
+        if not isinstance(architecture, str) or not re.fullmatch(r"[a-z0-9_]+", architecture):
+            raise ValueError("The pinned native image has an invalid architecture")
+        if expected_platform is not None and expected_platform != ("linux", architecture):
+            raise ValueError("Native image platform does not match its index")
+        if not isinstance(config_digest, str) or not DIGEST_RE.fullmatch(config_digest):
+            raise ValueError("The pinned native image has an invalid configuration digest")
+        platform = f"linux/{architecture}"
+        platform_image = {
+            "manifest_digest": reference.rsplit("@", 1)[1],
+            "config_digest": config_digest,
+        }
+        existing = platform_images.get(platform)
+        if existing is not None and existing != platform_image:
+            raise ValueError(
+                f"The pinned native image index contains multiple images for {platform}"
+            )
+        platform_images[platform] = platform_image
+    if not platform_images:
         raise ValueError("The pinned image index contains no native application images")
+    return platform_images
 
 
 def build_bundle(
@@ -152,9 +188,7 @@ def build_bundle(
     if runtime not in ("python", "rust"):
         raise ValueError("Unsupported application runtime")
     native = runtime == "rust"
-    if native:
-        verify_native_image(app_image, sha)
-    else:
+    if not native:
         check_compose()
     compose_source = ROOT / ("compose.rust-release.yml" if native else "compose.release.yml")
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
@@ -176,6 +210,7 @@ def build_bundle(
         "release_status": "candidate; operational and license acceptance pending",
     }
     if native:
+        manifest["app_platform_images"] = verify_native_image(app_image, sha)
         manifest["runtime"] = "rust"
     native_suffix = "-native" if native else ""
     prefix = f"garmin-ai-{version}{native_suffix}-{sha[:8]}"

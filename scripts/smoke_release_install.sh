@@ -454,8 +454,35 @@ assert len(counts) == 30 and counts["events"] == 1
 fi
 
 mkdir -p "$root/test-results"
+app_platform_image='null'
+if [[ "$runtime" == rust ]]; then
+    app_platform_image=$("$python_bin" - "$platform" "$(compose ps -q api)" "$(compose ps -q worker)" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+platform, api, worker = sys.argv[1:]
+architecture = "/".join(platform.split("/")[:2])
+image = json.loads(Path("release-manifest.json").read_text())["app_platform_images"][architecture]
+running = json.loads(subprocess.check_output(["docker", "inspect", "--type=container", api, worker]))
+if len(running) != 2:
+    raise SystemExit("Expected the running API and worker containers.")
+for container in running:
+    descriptor = container.get("ImageManifestDescriptor")
+    if descriptor is None:
+        matches = container.get("Image") == image["config_digest"]
+    else:
+        matches = descriptor.get("digest") == image["manifest_digest"]
+    if not matches:
+        raise SystemExit("The running API and worker must match the bundled platform image.")
+print(json.dumps(image))
+PY
+)
+fi
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
-    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" <<'PY'
+    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" \
+    "$app_platform_image" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -470,6 +497,7 @@ Path(sys.argv[1]).write_text(
             "git_sha": sys.argv[3],
             "app_image": sys.argv[4],
             "app_image_source": sys.argv[9],
+            **({"app_platform_image": json.loads(sys.argv[10])} if sys.argv[5] == "rust" else {}),
             "runtime": sys.argv[5],
             "platform": sys.argv[6],
             "setup_preserved_settings": True,

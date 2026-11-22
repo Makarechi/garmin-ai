@@ -75,9 +75,10 @@ def test_inspection_retries_connection_reset_while_the_api_starts(monkeypatch):
     assert paths == ["/health/ready", "/health/ready", "/tools", "/events"]
 
 
-def native_config(revision, entrypoint=None):
+def native_config(revision, entrypoint=None, *, architecture="amd64"):
     return {
         "os": "linux",
+        "architecture": architecture,
         "config": {
             "Labels": {bundle_module.REVISION_LABEL: revision} if revision else None,
             "Entrypoint": entrypoint or ["garmin-ai-rust"],
@@ -86,19 +87,23 @@ def native_config(revision, entrypoint=None):
 
 
 @pytest.mark.parametrize(
-    ("revision", "entrypoint", "error"),
+    ("revision", "entrypoint", "architecture", "error"),
     [
-        (SHA, None, None),
-        ("c" * 40, None, "revision does not match"),
-        (None, None, "revision does not match"),
-        (SHA, ["garmin-ai"], "must start the native"),
+        (SHA, None, "arm64", None),
+        ("c" * 40, None, "arm64", "revision does not match"),
+        (None, None, "arm64", "revision does not match"),
+        (SHA, ["garmin-ai"], "arm64", "must start the native"),
+        (SHA, None, "amd64", "platform does not match its index"),
     ],
 )
 def test_native_bundle_checks_every_runnable_image(
-    tmp_path, monkeypatch, revision, entrypoint, error
+    tmp_path, monkeypatch, revision, entrypoint, architecture, error
 ):
     first = "sha256:" + "1" * 64
     second = "sha256:" + "2" * 64
+    first_config = "sha256:" + "4" * 64
+    second_config = "sha256:" + "5" * 64
+    nested = "sha256:" + "6" * 64
     repository = IMAGE.split("@")[0]
     inspected = []
 
@@ -107,7 +112,7 @@ def test_native_bundle_checks_every_runnable_image(
             assert options == ("--raw",)
             return {
                 "manifests": [
-                    {"digest": second, "platform": {"os": "linux", "architecture": "arm64"}},
+                    {"digest": nested, "platform": {"os": "linux", "architecture": "arm64"}},
                     {"digest": first, "platform": {"os": "linux", "architecture": "amd64"}},
                     {
                         "digest": "sha256:" + "3" * 64,
@@ -116,22 +121,72 @@ def test_native_bundle_checks_every_runnable_image(
                     },
                 ]
             }
+        if image.endswith(nested):
+            assert options == ("--raw",)
+            return {"manifests": [{"digest": second}]}
         if options == ("--raw",):
-            return {"schemaVersion": 2}
+            return {"config": {"digest": first_config if image.endswith(first) else second_config}}
         assert image in {f"{repository}@{first}", f"{repository}@{second}"}
         inspected.append(image)
-        return native_config(SHA) if image.endswith(first) else native_config(revision, entrypoint)
+        if image.endswith(first):
+            return native_config(SHA)
+        return native_config(revision, entrypoint, architecture=architecture)
 
     monkeypatch.setattr(bundle_module, "registry_document", document)
     output = tmp_path / "bundle"
     if error is None:
         archive, _ = build_bundle(IMAGE, sha=SHA, output=output, runtime="rust")
-        assert archive.is_file()
+        with tarfile.open(archive) as bundle:
+            manifest = json.load(
+                bundle.extractfile(
+                    next(
+                        name
+                        for name in bundle.getnames()
+                        if name.endswith("/release-manifest.json")
+                    )
+                )
+            )
+        assert manifest["app_platform_images"] == {
+            "linux/amd64": {"manifest_digest": first, "config_digest": first_config},
+            "linux/arm64": {"manifest_digest": second, "config_digest": second_config},
+        }
+        assert manifest["validated_platforms"] == []
     else:
         with pytest.raises(ValueError, match=error):
             build_bundle(IMAGE, sha=SHA, output=output, runtime="rust")
         assert not output.exists()
     assert inspected == [f"{repository}@{first}", f"{repository}@{second}"]
+
+
+@pytest.mark.parametrize("second_image", [False, True])
+def test_native_bundle_rejects_ambiguous_platforms_but_allows_single_image(
+    tmp_path, monkeypatch, second_image
+):
+    first = "sha256:" + "1" * 64
+    second = "sha256:" + "2" * 64
+    config = "sha256:" + "3" * 64
+
+    def document(image, *options):
+        if options != ("--raw",):
+            return native_config(SHA)
+        if image == IMAGE and second_image:
+            platform = {"os": "linux", "architecture": "amd64"}
+            return {
+                "manifests": [
+                    {"digest": digest, "platform": platform} for digest in [first, second]
+                ]
+            }
+        return {"config": {"digest": config}}
+
+    monkeypatch.setattr(bundle_module, "registry_document", document)
+    if second_image:
+        with pytest.raises(ValueError, match="multiple images for linux/amd64"):
+            build_bundle(IMAGE, sha=SHA, output=tmp_path / "bundle", runtime="rust")
+        assert not (tmp_path / "bundle").exists()
+    else:
+        assert bundle_module.verify_native_image(IMAGE, SHA) == {
+            "linux/amd64": {"manifest_digest": IMAGE.rsplit("@", 1)[1], "config_digest": config}
+        }
 
 
 def test_registry_manifest_bytes_match_the_requested_digest(monkeypatch):
@@ -193,7 +248,7 @@ def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path):
 def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
     tmp_path, monkeypatch, failure
 ):
-    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: None)
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
     archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime="rust")
     previous = archive.read_bytes(), checksum.read_bytes()
     replacement = IMAGE.split("@")[0] + "@sha256:" + "c" * 64
@@ -232,7 +287,7 @@ def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
 
 @pytest.mark.parametrize("interruption", ["archive", "checksum"])
 def test_rebuild_recovers_after_interrupted_publication(tmp_path, monkeypatch, interruption):
-    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: None)
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
     archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime="rust")
     original = archive.read_bytes(), checksum.read_bytes()
     replacement = IMAGE.split("@")[0] + "@sha256:" + "c" * 64
@@ -247,7 +302,7 @@ builder, output, revision, image, stop_at = sys.argv[1:]
 spec = spec_from_file_location("release_builder", builder)
 module = module_from_spec(spec)
 spec.loader.exec_module(module)
-module.verify_native_image = lambda *_: None
+module.verify_native_image = lambda *_: {}
 replace = Path.replace
 
 def replace_then_kill(path, target):
@@ -316,7 +371,11 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(
         monkeypatch.setattr(
             bundle_module,
             "registry_document",
-            lambda _image, *options: {} if options == ("--raw",) else native_config(SHA),
+            lambda _image, *options: (
+                {"config": {"digest": "sha256:" + "c" * 64}}
+                if options == ("--raw",)
+                else native_config(SHA)
+            ),
         )
     archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
     assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
@@ -492,7 +551,7 @@ def test_backup_verification_uses_separate_scratch_and_removes_plaintext(tmp_pat
 
 @pytest.mark.parametrize("runtime", ["python", "rust"])
 def test_bundle_account_commands_use_source_free_worker(tmp_path, monkeypatch, runtime):
-    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: None)
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
     archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
     with tarfile.open(archive) as bundle:
         bundle.extractall(tmp_path, filter="data")
