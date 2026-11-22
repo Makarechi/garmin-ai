@@ -34,6 +34,11 @@ with status 1. The report counts incomplete samples even when there are also
 sampling gaps. A complete, healthy smoke run ends with `short_observation`.
 Use `--duration-seconds` to set its duration.
 
+If the API, worker, or database container restarts, the observer marks that
+sample incomplete even when the service is healthy again before the next probe.
+It checks the container start time and restart count. The report keeps the
+subsequent samples, including the recovered service's measurements.
+
 The first sample establishes each container's cgroup out-of-memory kill
 counter. A later increase records a kill even if the container stays running
 or recovers before the next probe. An unavailable or reset counter leaves the
