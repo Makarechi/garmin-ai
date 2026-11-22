@@ -289,35 +289,30 @@ def create_native_recovery_edit(native):
     return saved.json()
 
 
-def verify_python_can_continue(engine, config, native_event):
+def verify_recovered_diary_edit(api, engine, native_event, *, description):
     path = f"{PATH}/{native_event['id']}"
     request_headers = headers("both", NATIVE_EDIT_KEY)
-    with previous_api(config, engine) as previous:
-        assert previous.get("/health/ready").status_code == 200
-        restored = previous.get(path, headers=headers("reader"))
-        assert restored.status_code == 200 and restored.json() == native_event
-        repeated = previous.post(PATH, json=NOTE, headers=request_headers)
-        assert repeated.status_code == 200 and repeated.json() == native_event
-        stale_edit = previous.put(
-            path, json={"revision": 1, "event": NATIVE_CORRECTION}, headers=request_headers
-        )
-        assert stale_edit.status_code == 409
+    assert api.get("/health/ready").status_code == 200
+    restored = api.get(path, headers=headers("reader"))
+    assert restored.status_code == 200 and restored.json() == native_event
+    repeated = api.post(PATH, json=NOTE, headers=request_headers)
+    assert repeated.status_code == 200 and repeated.json() == native_event
+    stale_edit = api.put(
+        path, json={"revision": 1, "event": NATIVE_CORRECTION}, headers=request_headers
+    )
+    assert stale_edit.status_code == 409
 
-        python_correction = {
-            **NATIVE_CORRECTION,
-            "payload": {
-                **NATIVE_CORRECTION["payload"],
-                "description": "Synthetic correction after the return to Python",
-            },
-        }
-        edited = previous.put(
-            path, json={"revision": 2, "event": python_correction}, headers=request_headers
-        )
-        assert edited.status_code == 200
-        event = edited.json()
-        assert event["id"] == native_event["id"] and event["revision"] == 3
-        assert event["payload"]["description"] == python_correction["payload"]["description"]
-        assert previous.post(PATH, json=NOTE, headers=request_headers).json() == event
+    correction = {
+        **NATIVE_CORRECTION,
+        "payload": {**NATIVE_CORRECTION["payload"], "description": description},
+    }
+    edited = api.put(path, json={"revision": 2, "event": correction}, headers=request_headers)
+    assert edited.status_code == 200
+    event = edited.json()
+    assert event["id"] == native_event["id"] and event["revision"] == 3
+    assert event["payload"]["description"] == description
+    repeated = api.post(PATH, json=NOTE, headers=request_headers)
+    assert repeated.status_code == 200 and repeated.json() == event
 
     with engine.connect() as connection:
         audit = connection.execute(
@@ -328,6 +323,16 @@ def verify_python_can_continue(engine, config, native_event):
     assert [entry.after["revision"] for entry in audit] == [1, 2, 3]
     assert all(new.before == old.after for old, new in pairwise(audit))
     return event
+
+
+def verify_python_can_continue(engine, config, native_event):
+    with previous_api(config, engine) as previous:
+        return verify_recovered_diary_edit(
+            previous,
+            engine,
+            native_event,
+            description="Synthetic correction after the return to Python",
+        )
 
 
 def verify(binary, root, source, before_target, after_target):

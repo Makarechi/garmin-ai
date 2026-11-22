@@ -104,6 +104,8 @@ jobs:
             target: rust
           - source: rust
             target: python
+          - source: rust
+            target: rust
           - source: python
             target: python
     services:
@@ -133,7 +135,7 @@ jobs:
           ref: ${{ env.FROZEN_PYTHON_COMMIT }}
           path: .offhost-python-reference
           persist-credentials: false
-      - if: matrix.target == 'rust' || matrix.source == matrix.target
+      - if: matrix.target == 'rust' || matrix.source == 'python'
         run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
       - uses: actions/download-artifact@v4
         with:
@@ -151,7 +153,7 @@ jobs:
             project=.offhost-python-reference
             args=(--python-reference "$FROZEN_PYTHON_COMMIT")
           fi
-          if [[ $PROBE_SOURCE == "$PROBE_RUNTIME" ]]; then
+          if [[ $PROBE_SOURCE == python && $PROBE_RUNTIME == python ]]; then
             args+=(--prewrite-inspector "$RUNNER_TEMP/garmin-ai-rust")
           fi
           PYTHONPATH="$project/src:migration" uv run --locked --project "$project" python tests/evals/offhost_restore_probe.py restore \
