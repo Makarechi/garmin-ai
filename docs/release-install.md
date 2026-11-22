@@ -36,9 +36,10 @@ checkout's Git revision. A native index must resolve to one image per
 architecture. The builder produces a `.tar.gz` and a SHA-256 checksum in
 `dist/`. The archive contains no credentials, health records or original data.
 The manifest records the exact Git SHA, application and database image digests,
-schema revision and candidate status. Native manifests also record each platform's image manifest and
-configuration digests in `app_platform_images`. The installation smoke checks
-the running API and worker against the expected platform configuration digest.
+schema revision and candidate status. Native manifests also record each platform's
+image manifest and configuration digests in `app_platform_images`. The installation
+smoke verifies the running API and worker against the expected platform manifest
+or configuration, depending on which identifier Docker supplies.
 The builder writes the archive and checksum to a temporary directory
 before replacing any previous output. After an interrupted replacement, a retry
 recovers the pair that matches the published checksum before staging new output.

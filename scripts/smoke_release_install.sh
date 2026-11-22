@@ -456,17 +456,22 @@ fi
 mkdir -p "$root/test-results"
 app_platform_image='null'
 if [[ "$runtime" == rust ]]; then
-    api_image=$(docker inspect --format '{{.Image}}' "$(compose ps -q api)")
-    worker_image=$(docker inspect --format '{{.Image}}' "$(compose ps -q worker)")
-    app_platform_image=$("$python_bin" - "$platform" "$api_image" "$worker_image" <<'PY'
+    running_images=$(docker inspect --type=container \
+        --format '{{.Image}}{{with .ImageManifestDescriptor}} {{.Digest}}{{end}}' \
+        "$(compose ps -q api)" "$(compose ps -q worker)")
+    app_platform_image=$("$python_bin" - "$platform" "$running_images" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-platform, api, worker = sys.argv[1:]
+platform, inspected = sys.argv[1:]
 image = json.loads(Path("release-manifest.json").read_text())["app_platform_images"][platform]
-if api != worker or api != image["config_digest"]:
-    raise SystemExit("Running API and worker do not match the bundled platform image.")
+running = [line.split() for line in inspected.splitlines()]
+expected = {1: image["config_digest"], 2: image["manifest_digest"]}
+if len(running) != 2 or any(
+    not fields or fields[-1] != expected.get(len(fields)) for fields in running
+):
+    raise SystemExit("The running API and worker must match the bundled platform image.")
 print(json.dumps(image))
 PY
 )
