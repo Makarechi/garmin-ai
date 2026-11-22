@@ -22,16 +22,21 @@ AUTH_URL = "https://synthetic.invalid/garmin-auth"
 BOT = "9000:synthetic-garmin-test"
 
 
-def signed(auth_at, owner=42, *, bot=BOT):
+def signed(auth_at, owner=42, *, bot=BOT, padding=None):
     fields = {
         "auth_date": str(auth_at),
         "user": json.dumps({"id": owner, "first_name": "Fictional + & ☕"}, ensure_ascii=False),
         "query_id": "synthetic + &",
         "signature": "fictional-telegram-field",
     }
+    if padding is not None:
+        fields["signature"] = "Ж" * padding
     check = "\n".join(f"{key}={value}" for key, value in sorted(fields.items())).encode()
     secret = hmac.digest(b"WebAppData", bot.encode(), hashlib.sha256)
     fields["hash"] = hmac.new(secret, check, hashlib.sha256).hexdigest()
+    if padding is not None:
+        signature = fields.pop("signature")
+        return urlencode(fields) + f"&signature={signature}"
     return urlencode(fields)
 
 
@@ -110,7 +115,12 @@ def verify(engine, binary, directory):
                 def compare(route, data, expected):
                     old = oracle.post(f"/garmin-auth/{route}", json={"init_data": data})
                     new = native.post(f"/garmin-auth/{route}", json={"init_data": data})
-                    assert old.status_code == new.status_code == expected
+                    assert old.status_code == new.status_code == expected, (
+                        route,
+                        expected,
+                        old.status_code,
+                        new.status_code,
+                    )
                     assert old.json() == new.json()
                     assert new.headers["cache-control"] == "no-store"
 
@@ -124,6 +134,36 @@ def verify(engine, binary, directory):
                 compare("start", stale, 403)
                 compare("start", current + "&%75ser=%7B%7D", 403)
                 compare("start", current + "&malformed", 403)
+
+                document = json.dumps({"init_data": current})
+                for encoding in ("utf-8-sig", "utf-16", "utf-32"):
+                    arguments = {
+                        "content": document.encode(encoding),
+                        "headers": {"Content-Type": "application/json"},
+                    }
+                    old = oracle.post("/garmin-auth/start", **arguments)
+                    new = native.post("/garmin-auth/start", **arguments)
+                    assert old.status_code == new.status_code == 200, (
+                        encoding,
+                        old.status_code,
+                        new.status_code,
+                    )
+                    assert old.json() == new.json() == {"status": "already_connected"}
+                    assert new.headers["cache-control"] == "no-store"
+
+                padding = 8192 - len(signed(now, padding=0))
+                boundary = signed(now, padding=padding)
+                assert len(boundary) == 8192 and len(boundary.encode()) > 8192
+                compare("start", boundary, 200)
+                compare("start", signed(now - 400, padding=padding), 403)
+                compare("start", boundary[:-1] + "Я", 403)
+                oversized = {"init_data": signed(now, padding=padding + 1)}
+                old = oracle.post("/garmin-auth/start", json=oversized)
+                new = native.post("/garmin-auth/start", json=oversized)
+                assert old.status_code == new.status_code == 422
+                assert new.json() == {"detail": "Invalid arguments"}
+                assert new.headers["cache-control"] == "no-store"
+
                 status(engine, "reauth_required", "AccountMismatch")
                 compare("start", current, 409)
                 status(engine, "reauth_required", "AuthenticationRequired")
@@ -133,7 +173,7 @@ def verify(engine, binary, directory):
         finally:
             server.terminate()
             assert server.wait(timeout=5) == 0
-    print("Matched the pinned Mini App page and ten signed request outcomes")
+    print("Matched the pinned Mini App page and 17 signed request outcomes")
 
 
 def main():

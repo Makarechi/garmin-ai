@@ -4,7 +4,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const MAX_INIT_DATA_BYTES: usize = 8192;
+const MAX_INIT_DATA_CHARS: usize = 8192;
 const MAX_INITIAL_AGE_SECONDS: i64 = 300;
 const ALLOWED_CLOCK_LEAD_SECONDS: i64 = 30;
 
@@ -34,7 +34,7 @@ pub(super) fn validate_init_data(
     stage: TelegramSessionStage,
 ) -> Result<[u8; 32], InvalidTelegramSession> {
     if raw.is_empty()
-        || raw.len() > MAX_INIT_DATA_BYTES
+        || raw.chars().count() > MAX_INIT_DATA_CHARS
         || bot_token.is_empty()
         || !(1..(1_i64 << 52)).contains(&owner)
         || raw.split('&').any(|part| !part.contains('='))

@@ -11,6 +11,7 @@ on:
       - 'tests/test_web_chat_browser.py'
       - 'tests/test_dashboard_demo_browser.py'
       - 'migration/check_file_json.py'
+      - 'migration/check_garmin_web_reauth.py'
       - 'migration/check_cutover_restore.py'
       - 'migration/check_insights_list.py'
       - 'migration/check_legacy_telegram_schema.py'
@@ -39,6 +40,7 @@ on:
       - 'tests/test_web_chat_browser.py'
       - 'tests/test_dashboard_demo_browser.py'
       - 'migration/check_file_json.py'
+      - 'migration/check_garmin_web_reauth.py'
       - 'migration/check_cutover_restore.py'
       - 'migration/check_insights_list.py'
       - 'migration/check_legacy_telegram_schema.py'
@@ -156,6 +158,22 @@ jobs:
           docker exec "${{ job.services.postgres.id }}" createdb -U garmin garmin_mcp_nonfinite_test
           GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/garmin_mcp_nonfinite_test" \
             uv run python migration/check_mcp_generic_nonfinite.py target/release/garmin-ai-rust
+      - name: Check out the frozen Garmin reauthentication reference
+        uses: actions/checkout@v4
+        with:
+          ref: ee3a14a48a6ad30c1085951bac2f53c9088c2450
+          path: test-results/python-reauth-reference
+          persist-credentials: false
+      - name: Compare signed Garmin reauthentication requests
+        run: |
+          reference="$GITHUB_WORKSPACE/test-results/python-reauth-reference"
+          test "$(git -C "$reference" rev-parse HEAD)" = ee3a14a48a6ad30c1085951bac2f53c9088c2450
+          uv sync --project "$reference" --locked --no-dev --extra garmin
+          docker exec "${{ job.services.postgres.id }}" createdb -U garmin garmin_reauth_test
+          cd "$reference"
+          GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/garmin_reauth_test" \
+            "$reference/.venv/bin/python" "$GITHUB_WORKSPACE/migration/check_garmin_web_reauth.py" \
+            "$GITHUB_WORKSPACE/target/release/garmin-ai-rust"
       - name: Rehearse read-only inspection and recovery before and after writes
         run: |
           for phase in source before after; do
