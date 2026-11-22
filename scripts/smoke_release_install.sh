@@ -139,6 +139,15 @@ if [[ "$runtime" == rust ]]; then
         --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_ref" --help >/dev/null
     ./install.sh "${profile[@]}" licenses >"$work/notices.txt"
     grep -Fxq 'Rust dependency license files bundled with this application image' "$work/notices.txt"
+    grep -Fxq 'Debian runtime package notices' "$work/notices.txt"
+    grep -Fxq 'Debian common license texts' "$work/notices.txt"
+    docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
+        --entrypoint dpkg-query "$image_ref" -W -f='${Package} ${Version} ${Architecture}\n' \
+        > "$work/debian-packages.txt"
+    test -s "$work/debian-packages.txt"
+    while read -r package version package_arch; do
+        grep -Fxq -- "--- $package $version ($package_arch) ---" "$work/notices.txt"
+    done < "$work/debian-packages.txt"
     docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
         /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt | cmp - "$root/crates/ga-fit/profile/LICENSE-fitdecode.txt"
     docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
