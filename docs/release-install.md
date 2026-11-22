@@ -40,6 +40,14 @@ schema revision and candidate status. Native manifests also record each platform
 image manifest and configuration digests in `app_platform_images`. The installation
 smoke verifies the running API and worker against the expected platform manifest
 or configuration, depending on which identifier Docker supplies.
+
+After the native installation workflow tests the pinned image, pass its
+installation receipts as repeated `--native-installation-report FILE` options.
+Use receipts for each platform in that same image. The builder checks their
+Git revision, image and platform digests, and agreement on the storage versions
+reported by the executable. It records those versions and the receipt
+checksums in the manifest.
+
 The builder writes the archive and checksum to a temporary directory
 before replacing any previous output. After an interrupted replacement, a retry
 recovers the pair that matches the published checksum before staging new output.
