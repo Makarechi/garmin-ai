@@ -158,7 +158,8 @@ if [[ "$runtime" == rust ]]; then
     docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
         /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt | cmp - "$root/crates/ga-fit/profile/LICENSE-fitdecode.txt"
     docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
-        /usr/share/doc/garmin-ai/rust-third-party-inventory.json | "$python_bin" -c '
+        /usr/share/doc/garmin-ai/rust-third-party-inventory.json >"$work/rust-third-party-inventory.json"
+    "$python_bin" -c '
 import json
 import sys
 
@@ -167,7 +168,7 @@ names = {crate["name"] for crate in inventory}
 assert {"rmcp", "sqlx", "serde_json"} <= names
 assert "pyo3" not in names
 assert all(crate["license_files"] or crate["review_required"] for crate in inventory)
-'
+' <"$work/rust-third-party-inventory.json"
 fi
 ports=$("$python_bin" - <<'PY'
 import socket
@@ -503,51 +504,63 @@ PY
 fi
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
     "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" \
-    "$app_platform_image" "$work/release-info.json" <<'PY'
+    "$app_platform_image" "$work" <<'PY'
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-Path(sys.argv[1]).write_text(
-    json.dumps(
-        {
-            "checked_at": datetime.now(UTC).isoformat(),
-            "host_architecture": sys.argv[2],
-            "native_amd64": sys.argv[2] == "x86_64" and sys.argv[6] == "linux/amd64",
-            "git_sha": sys.argv[3],
-            "app_image": sys.argv[4],
-            "app_image_source": sys.argv[9],
-            **(
-                {
-                    "app_platform_image": json.loads(sys.argv[10]),
-                    "release_info": json.loads(Path(sys.argv[11]).read_text()),
-                }
-                if sys.argv[5] == "rust"
-                else {}
-            ),
-            "runtime": sys.argv[5],
-            "platform": sys.argv[6],
-            "setup_preserved_settings": True,
-            "owner_onboarding_without_integrations_verified": True,
-            "fictional_tracker_survived_restart": True,
-            "fictional_tracker_entry_survived_preference_change": True,
-            "backup_capacity_verified": True,
-            "portable_database_export_verified": True,
-            "garmin_enrollment_requires_confirmation_and_saved_session": True,
-            "native_runtime_processes_verified": sys.argv[5] == "rust",
-            "native_database_without_plpython_verified": sys.argv[5] == "rust",
-            "native_backup_and_recovery_verified": sys.argv[5] == "rust",
-            "native_bundle_restore_verified": sys.argv[5] == "rust",
-            "native_mounted_erasure_verified": sys.argv[5] == "rust",
-            "historical_upgrade_verified": sys.argv[7] == "true",
-            "staged_read_only_upgrade_verified": sys.argv[7] == "true",
-            "deployment_profile": "gcp" if sys.argv[8] == "true" else "standard",
-        },
-        indent=2,
-        sort_keys=True,
-    )
-    + "\n"
-)
+destination = Path(sys.argv[1])
+work = Path(sys.argv[11])
+with TemporaryDirectory(dir=destination.parent) as staging:
+    staged = Path(staging)
+    native = {}
+    if sys.argv[5] == "rust":
+        license_archive = staged / "licenses.zip"
+        with ZipFile(license_archive, "w") as archive:
+            for name in ("notices.txt", "debian-packages.txt", "rust-third-party-inventory.json"):
+                archive.writestr(ZipInfo(name), (work / name).read_bytes(), compress_type=ZIP_DEFLATED)
+        with license_archive.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        archived = destination.with_name(f"native-licenses-{digest}.zip")
+        license_archive.replace(archived)
+        native = {
+            "app_platform_image": json.loads(sys.argv[10]),
+            "release_info": json.loads((work / "release-info.json").read_text()),
+            "license_evidence": {"file": archived.name, "sha256": digest},
+        }
+
+    report = {
+        "checked_at": datetime.now(UTC).isoformat(),
+        "host_architecture": sys.argv[2],
+        "native_amd64": sys.argv[2] == "x86_64" and sys.argv[6] == "linux/amd64",
+        "git_sha": sys.argv[3],
+        "app_image": sys.argv[4],
+        "app_image_source": sys.argv[9],
+        **native,
+        "runtime": sys.argv[5],
+        "platform": sys.argv[6],
+        "setup_preserved_settings": True,
+        "owner_onboarding_without_integrations_verified": True,
+        "fictional_tracker_survived_restart": True,
+        "fictional_tracker_entry_survived_preference_change": True,
+        "backup_capacity_verified": True,
+        "portable_database_export_verified": True,
+        "garmin_enrollment_requires_confirmation_and_saved_session": True,
+        "native_runtime_processes_verified": sys.argv[5] == "rust",
+        "native_database_without_plpython_verified": sys.argv[5] == "rust",
+        "native_backup_and_recovery_verified": sys.argv[5] == "rust",
+        "native_bundle_restore_verified": sys.argv[5] == "rust",
+        "native_mounted_erasure_verified": sys.argv[5] == "rust",
+        "historical_upgrade_verified": sys.argv[7] == "true",
+        "staged_read_only_upgrade_verified": sys.argv[7] == "true",
+        "deployment_profile": "gcp" if sys.argv[8] == "true" else "standard",
+    }
+    receipt = staged / destination.name
+    receipt.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    receipt.replace(destination)
 PY
 echo "Release installation smoke passed on $architecture."

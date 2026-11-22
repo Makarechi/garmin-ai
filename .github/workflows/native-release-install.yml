@@ -93,4 +93,5 @@ jobs:
             test-results/native-rust-install.json
             test-results/native-rust-upgrade.json
             test-results/native-rust-gcp-install.json
+            test-results/native-licenses-*.zip
           if-no-files-found: warn

@@ -15,6 +15,11 @@ The candidate includes the [cutover](cutover-runbook.md) and
 The installation result also records the schema, parser and storage formats
 reported by the running native application.
 
+Each successful native installation result links a checksummed archive of
+the tested image's Rust and Debian inventories and the notice texts printed
+by `install.sh licenses`. These files are stored with the workflow results for
+the same platform and image digest. They support the final distribution review.
+
 The pinned TimescaleDB image includes optional PL/Python files for PostgreSQL.
 The native installation smoke checks that the tested database has no PL/Python
 language or extension registered after clean setup or historical upgrade and
