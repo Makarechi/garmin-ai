@@ -1,11 +1,15 @@
-use std::{fs::File, os::fd::OwnedFd};
+use std::{fs::File, io, os::fd::OwnedFd};
 
 use rustix::{
     fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags},
     io::Errno,
+    path::Arg,
 };
 
-use crate::{ArchiveError, DIRECTORY_READ, FILE_MODE};
+use crate::{
+    ArchiveError, DIRECTORY_READ, FILE_MODE,
+    filesystem_entry::{Entry, Identity},
+};
 
 const STAGE_PREFIX: &str = ".rust-stage-";
 
@@ -94,22 +98,65 @@ impl Drop for Stage<'_> {
     }
 }
 
-pub(crate) fn remove_contents(directory: &OwnedFd) -> std::io::Result<()> {
+pub(crate) fn discard_directory(
+    parent: &OwnedFd,
+    name: impl Arg + Copy,
+    directory: &OwnedFd,
+    protected: &[Option<Identity>],
+) -> io::Result<()> {
+    let opened = Entry::opened(directory)?;
+    if opened != Entry::lookup(parent, name)?
+        || opened.mount != Entry::opened(parent)?.mount
+        || protected.contains(&Some(opened.identity))
+    {
+        return Err(io::Error::other(
+            "Backup staging directory changed or overlaps protected storage",
+        ));
+    }
+    walk_contents(directory, opened.mount, protected, false)?;
+    walk_contents(directory, opened.mount, protected, true)?;
+    if opened != Entry::lookup(parent, name)? {
+        return Err(io::Error::other("Backup staging directory changed"));
+    }
+    fs::unlinkat(parent, name, AtFlags::REMOVEDIR)?;
+    fs::fsync(parent)?;
+    Ok(())
+}
+
+fn walk_contents(
+    directory: &OwnedFd,
+    mount: u64,
+    protected: &[Option<Identity>],
+    remove: bool,
+) -> io::Result<()> {
     for entry in fs::Dir::read_from(directory)? {
         let entry = entry?;
         let name = entry.file_name();
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
-        let metadata = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
-        let flag = if FileType::from_raw_mode(metadata.st_mode) == FileType::Directory {
+        let entry = Entry::lookup(directory, name)?;
+        if entry.mount != mount || protected.contains(&Some(entry.identity)) {
+            return Err(io::Error::other(
+                "Backup staging contains a mount or protected entry",
+            ));
+        }
+        let flag = if entry.kind == FileType::Directory {
             let child = fs::openat(directory, name, DIRECTORY_READ, Mode::empty())?;
-            remove_contents(&child)?;
+            if Entry::opened(&child)? != entry {
+                return Err(io::Error::other("Backup staging entry changed"));
+            }
+            walk_contents(&child, mount, protected, remove)?;
             AtFlags::REMOVEDIR
         } else {
             AtFlags::empty()
         };
-        fs::unlinkat(directory, name, flag)?;
+        if remove {
+            if Entry::lookup(directory, name)? != entry {
+                return Err(io::Error::other("Backup staging entry changed"));
+            }
+            fs::unlinkat(directory, name, flag)?;
+        }
     }
     Ok(())
 }

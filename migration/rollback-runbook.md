@@ -60,6 +60,11 @@ used separate `.rust-backup-*` folders.
 Treat any of those retained folders as private and confirm the old unpack process
 has exited before handling them.
 
+The native cleanup checks for mount points and protected files before removing
+an interrupted workspace. If it refuses the workspace, inspect the mounts and
+choose a separate recovery parent where the archive and live storage are outside
+the recovery workspace.
+
 Check the recovered table counts and stable identity hashes, archive
 manifest and file hashes, parser/representation versions, source account
 binding, polling and replay offsets, and pending clarification. Compare

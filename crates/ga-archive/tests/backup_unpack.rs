@@ -464,3 +464,61 @@ fn does_not_publish_into_a_reserved_workspace_name() -> Result<(), Box<dyn Error
     assert!(!root.join(".GARMIN-AI-PLAINTEXT").exists());
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the disposable Linux recovery mount fixture"]
+fn retry_preserves_mounted_or_aliased_recovery_data() -> Result<(), Box<dyn Error>> {
+    use std::{os::unix::fs::MetadataExt, path::Path};
+
+    let scenario = env::var("GA_TEST_RECOVERY_MOUNTS")?;
+    assert!(["workspace", "active", "nested", "input", "protected"].contains(&scenario.as_str()));
+    let fixture = Path::new("/recovery-mount-fixture");
+    assert_eq!(
+        fs::read(fixture.join("synthetic-only"))?,
+        b"recovery mount test\n"
+    );
+    let root = fixture.join(&scenario);
+    let active = root.join(".garmin-ai-plaintext/active");
+    let retained = active.join("old.txt");
+    assert_eq!(fs::read(&retained)?, b"retained staging fixture\n");
+    let destination = root.join("recovered");
+    let source = if scenario == "input" {
+        let alias = root.join("alias/input.enc");
+        assert_eq!(
+            fs::metadata(&alias)?.ino(),
+            fs::metadata(active.join("input.enc"))?.ino()
+        );
+        alias
+    } else {
+        root.join("input.enc")
+    };
+    let data = if scenario == "protected" {
+        let alias = root.join("alias");
+        assert_eq!(
+            fs::metadata(&alias)?.ino(),
+            fs::metadata(active.join("nested"))?.ino()
+        );
+        alias
+    } else {
+        root.join("data")
+    };
+    let external = active.join("nested/protected.txt");
+    assert_eq!(fs::read(&external)?, b"protected file\n");
+    let outcome = unpack_backup(
+        &source,
+        &destination,
+        &FIXTURE_BYTES,
+        &data,
+        &root.join("tokens"),
+    );
+    assert_eq!(fs::read(retained)?, b"retained staging fixture\n");
+    assert_eq!(fs::read(external)?, b"protected file\n");
+    assert_eq!(fs::read(source)?, b"synthetic input\n");
+    assert!(matches!(
+        outcome,
+        Err(BackupError::InvalidPath | BackupError::Workspace(_))
+    ));
+    assert!(!destination.exists());
+    Ok(())
+}
