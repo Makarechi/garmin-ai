@@ -13,7 +13,7 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
-from garmin_ai.archive import private_directory
+from garmin_ai.archive import atomic_private_write, private_directory
 from garmin_ai.garmin_contract import ENDPOINTS, AuthenticationRequired, CircuitOpen, Endpoint
 
 
@@ -57,6 +57,30 @@ class GarminReader:
         except GarminConnectAuthenticationError:
             raise AuthenticationRequired("Run garmin-ai login in your local terminal") from None
         return cls(client)
+
+    @classmethod
+    def stage_saved_session(cls, token_dir: Path):
+        """Authenticate a saved session without giving the SDK a write-back path."""
+        token_dir = private_directory(token_dir).resolve()
+        saved = Garmin()
+        try:
+            saved.client.load(str(token_dir))
+        except GarminConnectConnectionError:
+            raise AuthenticationRequired("Run garmin-ai login in your local terminal") from None
+        previous = saved.client.dumps()
+
+        candidate = Garmin()
+        try:
+            candidate.login(previous)
+        except GarminConnectAuthenticationError:
+            raise AuthenticationRequired("Run garmin-ai login in your local terminal") from None
+
+        def publish():
+            updated = candidate.client.dumps()
+            if updated != previous:
+                atomic_private_write(token_dir / "garmin_tokens.json", updated.encode("utf-8"))
+
+        return cls(candidate), publish
 
     def call(self, method: str, *args, **kwargs):
         allowed = {e.method for e in ENDPOINTS} | {"get_activities", "download_activity"}
