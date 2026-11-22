@@ -54,6 +54,7 @@ def docker_installation(monkeypatch):
         oom_kills=0,
         worker_started_at="2026-11-21T08:00:00Z",
         worker_restarts=0,
+        worker_limits={},
     )
 
     def run_docker(*args):
@@ -69,10 +70,21 @@ def docker_installation(monkeypatch):
             started = config.worker_started_at if worker else "2026-11-21T08:00:00Z"
             return f"{IMAGE} {str(not api_stopped).lower()} {restarts} {started} {str(api_stopped).lower()}"
         if args[0] == "exec":
-            fields = dict.fromkeys(observer.CGROUP_FIELDS, "0")
-            count = config.oom_kills if args[1] == CONTAINERS["worker"] else 0
+            fields = dict.fromkeys(args[6:], "0")
+            fields.update(
+                {
+                    "cpu.max": "100000 100000",
+                    "cpuset.cpus.effective": "0-3",
+                    "memory.max": "536870912",
+                    "memory.swap.max": "max",
+                }
+            )
+            worker = args[1] == CONTAINERS["worker"]
+            count = config.oom_kills if worker else 0
+            if worker:
+                fields.update(config.worker_limits)
             fields["memory.events"] = f"low 0\noom_kill {count}"
-            return "\n".join(f"{field}\n{value}" for field, value in fields.items())
+            return "\n".join(f"{field}\n{fields[field]}" for field in args[6:])
         if args[0] == "port":
             return config.port
         if args[:2] == ("image", "inspect"):
@@ -144,6 +156,38 @@ def test_selected_api_receives_http_probes(monkeypatch, docker_installation):
         (4, 1, 5, "oom", "gapped_observation", "worker:oom_kills_increased"),
         (4, 1, 0, "manual_restart", "unhealthy_observation", "worker:restarted"),
         (4, 1, 0, "auto_restart", "unhealthy_observation", "worker:restarted"),
+        (
+            4,
+            1,
+            0,
+            {"cpu.max": "50000 100000"},
+            "unhealthy_observation",
+            "worker:resource_limits_changed",
+        ),
+        (
+            4,
+            1,
+            0,
+            {"cpuset.cpus.effective": "0-1"},
+            "unhealthy_observation",
+            "worker:resource_limits_changed",
+        ),
+        (
+            4,
+            1,
+            0,
+            {"memory.max": "402653184"},
+            "unhealthy_observation",
+            "worker:resource_limits_changed",
+        ),
+        (
+            4,
+            1,
+            0,
+            {"memory.swap.max": "0"},
+            "unhealthy_observation",
+            "worker:resource_limits_changed",
+        ),
     ],
 )
 def test_window_result_requires_contiguous_samples(
@@ -173,6 +217,8 @@ def test_window_result_requires_contiguous_samples(
                 config.worker_started_at = "2026-11-21T08:00:00.600Z"
             if event == "auto_restart":
                 config.worker_restarts += 1
+            if isinstance(event, dict):
+                config.worker_limits.update(event)
         now += seconds
 
     def http(url, token=None):

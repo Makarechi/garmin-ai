@@ -45,6 +45,12 @@ or recovers before the next probe. An unavailable or reset counter leaves the
 sample incomplete. Container start times, restart counts and Docker's
 OOM-killed flag help correlate these events with the health probes.
 
+Each sample records the CPU quota, effective CPU set, memory limit, and swap
+limit for each container. A change since the previous sample marks the current
+sample incomplete, even when the container stayed running and every health
+probe passed. The report preserves the measured limits before and after the
+change.
+
 Keep the report private, especially if the installation contains real data.
 Before accepting the release, inspect queue progress, nightly and weekly
 scheduling, backup history, reconnect, memory pressure, and any incomplete
