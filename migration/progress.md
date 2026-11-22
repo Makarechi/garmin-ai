@@ -2,6 +2,40 @@
 
 The compatibility baseline is `ee3a14a48a6ad30c1085951bac2f53c9088c2450`. It
 contains the Gemini diagnostics change that merged after the handoff's SHA.
+
+## Verified release checkpoint
+
+The [checkpoint](evidence/native-release-checkpoint-44617c2.json) records the
+synthetic checks of `44617c219d262292c7487a37ee6794a9e4c8bc7e` on main.
+It binds the tested Git tree, the workflow runs, the application image and
+installed platform digests, and the database schema, parser and backup
+versions to their receipts.
+The recorded images came from disposable test registries.
+
+- R34–R35. Five physical AMD64 and ARM64 installs verified the packaged
+  runtime, including historical upgrades and the AMD64 GCP profile. The
+  installations verified the encrypted backup, portable export and native
+  recovery. The checkpoint includes the installed license archives' hashes.
+- R36. The inventory covers 459 surfaces across 25 areas. The strict check has
+  nine open areas. The Python-based CI suite passed 4,385 cases and recorded
+  80 skips. A separate CI step passed the same 54 skipped extension cases.
+  The checkpoint records the remaining filesystem and live model-provider skips.
+- R38–R39. Four recoveries on independent Linux hosts verified 30 tables and
+  three files per case. The Rust-to-Rust run preserved the acknowledged diary
+  edit, completed the restored job once and saved the next revision. The
+  tested native installations used a Python-free API and worker.
+
+The checkpoint identifies the exact workflow definition and tested revision
+for each run. The Rust CI run belongs to the preceding commit. The source
+changes between those two commits are the installer guard and its tests.
+Run the inventory and strict checks at the checkpoint revision with
+`python3 migration/check_parity.py` and
+`python3 migration/check_parity.py --require-verified`. Release acceptance,
+the 168-hour observation, final rehearsal and production cutover remain open.
+See the [open verification conditions](blockers.md).
+
+## Implementation snapshot
+
 The implementation snapshot below follows `6342db821a20fc80374a7cdfb10036c30780a453`
 on main. Test evidence is scoped to the revision, environment and workload
 that produced it.
