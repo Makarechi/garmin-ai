@@ -22,7 +22,7 @@ pub enum LegacyCapability {
     ActivityWeather,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DateRange {
     start: Date,
     end: Date,
@@ -34,6 +34,16 @@ impl DateRange {
             return Err(GarminError::InvalidRequest);
         }
         Ok(Self { start, end })
+    }
+
+    pub fn contains(self, date: Date) -> bool {
+        (self.start..=self.end).contains(&date)
+    }
+
+    pub(crate) fn add_query(self, url: &mut Url) {
+        url.query_pairs_mut()
+            .append_pair("startDate", &self.start.to_string())
+            .append_pair("endDate", &self.end.to_string());
     }
 }
 
@@ -123,9 +133,8 @@ impl PersonalRead {
                 let mut url = join("activitylist-service/activities/search/activities")?;
                 url.query_pairs_mut()
                     .append_pair("start", &offset.to_string())
-                    .append_pair("limit", &limit.to_string())
-                    .append_pair("startDate", &dates.start.to_string())
-                    .append_pair("endDate", &dates.end.to_string());
+                    .append_pair("limit", &limit.to_string());
+                dates.add_query(&mut url);
                 Ok(url)
             }
             Self::Activity(id) => join(&format!("activity-service/activity/{id}")),

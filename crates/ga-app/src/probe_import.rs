@@ -28,9 +28,14 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 
-use crate::{configuration, replay_worker::FIT_EXPORT_LIMITS};
+use crate::{
+    configuration,
+    garmin_probe::{MAX_PROBE_DAYS, MAX_SCOPED_ACTIVITIES},
+    replay_worker::FIT_EXPORT_LIMITS,
+};
 
-const MAX_REQUESTS: usize = 31 * 20 + 2 + 5 * 7;
+// Twenty daily endpoints, activity list, legacy device inventory and seven requests per activity.
+const MAX_REQUESTS: usize = MAX_PROBE_DAYS * 20 + 2 + MAX_SCOPED_ACTIVITIES * 7;
 const JSON_LIMITS: PutLimits = PutLimits {
     max_bytes: 8 * 1024 * 1024,
     disk_reserve_bytes: 64 * 1024 * 1024,
@@ -86,6 +91,35 @@ where
         }
     }
     parser.deserialize_seq(Requests)
+}
+
+#[cfg(test)]
+mod request_bound_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn import_accepts_scoped_reports_up_to_the_request_limit() -> Result<(), Box<dyn Error>> {
+        let row = json!({ "endpoint": "daily", "key": "2026-11-20", "status": "available" });
+        let mut report = json!({ "requests": vec![row.clone(); 31 * 20 + 1 + 6 * 7] });
+        let parsed: ProbeReport = serde_json::from_value(report.clone())?;
+        assert_eq!(parsed.requests.len(), 663);
+
+        report["requests"] = json!(vec![row.clone(); MAX_REQUESTS]);
+        let parsed: ProbeReport = serde_json::from_value(report.clone())?;
+        assert_eq!(parsed.requests.len(), MAX_REQUESTS);
+
+        report["requests"] = json!(vec![row; MAX_REQUESTS + 1]);
+        let Err(error) = serde_json::from_value::<ProbeReport>(report) else {
+            panic!("oversized report was accepted");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the supported request count")
+        );
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]

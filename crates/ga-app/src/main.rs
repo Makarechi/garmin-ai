@@ -71,6 +71,9 @@ enum Command {
         start: Option<time::Date>,
         #[arg(long, value_parser = garmin_probe::parse_date)]
         end: Option<time::Date>,
+        /// Limit activity exports to the requested dates and skip the device inventory
+        #[arg(long, requires_all = ["start", "end"])]
+        activities_in_range: bool,
     },
     /// Import data from a locally archived Garmin coverage report
     ImportProbe {
@@ -258,8 +261,12 @@ fn main() -> ExitCode {
                 println!("{}\t{}\t{}", entry.name, entry.method, entry.scope());
             }
         }
-        Some(Command::Probe { start, end }) => {
-            if let Err(error) = garmin_probe::run(start, end) {
+        Some(Command::Probe {
+            start,
+            end,
+            activities_in_range,
+        }) => {
+            if let Err(error) = garmin_probe::run(start, end, activities_in_range) {
                 eprintln!("{error}");
                 return if error.is::<garmin_probe::InvalidRange>() {
                     ExitCode::from(2)

@@ -4,7 +4,7 @@ use reqwest::Url;
 use time::{Date, format_description::well_known::Iso8601};
 
 use super::endpoint;
-use crate::GarminError;
+use crate::{DateRange, GarminError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DailyEndpoint {
@@ -221,6 +221,7 @@ pub enum LegacyRead {
     Daily(DailyEndpoint, Date),
     Devices,
     Activities { start: u32, limit: NonZeroU16 },
+    ActivitiesInRange { limit: NonZeroU16, dates: DateRange },
     Activity(ActivityEndpoint, NonZeroU64),
 }
 
@@ -261,6 +262,11 @@ impl LegacyRead {
                 url.query_pairs_mut()
                     .append_pair("start", &start.to_string())
                     .append_pair("limit", &limit.to_string());
+                Ok(url)
+            }
+            Self::ActivitiesInRange { limit, dates } => {
+                let mut url = Self::Activities { start: 0, limit }.url(base, display_name)?;
+                dates.add_query(&mut url);
                 Ok(url)
             }
             Self::Activity(resource, id) => resource.url(base, id),
@@ -410,6 +416,26 @@ mod tests {
             (original_export.path().to_owned(), BTreeMap::new()),
         );
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_activity_query_sends_both_date_bounds() -> Result<(), Box<dyn Error>> {
+        let base = Url::parse("https://connectapi.garmin.com/")?;
+        let day = Date::from_calendar_date(2026, Month::November, 20)?;
+        let resource = LegacyRead::ActivitiesInRange {
+            limit: NonZeroU16::try_from(100)?,
+            dates: DateRange::new(day, day.next_day().ok_or(GarminError::InvalidRequest)?)?,
+        };
+        let url = resource.url(&base, None)?;
+        assert_eq!(
+            url.path(),
+            "/activitylist-service/activities/search/activities"
+        );
+        assert_eq!(
+            url.query(),
+            Some("start=0&limit=100&startDate=2026-11-20&endDate=2026-11-21")
+        );
         Ok(())
     }
 
