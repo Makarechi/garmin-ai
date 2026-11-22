@@ -171,8 +171,15 @@ and the status command again against the authorized database. Run
 loopback API port. It provides read-only database access and holds the worker's
 exclusive lease while running. Exit with Ctrl-C before starting the service.
 
-The application image, platform matrix, third-party notices, seven-day run and
-independent-host restore are still pending before a supported public release.
+The Native release installation workflow tests clean installs and historical
+upgrades on physical Linux amd64 and arm64 runners. It also tests the GCP
+profile on amd64. The Native off-host recovery workflow verifies encrypted
+synthetic backups on a separate Linux runner, including recovery from Python
+to Rust and from Rust to Python.
+
+Repeat the applicable checks for the exact candidate revision and image digest
+before publishing. The supported release also requires final third-party
+notices, approved live integration checks and a complete seven-day observation.
 
 The `native-amd64-install` CI job builds an amd64 image and runs a digest-pinned
 bundle on its x86_64 host with fictional data. It checks setup, API readiness,
