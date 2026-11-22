@@ -47,8 +47,10 @@ Keep its API and worker stopped. Restore the authenticated raw and token files
 to the exact configured destinations with their private ownership. Run
 `./install.sh restore-db RECOVERY_DIRECTORY` with the directory name printed by
 `unpack-backup`. It loads `database.jsonl.gz` and requires an empty database at
-the supported revision. Verify the result before starting readers. Keep the
-source installation and both encrypted backups until recovery has been verified.
+the supported revision. Use the database role that owns the target sequences
+so their restart can commit with the restored rows. Verify the result before
+starting readers. Keep the source installation and both encrypted backups
+until recovery has been verified.
 
 Python and Rust coordinate unpacking through a private workspace in the
 recovery destination's parent directory. When unpacking stops partway through,
