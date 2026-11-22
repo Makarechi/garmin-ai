@@ -804,3 +804,44 @@ esac
         f"volume rm {'-f ' if unpack_status else ''}{scratch}",
     ]
     assert ("Verified encrypted backup:" in result.stdout) == (unpack_status == 0)
+
+
+@pytest.mark.parametrize(
+    ("assignments", "expected_status"),
+    [
+        (f"GA_APP_IMAGE={IMAGE}\n", 0),
+        (f"GA_APP_IMAGE={IMAGE}", 0),
+        (f"GA_APP_IMAGE={IMAGE}\nGA_APP_IMAGE={IMAGE}\n", 1),
+        (f"GA_APP_IMAGE={IMAGE}\nGA_APP_IMAGE=\n", 1),
+        (f"GA_APP_IMAGE=\nGA_APP_IMAGE={IMAGE}\n", 1),
+    ],
+)
+def test_installer_requires_one_release_image_assignment(tmp_path, assignments, expected_status):
+    shutil.copy2(ROOT / "install.sh", tmp_path / "install.sh")
+    (tmp_path / "release.env").write_text(assignments)
+    (tmp_path / ".env").touch()
+    docker = tmp_path / "docker"
+    docker.write_text(
+        r"""#!/bin/sh
+case "$*" in
+    'compose version --short') echo 'v2.24.0'; exit 0 ;;
+    'compose version') exit 0 ;;
+esac
+printf '%s\n' "$GA_APP_IMAGE"
+"""
+    )
+    docker.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "./install.sh", "status"],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == expected_status
+    if expected_status:
+        assert result.stdout == ""
+        assert "release.env must contain one digest-pinned GA_APP_IMAGE." in result.stderr
+    else:
+        assert result.stdout == f"{IMAGE}\n"

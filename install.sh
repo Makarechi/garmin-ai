@@ -26,11 +26,12 @@ if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_min
     exit 1
 fi
 
-image=$(sed -n 's/^GA_APP_IMAGE=//p' release.env)
-if ! printf '%s\n' "$image" | grep -Eq '^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$'; then
+image_assignment=$(sed -n '/^GA_APP_IMAGE=/p' release.env)
+if [[ ! $image_assignment =~ ^GA_APP_IMAGE=[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]]; then
     echo "release.env must contain one digest-pinned GA_APP_IMAGE." >&2
     exit 1
 fi
+image=${image_assignment#GA_APP_IMAGE=}
 runtime=$(sed -n 's/^GA_APP_RUNTIME=//p' release.env)
 legacy_entry=
 case "${runtime:-python}" in
