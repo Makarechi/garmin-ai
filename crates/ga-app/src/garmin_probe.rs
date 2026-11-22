@@ -17,10 +17,11 @@ use ga_db::{
 };
 use ga_domain::{
     event_input::source_calendar_date,
-    timestamp::{OffsetTimestamp, StoredInstant},
+    garmin_summary::gmt_instant,
+    timestamp::{OffsetTimestamp, StoredInstant, source_timezone_available},
 };
 use ga_garmin::{
-    GarminError, TransportConfig,
+    DateRange, GarminError, TransportConfig,
     legacy::{LEGACY_CAPABILITIES, LegacyRead, LegacyReader, LegacyResource, LegacySession},
 };
 use serde::Deserialize;
@@ -38,6 +39,7 @@ const FIT_LIMITS: PutLimits = PutLimits {
     max_bytes: ga_fit::MAX_FIT_BYTES,
     ..JSON_LIMITS
 };
+const ACTIVITY_LIST_LIMIT: NonZeroU16 = NonZeroU16::new(100).unwrap();
 
 #[derive(Debug)]
 pub(crate) struct InvalidRange;
@@ -64,7 +66,11 @@ pub(crate) fn parse_date(value: &str) -> Result<Date, &'static str> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-pub(crate) async fn run(start: Option<Date>, end: Option<Date>) -> Result<(), Box<dyn Error>> {
+pub(crate) async fn run(
+    start: Option<Date>,
+    end: Option<Date>,
+    activities_in_range: bool,
+) -> Result<(), Box<dyn Error>> {
     let [url, data, tokens, locks, backups, timezone] = configuration::read([
         "GA_DATABASE_URL",
         "GA_DATA_DIR",
@@ -73,11 +79,12 @@ pub(crate) async fn run(start: Option<Date>, end: Option<Date>) -> Result<(), Bo
         "GA_BACKUP_DIR",
         "GA_TIMEZONE",
     ])?;
+    let timezone = timezone.as_deref().unwrap_or("Europe/Bratislava");
     let end = match end {
         Some(end) => end,
         None => source_calendar_date(
             StoredInstant::try_from(OffsetDateTime::now_utc())?,
-            timezone.as_deref().unwrap_or("Europe/Bratislava"),
+            timezone,
         )
         .ok_or("Invalid probe time zone")?,
     };
@@ -89,6 +96,14 @@ pub(crate) async fn run(start: Option<Date>, end: Option<Date>) -> Result<(), Bo
     if !(0..31).contains(&days) {
         return Err(InvalidRange.into());
     }
+    let activity_dates = if activities_in_range {
+        if !source_timezone_available(timezone) {
+            return Err("Invalid probe time zone".into());
+        }
+        Some(DateRange::new(start, end)?)
+    } else {
+        None
+    };
 
     let data = PathBuf::from(data.unwrap_or_else(|| "data".into()));
     let tokens = PathBuf::from(tokens.unwrap_or_else(|| "tokens/garmin".into()));
@@ -138,6 +153,8 @@ pub(crate) async fn run(start: Option<Date>, end: Option<Date>) -> Result<(), Bo
         reader: LegacyReader::from_verified_session(store, session, transport)?,
         report: Report::open(&data, start, end, fingerprint)?,
         setup,
+        activity_dates,
+        timezone,
         cooldown: false,
         connection_failures: 0,
     };
@@ -238,16 +255,18 @@ impl Report {
     }
 }
 
-struct CoverageProbe {
+struct CoverageProbe<'a> {
     archive: Archive,
     reader: LegacyReader,
     report: Report,
     setup: Option<LocalGarminSetup>,
+    activity_dates: Option<DateRange>,
+    timezone: &'a str,
     cooldown: bool,
     connection_failures: u8,
 }
 
-impl CoverageProbe {
+impl CoverageProbe<'_> {
     async fn collect(&mut self, days: i64) -> Result<(), Box<dyn Error>> {
         self.check_storage().await?;
         self.report.checkpoint(false)?;
@@ -261,17 +280,30 @@ impl CoverageProbe {
                 }
             }
         }
-        self.capture_json("devices", "global", LegacyRead::Devices)
-            .await?;
-        let list = LegacyRead::Activities {
-            start: 0,
-            limit: NonZeroU16::try_from(100)?,
+        let list = match self.activity_dates {
+            Some(dates) => LegacyRead::ActivitiesInRange {
+                limit: ACTIVITY_LIST_LIMIT,
+                dates,
+            },
+            None => {
+                self.capture_json("devices", "global", LegacyRead::Devices)
+                    .await?;
+                LegacyRead::Activities {
+                    start: 0,
+                    limit: ACTIVITY_LIST_LIMIT,
+                }
+            }
         };
         if let Some((list, archive_key)) = self.capture_json("activities", "recent", list).await?
             && !list.is_null()
         {
             self.report.activity_list_archive = Some(archive_key);
-            let activities = activity_ids(&list)?;
+            let count = if self.activity_dates.is_some() {
+                usize::from(ACTIVITY_LIST_LIMIT.get())
+            } else {
+                5
+            };
+            let activities = activity_ids(&list, count)?;
             drop(list);
             for activity in activities {
                 let key = activity.to_string();
@@ -318,7 +350,17 @@ impl CoverageProbe {
         };
         self.connection_failures = 0;
         let bytes = bytes.as_deref().unwrap_or(b"null");
-        let value: Value = serde_json::from_slice(bytes)?;
+        let mut value: Value = serde_json::from_slice(bytes)?;
+        let filtered;
+        let bytes = if let LegacyRead::ActivitiesInRange { dates, limit } = resource
+            && !value.is_null()
+        {
+            restrict_activities(&mut value, dates, self.timezone, usize::from(limit.get()))?;
+            filtered = serde_json::to_vec(&value)?;
+            &filtered
+        } else {
+            bytes
+        };
         let archive_key = self.archive.put_json(bytes, JSON_LIMITS)?.to_string();
         let empty = value.is_null()
             || value.as_object().is_some_and(|object| object.is_empty())
@@ -406,14 +448,39 @@ impl CoverageProbe {
     }
 }
 
-fn activity_ids(value: &Value) -> Result<Vec<NonZeroU64>, Box<dyn Error>> {
+fn restrict_activities(
+    value: &mut Value,
+    dates: DateRange,
+    timezone: &str,
+    page_limit: usize,
+) -> Result<(), Box<dyn Error>> {
+    let activities = value
+        .as_array_mut()
+        .ok_or("Unexpected activity list shape")?;
+    if activities.len() >= page_limit {
+        return Err("Garmin activity list may be incomplete. Probe fewer days at a time.".into());
+    }
+    let mut selected = Vec::new();
+    for activity in std::mem::take(activities) {
+        let day = gmt_instant(&activity["startTimeGMT"])
+            .and_then(|at| source_calendar_date(at, timezone))
+            .ok_or("Garmin activity start date could not be verified")?;
+        if dates.contains(day) {
+            selected.push(activity);
+        }
+    }
+    *activities = selected;
+    Ok(())
+}
+
+fn activity_ids(value: &Value, count: usize) -> Result<Vec<NonZeroU64>, Box<dyn Error>> {
     value
         .as_array()
         .ok_or_else(|| "Unexpected activity list shape".into())
         .and_then(|activities| {
             activities
                 .iter()
-                .take(5)
+                .take(count)
                 .map(|item| {
                     let id = &item["activityId"];
                     id.as_u64()
@@ -458,4 +525,37 @@ fn shape(value: &Value, depth: usize) -> Value {
         Value::Array(_) => "list",
         Value::Object(_) => "dict",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_activities_use_the_configured_calendar() -> Result<(), Box<dyn Error>> {
+        let dates = DateRange::new(parse_date("2026-11-20")?, parse_date("2026-11-22")?)?;
+        let mut activities = json!([
+            {"activityId": 1, "startTimeGMT": "2026-11-19 22:59:59"},
+            {"activityId": 2, "startTimeGMT": "2026-11-19 23:00:00"},
+            {"activityId": 3, "startTimeGMT": "2026-11-22 22:59:59"},
+            {"activityId": 4, "startTimeGMT": "2026-11-22 23:00:00"}
+        ]);
+        restrict_activities(&mut activities, dates, "Europe/Bratislava", 100)?;
+        let ids: Vec<_> = activity_ids(&activities, 100)?
+            .into_iter()
+            .map(NonZeroU64::get)
+            .collect();
+        assert_eq!(ids, [2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_activities_reject_a_full_page_and_an_unknown_date() -> Result<(), Box<dyn Error>> {
+        let dates = DateRange::new(parse_date("2026-11-20")?, parse_date("2026-11-22")?)?;
+        let mut full = json!([{"activityId": 1, "startTimeGMT": "2026-11-20 15:30:00"}]);
+        assert!(restrict_activities(&mut full, dates, "Europe/Bratislava", 1).is_err());
+        let mut undated = json!([{"activityId": 1}]);
+        assert!(restrict_activities(&mut undated, dates, "Europe/Bratislava", 100).is_err());
+        Ok(())
+    }
 }

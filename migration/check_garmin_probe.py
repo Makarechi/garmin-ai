@@ -33,6 +33,11 @@ DAILY = {
     "variants": [True, False, None, {}, [], {}, {"inner": [{"leaf": "value"}]}],
 }
 ACTIVITIES = [{"activityId": 42, "synthetic_scalar": "do not disclose this invented value"}]
+SCOPED_ACTIVITIES = [
+    {"activityId": 41, "startTimeGMT": "2026-10-31 22:59:59"},
+    {"activityId": 42, "startTimeGMT": "2026-10-31 23:00:00"},
+    {"activityId": 43, "startTimeGMT": "2026-11-01 23:00:00"},
+]
 BINARY = b"PK\x03\x04synthetic source-free fixture"
 
 
@@ -59,6 +64,8 @@ def routes():
     filename = Path(__file__).parent / "contracts" / "garmin-legacy-requests.json"
     contract = json.loads(filename.read_text())
     contract["activities"][1]["start"] = "0"
+    path, query = contract["activities"]
+    contract["scoped_activities"] = (path, query | {"startDate": DAY.isoformat(), "endDate": DAY.isoformat()})
     return {
         (url, tuple(sorted(parameters.items()))): name
         for name, (url, parameters) in contract.items()
@@ -107,6 +114,7 @@ def fake_garmin(directory):
                         "hrv": None,
                         "devices": [],
                         "activities": ACTIVITIES,
+                        "scoped_activities": SCOPED_ACTIVITIES,
                     }.get(endpoint, DAILY)
                     body, content_type = json.dumps(payload).encode(), "application/json"
             self.send_response(200)
@@ -184,6 +192,29 @@ def read_report(path):
     for record in report["requests"]:
         assert datetime.fromisoformat(record.pop("fetched_at")).utcoffset() == timedelta(0)
     return report
+
+
+def exercise_scoped(binary, root, ca, seen):
+    work = root / "scoped"
+    work.mkdir()
+    environment, _ = stores(work, ca)
+    result = subprocess.run(
+        [binary, "probe", "--start", DAY.isoformat(), "--end", DAY.isoformat(), "--activities-in-range"],
+        cwd=work,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=75,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "devices" not in seen and "activities" not in seen
+    assert seen.count("scoped_activities") == 1 and seen.count("activity_fit") == 1
+    report = read_report(work / "data" / "coverage-report.json")
+    assert report["complete"]
+    archive = work / "data" / "raw"
+    assert json.loads((archive / report["activity_list_archive"]).read_bytes()) == [SCOPED_ACTIVITIES[1]]
+    fit, = (record for record in report["requests"] if record["endpoint"] == "activity_fit")
+    assert fit["key"] == "42" and (archive / fit["archive_key"]).read_bytes() == BINARY
 
 
 def exercise(binary, root, ca, seen, state, database=None):
@@ -304,6 +335,8 @@ def main():
     with TemporaryDirectory() as directory:
         root = Path(directory)
         with fake_garmin(root) as (ca, seen, state):
+            exercise_scoped(args.binary.resolve(strict=True), root, ca, seen)
+            seen.clear()
             count = exercise(args.binary.resolve(strict=True), root, ca, seen, state, database)
     print(f"Matched all {count} reference archive requests and verified owner and storage fencing")
 

@@ -70,6 +70,12 @@ can be processed in non-overlapping batches. Raw archive files and `coverage-rep
 private. Replays retain request timestamps; older data cannot overwrite newer activity/FIT versions.
 Normal operation reconciles the previous seven days nightly and 30 days on Mondays.
 
+The native `probe --start DATE --end DATE --activities-in-range` command sends the same date
+bounds for the activity list and checks each activity's start against the configured time zone
+before storing its summary or requesting its details and FIT file. It skips device inventory and
+exports all verified activities when the returned list fits below 100 entries. If Garmin returns
+a full page, split the date range into smaller runs.
+
 ## Telegram and Gemini
 
 Configure the bot token in `.env`, leave `GA_TELEGRAM_USER_ID=0`, and run
