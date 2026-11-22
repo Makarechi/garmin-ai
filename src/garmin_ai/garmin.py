@@ -76,9 +76,11 @@ class GarminReader:
             raise AuthenticationRequired("Run garmin-ai login in your local terminal") from None
 
         def publish():
+            nonlocal previous
             updated = candidate.client.dumps()
             if updated != previous:
                 atomic_private_write(token_dir / "garmin_tokens.json", updated.encode("utf-8"))
+                previous = updated
 
         return cls(candidate), publish
 
