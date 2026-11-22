@@ -4,6 +4,9 @@ use serde::Deserialize;
 
 use crate::FitError;
 
+/// Version of the bundled FIT protocol profile.
+pub const FIT_PROFILE_VERSION: &str = "21.171";
+
 pub(crate) static PROFILE: LazyLock<Result<FitProfile, FitError>> = LazyLock::new(load);
 
 pub(crate) struct FitProfile {
@@ -60,7 +63,7 @@ struct EncodedProfile {
 fn load() -> Result<FitProfile, FitError> {
     let encoded: EncodedProfile = serde_json::from_str(include_str!("../profile/21.171.json"))
         .map_err(|_| FitError::InvalidProfile)?;
-    if encoded.version != "21.171" {
+    if encoded.version != FIT_PROFILE_VERSION {
         return Err(FitError::InvalidProfile);
     }
     Ok(FitProfile {

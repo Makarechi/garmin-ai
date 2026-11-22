@@ -122,6 +122,8 @@ enum Command {
         #[arg(long)]
         status: bool,
     },
+    /// Print the built-in schema, parser and storage format versions
+    ReleaseInfo,
     /// Create a verified encrypted backup outside the source directories
     Backup { path: PathBuf },
     /// Export the logical database to a private compressed file
@@ -335,6 +337,19 @@ fn main() -> ExitCode {
                 eprintln!("{error}");
                 return ExitCode::FAILURE;
             }
+        }
+        Some(Command::ReleaseInfo) => {
+            let info = serde_json::json!({
+                "application_version": env!("CARGO_PKG_VERSION"),
+                "database_revision": ga_db::schema_migration::SchemaState::Current.revision(),
+                "garmin_parser_version": ga_db::replay::GARMIN_PARSER_VERSION,
+                "fit_parser_version": ga_db::fit_ingest::PARSER_VERSION,
+                "fit_profile_version": ga_fit::FIT_PROFILE_VERSION,
+                "archive_json": "Python-compatible UTF-8 JSON",
+                "database_export_format": ga_db::database_export::FORMAT,
+                "backup_envelope": ga_archive::backup_envelope::FORMAT,
+            });
+            println!("{info}");
         }
         Some(Command::Backup { path }) => {
             return report(backup::create(&path));

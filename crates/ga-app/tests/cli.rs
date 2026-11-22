@@ -72,6 +72,28 @@ fn reports_the_built_version() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn reports_storage_versions_without_installation_settings() -> Result<(), Box<dyn std::error::Error>>
+{
+    let output = invoke(&["release-info"])?;
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout)?,
+        serde_json::json!({
+            "application_version": env!("CARGO_PKG_VERSION"),
+            "database_revision": "c54f8a72d130",
+            "garmin_parser_version": 9,
+            "fit_parser_version": 9,
+            "fit_profile_version": "21.171",
+            "archive_json": "Python-compatible UTF-8 JSON",
+            "database_export_format": "garmin-ai-jsonl-v1",
+            "backup_envelope": "GARMINAI1",
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn accepts_one_flag_and_keeps_argument_values_out_of_errors()
 -> Result<(), Box<dyn std::error::Error>> {
     for args in [

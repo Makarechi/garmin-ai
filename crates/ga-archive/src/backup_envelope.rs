@@ -21,7 +21,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{ArchiveError, DIRECTORY_READ, staging::Stage, storage_files::StorageFilesError};
 
-const MAGIC: &[u8; 9] = b"GARMINAI1";
+/// Format identifier at the start of each encrypted backup.
+pub const FORMAT: &str = "GARMINAI1";
+const MAGIC: &[u8] = FORMAT.as_bytes();
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const HEADER_BYTES: u64 = (MAGIC.len() + NONCE_BYTES) as u64;
@@ -289,7 +291,7 @@ fn read_authenticated(
     source.rewind()?;
     let mut magic = [0; MAGIC.len()];
     read_frame(source, &mut magic)?;
-    if &magic != MAGIC {
+    if magic != MAGIC {
         return Err(BackupError::InvalidFrame);
     }
     let mut nonce = [0; NONCE_BYTES];

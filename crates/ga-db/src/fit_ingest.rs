@@ -32,7 +32,8 @@ use crate::{
 };
 
 pub(crate) const ENDPOINT: &str = "activity_fit";
-const PARSER_VERSION: i32 = 9;
+/// Parser version recorded when a FIT projection is published.
+pub const PARSER_VERSION: i32 = 9;
 const ZIP_END: &[u8] = b"PK\x05\x06";
 const ZIP_END_BYTES: usize = 22;
 const ZIP_COMMENT_BYTES: usize = 65_535;

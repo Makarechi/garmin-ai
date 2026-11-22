@@ -292,7 +292,12 @@ fi
 grep -Fx 'Choose a new .jsonl.gz filename for the export in GA_DATA_DIR.' "$work/export-refusal.log"
 ./install.sh "${profile[@]}" export "$snapshot_name" >"$work/export-counts.json"
 snapshot="data/$snapshot_name"
-snapshot_sha=$("$python_bin" - "$snapshot" "$work/export-counts.json" "$work/tracker.json" <<'PY'
+printf 'null\n' >"$work/release-info.json"
+if [[ "$runtime" == rust ]]; then
+    compose exec -T api garmin-ai-rust release-info >"$work/release-info.json"
+fi
+snapshot_sha=$("$python_bin" - "$snapshot" "$work/export-counts.json" "$work/tracker.json" \
+    "$work/release-info.json" <<'PY'
 import gzip
 import hashlib
 import json
@@ -300,13 +305,19 @@ import stat
 import sys
 from pathlib import Path
 
-path, counts_file, tracker_file = map(Path, sys.argv[1:])
+path, counts_file, tracker_file, release_info = map(Path, sys.argv[1:])
 assert stat.S_IMODE(path.stat().st_mode) == 0o600
 counts = json.loads(counts_file.read_text())
 tracker_id = json.loads(tracker_file.read_text())["entry"]["id"]
 with gzip.open(path, "rt", encoding="utf-8") as archive:
     header, *rows, footer = map(json.loads, archive)
-assert (header["format"], header["revision"]) == ("garmin-ai-jsonl-v1", "c54f8a72d130")
+manifest = json.loads(Path("release-manifest.json").read_text())
+versions = json.loads(release_info.read_text())
+expected_format = "garmin-ai-jsonl-v1"
+if versions is not None:
+    expected_format = versions["database_export_format"]
+    assert versions["database_revision"] == manifest["database_revision"]
+assert (header["format"], header["revision"]) == (expected_format, manifest["database_revision"])
 assert len(counts) == 30 and counts["events"] == 1 and footer == {"counts": counts}
 assert [row["row"]["id"] for row in rows if row["table"] == "events"] == [tracker_id]
 print(hashlib.sha256(path.read_bytes()).hexdigest())
@@ -378,6 +389,16 @@ if [[ "$runtime" == rust ]]; then
     ./install.sh "${profile[@]}" backup
     archive=$(find backups -maxdepth 1 -type f -name 'manual-*.enc' -print -quit)
     test -n "$archive"
+    "$python_bin" - "$archive" "$work/release-info.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+archive, info = map(Path, sys.argv[1:])
+envelope = json.loads(info.read_text())["backup_envelope"].encode("ascii")
+with archive.open("rb") as source:
+    assert envelope and source.read(len(envelope)) == envelope
+PY
     ./install.sh "${profile[@]}" unpack-backup "${archive##*/}"
     recovered=$(find backups -mindepth 2 -name database.jsonl.gz -type f -print -quit)
     test -n "$recovered"
@@ -482,7 +503,7 @@ PY
 fi
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
     "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" \
-    "$app_platform_image" <<'PY'
+    "$app_platform_image" "$work/release-info.json" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -497,7 +518,14 @@ Path(sys.argv[1]).write_text(
             "git_sha": sys.argv[3],
             "app_image": sys.argv[4],
             "app_image_source": sys.argv[9],
-            **({"app_platform_image": json.loads(sys.argv[10])} if sys.argv[5] == "rust" else {}),
+            **(
+                {
+                    "app_platform_image": json.loads(sys.argv[10]),
+                    "release_info": json.loads(Path(sys.argv[11]).read_text()),
+                }
+                if sys.argv[5] == "rust"
+                else {}
+            ),
             "runtime": sys.argv[5],
             "platform": sys.argv[6],
             "setup_preserved_settings": True,

@@ -348,9 +348,10 @@ module.build_bundle(image, sha=revision, output=Path(output), runtime="rust")
     )
 
 
-def test_bundled_markdown_links_resolve_within_bundle():
-    included = set(CONTENTS)
-    for name in CONTENTS:
+@pytest.mark.parametrize("contents", [CONTENTS, bundle_module.NATIVE_CONTENTS])
+def test_bundled_markdown_links_resolve_within_bundle(contents):
+    included = set(contents)
+    for name in contents:
         if not name.endswith(".md"):
             continue
         for target in re.findall(r"\]\(([^)]+)\)", (ROOT / name).read_text()):
@@ -429,6 +430,8 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(
         ]
         assert "GA_APP_RUNTIME=rust\n" in (root / "release.env").read_text()
         assert json.loads((root / "release-manifest.json").read_text())["runtime"] == "rust"
+        assert (root / "migration/cutover-runbook.md").is_file()
+        assert (root / "migration/rollback-runbook.md").is_file()
         assert not list(root.rglob("*.py"))
         assert services["migrate"]["command"] == ["migrate"]
         assert services["worker"]["command"] == ["worker"]

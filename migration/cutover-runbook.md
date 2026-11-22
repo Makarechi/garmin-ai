@@ -14,6 +14,15 @@ known working Python release, including its image, configuration and
 supported schema/parser versions. Prepare the [rollback procedure](rollback-runbook.md)
 and record who can authorize return to service.
 
+Use the pinned native application image from the release manifest to record
+the schema, Garmin and FIT parser versions, and the archive and backup formats.
+Compare the output with the installation verification for the same image and
+platform. The command uses the bundled application without opening a database.
+
+```sh
+docker run --rm --network none --read-only "$GA_APP_IMAGE" release-info
+```
+
 ## Rehearse with synthetic data
 
 Use the frozen Python test environment and the exact native release binary.

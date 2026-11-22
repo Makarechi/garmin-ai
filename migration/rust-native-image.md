@@ -10,6 +10,11 @@ both Linux architectures. It verifies that each service starts
 Python interpreter. The installation result records this alongside setup,
 upgrade and backup checks.
 
+The candidate includes the [cutover](cutover-runbook.md) and
+[rollback](rollback-runbook.md) procedures for the same source revision.
+The installation result also records the schema, parser and storage formats
+reported by the running native application.
+
 The pinned TimescaleDB image includes optional PL/Python files for PostgreSQL.
 The native installation smoke checks that the tested database has no PL/Python
 language or extension registered after clean setup or historical upgrade and
