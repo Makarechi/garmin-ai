@@ -251,21 +251,36 @@ if [[ "$runtime" == rust ]]; then
         '
     done
     compose exec -T api sh -ec 'test -s /etc/ssl/certs/ca-certificates.crt && test -f /usr/share/zoneinfo/Europe/Bratislava'
+    compose run --rm --no-deps -T --entrypoint sh worker -ec '
+        umask 077
+        mkdir -p "$GA_DATA_DIR/raw"
+        printf "synthetic file\n" > "$GA_DATA_DIR/raw/recovery-fixture"
+        printf "synthetic token\n" > "$GA_TOKEN_DIR/recovery-fixture"
+    '
     ./install.sh "${profile[@]}" backup
     archive=$(find backups -maxdepth 1 -type f -name 'manual-*.enc' -print -quit)
     test -n "$archive"
     ./install.sh "${profile[@]}" unpack-backup "${archive##*/}"
     recovered=$(find backups -mindepth 2 -name database.jsonl.gz -type f -print -quit)
     test -n "$recovered"
+    recovery_dir=${recovered%/*}
+    recovery_name=${recovery_dir##*/}
 
+    reject_restore() {
+        if ./install.sh "${profile[@]}" restore-db "$recovery_name" >"$work/restore-refusal.log" 2>&1; then
+            echo "Database restore succeeded when it should have been refused." >&2
+            return 1
+        fi
+        if ! grep -F -- "$1" "$work/restore-refusal.log"; then
+            cat "$work/restore-refusal.log" >&2
+            return 1
+        fi
+    }
+    reject_restore 'Stop the API and worker before restoring the database.'
     compose stop api worker
+    reject_restore 'Restore requires an empty destination database'
     compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
         "SELECT current_database(), EXISTS (SELECT FROM events)" | grep -Fx 'garmin_ai|t'
-    compose run --rm --no-deps -T --entrypoint sh worker -ec '
-        umask 077
-        printf "synthetic file\n" > "$GA_DATA_DIR/erase-fixture"
-        printf "synthetic token\n" > "$GA_TOKEN_DIR/erase-fixture"
-    '
     archive_sha=$(
         "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
     )
@@ -289,9 +304,33 @@ if [[ "$runtime" == rust ]]; then
         test ! -e "$GA_LOCK_DIR/erased"
         test ! -e "$GA_LOCK_DIR/activating"
     '
+    compose run --rm --no-deps -T --entrypoint sh worker -ec '
+        umask 077
+        recovery="$GA_BACKUP_DIR/$1"
+        mkdir "$GA_DATA_DIR/raw"
+        cp -R "$recovery/raw/." "$GA_DATA_DIR/raw"
+        cp -R "$recovery/tokens/." "$GA_TOKEN_DIR"
+        printf "synthetic file\n" | cmp - "$GA_DATA_DIR/raw/recovery-fixture"
+        printf "synthetic token\n" | cmp - "$GA_TOKEN_DIR/recovery-fixture"
+    ' recovery-fixture "$recovery_name"
+    ./install.sh "${profile[@]}" restore-db "$recovery_name" | "$python_bin" -c '
+import json
+import sys
+
+counts = json.load(sys.stdin)
+assert len(counts) == 30 and counts["events"] == 1
+'
+    reject_restore 'Restore requires an empty destination database'
     test "$archive_sha" = "$(
         "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
     )"
+    ./install.sh "${profile[@]}" start
+    "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
+        --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
+    if [[ "$historical" == true ]]; then
+        compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+            "SELECT value->>'retained' FROM app_state WHERE key='synthetic:release-upgrade'" | grep -Fx true
+    fi
 fi
 
 mkdir -p "$root/test-results"
@@ -318,6 +357,7 @@ Path(sys.argv[1]).write_text(
             "fictional_tracker_entry_survived_preference_change": True,
             "native_runtime_processes_verified": sys.argv[5] == "rust",
             "native_backup_and_recovery_verified": sys.argv[5] == "rust",
+            "native_bundle_restore_verified": sys.argv[5] == "rust",
             "native_mounted_erasure_verified": sys.argv[5] == "rust",
             "historical_upgrade_verified": sys.argv[7] == "true",
             "staged_read_only_upgrade_verified": sys.argv[7] == "true",

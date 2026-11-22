@@ -62,6 +62,15 @@ compose() (
     GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env "${compose_files[@]}" "$@"
 )
 
+require_stopped_runtime() {
+    local active
+    active=$(compose ps --status running --status restarting --status paused --quiet api worker) || return
+    if [[ -n "$active" ]]; then
+        echo "$1" >&2
+        return 1
+    fi
+}
+
 stop_inspection() {
     if docker container inspect "$inspection_name" >/dev/null 2>&1 &&
         ! docker container stop "$inspection_name" >/dev/null 2>&1 &&
@@ -142,11 +151,7 @@ case "${1:-}" in
             exit
         fi
         test "$#" -eq 1 || { echo "Unexpected command arguments." >&2; exit 2; }
-        active=$(compose ps --status running --status restarting --status paused --quiet api worker)
-        if [[ -n "$active" ]]; then
-            echo "Stop the API and worker before preparing a cutover." >&2
-            exit 1
-        fi
+        require_stopped_runtime "Stop the API and worker before preparing a cutover."
         if [[ "$1" == migrate ]]; then
             compose up -d --wait db
             compose run --rm --no-deps migrate
@@ -223,8 +228,18 @@ case "${1:-}" in
             "/app/backups/$backup_name" "/app/backups/$recovery_name"
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
+    restore-db)
+        test "$runtime" = rust || { echo "This command requires a native bundle." >&2; exit 2; }
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        if [[ $# -ne 2 || ! "${2:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+            echo "Pass the recovery directory name from GA_BACKUP_DIR." >&2
+            exit 2
+        fi
+        require_stopped_runtime "Stop the API and worker before restoring the database."
+        compose run --rm --no-deps -T worker restore-db "/app/backups/$2/database.jsonl.gz"
+        ;;
     *)
-        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME | migrate [--status] | inspect}" >&2
+        echo "Usage: ./install.sh [--gcp] {demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME | restore-db RECOVERY_DIRECTORY | migrate [--status] | inspect}" >&2
         exit 2
         ;;
 esac
