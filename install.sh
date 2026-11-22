@@ -97,12 +97,27 @@ case "${1:-}" in
         ;;
     licenses)
         if [ -z "$legacy_entry" ]; then
-            exec docker run --rm --read-only --entrypoint cat "$image" \
-                /usr/share/doc/garmin-ai/LICENSE \
-                /usr/share/doc/garmin-ai/LICENSE-scipy.txt \
-                /usr/share/doc/garmin-ai/LICENSE-python.txt \
-                /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt \
-                /usr/share/doc/garmin-ai/rust-third-party-notices.txt
+            exec docker run --rm --network none --read-only --cap-drop ALL \
+                --entrypoint sh "$image" -ec '
+                    cd /usr/share/doc/garmin-ai
+                    cat LICENSE LICENSE-scipy.txt LICENSE-python.txt LICENSE-fitdecode.txt \
+                        rust-third-party-notices.txt
+                    printf "\nDebian runtime package notices\n"
+                    packages=$(dpkg-query -W -f="\${Package} \${Version} \${Architecture}\n")
+                    test -n "$packages"
+                    printf "%s\n" "$packages" | while read -r package version architecture; do
+                        printf "\n--- %s %s (%s) ---\n" "$package" "$version" "$architecture"
+                        notice="/usr/share/doc/$package/copyright"
+                        test -s "$notice"
+                        cat "$notice"
+                    done
+                    printf "\nDebian common license texts\n"
+                    for license in /usr/share/common-licenses/*; do
+                        test -s "$license"
+                        printf "\n--- %s ---\n" "${license##*/}"
+                        cat "$license"
+                    done
+                '
         fi
         docker run --rm --read-only --entrypoint cat "$image" \
             /usr/share/doc/garmin-ai/LICENSE \
