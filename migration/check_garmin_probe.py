@@ -65,7 +65,10 @@ def routes():
     contract = json.loads(filename.read_text())
     contract["activities"][1]["start"] = "0"
     path, query = contract["activities"]
-    contract["scoped_activities"] = (path, query | {"startDate": DAY.isoformat(), "endDate": DAY.isoformat()})
+    contract["scoped_activities"] = (
+        path,
+        query | {"startDate": DAY.isoformat(), "endDate": DAY.isoformat()},
+    )
     return {
         (url, tuple(sorted(parameters.items()))): name
         for name, (url, parameters) in contract.items()
@@ -199,7 +202,15 @@ def exercise_scoped(binary, root, ca, seen):
     work.mkdir()
     environment, _ = stores(work, ca)
     result = subprocess.run(
-        [binary, "probe", "--start", DAY.isoformat(), "--end", DAY.isoformat(), "--activities-in-range"],
+        [
+            binary,
+            "probe",
+            "--start",
+            DAY.isoformat(),
+            "--end",
+            DAY.isoformat(),
+            "--activities-in-range",
+        ],
         cwd=work,
         env=environment,
         text=True,
@@ -212,8 +223,10 @@ def exercise_scoped(binary, root, ca, seen):
     report = read_report(work / "data" / "coverage-report.json")
     assert report["complete"]
     archive = work / "data" / "raw"
-    assert json.loads((archive / report["activity_list_archive"]).read_bytes()) == [SCOPED_ACTIVITIES[1]]
-    fit, = (record for record in report["requests"] if record["endpoint"] == "activity_fit")
+    assert json.loads((archive / report["activity_list_archive"]).read_bytes()) == [
+        SCOPED_ACTIVITIES[1]
+    ]
+    (fit,) = (record for record in report["requests"] if record["endpoint"] == "activity_fit")
     assert fit["key"] == "42" and (archive / fit["archive_key"]).read_bytes() == BINARY
 
 
