@@ -24,6 +24,7 @@ from check_cutover_restore import (
     prepare_state,
     previous_api,
     verify_python_can_continue,
+    verify_recovered_diary_edit,
     wait_for_runtime_lease_release,
 )
 from check_database_export import table_values
@@ -194,7 +195,7 @@ def resume_restored_replay(
     return {**result, "worker_resume_seconds": resumed_seconds}
 
 
-def verify_native_resume(binary, engine, paths, work, pending, identity, *, started):
+def verify_native_resume(binary, engine, paths, work, pending, identity, *, started, native_edit):
     event_id = UUID(identity["event_id"])
     with native_api(binary, work, paths) as api:
         api_ready_seconds = round(monotonic() - started, 3)
@@ -215,6 +216,17 @@ def verify_native_resume(binary, engine, paths, work, pending, identity, *, star
         )
         assert api.get("/health/ready").status_code == 200
         assert api.get(event_path, headers=headers("reader")).json() == event
+        if native_edit is not None:
+            pending_after_replay = pending_state(table_values(engine))
+            edited = verify_recovered_diary_edit(
+                api, engine, native_edit, description="Synthetic correction after native recovery"
+            )
+            assert pending_state(table_values(engine)) == pending_after_replay
+            replay["recovered_native_event_revisions"] = [
+                1,
+                native_edit["revision"],
+                edited["revision"],
+            ]
     return {"api_ready_after_restore_seconds": api_ready_seconds, **replay}
 
 
@@ -460,12 +472,17 @@ def verify_backup(
     manifest = json.loads((root / "synthetic-manifest.json").read_text())
     if manifest["commit"] != sha:
         raise ValueError("Backup and restore must use the same source revision")
+    source_runtime = manifest["source_runtime"]
+    native_edit = manifest["native_edit"]
+    if source_runtime not in {"python", "rust"} or (source_runtime == "rust") != (
+        native_edit is not None
+    ):
+        raise ValueError("The backup must identify its source runtime and any native diary edit")
     if prewrite_inspector is not None and (
         native is not None
         or not python_reference
-        or manifest["source_runtime"] != "python"
+        or source_runtime != "python"
         or manifest["source_python_reference"] != python_reference
-        or manifest["native_edit"] is not None
     ):
         raise ValueError(
             "Pre-write recovery requires a backup and restore from the same frozen Python runtime"
@@ -601,15 +618,22 @@ def verify_backup(
     if native is not None:
         assert pending_state(table_values(engine)) == pending
         native_resume = verify_native_resume(
-            native, engine, paths, work, pending, ids, started=started
+            native,
+            engine,
+            paths,
+            work,
+            pending,
+            ids,
+            started=started,
+            native_edit=native_edit,
         )
         print("Rust resumed the archived job and preserved retained work on the recovery host.")
-    elif manifest["source_runtime"] == "rust" or prewrite_result is not None:
+    elif native_edit is not None or prewrite_result is not None:
         event_id, revision = UUID(ids["event_id"]), 1
-        if manifest["source_runtime"] == "rust":
-            resumed = verify_python_can_continue(engine, paths, manifest["native_edit"])
+        if native_edit is not None:
+            resumed = verify_python_can_continue(engine, paths, native_edit)
             event_id, revision = UUID(resumed["id"]), resumed["revision"]
-            verified_revisions = [1, manifest["native_edit"]["revision"], revision]
+            verified_revisions = [1, native_edit["revision"], revision]
         assert pending_state(table_values(engine)) == pending
         restored_replay = resume_restored_replay(
             engine, paths, work, pending, UUID(ids["source_id"]), event_id, revision
@@ -621,7 +645,7 @@ def verify_backup(
             json.dumps(
                 {
                     "commit": sha,
-                    "source_runtime": manifest["source_runtime"],
+                    "source_runtime": source_runtime,
                     "restore_runtime": "python" if native is None else "rust",
                     "source_python_reference": manifest["source_python_reference"],
                     "restore_python_reference": python_reference,
