@@ -119,6 +119,16 @@ unpack-backup FILENAME.enc`; it creates a private recovery directory inside
 [backup guidance](operations.md#backup-and-restore) still applies to data
 handling, while its `uv` and bare Compose commands are for source installations.
 
+For a native recovery, work from the isolated target bundle. Confirm the target
+database against the installation settings, check its schema with
+`./install.sh migrate --status`, and keep the API and worker stopped. Restore
+the authenticated raw and token files to the target's configured paths. Pass
+the directory name printed by `unpack-backup` to
+`./install.sh restore-db RECOVERY_DIRECTORY` to load the logical database export.
+The command expects an empty database at the supported schema and uses the
+target bundle's settings.
+Follow the [rollback procedure](../migration/rollback-runbook.md#restore-and-verify).
+
 Copy the existing `.env` to the new private bundle directory with owner-only
 permissions. If the old bundle has `.plugin.env`, copy it with owner-only
 permissions too. When `GA_PLUGIN_ENV_FILE` names a different relative file,

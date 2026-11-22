@@ -41,13 +41,14 @@ decision requires approval for the named target and reconciliation method.
 
 Authenticate the archive before extracting it. The digest-pinned bundle's
 `./install.sh unpack-backup ARCHIVE.enc` creates a private recovery
-directory. The native CLI's `restore-db` consumes the extracted
-`database.jsonl.gz` with its recovery-target configuration. Verify that the
-named target is isolated, initialized at the supported schema, and empty
-according to the native restore preflight. Restore raw and token files to
-the exact configured destinations with their private ownership before
-starting readers. Keep the source installation and both encrypted backups
-until recovery has been verified.
+directory. On the isolated recovery target, confirm the database against the
+installation settings and check its schema with `./install.sh migrate --status`.
+Keep its API and worker stopped. Restore the authenticated raw and token files
+to the exact configured destinations with their private ownership. Run
+`./install.sh restore-db RECOVERY_DIRECTORY` with the directory name printed by
+`unpack-backup`. It loads `database.jsonl.gz` and requires an empty database at
+the supported revision. Verify the result before starting readers. Keep the
+source installation and both encrypted backups until recovery has been verified.
 
 Python and Rust coordinate unpacking through a private workspace in the
 recovery destination's parent directory. When unpacking stops partway through,
