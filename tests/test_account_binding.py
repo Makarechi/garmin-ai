@@ -307,32 +307,21 @@ def test_login_mismatch_preserves_existing_tokens_and_neutralizes_ambient_cache(
     assert ensure_account(db_engine, A)["fingerprint"] == A
 
 
-@pytest.mark.parametrize("profile_id", [101, 202])
-def test_enrollment_only_publishes_refreshed_session_for_the_bound_owner(
-    db, db_engine, tmp_path, monkeypatch, profile_id
-):
+def simulate_saved_session_refresh(token_file, monkeypatch, profile_id):
     from pathlib import Path
 
-    from garmin_ai import cli, garmin
+    from garmin_ai import garmin
 
-    settings = Settings(
-        database_url=db_engine.url.render_as_string(hide_password=False),
-        data_dir=tmp_path / "data",
-        token_dir=tmp_path / "tokens",
-        lock_dir=tmp_path / "locks",
-        backup_dir=tmp_path / "backups",
-    )
-    settings.token_dir.mkdir()
-    token_file = settings.token_dir / "garmin_tokens.json"
+    token_file.parent.mkdir()
     original = {"di_token": "synthetic-original"}
     refreshed = {"di_token": "synthetic-refreshed"}
     token_file.write_text(json.dumps(original))
-    ensure_account(db_engine, A)
 
     class SavedSession:
         def __init__(self):
             self.client = self
             self.session = None
+            self.directory = None
 
         def load(self, directory):
             self.session = json.loads((Path(directory) / "garmin_tokens.json").read_text())
@@ -343,21 +332,43 @@ def test_enrollment_only_publishes_refreshed_session_for_the_bound_owner(
         def login(self, tokenstore):
             if tokenstore.startswith("{"):
                 self.session = json.loads(tokenstore)
-                assert self.session == original
-                self.session = refreshed
             else:
                 self.load(tokenstore)
-                assert self.session == original
-                self.session = refreshed
-                # The SDK persists refreshes automatically when given a directory.
-                (Path(tokenstore) / "garmin_tokens.json").write_text(self.dumps())
+                self.directory = Path(tokenstore)
+            assert self.session == original
+            self.refresh(refreshed)
+
+        def refresh(self, updated):
+            self.session = updated
+            # The SDK persists refreshes automatically when given a directory.
+            if self.directory is not None:
+                (self.directory / "garmin_tokens.json").write_text(self.dumps())
 
         def connectapi(self, path):
             assert path == "/userprofile-service/socialProfile"
             return {"profileId": profile_id}
 
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(garmin, "Garmin", SavedSession)
+    return original, refreshed
+
+
+@pytest.mark.parametrize("profile_id", [101, 202])
+def test_enrollment_only_publishes_refreshed_session_for_the_bound_owner(
+    db, db_engine, tmp_path, monkeypatch, profile_id
+):
+    from garmin_ai import cli
+
+    settings = Settings(
+        database_url=db_engine.url.render_as_string(hide_password=False),
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    token_file = settings.token_dir / "garmin_tokens.json"
+    original, refreshed = simulate_saved_session_refresh(token_file, monkeypatch, profile_id)
+    ensure_account(db_engine, A)
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr("sys.argv", ["garmin-ai", "enroll-account", "--confirm-existing-owner"])
 
     if profile_id == 101:
@@ -368,6 +379,106 @@ def test_enrollment_only_publishes_refreshed_session_for_the_bound_owner(
             cli.main()
         assert exc.value.code == 1
         assert token_file.read_text() == json.dumps(original)
+    assert ensure_account(db_engine, A)["fingerprint"] == A
+
+
+@pytest.mark.parametrize("profile_id", [101, 202])
+@pytest.mark.parametrize("with_database", [False, True])
+def test_probe_publishes_refreshed_session_after_owner_check(
+    request, tmp_path, monkeypatch, profile_id, with_database
+):
+    from garmin_ai import cli
+
+    database_url = ""
+    if with_database:
+        request.getfixturevalue("db")
+        database = request.getfixturevalue("db_engine")
+        database_url = database.url.render_as_string(hide_password=False)
+        ensure_account(database, A)
+    settings = Settings(
+        database_url=database_url,
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    token_file = settings.token_dir / "garmin_tokens.json"
+    original, refreshed = simulate_saved_session_refresh(token_file, monkeypatch, profile_id)
+    archive = LocalArchive(settings.data_dir / "raw")
+    archive.put_json({"synthetic": True})
+    report_file = settings.data_dir / "coverage-report.json"
+    baseline = {"account_fingerprint": A, "requests": []}
+    report_file.write_text(json.dumps(baseline))
+    late_refresh = {"di_token": "synthetic-refreshed-again"}
+
+    def probe(reader, archive, start, end, checkpoint):
+        assert profile_id == 101
+        assert json.loads(token_file.read_text()) == refreshed
+        reader.client.refresh(late_refresh)
+        checkpoint(baseline | {"complete": False})
+        assert json.loads(token_file.read_text()) == late_refresh
+        timestamp = token_file.stat().st_mtime_ns
+        checkpoint(baseline | {"complete": True})
+        assert token_file.stat().st_mtime_ns == timestamp
+        return baseline | {"complete": True}
+
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "probe", probe)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "probe"])
+    if profile_id == 101:
+        cli.main()
+        assert json.loads(report_file.read_text())["complete"] is True
+        assert json.loads(token_file.read_text()) == late_refresh
+    else:
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert token_file.read_text() == json.dumps(original)
+        assert report_file.read_text() == json.dumps(baseline)
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "report_owner"),
+    [
+        pytest.param(101, None, id="legacy-report"),
+        pytest.param(101, A, id="matching-report"),
+        pytest.param(202, A, id="report-mismatch"),
+        pytest.param(202, B, id="binding-mismatch"),
+    ],
+)
+def test_confirmed_probe_import_publishes_refresh_only_after_provenance_and_binding_checks(
+    db, db_engine, tmp_path, monkeypatch, profile_id, report_owner
+):
+    from garmin_ai import cli
+
+    settings = Settings(
+        database_url=db_engine.url.render_as_string(hide_password=False),
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    token_file = settings.token_dir / "garmin_tokens.json"
+    original, refreshed = simulate_saved_session_refresh(token_file, monkeypatch, profile_id)
+    ensure_account(db_engine, A)
+    settings.data_dir.mkdir()
+    report = {"requests": []}
+    if report_owner is not None:
+        report["account_fingerprint"] = report_owner
+    report_file = settings.data_dir / "coverage-report.json"
+    report_file.write_text(json.dumps(report))
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "import-probe", "--confirm-legacy-owner"])
+
+    if profile_id == 101:
+        cli.main()
+        assert json.loads(token_file.read_text()) == refreshed
+    else:
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert token_file.read_text() == json.dumps(original)
+    assert report_file.read_text() == json.dumps(report)
     assert ensure_account(db_engine, A)["fingerprint"] == A
 
 
@@ -530,7 +641,12 @@ def test_file_only_probe_rejects_existing_other_owner_before_fetch(tmp_path, mon
     before = set(archive.root.rglob("*"))
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(
-        cli.GarminReader, "restore", lambda _: SimpleNamespace(account_fingerprint=lambda: B)
+        cli.GarminReader,
+        "stage_saved_session",
+        lambda _: (
+            SimpleNamespace(account_fingerprint=lambda: B),
+            lambda: pytest.fail("must not save another owner's session"),
+        ),
     )
     monkeypatch.setattr(
         cli, "probe", lambda *args, **kwargs: pytest.fail("must not fetch another owner")

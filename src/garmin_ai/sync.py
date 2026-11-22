@@ -147,7 +147,9 @@ def schedule_sync(session, settings, now: datetime):
     compact_pending_periodic_fetches(session, now)
 
 
-def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fingerprint=None):
+def import_probe(
+    engine, archive, settings, path: Path, *, confirmed_legacy_fingerprint=None, before_commit=None
+):
     report = json.loads(path.read_text())
     fingerprint = report.get("account_fingerprint", confirmed_legacy_fingerprint)
     if confirmed_legacy_fingerprint is not None and fingerprint != confirmed_legacy_fingerprint:
@@ -159,6 +161,7 @@ def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fing
         fingerprint,
         archive_root=archive.root,
         confirm_existing_owner=confirmed_legacy_fingerprint is not None,
+        before_commit=before_commit,
     )
     imported = 0
 

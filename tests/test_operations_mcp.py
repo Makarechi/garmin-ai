@@ -772,7 +772,9 @@ def test_login_and_probe_exclude_erasure_before_database_setup(
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        cli.GarminReader, "restore", lambda _: SimpleNamespace(account_fingerprint=lambda: "a" * 64)
+        cli.GarminReader,
+        "stage_saved_session",
+        lambda _: (SimpleNamespace(account_fingerprint=lambda: "a" * 64), lambda: None),
     )
     monkeypatch.setattr("sys.argv", ["garmin-ai", "probe"])
     cli.main()

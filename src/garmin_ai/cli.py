@@ -21,12 +21,6 @@ class _LazyGarminReader:
         return Reader(*args, **kwargs)
 
     @classmethod
-    def restore(cls, path):
-        from garmin_ai.garmin import GarminReader as Reader
-
-        return Reader.restore(path)
-
-    @classmethod
     def stage_saved_session(cls, path):
         from garmin_ai.garmin import GarminReader as Reader
 
@@ -277,31 +271,36 @@ def main():
             with standalone_files(settings):
                 archive = LocalArchive(settings.data_dir / "raw")
                 path = settings.data_dir / "coverage-report.json"
-                reader = GarminReader.restore(settings.token_dir)
+                reader, publish = GarminReader.stage_saved_session(settings.token_dir)
+                fingerprint = reader.account_fingerprint()
                 if settings.database_url.get_secret_value():
                     from garmin_ai.db import make_engine
 
                     engine = make_engine(settings)
                     try:
                         verify_setup_account(
-                            engine, reader.account_fingerprint(), archive_root=archive.root
+                            engine, fingerprint, archive_root=archive.root, before_commit=publish
                         )
                     finally:
                         engine.dispose()
                 else:
                     from garmin_ai.accounts import verify_file_probe
 
-                    verify_file_probe(archive.root, path, reader.account_fingerprint())
+                    verify_file_probe(archive.root, path, fingerprint)
+                    publish()
+
+                def checkpoint(report):
+                    publish()
+                    atomic_private_write(path, json.dumps(report, indent=2).encode())
+
                 result = probe(
                     reader,
                     archive,
                     start,
                     end,
-                    checkpoint=lambda report: atomic_private_write(
-                        path, json.dumps(report, indent=2).encode()
-                    ),
+                    checkpoint=checkpoint,
                 )
-                atomic_private_write(path, json.dumps(result, indent=2).encode())
+                checkpoint(result)
                 print(f"Coverage report saved locally to {path}. Review before sharing.")
         elif args.command == "mcp":
             from garmin_ai.mcp_server import main as mcp_main
@@ -485,11 +484,10 @@ def main():
             with standalone_files(settings):
                 engine = make_engine(settings)
                 try:
-                    legacy = (
-                        GarminReader.restore(settings.token_dir).account_fingerprint()
-                        if args.confirm_legacy_owner
-                        else None
-                    )
+                    legacy = publish = None
+                    if args.confirm_legacy_owner:
+                        reader, publish = GarminReader.stage_saved_session(settings.token_dir)
+                        legacy = reader.account_fingerprint()
                     result = import_probe(
                         engine,
                         LocalArchive(settings.data_dir / "raw"),
@@ -498,6 +496,7 @@ def main():
                         if args.report
                         else settings.data_dir / "coverage-report.json",
                         confirmed_legacy_fingerprint=legacy,
+                        before_commit=publish,
                     )
                 finally:
                     engine.dispose()

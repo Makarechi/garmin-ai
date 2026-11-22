@@ -44,7 +44,9 @@ the first actual sync still must pass the regular database guard. The setup chec
 is only used under the existing standalone storage/runtime lock. Partial schemas
 fail closed. The upstream locked client atomically replaces its token file.
 
-Probe reports carry the account fingerprint. Configured active databases are checked
+Probe reports carry the account fingerprint. A coverage probe or confirmed legacy
+import saves a refreshed Garmin session only after the ownership checks pass.
+Configured active databases are checked
 before collecting a probe. Import rejects missing or mismatched provenance before
 reading archived payloads. For an old report only, `import-probe --confirm-legacy-owner`
 explicitly attests it belongs to the currently authenticated owner; it cannot override
