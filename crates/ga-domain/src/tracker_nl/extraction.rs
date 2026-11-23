@@ -171,8 +171,8 @@ fn contract() -> Result<&'static Validator, ExtractionError> {
     static CONTRACT: OnceLock<Option<Validator>> = OnceLock::new();
     CONTRACT
         .get_or_init(|| {
-            let schema =
-                serde_json::from_slice(ApprovedModelSchema::TrackerExtraction.document()).ok()?;
+            let document = ApprovedModelSchema::TrackerExtraction.document().ok()?;
+            let schema = serde_json::from_slice(document).ok()?;
             application_validator(&schema).ok()
         })
         .as_ref()

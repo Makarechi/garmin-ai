@@ -40,6 +40,33 @@ pub enum ModelContinuationReply {
 }
 
 impl Database {
+    pub async fn publish_telegram_capability_answer(
+        &self,
+        lease: &TelegramInboundLease,
+        expected: TelegramModelContext<'_>,
+        reply: impl FnOnce(&InboundEnvelope) -> Option<OutboundIntent>,
+    ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        let envelope = text_envelope(lease)?;
+        tokio::time::timeout(Duration::from_millis(1800), async {
+            let mut txn = self.begin_telegram_text(lease, &envelope).await?;
+            let context = verify(
+                &mut txn,
+                lease,
+                &envelope,
+                expected,
+                ModelCategories::HEALTH_AND_DIARY,
+            )
+            .await?;
+            let intent = reply(&envelope).ok_or(TelegramDiaryCommitError::Reply)?;
+            let queued = queue(&mut txn, lease, context, intent).await?;
+            complete_reply(&mut txn, lease).await?;
+            txn.commit().await?;
+            Ok(queued)
+        })
+        .await
+        .map_err(|_| TelegramDiaryCommitError::Database)?
+    }
+
     /// Save only an offered acknowledgement or the exact current undo group.
     pub async fn apply_telegram_model_continuation(
         &self,

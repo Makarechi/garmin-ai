@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::OnceLock};
 
 mod gemini;
 
@@ -19,25 +19,43 @@ use crate::{
 pub enum ApprovedModelSchema {
     AgentStep,
     Interpretation,
+    ConversationInterpretation,
     SafetyScreen,
     TrackerExtraction,
     ModelProbe,
 }
 
 impl ApprovedModelSchema {
-    pub(crate) fn document(self) -> &'static [u8] {
-        match self {
+    pub(crate) fn document(self) -> Result<&'static [u8], ModelSchemaError> {
+        Ok(match self {
             Self::AgentStep => include_bytes!("../contracts/model-schemas/agent-step.json"),
-            Self::Interpretation => {
-                include_bytes!("../contracts/model-schemas/interpretation.json")
-            }
+            Self::Interpretation => INTERPRETATION,
+            Self::ConversationInterpretation => conversation_interpretation()?,
             Self::SafetyScreen => include_bytes!("../contracts/model-schemas/safety-screen.json"),
             Self::TrackerExtraction => {
                 include_bytes!("../contracts/model-schemas/tracker-extraction.json")
             }
             Self::ModelProbe => include_bytes!("../contracts/model-schemas/model-probe.json"),
-        }
+        })
     }
+}
+
+const INTERPRETATION: &[u8] = include_bytes!("../contracts/model-schemas/interpretation.json");
+
+fn conversation_interpretation() -> Result<&'static [u8], ModelSchemaError> {
+    static DOCUMENT: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    DOCUMENT
+        .get_or_init(|| {
+            let mut schema: Value = serde_json::from_slice(INTERPRETATION).ok()?;
+            schema["properties"].as_object_mut()?.insert(
+                "capability_answer".into(),
+                json!({"anyOf":[{"type":"string","minLength":1,"maxLength":900},{"type":"null"}],
+                       "description":"An answer about the assistant's documented features only, in the response language."}),
+            );
+            serde_json::to_vec(&schema).ok()
+        })
+        .as_deref()
+        .ok_or(ModelSchemaError::InvalidDocument)
 }
 
 pub struct StructuredModelRequest {
@@ -78,8 +96,9 @@ impl ExtensionModelRequest {
         instruction: &str,
         prompt: &str,
     ) -> Result<Self, ModelRequestError> {
-        let application: Value = serde_json::from_slice(contract.document())
-            .map_err(|_| ModelRequestError::Schema(ModelSchemaError::InvalidDocument))?;
+        let application: Value =
+            serde_json::from_slice(contract.document().map_err(ModelRequestError::Schema)?)
+                .map_err(|_| ModelRequestError::Schema(ModelSchemaError::InvalidDocument))?;
         let schema = ExtensionResponseSchema::new(&application)
             .map_err(ModelRequestError::ResponseSchema)?;
         let mut params = json!({"schema":application,"instruction":instruction,"prompt":prompt});
@@ -114,7 +133,7 @@ impl StructuredModelRequest {
         {
             return Err(ModelRequestError::InvalidConfiguration);
         }
-        let original = contract.document();
+        let original = contract.document().map_err(ModelRequestError::Schema)?;
         let application: Value = serde_json::from_slice(original)
             .map_err(|_| ModelRequestError::Schema(ModelSchemaError::InvalidDocument))?;
         let wire = compile_model_schema(provider, original).map_err(ModelRequestError::Schema)?;

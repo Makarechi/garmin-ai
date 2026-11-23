@@ -25,7 +25,11 @@ mod telegram;
 mod web;
 pub use telegram::TelegramDiaryInterpretation;
 
-const EXTRACT: &str = include_str!("../../../../src/garmin_ai/prompts/diary_extract.txt");
+const EXTRACT: &str = concat!(
+    include_str!("../../../../src/garmin_ai/prompts/diary_extract.txt"),
+    "\n\n",
+    include_str!("../../contracts/model-prompts/capability-answer.txt")
+);
 const OWNER_TEXT_LIMIT: usize = 16_000;
 const PROMPT_LIMIT: usize = 24_000;
 const EVENT_LIMIT: usize = 20;
@@ -139,7 +143,7 @@ impl ModelGateway<'_> {
             remaining,
             self.execute_with_context(
                 ModelInput::Structured {
-                    contract: ApprovedModelSchema::Interpretation,
+                    contract: ApprovedModelSchema::ConversationInterpretation,
                     instruction: EXTRACT.trim(),
                     prompt: &prompt.json,
                     categories: ModelCategories::HEALTH_AND_DIARY,

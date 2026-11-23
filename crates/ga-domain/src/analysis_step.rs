@@ -163,7 +163,7 @@ fn contract() -> Result<&'static Validator, AnalysisStepError> {
     SCHEMA
         .get_or_init(|| {
             let original =
-                serde_json::from_slice(ApprovedModelSchema::AgentStep.document()).ok()?;
+                serde_json::from_slice(ApprovedModelSchema::AgentStep.document().ok()?).ok()?;
             application_validator(&original).ok()
         })
         .as_ref()
