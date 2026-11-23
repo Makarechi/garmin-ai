@@ -150,6 +150,12 @@ jobs:
           export GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/replay_worker_test"
           GA_DATABASE_URL="$GA_TEST_DATABASE_URL" target/release/garmin-ai-rust migrate
           cargo test --locked -p ga-app --test replay_worker -- --ignored
+      - name: Answer Telegram capability questions locally
+        run: |
+          docker exec "${{ job.services.postgres.id }}" createdb -U garmin telegram_help_test
+          export GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/telegram_help_test"
+          GA_DATABASE_URL="$GA_TEST_DATABASE_URL" target/release/garmin-ai-rust migrate
+          cargo test --locked -p ga-app --test telegram_local_text capability_questions -- --ignored
       - name: Verify the public migration command for every supported schema
         run: |
           binary=target/release/garmin-ai-rust

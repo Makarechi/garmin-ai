@@ -9,7 +9,7 @@ use sqlx::Postgres;
 use time::OffsetDateTime;
 
 use super::{
-    TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState, complete,
+    TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundState, complete, control::HELP,
     diary::queue_reply, history::prompt,
 };
 use crate::{
@@ -90,6 +90,11 @@ impl Database {
             let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn)
                 .await?;
+            if let Some(help) = capability_help(&envelope) {
+                write_reply(&mut txn, lease, &envelope, at, help).await?;
+                txn.commit().await?;
+                return Ok(TelegramModelAdmission::Replied);
+            }
             let now =
                 StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
             if super::tracker_form::apply_in(
@@ -197,6 +202,13 @@ impl Database {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
             let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
                 .fetch_one(&mut *txn).await?;
+            if !matches!(work, LocalTelegramText::Safety(TelegramSafetyDecision::Urgent { .. }))
+                && let Some(help) = capability_help(&envelope)
+            {
+                write_reply(&mut txn, lease, &envelope, at, help).await?;
+                txn.commit().await?;
+                return Ok(());
+            }
             let now = StoredInstant::try_from(at).map_err(|_| TelegramDiaryCommitError::Database)?;
             if matches!(work, LocalTelegramText::ProviderUnavailable)
                 && super::tracker_form::apply_in(&mut txn,lease,&envelope,"UTC",configured_locale,false).await? {
@@ -264,6 +276,32 @@ impl Database {
             txn.commit().await?;
             Ok(())
         }).await.map_err(|_| TelegramDiaryCommitError::Database)?
+    }
+}
+
+fn capability_help(envelope: &InboundEnvelope) -> Option<&'static str> {
+    let text = envelope.text()?;
+    if !matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit) || text.len() > 128 {
+        return None;
+    }
+    let question = text
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '«' | '»' | '"' | '“' | '”' | '„' | '?' | '!' | '.')
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    match question.as_str() {
+        "что ты умеешь" | "что умеешь" | "какие у тебя возможности" | "что умеет бот" => {
+            Some(HELP)
+        }
+        "what can you do" | "what are your capabilities" => Some(concat!(
+            "I can keep your diary, record activities you report, and help you review your Garmin data.\n\n",
+            "Use /today for recent metrics, /status to check synchronization, ",
+            "/history to review the diary, and /newtracker to create a tracker."
+        )),
+        _ => None,
     }
 }
 
