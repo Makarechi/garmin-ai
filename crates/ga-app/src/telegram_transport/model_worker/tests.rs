@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::*;
+mod capability_answers;
 mod tracker;
 mod voice;
 use crate::{

@@ -49,6 +49,10 @@ pub struct WebChatInterpretationContext<'a> {
 pub enum WebChatModelReply<'a> {
     Unverified,
     FixedNotice(&'static str),
+    CapabilityAnswer {
+        answer: &'a str,
+        expected: WebChatInterpretationContext<'a>,
+    },
     Clarify {
         question: &'a str,
         expected: WebChatInterpretationContext<'a>,
@@ -242,7 +246,8 @@ async fn render_model_reply(
         WebChatModelReply::Unverified => return Ok((MODEL_FAILED.to_owned(), Vec::new())),
         // The fixed safety notice uses no diary context or tracker references.
         WebChatModelReply::FixedNotice(message) => return Ok(((*message).to_owned(), Vec::new())),
-        WebChatModelReply::Clarify { expected, .. }
+        WebChatModelReply::CapabilityAnswer { expected, .. }
+        | WebChatModelReply::Clarify { expected, .. }
         | WebChatModelReply::Mutation { expected, .. }
         | WebChatModelReply::Undo { expected, .. }
         | WebChatModelReply::Analysis { expected, .. } => *expected,
@@ -257,6 +262,7 @@ async fn render_model_reply(
     let message = match reply {
         WebChatModelReply::Unverified => MODEL_FAILED.to_owned(),
         WebChatModelReply::FixedNotice(message) => message.to_owned(),
+        WebChatModelReply::CapabilityAnswer { answer, .. } => answer.to_owned(),
         WebChatModelReply::Clarify { question, .. } => {
             save_clarification_in(
                 txn,

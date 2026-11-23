@@ -110,7 +110,16 @@ pub async fn publish_telegram_interpretation(
                     .await?;
                 return Ok(DiaryReplyOutcome::Published);
             }
-            AgentIntent::Question => return Ok(DiaryReplyOutcome::NeedsAnalysis),
+            AgentIntent::Question => {
+                let Some(answer) = command.capability_answer() else {
+                    return Ok(DiaryReplyOutcome::NeedsAnalysis);
+                };
+                database
+                    .publish_telegram_capability_answer(lease, expected, |envelope| {
+                        text_reply(envelope, answer)
+                    })
+                    .await
+            }
         }
     };
     if let Err(error) = result {

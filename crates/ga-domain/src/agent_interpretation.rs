@@ -63,6 +63,7 @@ pub struct AgentInterpretation {
     target_question_id: Option<Uuid>,
     question_context_ids: Vec<Uuid>,
     clarification: Option<String>,
+    capability_answer: Option<String>,
     confidence: f64,
     response_language: Option<String>,
     changed_fields: Vec<String>,
@@ -101,6 +102,24 @@ impl AgentInterpretation {
         }
         let intent =
             AgentIntent::parse(&value["intent"]).ok_or(InterpretationError::InvalidResponse)?;
+        let capability_answer = value["capability_answer"].as_str().map(str::trim);
+        if let Some(answer) = capability_answer
+            && (answer.is_empty()
+                || intent != AgentIntent::Question
+                || ["target_event_id", "target_question_id", "clarification"]
+                    .iter()
+                    .any(|field| !value[*field].is_null())
+                || [
+                    "events",
+                    "draft_links",
+                    "question_context_ids",
+                    "changed_fields",
+                ]
+                .iter()
+                .any(|field| !items(&value[*field]).is_empty()))
+        {
+            return Err(InterpretationError::InvalidResponse);
+        }
         let confidence = value["confidence"]
             .as_f64()
             .ok_or(InterpretationError::InvalidResponse)?;
@@ -154,6 +173,7 @@ impl AgentInterpretation {
             response_language,
             target_question_id: optional_uuid(&value["target_question_id"])?,
             clarification: value["clarification"].as_str().map(str::to_owned),
+            capability_answer: capability_answer.map(str::to_owned),
             changed_fields: items(&value["changed_fields"])
                 .iter()
                 .map(|item| {
@@ -186,6 +206,9 @@ impl AgentInterpretation {
     pub fn clarification(&self) -> Option<&str> {
         self.clarification.as_deref()
     }
+    pub fn capability_answer(&self) -> Option<&str> {
+        self.capability_answer.as_deref()
+    }
     pub fn confidence(&self) -> f64 {
         self.confidence
     }
@@ -201,8 +224,10 @@ fn contract() -> Result<&'static Validator, InterpretationError> {
     static SCHEMA: OnceLock<Option<Validator>> = OnceLock::new();
     SCHEMA
         .get_or_init(|| {
-            let original =
-                serde_json::from_slice(ApprovedModelSchema::Interpretation.document()).ok()?;
+            let document = ApprovedModelSchema::ConversationInterpretation
+                .document()
+                .ok()?;
+            let original = serde_json::from_slice(document).ok()?;
             application_validator(&original).ok()
         })
         .as_ref()

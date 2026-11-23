@@ -26,7 +26,7 @@ impl GeminiModelRequest {
         prompt: &str,
     ) -> Result<Self, ModelRequestError> {
         check_model(model)?;
-        let original = contract.document();
+        let original = contract.document().map_err(ModelRequestError::Schema)?;
         let application = serde_json::from_slice(original)
             .map_err(|_| ModelRequestError::Schema(ModelSchemaError::InvalidDocument))?;
         let wire = compile_gemini_schema(original).map_err(ModelRequestError::Schema)?;

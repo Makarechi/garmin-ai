@@ -22,6 +22,39 @@ fn rejects_a_mutation_without_events_or_a_target() {
 }
 
 #[test]
+fn capability_answers_cannot_carry_record_actions() -> Result<(), InterpretationError> {
+    let answer = json!({"intent":"question","confidence":0.97,
+        "response_language":"ja","capability_answer":" Garminのデータと日記を確認できます。 "});
+    assert_eq!(
+        AgentInterpretation::from_value(&answer)?.capability_answer(),
+        Some("Garminのデータと日記を確認できます。")
+    );
+    for (field, value) in [
+        ("intent", json!("safety")),
+        ("capability_answer", json!(" ")),
+        ("capability_answer", json!("a".repeat(901))),
+        ("clarification", json!("What record should I change?")),
+        (
+            "target_event_id",
+            json!("00000000-0000-0000-0000-000000000004"),
+        ),
+        (
+            "question_context_ids",
+            json!(["00000000-0000-0000-0000-000000000005"]),
+        ),
+        ("changed_fields", json!(["payload.description"])),
+    ] {
+        let mut invalid = answer.clone();
+        invalid[field] = value;
+        assert!(matches!(
+            AgentInterpretation::from_value(&invalid),
+            Err(InterpretationError::InvalidResponse)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "matches synthetic interpretations from pinned Python"]
 fn matches_structured_commands_and_cross_field_validation() -> Result<(), Box<dyn Error>> {
     let fixture: Vec<Value> =

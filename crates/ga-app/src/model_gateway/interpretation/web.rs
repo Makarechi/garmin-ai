@@ -77,6 +77,9 @@ impl ModelGateway<'_> {
                     expected,
                 },
                 AgentIntent::Safety => WebChatModelReply::FixedNotice(urgent_notice(&language)),
+                AgentIntent::Question if let Some(answer) = command.capability_answer() => {
+                    WebChatModelReply::CapabilityAnswer { answer, expected }
+                }
                 AgentIntent::Question => {
                     answer = self
                         .answer_web_chat(
