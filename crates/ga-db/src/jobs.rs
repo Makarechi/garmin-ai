@@ -36,6 +36,7 @@ pub enum JobStoreError {
     LeaseLost,
     PublicationTimedOut,
     InvalidRecordedState,
+    StatementCanceled,
     Database,
 }
 
@@ -47,6 +48,7 @@ impl fmt::Display for JobStoreError {
             Self::LeaseLost => "Job lease expired or belongs to a different worker",
             Self::PublicationTimedOut => "Job publication timed out",
             Self::InvalidRecordedState => "Recorded job state is invalid",
+            Self::StatementCanceled => "Job database query was canceled",
             Self::Database => "Job database operation failed",
         })
     }

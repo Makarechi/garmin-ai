@@ -29,6 +29,7 @@ use uuid::Uuid;
 use crate::{
     Database, ReadinessError, check_readiness,
     garmin_owner::{OwnerVerificationError, verify_owner_in_transaction},
+    query_canceled,
 };
 
 const SCAN_LIMIT: i64 = 128;
@@ -61,6 +62,7 @@ pub enum ReplaySelectionError {
     Owner(OwnerVerificationError),
     InvalidVersion,
     InvalidClock,
+    StatementCanceled,
     Database,
 }
 
@@ -71,6 +73,7 @@ impl fmt::Display for ReplaySelectionError {
             Self::Owner(_) => "Replay inventory owner could not be verified",
             Self::InvalidVersion => "Replay target parser version is invalid",
             Self::InvalidClock => "Archived source has an invalid fetch time",
+            Self::StatementCanceled => "Replay inventory query was canceled",
             Self::Database => "Replay inventory could not be read",
         })
     }
@@ -78,8 +81,12 @@ impl fmt::Display for ReplaySelectionError {
 impl Error for ReplaySelectionError {}
 
 impl From<sqlx::Error> for ReplaySelectionError {
-    fn from(_: sqlx::Error) -> Self {
-        Self::Database
+    fn from(error: sqlx::Error) -> Self {
+        if query_canceled(&error) {
+            Self::StatementCanceled
+        } else {
+            Self::Database
+        }
     }
 }
 

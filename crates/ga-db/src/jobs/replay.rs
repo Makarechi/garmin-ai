@@ -13,6 +13,7 @@ use crate::{
     activity_documents::{ActivityDocument, ActivitySummaryKind},
     fit_ingest::ENDPOINT as FIT_ENDPOINT,
     history_windows::DAY_ENDPOINTS,
+    query_canceled,
     replay::{GARMIN_PARSER_VERSION, HEALTH_CALENDAR_ENDPOINTS, HEALTH_INTRADAY_ENDPOINTS},
 };
 
@@ -146,7 +147,14 @@ impl Database {
                 .bind(seconds)
                 .bind(endpoints)
                 .fetch_optional(&mut *txn)
-                .await?;
+                .await
+                .map_err(|error| {
+                    if query_canceled(&error) {
+                        JobStoreError::StatementCanceled
+                    } else {
+                        error.into()
+                    }
+                })?;
         txn.commit().await?;
         Ok(
             claimed.map(|(id, attempt, payload, endpoint)| ReplayJobLease {

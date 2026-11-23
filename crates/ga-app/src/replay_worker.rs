@@ -36,6 +36,7 @@ use crate::{
 };
 
 const WORKER_POLL: Duration = Duration::from_secs(1);
+const CLAIM_RETRY: Duration = Duration::from_secs(5);
 const REPLAY_BUSY_RETRY_MICROSECONDS: i64 = 2_000_000;
 const PLAN_BUSY: Duration = Duration::from_secs(30);
 const PLAN_IDLE: Duration = Duration::from_secs(15 * 60);
@@ -424,21 +425,26 @@ async fn process_archive(
     let mut next_plan = Instant::now();
     loop {
         if Instant::now() >= next_plan {
-            let plan = database
-                .schedule_bound_replay(clock()?)
-                .await
-                .map_err(ReplayServiceError::Planning)?;
-            next_plan = Instant::now()
-                + if plan.plan_again_soon() {
+            let delay = match database.schedule_bound_replay(clock()?).await {
+                Ok(plan) if plan.plan_again_soon() => PLAN_BUSY,
+                Ok(_) => PLAN_IDLE,
+                Err(error @ ReplaySelectionError::StatementCanceled) if !once => {
+                    eprintln!("Archive replay planning will retry: {error}");
                     PLAN_BUSY
-                } else {
-                    PLAN_IDLE
-                };
+                }
+                Err(error) => return Err(ReplayServiceError::Planning(error)),
+            };
+            next_plan = Instant::now() + delay;
         }
-        let lease = database
-            .claim_replay_job(clock()?, LEASE_SECONDS)
-            .await
-            .map_err(ReplayServiceError::Jobs)?;
+        let lease = match database.claim_replay_job(clock()?, LEASE_SECONDS).await {
+            Ok(lease) => lease,
+            Err(error @ JobStoreError::StatementCanceled) if !once => {
+                eprintln!("Archive replay job claim will retry: {error}");
+                tokio::time::sleep(CLAIM_RETRY).await;
+                continue;
+            }
+            Err(error) => return Err(ReplayServiceError::Jobs(error)),
+        };
         if let Some(lease) = lease {
             let outcome = database
                 .run_replay_job(
