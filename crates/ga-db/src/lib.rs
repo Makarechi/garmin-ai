@@ -43,12 +43,14 @@ pub mod web_chat;
 
 use std::{str::FromStr, time::Duration};
 
-use sqlx::{ConnectOptions, Transaction};
+use sqlx::{ConnectOptions, Connection, Transaction};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgPoolOptions, Postgres};
 
 const SCHEMA_REVISION: &str = "c54f8a72d130";
 const STORAGE_LIFECYCLE_LOCK: i64 = 72104622;
 const OWNER_ENROLLMENT_LOCK: i64 = 72104625;
+const DATABASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const CONTROL_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub struct Database {
@@ -101,8 +103,9 @@ impl Database {
 
     /// Read physical database size for the backup staging estimate.
     pub async fn backup_database_bytes(&self) -> Result<u64, ReadinessError> {
-        tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+        let mut connection = self.control.acquire().await?;
+        tokio::time::timeout(CONTROL_TRANSACTION_TIMEOUT, async {
+            let mut txn = connection.begin_with("BEGIN READ ONLY").await?;
             sqlx::query("SET LOCAL statement_timeout='750ms'")
                 .execute(&mut *txn)
                 .await?;
@@ -117,19 +120,18 @@ impl Database {
     }
 
     pub async fn readiness(&self) -> Result<(), ReadinessError> {
-        tokio::time::timeout(Duration::from_millis(1500), self.readiness_transaction())
-            .await
-            .map_err(|_| ReadinessError::Unavailable)?
-    }
-
-    async fn readiness_transaction(&self) -> Result<(), ReadinessError> {
-        let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
-        sqlx::query("SET LOCAL statement_timeout = '750ms'")
-            .execute(&mut *txn)
-            .await?;
-        let readiness = check_readiness(&mut txn).await;
-        txn.rollback().await?;
-        readiness
+        let mut connection = self.control.acquire().await?;
+        tokio::time::timeout(CONTROL_TRANSACTION_TIMEOUT, async {
+            let mut txn = connection.begin_with("BEGIN READ ONLY").await?;
+            sqlx::query("SET LOCAL statement_timeout = '750ms'")
+                .execute(&mut *txn)
+                .await?;
+            let readiness = check_readiness(&mut txn).await;
+            txn.rollback().await?;
+            readiness
+        })
+        .await
+        .map_err(|_| ReadinessError::Unavailable)?
     }
 }
 
@@ -137,7 +139,7 @@ fn small_pool(options: PgConnectOptions) -> PgPool {
     PgPoolOptions::new()
         .max_connections(2)
         .min_connections(0)
-        .acquire_timeout(Duration::from_millis(750))
+        .acquire_timeout(DATABASE_CONNECT_TIMEOUT)
         .connect_lazy_with(options)
 }
 

@@ -3,7 +3,10 @@ use std::{error::Error, fmt, future::Future, time::Duration};
 use sqlx::{Connection, PgConnection};
 use tokio::time::Instant;
 
-use crate::{Database, ReadinessError, check_readiness};
+use crate::{
+    CONTROL_TRANSACTION_TIMEOUT, DATABASE_CONNECT_TIMEOUT, Database, ReadinessError,
+    check_readiness,
+};
 
 pub(crate) const RUNTIME_LOCK: i64 = 72104620;
 const DATABASE_DEADLINE: Duration = Duration::from_millis(750);
@@ -75,8 +78,13 @@ impl Database {
             .await
             .map_err(RuntimeLeaseError::Readiness)?;
         let options = self.control.connect_options();
+        let mut connection = tokio::time::timeout(
+            DATABASE_CONNECT_TIMEOUT,
+            PgConnection::connect_with(options.as_ref()),
+        )
+        .await
+        .map_err(|_| RuntimeLeaseError::Database)??;
         tokio::time::timeout(DATABASE_DEADLINE, async {
-            let mut connection = PgConnection::connect_with(options.as_ref()).await?;
             let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
                 .bind(RUNTIME_LOCK)
                 .fetch_one(&mut connection)
@@ -110,8 +118,9 @@ impl Database {
 
     /// Observe a recent heartbeat from the same session that still owns this database's worker.
     pub async fn native_worker_healthy(&self) -> Result<bool, ReadinessError> {
-        tokio::time::timeout(Duration::from_millis(1500), async {
-            let mut txn = self.control.begin_with("BEGIN READ ONLY").await?;
+        let mut connection = self.control.acquire().await?;
+        tokio::time::timeout(CONTROL_TRANSACTION_TIMEOUT, async {
+            let mut txn = connection.begin_with("BEGIN READ ONLY").await?;
             sqlx::query("SET LOCAL statement_timeout = '750ms'")
                 .execute(&mut *txn)
                 .await?;
