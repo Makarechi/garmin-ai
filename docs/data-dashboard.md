@@ -2,7 +2,7 @@
 
 Open `/dashboard` on the existing API origin. The initial view explicitly shows synthetic demonstration data. Connect using an existing instance token with `read:health` and/or `read:diary`. Missing scopes are shown per section. Authentication, event storage and export permission checks use the existing API. Authorized users can also create custom trackers and use generated forms to add or correct their entries; those actions require the corresponding write and definition permissions.
 
-For an account-free interactive preview, run `python3 scripts/serve_demo.py` and follow the [demo guide](interactive-demo.md). Its tracker and diary actions use separate tab memory and never call the personal API. The standalone server blocks all network connections initiated by the page.
+For an account-free interactive preview, run `cargo run --locked -p ga-app -- demo` and follow the [demo guide](interactive-demo.md). Its tracker and diary actions use separate tab memory and never call the personal API. The standalone server blocks all network connections initiated by the page.
 
 The date range is 1–31 inclusive days in UTC and applies to the diary; source freshness describes the current state. Daily summaries retain their calendar semantics. Unknown coverage, parser errors and failed downloads remain distinct. The first 500 diary rows are shown with an explicit truncation notice; narrow the period to inspect the remainder. JSON export includes all event types for the selected period, regardless of the on-screen type filter.
 

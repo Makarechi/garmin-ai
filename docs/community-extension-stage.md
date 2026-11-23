@@ -1,5 +1,9 @@
 # Community extension stage: model lifecycle
 
+The in-process Python examples below refer to archived source at
+`9376d081620740799362282ac9faf2f1a1baaffa`. Current Rust extension examples live in
+`examples/native-source`, `examples/native-channel`, and `examples/native-model`.
+
 For the later versioned examples and contract checks, see the
 [extension SDK guide](extension-sdk.md). This page records the earlier model
 lifecycle slice and its original baseline.

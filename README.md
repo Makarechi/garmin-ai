@@ -7,7 +7,7 @@ Queries continue working when Garmin is unavailable.
 ## Implemented
 
 - Installation-local owner identity, selectable scenario packs, versioned event and metric
-  definitions, and user-created trackers that do not require Python or database schema changes.
+  definitions, and user-created trackers that do not require code or schema changes.
 - Generated forms, bounded natural-language tracker setup, tracker-driven check-ins, generic
   analytics, localized onboarding, and transport-neutral messaging with a restricted text-only
   reference channel.
@@ -31,9 +31,9 @@ A populated response from Garmin is not proof of complete daily coverage. Missin
 
 ## Try the interactive demo
 
-Run `python3 scripts/serve_demo.py` and open `http://127.0.0.1:8765/dashboard`.
-No Garmin account, bot, model, database or project installation is needed. Create a tracker,
-record and correct a fictional fact, and see the recalculated summary. The [demo guide](docs/interactive-demo.md)
+Run `cargo run --locked -p ga-app -- demo` and open `http://127.0.0.1:8765/dashboard`.
+Create a tracker, record and correct a fictional fact, and see the recalculated
+summary. All demo data stays in the browser tab. The [demo guide](docs/interactive-demo.md)
 explains the local-only data and reset behavior. The authenticated dashboard on a configured
 instance also offers this demo before connecting personal data.
 
@@ -55,18 +55,19 @@ It has local smoke evidence but is not yet a supported public release.
 
 ### Setup from source
 
-Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.15.2 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
+Use Linux, macOS or WSL2 with Docker Compose 2.24 or newer and a private, backed-up local disk.
 
 ```sh
-uv sync --locked
-uv run python scripts/configure.py
-docker compose up -d --wait db
-uv run garmin-ai migrate
-docker compose up -d --build
+export GA_APP_IMAGE=garmin-ai:local
+docker build -t "$GA_APP_IMAGE" .
+docker run --rm --network none --cap-drop ALL --user "$(id -u):$(id -g)" \
+  --mount "type=bind,source=$PWD,target=$PWD" --workdir "$PWD" \
+  "$GA_APP_IMAGE" configure
+docker compose up -d --wait
 ```
 
 This starts the local diary without external accounts. To connect Garmin,
-Telegram or Gemini later, install the relevant optional dependencies and follow
+Telegram or Gemini later, follow
 the [operations guide](docs/operations.md), [Telegram pairing guide](docs/telegram-pairing.md)
 and [provider consent guide](docs/provider-consent.md). Enter credentials only
 on the private host. Text model processing needs health and diary consent; voice
@@ -93,10 +94,6 @@ accepts only that owner's private chat; zero leaves polling disabled. Garmin log
 password and MFA locally. External account IDs never replace the internal owner identity.
 Never send passwords, MFA codes, bot tokens or API keys in chat or commit them.
 
-Garmin, Telegram and model-provider packages are optional. A local tracker-only installation can
-complete onboarding without connecting any external service. Use `--extra full`
-only when those integrations are needed.
-
 ## Everyday Telegram use
 
 Examples: «кофе был в 11», «мигрень началась часа два назад, 6 из 10»,
@@ -115,20 +112,19 @@ The API binds to `127.0.0.1:8080`. `/health/live` and `/health/ready` expose onl
 The [local web chat](docs/local-web-chat.md) is at `/chat` and requires the owner API key.
 No public ingress is configured. Put authentication and TLS in front of any remote deployment.
 
-Start MCP with `uv run garmin-ai mcp`. It reads the local database, never Garmin directly.
+After `cargo build --locked --release -p ga-app`, start MCP from the instance directory with
+`target/release/garmin-ai-rust mcp`. It reads the local database, never Garmin directly.
 MCP is read-only by default. Set `GA_MCP_ENABLE_WRITES=true` locally to enable audited diary writes.
 See the project-scoped Codex configuration example in the operations guide.
 
 ## Development
 
 ```sh
-uv run playwright install chromium  # required once for the browser demo test
-uv run ruff check .
-uv run ruff format --check .
-# GA_TEST_DATABASE_URL must point to a disposable database whose name ends in _test.
-uv run pytest -q
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
 ```
 
-Database tests skip if a dedicated test database is absent. CI provisions a real TimescaleDB.
-Live Gemini tests require `GA_LIVE_GEMINI_TESTS=1`, use synthetic facts, and consume API quota.
-[Contribution rules](CONTRIBUTING.md) describe the non-draft PR and 30-minute review process.
+CI also provisions a disposable TimescaleDB for storage and browser tests, installs
+the release bundle, and restores backups. [Contribution rules](CONTRIBUTING.md)
+describe how to run the checks and submit a change.

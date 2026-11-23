@@ -1,4 +1,40 @@
 name: ${COMPOSE_PROJECT_NAME:-garmin-ai}
+
+x-app: &app
+  image: ${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}
+  user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+  cap_drop: [ALL]
+
+x-storage-settings: &storage-settings
+  GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL:?Set GA_CONTAINER_DATABASE_URL in .env}
+  GA_LOCK_DIR: /app/state
+  GA_BACKUP_DIR: /app/backups
+  GA_DATA_DIR: /app/data
+  GA_TOKEN_DIR: /app/tokens/garmin
+
+x-storage-mounts: &storage-mounts
+  - &state
+    type: bind
+    source: ${GA_LOCK_DIR:-./.state}
+    target: /app/state
+    bind:
+      create_host_path: false
+  - type: bind
+    source: ${GA_BACKUP_DIR:-./backups}
+    target: /app/backups
+    bind:
+      create_host_path: false
+  - type: bind
+    source: ${GA_DATA_DIR:-./data}
+    target: /app/data
+    bind:
+      create_host_path: false
+  - type: bind
+    source: ${GA_TOKEN_DIR:-./tokens/garmin}
+    target: /app/tokens/garmin
+    bind:
+      create_host_path: false
+
 services:
   db:
     image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
@@ -12,31 +48,28 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: [CMD-SHELL, "pg_isready -U garmin -d garmin_ai"]
+      test: [CMD, pg_isready, -h, "127.0.0.1", -U, garmin, -d, garmin_ai]
       interval: 5s
       timeout: 5s
       retries: 20
   migrate:
-    build: .
-    image: ${COMPOSE_PROJECT_NAME:-garmin-ai}:local
-    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
-    command: [garmin-ai, migrate]
-    environment:
-      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL:?Set GA_CONTAINER_DATABASE_URL in .env}
+    <<: *app
+    command: [migrate]
+    environment: *storage-settings
+    volumes: [*state]
     depends_on:
       db:
         condition: service_healthy
   api:
-    image: ${COMPOSE_PROJECT_NAME:-garmin-ai}:local
-    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    <<: *app
     restart: unless-stopped
-    command: [garmin-ai, serve, --host, 0.0.0.0]
+    command: [serve, --host, 0.0.0.0, --port, "8080"]
     env_file:
       - path: ${GA_PLUGIN_ENV_FILE:-.plugin.env}
         required: false
     environment:
-      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
-      GA_API_KEY: ${GA_API_KEY}
+      <<: *storage-settings
+      GA_API_KEY: ${GA_API_KEY:-}
       GA_API_TOKENS: ${GA_API_TOKENS:-[]}
       GA_CALENDAR_SOURCES: ${GA_CALENDAR_SOURCES:-[]}
       GA_GEMINI_API_KEY: ${GA_GEMINI_API_KEY:-}
@@ -53,75 +86,39 @@ services:
       GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
       GA_TELEGRAM_BOT_TOKEN: ${GA_TELEGRAM_BOT_TOKEN:-}
       GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
-      GA_TELEGRAM_DISPATCHER_VERSION: ${GA_TELEGRAM_DISPATCHER_VERSION:-neutral-shadow-v1}
-      GA_TOKEN_DIR: /app/tokens/garmin
       GA_GARMIN_EMAIL: ${GA_GARMIN_EMAIL:-}
       GA_GARMIN_PASSWORD_SECRET_VERSION: ${GA_GARMIN_PASSWORD_SECRET_VERSION:-}
       GA_GARMIN_AUTH_URL: ${GA_GARMIN_AUTH_URL:-}
-    volumes:
-      - type: bind
-        source: ${GA_TOKEN_DIR:-./tokens/garmin}
-        target: /app/tokens/garmin
-        bind:
-          create_host_path: false
+    volumes: *storage-mounts
     ports:
       - "127.0.0.1:${GA_API_PORT:-8080}:8080"
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: [CMD, garmin-ai-rust, healthcheck, --ready]
+      interval: 15s
+      timeout: 5s
+      retries: 5
   worker:
-    image: ${COMPOSE_PROJECT_NAME:-garmin-ai}:local
-    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    <<: *app
     restart: unless-stopped
     stop_grace_period: 120s
+    command: [worker]
     env_file:
       - path: ${GA_WORKER_ENV_FILE:-.env}
       - path: ${GA_PLUGIN_ENV_FILE:-.plugin.env}
         required: false
-    environment:
-      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
-      GA_LOCK_DIR: /app/state
-      GA_BACKUP_DIR: /app/backups
-      GA_DATA_DIR: /app/data
-      GA_TOKEN_DIR: /app/tokens/garmin
-      GA_GARMIN_AUTH_URL: ${GA_GARMIN_AUTH_URL:-}
-      GA_GARMIN_EMAIL: ${GA_GARMIN_EMAIL:-}
-      GA_GARMIN_PASSWORD_SECRET_VERSION: ${GA_GARMIN_PASSWORD_SECRET_VERSION:-}
-      GA_GEMINI_FALLBACK_ENABLED: ${GA_GEMINI_FALLBACK_ENABLED:-true}
-      GA_GEMINI_FALLBACK_MODELS: '${GA_GEMINI_FALLBACK_MODELS:-["gemini-3.1-flash-lite"]}'
-    volumes:
-      - type: bind
-        source: ${GA_LOCK_DIR:-./.state}
-        target: /app/state
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${GA_BACKUP_DIR:-./backups}
-        target: /app/backups
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${GA_DATA_DIR:-./data}
-        target: /app/data
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${GA_TOKEN_DIR:-./tokens/garmin}
-        target: /app/tokens/garmin
-        bind:
-          create_host_path: false
+    environment: *storage-settings
+    volumes: *storage-mounts
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: [CMD, python, -m, garmin_ai.healthcheck]
-      interval: 60s
-      timeout: 10s
-      retries: 3
+      test: [CMD, garmin-ai-rust, healthcheck, --worker]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres-data:

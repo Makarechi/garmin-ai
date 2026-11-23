@@ -1,1 +1,0 @@
-"""Personal Garmin health platform."""

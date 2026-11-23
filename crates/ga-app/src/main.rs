@@ -25,7 +25,7 @@ use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 #[command(
     name = "garmin-ai-rust",
     version,
-    about = "Garmin AI Rust migration executable"
+    about = "Garmin AI personal diary and Garmin analytics"
 )]
 struct Cli {
     #[command(subcommand)]

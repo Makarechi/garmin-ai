@@ -3,13 +3,13 @@
 Use a separate clone and private directories for each owner. In a new clone run:
 
 ```sh
-uv run python scripts/configure.py --instance garmin-owner-a --db-port 55433 --api-port 8081
+/path/to/garmin-ai-rust configure --instance garmin-owner-a --db-port 55433 --api-port 8081
 ```
 
 For another owner use another clone, another name, and two other unused ports.
 Compose scopes its network and PostgreSQL volume by the persisted project name.
-Local application image tags are also scoped, so building one clone does not replace
-another clone's image tag. All published ports remain bound to 127.0.0.1.
+Choose the Rust image for each clone with `GA_APP_IMAGE`. All published ports
+remain bound to 127.0.0.1.
 The container database endpoint remains db:5432; the generated host URL uses the
 selected port. Check port availability before starting Compose.
 
@@ -23,7 +23,7 @@ conflicting name: Docker gives those overrides precedence over the file.
 Distinct project names are required across all clones on the host. Do not copy another
 owner's .env, token store, archive, backup key or credentials. Configure a separate bot
 and owner for each instance. This is independent single-owner deployment, not a shared
-multi-user database. The GCP override's GA_IMAGE remains an explicit operator choice.
+multi-user database. For bundles, the image is selected in `release.env`.
 
 Validation covers two synthetic setup directories, preserved settings and keys,
 invalid arguments, protected existing identity and resolved Compose names/ports/volumes.

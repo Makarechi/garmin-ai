@@ -14,8 +14,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from garmin_ai.operations import REVISION
-
 ROOT = Path(__file__).resolve().parents[1]
 APP_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -26,20 +24,12 @@ NATIVE_VERSION_PATTERNS = {
     "database_export_format": r"garmin-ai-[a-z0-9]+-v[0-9]+",
     "backup_envelope": r"GARMINAI[0-9]+",
 }
-LOCAL_IMAGE = "${COMPOSE_PROJECT_NAME:-garmin-ai}:local"
 RELEASE_IMAGE = "${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}"
 CONTENTS = (
     ".env.example",
     "LICENSE",
     "compose.release.yml",
     "install.sh",
-    "scripts/configure.py",
-    "scripts/release_mounts.py",
-    "scripts/serve_demo.py",
-    "scripts/verify_release_backup.py",
-    "src/garmin_ai/static/dashboard/app.js",
-    "src/garmin_ai/static/dashboard/index.html",
-    "src/garmin_ai/static/dashboard/styles.css",
     "docs/release-install.md",
     "docs/provider-consent.md",
     "docs/operations.md",
@@ -53,8 +43,6 @@ CONTENTS = (
     "docs/verification.md",
     "docs/wearable-capability-spike.md",
     "tests/universal_acceptance_manifest.json",
-)
-NATIVE_CONTENTS = tuple(name for name in CONTENTS if not name.startswith(("scripts/", "src/"))) + (
     "compose.gcp.yml",
     "deploy/gcp/bootstrap.sh",
     "deploy/gcp/Caddyfile.garmin-auth",
@@ -70,22 +58,9 @@ NATIVE_CONTENTS = tuple(name for name in CONTENTS if not name.startswith(("scrip
 )
 
 
-def release_compose(source: str) -> str:
-    build = f"    build: .\n    image: {LOCAL_IMAGE}\n"
-    if source.count(build) != 1 or source.count(f"    image: {LOCAL_IMAGE}\n") != 3:
-        raise ValueError("Development Compose service layout changed; review release rendering")
-    result = source.replace(build, f"    image: {RELEASE_IMAGE}\n", 1)
-    result = result.replace(f"    image: {LOCAL_IMAGE}\n", f"    image: {RELEASE_IMAGE}\n")
-    if "build:" in result or LOCAL_IMAGE in result:
-        raise ValueError("Release Compose must not build from local source")
-    return result
-
-
-def check_compose() -> None:
-    expected = release_compose((ROOT / "compose.yml").read_text())
-    actual = (ROOT / "compose.release.yml").read_text()
-    if actual != expected:
-        raise ValueError("compose.release.yml differs from the reviewed development layout")
+def check_compose(source: str) -> None:
+    if f"image: {RELEASE_IMAGE}" not in source or re.search(r"^\s*build:", source, re.MULTILINE):
+        raise ValueError("Release Compose must use the pinned application image without a build")
 
 
 def registry_document(image: str, *options: str) -> dict:
@@ -256,25 +231,22 @@ def build_bundle(
     *,
     sha: str,
     output: Path,
-    runtime: str = "python",
     native_installation_reports: tuple[Path, ...] = (),
 ) -> tuple[Path, Path]:
     if not APP_IMAGE_RE.fullmatch(app_image):
         raise ValueError("Application image must include a full sha256 digest")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("Git revision must be a complete commit SHA")
-    if runtime not in ("python", "rust"):
-        raise ValueError("Unsupported application runtime")
-    native = runtime == "rust"
-    if native_installation_reports and not native:
-        raise ValueError("Native installation reports require the Rust runtime")
-    if not native:
-        check_compose()
-    compose_source = ROOT / ("compose.rust-release.yml" if native else "compose.release.yml")
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    compose_source = ROOT / "compose.yml"
+    compose = compose_source.read_text()
+    check_compose(compose)
+    version = tomllib.loads((ROOT / "crates/ga-app/Cargo.toml").read_text())["package"]["version"]
+    revision = (ROOT / "crates/ga-db/schema-revision.txt").read_text().strip()
+    if not re.fullmatch(r"[0-9a-f]{12}", revision):
+        raise ValueError("Invalid Rust database revision")
     database_image = re.search(
         r"^    image: (timescale/timescaledb:[^\s]+@sha256:[0-9a-f]{64})$",
-        compose_source.read_text(),
+        compose,
         re.MULTILINE,
     )
     if database_image is None:
@@ -285,17 +257,15 @@ def build_bundle(
         "git_sha": sha,
         "app_image": app_image,
         "database_image": database_image.group(1),
-        "database_revision": REVISION,
+        "database_revision": revision,
+        "app_platform_images": verify_native_image(app_image, sha),
+        "runtime": "rust",
         "validated_platforms": [],
         "release_status": "candidate; operational and license acceptance pending",
     }
-    if native:
-        manifest["app_platform_images"] = verify_native_image(app_image, sha)
-        manifest["runtime"] = "rust"
-        if native_installation_reports:
-            attach_native_versions(manifest, native_installation_reports)
-    native_suffix = "-native" if native else ""
-    prefix = f"garmin-ai-{version}{native_suffix}-{sha[:8]}"
+    if native_installation_reports:
+        attach_native_versions(manifest, native_installation_reports)
+    prefix = f"garmin-ai-{version}-native-{sha[:8]}"
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{prefix}.tar.gz"
     checksum = output / f"{archive.name}.sha256"
@@ -309,10 +279,8 @@ def build_bundle(
         staged_checksum = staging / checksum.name
         with staged_archive.open("wb") as raw:
             with tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-                for name in NATIVE_CONTENTS if native else CONTENTS:
+                for name in CONTENTS:
                     source = compose_source if name == "compose.release.yml" else ROOT / name
-                    if native and name == "compose.gcp.yml":
-                        source = ROOT / "compose.rust-gcp.yml"
                     data = source.read_bytes()
                     executable = name in {
                         "install.sh",
@@ -320,11 +288,10 @@ def build_bundle(
                         "deploy/gcp/install-native-cleanup.sh",
                     }
                     _add(tar, f"{prefix}/{name}", data, 0o755 if executable else 0o644)
-                runtime_setting = "GA_APP_RUNTIME=rust\n" if native else ""
                 _add(
                     tar,
                     f"{prefix}/release.env",
-                    f"GA_APP_IMAGE={app_image}\n{runtime_setting}".encode(),
+                    f"GA_APP_IMAGE={app_image}\nGA_APP_RUNTIME=rust\n".encode(),
                     0o644,
                 )
                 _add(
@@ -421,12 +388,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-compose", action="store_true")
     parser.add_argument("--app-image")
-    parser.add_argument("--runtime", choices=("python", "rust"), default="python")
+    parser.add_argument("--runtime", choices=("rust",), help=argparse.SUPPRESS)
     parser.add_argument("--native-installation-report", action="append", type=Path, default=[])
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     if args.check_compose:
-        check_compose()
+        check_compose((ROOT / "compose.yml").read_text())
         return
     if not args.app_image:
         parser.error("--app-image is required")
@@ -443,7 +410,6 @@ def main() -> None:
             args.app_image,
             sha=sha,
             output=args.output,
-            runtime=args.runtime,
             native_installation_reports=tuple(args.native_installation_report),
         )
     except ValueError as error:

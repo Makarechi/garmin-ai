@@ -2,12 +2,11 @@
 
 During setup, before starting the worker, store the bot token in the instance .env and leave
 GA_TELEGRAM_USER_ID absent or zero. Stop the worker, then run
-`uv run garmin-ai pair-telegram --env-file .env` on the host using the instance's
+`garmin-ai-rust pair-telegram --env-file .env` on the host using the instance's
 configured database access. The local console prints a fresh three-minute code
 and the bot username. Send that command in a private chat with that bot.
-Native installations use `garmin-ai-rust pair-telegram --env-file .env` and
-`garmin-ai-rust migrate`.
-The database must already be migrated (`uv run garmin-ai migrate`); pairing refuses
+In a release bundle, use `./install.sh pair-telegram` after initialization.
+The database must already be migrated (`garmin-ai-rust migrate`); pairing refuses
 an unmigrated database so two local configurations cannot both claim the first owner.
 
 Only a non-forwarded private message containing the fresh random code, whose sender owns the chat, can match. Host/server clock skew does not invalidate the code; its lifetime uses a local monotonic clock. The matched Telegram update is acknowledged before the owner is saved.

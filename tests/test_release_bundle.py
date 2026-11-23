@@ -26,14 +26,6 @@ spec.loader.exec_module(bundle_module)
 CONTENTS = bundle_module.CONTENTS
 build_bundle = bundle_module.build_bundle
 check_compose = bundle_module.check_compose
-mount_spec = spec_from_file_location("release_mounts", ROOT / "scripts/release_mounts.py")
-mount_module = module_from_spec(mount_spec)
-mount_spec.loader.exec_module(mount_module)
-verification_spec = spec_from_file_location(
-    "verify_release_backup", ROOT / "scripts/verify_release_backup.py"
-)
-verification_module = module_from_spec(verification_spec)
-verification_spec.loader.exec_module(verification_module)
 inspect_spec = spec_from_file_location(
     "verify_release_install", ROOT / "scripts/verify_release_install.py"
 )
@@ -135,7 +127,7 @@ def test_native_bundle_checks_every_runnable_image(
     monkeypatch.setattr(bundle_module, "registry_document", document)
     output = tmp_path / "bundle"
     if error is None:
-        archive, _ = build_bundle(IMAGE, sha=SHA, output=output, runtime="rust")
+        archive, _ = build_bundle(IMAGE, sha=SHA, output=output)
         with tarfile.open(archive) as bundle:
             manifest = json.load(
                 bundle.extractfile(
@@ -153,7 +145,7 @@ def test_native_bundle_checks_every_runnable_image(
         assert manifest["validated_platforms"] == []
     else:
         with pytest.raises(ValueError, match=error):
-            build_bundle(IMAGE, sha=SHA, output=output, runtime="rust")
+            build_bundle(IMAGE, sha=SHA, output=output)
         assert not output.exists()
     assert inspected == [f"{repository}@{first}", f"{repository}@{second}"]
 
@@ -181,7 +173,7 @@ def test_native_bundle_rejects_ambiguous_platforms_but_allows_single_image(
     monkeypatch.setattr(bundle_module, "registry_document", document)
     if second_image:
         with pytest.raises(ValueError, match="multiple images for linux/amd64"):
-            build_bundle(IMAGE, sha=SHA, output=tmp_path / "bundle", runtime="rust")
+            build_bundle(IMAGE, sha=SHA, output=tmp_path / "bundle")
         assert not (tmp_path / "bundle").exists()
     else:
         assert bundle_module.verify_native_image(IMAGE, SHA) == {
@@ -215,7 +207,7 @@ def native_version_reports(tmp_path, monkeypatch):
     monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: known_images)
     release_info = {
         "application_version": "0.1.0",
-        "database_revision": bundle_module.REVISION,
+        "database_revision": (ROOT / "crates/ga-db/schema-revision.txt").read_text().strip(),
         "archive_json": "Python-compatible UTF-8 JSON",
         "fit_parser_version": 9,
         "garmin_parser_version": 9,
@@ -250,7 +242,6 @@ def test_native_bundle_attaches_versions_for_exact_images(tmp_path, native_versi
         IMAGE,
         sha=SHA,
         output=tmp_path / "output",
-        runtime="rust",
         native_installation_reports=reports[::-1],
     )
     with tarfile.open(archive) as release:
@@ -309,34 +300,21 @@ def test_native_bundle_rejects_incompatible_version_reports(
     receipt.write_text(json.dumps(document))
     output = tmp_path / "output"
     with pytest.raises(ValueError, match=error):
-        build_bundle(
-            IMAGE, sha=SHA, output=output, runtime="rust", native_installation_reports=reports
-        )
-    assert not output.exists()
-
-
-def test_python_bundle_cannot_attach_native_versions(tmp_path):
-    output = tmp_path / "output"
-    with pytest.raises(ValueError, match="require the Rust runtime"):
-        build_bundle(
-            IMAGE,
-            sha=SHA,
-            output=output,
-            native_installation_reports=(tmp_path / "receipt.json",),
-        )
+        build_bundle(IMAGE, sha=SHA, output=output, native_installation_reports=reports)
     assert not output.exists()
 
 
 def test_release_compose_tracks_the_reviewed_service_layout():
-    check_compose()
-    content = (ROOT / "compose.release.yml").read_text()
+    content = (ROOT / "compose.yml").read_text()
+    check_compose(content)
     assert "build:" not in content
-    assert content.count("${GA_APP_IMAGE:") == 3
+    assert content.count("${GA_APP_IMAGE:") == 1
     assert "service_completed_successfully" in content
     assert "127.0.0.1:${GA_API_PORT:-8080}:8080" in content
 
 
-def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path):
+def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
     archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path)
     assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
     with tarfile.open(archive) as bundle:
@@ -358,7 +336,10 @@ def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path):
         assert manifest["validated_platforms"] == []
         assert manifest["release_status"].startswith("candidate")
         env_name = next(name for name in bundle.getnames() if name.endswith("release.env"))
-        assert bundle.extractfile(env_name).read() == f"GA_APP_IMAGE={IMAGE}\n".encode()
+        assert (
+            bundle.extractfile(env_name).read()
+            == f"GA_APP_IMAGE={IMAGE}\nGA_APP_RUNTIME=rust\n".encode()
+        )
         for doc in (
             "telegram-pairing.md",
             "access-scopes.md",
@@ -373,7 +354,7 @@ def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
     tmp_path, monkeypatch, failure
 ):
     monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
-    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime="rust")
+    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path)
     previous = archive.read_bytes(), checksum.read_bytes()
     replacement = IMAGE.split("@")[0] + "@sha256:" + "c" * 64
     add = bundle_module._add
@@ -394,13 +375,13 @@ def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
         else:
             patch.setattr(Path, "replace", fail_when_publishing_checksum)
         with pytest.raises(OSError) as failed:
-            build_bundle(replacement, sha=SHA, output=tmp_path, runtime="rust")
+            build_bundle(replacement, sha=SHA, output=tmp_path)
         assert failed.value.errno == errno.ENOSPC
 
     assert set(tmp_path.iterdir()) == {archive, checksum}
     assert (archive.read_bytes(), checksum.read_bytes()) == previous
 
-    assert build_bundle(replacement, sha=SHA, output=tmp_path, runtime="rust") == (
+    assert build_bundle(replacement, sha=SHA, output=tmp_path) == (
         archive,
         checksum,
     )
@@ -412,7 +393,7 @@ def test_bundle_rebuild_keeps_previous_artifacts_after_storage_failure(
 @pytest.mark.parametrize("interruption", ["archive", "checksum"])
 def test_rebuild_recovers_after_interrupted_publication(tmp_path, monkeypatch, interruption):
     monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
-    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime="rust")
+    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path)
     original = archive.read_bytes(), checksum.read_bytes()
     replacement = IMAGE.split("@")[0] + "@sha256:" + "c" * 64
     child = """
@@ -436,7 +417,7 @@ def replace_then_kill(path, target):
     return result
 
 Path.replace = replace_then_kill
-module.build_bundle(image, sha=revision, output=Path(output), runtime="rust")
+module.build_bundle(image, sha=revision, output=Path(output))
 """
     interrupted = subprocess.run(
         [
@@ -463,7 +444,7 @@ module.build_bundle(image, sha=revision, output=Path(output), runtime="rust")
     with monkeypatch.context() as patch:
         patch.setattr(bundle_module, "_add", full_volume)
         with pytest.raises(OSError) as failed:
-            build_bundle(replacement, sha=SHA, output=tmp_path, runtime="rust")
+            build_bundle(replacement, sha=SHA, output=tmp_path)
         assert failed.value.errno == errno.ENOSPC
     assert (archive.read_bytes(), checksum.read_bytes()) == expected
     assert (
@@ -472,10 +453,9 @@ module.build_bundle(image, sha=revision, output=Path(output), runtime="rust")
     )
 
 
-@pytest.mark.parametrize("contents", [CONTENTS, bundle_module.NATIVE_CONTENTS])
-def test_bundled_markdown_links_resolve_within_bundle(contents):
-    included = set(contents)
-    for name in contents:
+def test_bundled_markdown_links_resolve_within_bundle():
+    included = set(CONTENTS)
+    for name in CONTENTS:
         if not name.endswith(".md"):
             continue
         for target in re.findall(r"\]\(([^)]+)\)", (ROOT / name).read_text()):
@@ -486,23 +466,20 @@ def test_bundled_markdown_links_resolve_within_bundle(contents):
             assert resolved in included, f"{name} links to missing {resolved}"
 
 
-@pytest.mark.parametrize(("runtime", "gcp"), [("python", False), ("rust", False), ("rust", True)])
-def test_release_compose_resolves_to_the_pinned_image_without_source(
-    tmp_path, monkeypatch, runtime, gcp
-):
+@pytest.mark.parametrize("gcp", [False, True])
+def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, monkeypatch, gcp):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose is unavailable")
-    if runtime == "rust":
-        monkeypatch.setattr(
-            bundle_module,
-            "registry_document",
-            lambda _image, *options: (
-                {"config": {"digest": "sha256:" + "c" * 64}}
-                if options == ("--raw",)
-                else native_config(SHA)
-            ),
-        )
-    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
+    monkeypatch.setattr(
+        bundle_module,
+        "registry_document",
+        lambda _image, *options: (
+            {"config": {"digest": "sha256:" + "c" * 64}}
+            if options == ("--raw",)
+            else native_config(SHA)
+        ),
+    )
+    archive, checksum = build_bundle(IMAGE, sha=SHA, output=tmp_path)
     assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
     with tarfile.open(archive) as bundle:
         bundle.extractall(tmp_path, filter="data")
@@ -540,43 +517,40 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(
     assert {services[name]["image"] for name in ("migrate", "api", "worker")} == {IMAGE}
     assert all("build" not in services[name] for name in ("migrate", "api", "worker"))
     assert services["db"]["image"].startswith("timescale/timescaledb:")
-    if runtime == "rust":
-        # The temporary initialization server only accepts Unix socket connections.
-        assert services["db"]["healthcheck"]["test"] == [
-            "CMD",
-            "pg_isready",
-            "-h",
-            "127.0.0.1",
-            "-U",
-            "garmin",
-            "-d",
-            "garmin_ai",
-        ]
-        assert "GA_APP_RUNTIME=rust\n" in (root / "release.env").read_text()
-        assert json.loads((root / "release-manifest.json").read_text())["runtime"] == "rust"
-        assert (root / "migration/cutover-runbook.md").is_file()
-        assert (root / "migration/rollback-runbook.md").is_file()
-        assert not list(root.rglob("*.py"))
-        assert services["migrate"]["command"] == ["migrate"]
-        assert services["worker"]["command"] == ["worker"]
-        assert services["api"]["healthcheck"]["test"] == [
-            "CMD",
-            "garmin-ai-rust",
-            "healthcheck",
-            "--ready",
-        ]
-        assert services["worker"]["healthcheck"]["test"] == [
-            "CMD",
-            "garmin-ai-rust",
-            "healthcheck",
-            "--worker",
-        ]
-        for name in ("migrate", "api", "worker"):
-            state = next(
-                path for path in services[name]["volumes"] if path["target"] == "/app/state"
-            )
-            assert state["source"] == str(root / ".state")
-            assert state["bind"]["create_host_path"] is False
+    # The temporary initialization server only accepts Unix socket connections.
+    assert services["db"]["healthcheck"]["test"] == [
+        "CMD",
+        "pg_isready",
+        "-h",
+        "127.0.0.1",
+        "-U",
+        "garmin",
+        "-d",
+        "garmin_ai",
+    ]
+    assert "GA_APP_RUNTIME=rust\n" in (root / "release.env").read_text()
+    assert json.loads((root / "release-manifest.json").read_text())["runtime"] == "rust"
+    assert (root / "migration/cutover-runbook.md").is_file()
+    assert (root / "migration/rollback-runbook.md").is_file()
+    assert not list(root.rglob("*.py"))
+    assert services["migrate"]["command"] == ["migrate"]
+    assert services["worker"]["command"] == ["worker"]
+    assert services["api"]["healthcheck"]["test"] == [
+        "CMD",
+        "garmin-ai-rust",
+        "healthcheck",
+        "--ready",
+    ]
+    assert services["worker"]["healthcheck"]["test"] == [
+        "CMD",
+        "garmin-ai-rust",
+        "healthcheck",
+        "--worker",
+    ]
+    for name in ("migrate", "api", "worker"):
+        state = next(path for path in services[name]["volumes"] if path["target"] == "/app/state")
+        assert state["source"] == str(root / ".state")
+        assert state["bind"]["create_host_path"] is False
     if gcp:
         assert "auth-gateway" not in services
         assert services["db"]["mem_limit"] == str(320 * 1024**2)
@@ -620,66 +594,9 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(
         assert Path(caddyfile["source"]).is_file()
 
 
-def test_update_mounts_preserve_old_storage_paths_without_exposing_secrets(tmp_path):
-    old = tmp_path / "old"
-    new = tmp_path / "new"
-    old.mkdir()
-    new.mkdir()
-    fields = {
-        "GA_DATA_DIR": old / "data",
-        "GA_TOKEN_DIR": old / "tokens" / "garmin",
-        "GA_BACKUP_DIR": old / "backups",
-        "GA_LOCK_DIR": old / ".state",
-    }
-    env_file = new / ".env"
-    env_file.write_text(
-        "\n".join(f"{key}='{path}'" for key, path in fields.items())
-        + "\nGA_API_KEY='test-only-key-must-not-appear'\n"
-    )
-    assert mount_module.preserved_mounts(env_file, new) == [str(old)]
-    assert mount_module.preserved_mounts(new / "missing.env", new) == []
-    env_file.write_text("GA_DATA_DIR='/tmp/unsafe,path'\n")
-    with pytest.raises(ValueError, match="dedicated absolute path"):
-        mount_module.preserved_mounts(env_file, new)
-
-
-def test_update_mounts_accept_shallow_backup_and_lock_directories(tmp_path):
-    env_file = tmp_path / ".env"
-    env_file.write_text("GA_BACKUP_DIR='/srv/backups'\nGA_LOCK_DIR='/srv/locks'\n")
-    assert mount_module.preserved_mounts(env_file, tmp_path) == ["/srv/backups", "/srv/locks"]
-
-
-def test_backup_verification_uses_separate_scratch_and_removes_plaintext(tmp_path, monkeypatch):
-    backup_dir = tmp_path / "backup-media"
-    scratch = tmp_path / "local-scratch"
-    backup_dir.mkdir()
-    scratch.mkdir()
-    source = backup_dir / "synthetic.enc"
-    source.write_bytes(b"synthetic")
-    seen = []
-
-    def unpack(settings, encrypted, destination):
-        seen.append((encrypted, destination))
-        destination.mkdir()
-        (destination / "database.jsonl.gz").write_bytes(b"synthetic")
-
-    monkeypatch.setattr(
-        verification_module, "Settings", lambda: SimpleNamespace(backup_dir=backup_dir)
-    )
-    monkeypatch.setattr(verification_module, "unpack_backup", unpack)
-    monkeypatch.setattr("sys.argv", ["verify_release_backup.py", str(source)])
-    verification_module.main(scratch=scratch)
-    assert len(seen) == 1
-    assert seen[0][0] == source
-    assert seen[0][1].parent == scratch
-    assert list(scratch.iterdir()) == []
-    assert list(backup_dir.iterdir()) == [source]
-
-
-@pytest.mark.parametrize("runtime", ["python", "rust"])
-def test_bundle_account_commands_use_source_free_worker(tmp_path, monkeypatch, runtime):
+def test_bundle_account_commands_use_source_free_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(bundle_module, "verify_native_image", lambda *_args: {})
-    archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path, runtime=runtime)
+    archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path)
     with tarfile.open(archive) as bundle:
         bundle.extractall(tmp_path, filter="data")
     root = next(tmp_path.glob("garmin-ai-*/install.sh")).parent
@@ -731,18 +648,17 @@ def test_bundle_account_commands_use_source_free_worker(tmp_path, monkeypatch, r
     assert result.returncode == 1
     assert "./install.sh start" in result.stderr
     lines = calls.read_text().splitlines()
-    entry = "garmin-ai " if runtime == "python" else ""
-    assert any(f" run --rm --no-deps worker {entry}login" in line for line in lines)
+    assert any(" run --rm --no-deps worker login" in line for line in lines)
     assert any(
         " run --rm --no-deps --workdir " in line
-        and f" worker {entry}pair-telegram --env-file " in line
+        and " worker pair-telegram --env-file " in line
         and " --container-runtime" in line
         for line in lines
     )
     assert len(lines) == 8
     assert all(" stop worker | " in line for line in lines[::2])
     assert all(
-        f" run --rm --no-deps -T worker {entry}enroll-account --confirm-existing-owner | " in line
+        " run --rm --no-deps -T worker enroll-account --confirm-existing-owner | " in line
         for line in lines[5::2]
     )
     assert all(f"image={IMAGE}" in line for line in lines if line.startswith("compose --env-file"))
@@ -751,13 +667,10 @@ def test_bundle_account_commands_use_source_free_worker(tmp_path, monkeypatch, r
     )
 
 
-@pytest.mark.parametrize("runtime", ["python", "rust"])
 @pytest.mark.parametrize("unpack_status", [0, 1])
-def test_backup_uses_worker_identity_and_removes_verification_volume(
-    tmp_path, runtime, unpack_status
-):
+def test_backup_uses_worker_identity_and_removes_verification_volume(tmp_path, unpack_status):
     shutil.copy2(ROOT / "install.sh", tmp_path / "install.sh")
-    (tmp_path / "release.env").write_text(f"GA_APP_IMAGE={IMAGE}\nGA_APP_RUNTIME={runtime}\n")
+    (tmp_path / "release.env").write_text(f"GA_APP_IMAGE={IMAGE}\nGA_APP_RUNTIME=rust\n")
     worker_identity = f"{os.getuid() + 1}:{os.getgid() + 1}"
     (tmp_path / ".env").write_text(f"GA_APP_UID={os.getuid() + 1}\nGA_APP_GID={os.getgid() + 1}\n")
     docker = tmp_path / "docker"
@@ -771,7 +684,7 @@ printf '%s\n' "$*" >> "$DOCKER_CALLS"
 case "$*" in
     *'--entrypoint sh worker'*) printf '%s\n' "$WORKER_IDENTITY" ;;
     'volume create'*) printf '%s\n' "$VERIFICATION_VOLUME" ;;
-    *' worker unpack-backup '*|*' python /setup/scripts/verify_release_backup.py '*)
+    *' worker unpack-backup '*)
         exit "$UNPACK_STATUS" ;;
 esac
 """
@@ -809,8 +722,8 @@ esac
 @pytest.mark.parametrize(
     ("assignments", "expected_status"),
     [
-        (f"GA_APP_IMAGE={IMAGE}\n", 0),
-        (f"GA_APP_IMAGE={IMAGE}", 0),
+        (f"GA_APP_IMAGE={IMAGE}\nGA_APP_RUNTIME=rust\n", 0),
+        (f"GA_APP_IMAGE={IMAGE}\nGA_APP_RUNTIME=rust", 0),
         (f"GA_APP_IMAGE={IMAGE}\nGA_APP_IMAGE={IMAGE}\n", 1),
         (f"GA_APP_IMAGE={IMAGE}\nGA_APP_IMAGE=\n", 1),
         (f"GA_APP_IMAGE=\nGA_APP_IMAGE={IMAGE}\n", 1),

@@ -1,13 +1,12 @@
 #!/bin/sh
 set -eu
 case "$#:${1:-}" in
-    0:) set -- python3 ;;
-    1:--rust) set -- ;;
+    0:|1:--rust) ;;
     *) echo "Usage: sudo deploy/gcp/bootstrap.sh [--rust]" >&2; exit 2 ;;
 esac
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl "$@"
+apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc

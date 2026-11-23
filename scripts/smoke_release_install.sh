@@ -5,44 +5,30 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 python_bin=${GA_SMOKE_PYTHON:-$root/.venv/bin/python}
 architecture=$(uname -m)
-runtime=${GA_SMOKE_RUNTIME:-python}
 image_ref=${GA_SMOKE_NATIVE_IMAGE:-}
 historical=${GA_SMOKE_HISTORICAL:-false}
 gcp=${GA_SMOKE_GCP:-false}
-dockerfile=Dockerfile
-evidence=native-amd64-install.json
-platform=linux/amd64
-if [[ "$runtime" == rust ]]; then
-    dockerfile=Dockerfile.rust
-    evidence=native-rust-install.json
-    case "$architecture" in
-        aarch64|arm64) platform=linux/arm64 ;;
-        x86_64) ;;
-        *) echo "Unsupported host architecture." >&2; exit 2 ;;
-    esac
-    platform=${GA_SMOKE_PLATFORM:-$platform}
-elif [[ "$runtime" != python ]]; then
-    echo "Unknown installation smoke runtime." >&2
-    exit 2
-elif [[ "$architecture" != x86_64 && "${1:-}" != --allow-emulated ]]; then
-    echo "Native amd64 smoke requires an x86_64 host." >&2
-    exit 2
-fi
-if [[ -n "$image_ref" && "$runtime" != rust ]]; then
-    echo "An existing image can be selected only for the native installation smoke." >&2
-    exit 2
-fi
+evidence=native-rust-install.json
+case "$architecture" in
+    aarch64|arm64) platform=linux/arm64 ;;
+    x86_64) platform=linux/amd64 ;;
+    *) echo "Unsupported host architecture." >&2; exit 2 ;;
+esac
+platform=${GA_SMOKE_PLATFORM:-$platform}
 if [[ "$historical" == true ]]; then
-    if [[ "$runtime" != rust ]]; then
-        echo "The historical upgrade smoke requires the native runtime." >&2
+    reference=$(cd "${GA_SMOKE_LEGACY_REFERENCE:?Set the frozen schema fixture checkout}" && pwd)
+    if [[ $(git -C "$reference" rev-parse HEAD) != 9376d081620740799362282ac9faf2f1a1baaffa ]]; then
+        echo "Unexpected historical schema fixture revision." >&2
         exit 2
     fi
+    legacy_python="$reference/.venv/bin/python"
+    test -x "$legacy_python"
     evidence=native-rust-upgrade.json
 fi
 profile=()
 compose_files=(-f compose.release.yml)
 if [[ "$gcp" == true ]]; then
-    if [[ "$runtime" != rust || "$historical" == true ]]; then
+    if [[ "$historical" == true ]]; then
         echo "The GCP smoke requires a clean native installation." >&2
         exit 2
     fi
@@ -107,7 +93,7 @@ if [[ -z "$image_ref" ]]; then
     image_source=local-build
     image_tag=garmin-ai-install-smoke:$$
     registry_name="garmin-ai-native-smoke-$$"
-    docker buildx build --load --platform "$platform" -f "$root/$dockerfile" \
+    docker buildx build --load --platform "$platform" \
         --label "org.opencontainers.image.revision=$revision" -t "$image_tag" "$root" >"$work/build.log" 2>&1 || {
         tail -40 "$work/build.log" >&2
         exit 1
@@ -127,8 +113,8 @@ if [[ -z "$image_ref" ]]; then
     fi
     image_ref="127.0.0.1:$registry_port/garmin-ai@$digest"
 fi
-PYTHONPATH="$root/src" "$python_bin" "$root/scripts/build_release_bundle.py" \
-    --runtime "$runtime" --app-image "$image_ref" --output "$work/bundle"
+"$python_bin" "$root/scripts/build_release_bundle.py" \
+    --app-image "$image_ref" --output "$work/bundle"
 if [[ "$image_source" == provided ]]; then
     docker pull --platform "$platform" "$image_ref"
 fi
@@ -141,25 +127,24 @@ if [[ -z "$bundle_dir" ]]; then
 fi
 
 cd "$bundle_dir"
-if [[ "$runtime" == rust ]]; then
-    docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
-        --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_ref" --help >/dev/null
-    ./install.sh "${profile[@]}" licenses >"$work/notices.txt"
-    grep -Fxq 'Rust dependency license files bundled with this application image' "$work/notices.txt"
-    grep -Fxq 'Debian runtime package notices' "$work/notices.txt"
-    grep -Fxq 'Debian common license texts' "$work/notices.txt"
-    docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
-        --entrypoint dpkg-query "$image_ref" -W -f='${Package} ${Version} ${Architecture}\n' \
-        > "$work/debian-packages.txt"
-    test -s "$work/debian-packages.txt"
-    while read -r package version package_arch; do
-        grep -Fxq -- "--- $package $version ($package_arch) ---" "$work/notices.txt"
-    done < "$work/debian-packages.txt"
-    docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
-        /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt | cmp - "$root/crates/ga-fit/profile/LICENSE-fitdecode.txt"
-    docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
-        /usr/share/doc/garmin-ai/rust-third-party-inventory.json >"$work/rust-third-party-inventory.json"
-    "$python_bin" -c '
+docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
+    --entrypoint /usr/local/bin/garmin-ai-release-cleanup "$image_ref" --help >/dev/null
+./install.sh "${profile[@]}" licenses >"$work/notices.txt"
+grep -Fxq 'Rust dependency license files bundled with this application image' "$work/notices.txt"
+grep -Fxq 'Debian runtime package notices' "$work/notices.txt"
+grep -Fxq 'Debian common license texts' "$work/notices.txt"
+docker run --rm --platform "$platform" --network none --read-only --cap-drop ALL \
+    --entrypoint dpkg-query "$image_ref" -W -f='${Package} ${Version} ${Architecture}\n' \
+    > "$work/debian-packages.txt"
+test -s "$work/debian-packages.txt"
+while read -r package version package_arch; do
+    grep -Fxq -- "--- $package $version ($package_arch) ---" "$work/notices.txt"
+done < "$work/debian-packages.txt"
+docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
+    /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt | cmp - "$root/crates/ga-fit/profile/LICENSE-fitdecode.txt"
+docker run --rm --platform "$platform" --network none --read-only --entrypoint cat "$image_ref" \
+    /usr/share/doc/garmin-ai/rust-third-party-inventory.json >"$work/rust-third-party-inventory.json"
+"$python_bin" -c '
 import json
 import sys
 
@@ -169,7 +154,6 @@ assert {"rmcp", "sqlx", "serde_json"} <= names
 assert "pyo3" not in names
 assert all(crate["license_files"] or crate["review_required"] for crate in inventory)
 ' <"$work/rust-third-party-inventory.json"
-fi
 ports=$("$python_bin" - <<'PY'
 import socket
 
@@ -187,7 +171,7 @@ before=$(
 )
 if [[ "$historical" == true ]]; then
     compose up -d --wait db
-    PYTHONPATH="$root/src" "$python_bin" - "$root" "$instance" "$db_port" <<'PY'
+    PYTHONPATH="$reference/src" "$legacy_python" - "$reference" "$instance" "$db_port" <<'PY'
 import sys
 from pathlib import Path
 
@@ -293,10 +277,7 @@ fi
 grep -Fx 'Choose a new .jsonl.gz filename for the export in GA_DATA_DIR.' "$work/export-refusal.log"
 ./install.sh "${profile[@]}" export "$snapshot_name" >"$work/export-counts.json"
 snapshot="data/$snapshot_name"
-printf 'null\n' >"$work/release-info.json"
-if [[ "$runtime" == rust ]]; then
-    compose exec -T api garmin-ai-rust release-info >"$work/release-info.json"
-fi
+compose exec -T api garmin-ai-rust release-info >"$work/release-info.json"
 snapshot_sha=$("$python_bin" - "$snapshot" "$work/export-counts.json" "$work/tracker.json" \
     "$work/release-info.json" <<'PY'
 import gzip
@@ -314,10 +295,8 @@ with gzip.open(path, "rt", encoding="utf-8") as archive:
     header, *rows, footer = map(json.loads, archive)
 manifest = json.loads(Path("release-manifest.json").read_text())
 versions = json.loads(release_info.read_text())
-expected_format = "garmin-ai-jsonl-v1"
-if versions is not None:
-    expected_format = versions["database_export_format"]
-    assert versions["database_revision"] == manifest["database_revision"]
+expected_format = versions["database_export_format"]
+assert versions["database_revision"] == manifest["database_revision"]
 assert (header["format"], header["revision"]) == (expected_format, manifest["database_revision"])
 assert len(counts) == 30 and counts["events"] == 1 and footer == {"counts": counts}
 assert [row["row"]["id"] for row in rows if row["table"] == "events"] == [tracker_id]
@@ -351,46 +330,45 @@ compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
 "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
     --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
 
-if [[ "$runtime" == rust ]]; then
-    check_native_database_languages
-    if [[ "$historical" == true ]]; then
-        compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
-            "SELECT current_database(),version_num,value->>'retained' FROM alembic_version CROSS JOIN app_state WHERE key='synthetic:release-upgrade'" \
-            | grep -Fx 'garmin_ai|c54f8a72d130|true'
-    fi
-    if [[ "$gcp" == true ]]; then
-        test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}' "$(compose ps -q db)")" \
-            = '335544320 805306368'
-        test "$(docker inspect --format '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config "max-size"}} {{index .HostConfig.LogConfig.Config "max-file"}}' "$(compose ps -q worker)")" \
-            = 'json-file 5m 2'
-    fi
-    for service in api worker; do
-        compose exec -T "$service" sh -ec '
-            test "$(id -u)" -ne 0
-            test "$(cat /proc/1/comm)" = garmin-ai-rust
-            if command -v python >/dev/null || command -v python3 >/dev/null; then
-                echo "Unexpected Python executable in the native image." >&2
-                exit 1
-            fi
-            for command_file in /proc/[0-9]*/comm; do
-                command_name=$(cat "$command_file" 2>/dev/null) || continue
-                case "$command_name" in
-                    python*|pypy*) echo "Unexpected Python process in the native runtime." >&2; exit 1 ;;
-                esac
-            done
-        '
-    done
-    compose exec -T api sh -ec 'test -s /etc/ssl/certs/ca-certificates.crt && test -f /usr/share/zoneinfo/Europe/Bratislava'
-    compose run --rm --no-deps -T --entrypoint sh worker -ec '
-        umask 077
-        mkdir -p "$GA_DATA_DIR/raw"
-        printf "synthetic file\n" > "$GA_DATA_DIR/raw/recovery-fixture"
-        printf "synthetic token\n" > "$GA_TOKEN_DIR/recovery-fixture"
+check_native_database_languages
+if [[ "$historical" == true ]]; then
+    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+        "SELECT current_database(),version_num,value->>'retained' FROM alembic_version CROSS JOIN app_state WHERE key='synthetic:release-upgrade'" \
+        | grep -Fx 'garmin_ai|c54f8a72d130|true'
+fi
+if [[ "$gcp" == true ]]; then
+    test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}' "$(compose ps -q db)")" \
+        = '335544320 805306368'
+    test "$(docker inspect --format '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config "max-size"}} {{index .HostConfig.LogConfig.Config "max-file"}}' "$(compose ps -q worker)")" \
+        = 'json-file 5m 2'
+fi
+for service in api worker; do
+    compose exec -T "$service" sh -ec '
+        test "$(id -u)" -ne 0
+        test "$(cat /proc/1/comm)" = garmin-ai-rust
+        if command -v python >/dev/null || command -v python3 >/dev/null; then
+            echo "Unexpected Python executable in the native image." >&2
+            exit 1
+        fi
+        for command_file in /proc/[0-9]*/comm; do
+            command_name=$(cat "$command_file" 2>/dev/null) || continue
+            case "$command_name" in
+                python*|pypy*) echo "Unexpected Python process in the native runtime." >&2; exit 1 ;;
+            esac
+        done
     '
-    ./install.sh "${profile[@]}" backup
-    archive=$(find backups -maxdepth 1 -type f -name 'manual-*.enc' -print -quit)
-    test -n "$archive"
-    "$python_bin" - "$archive" "$work/release-info.json" <<'PY'
+done
+compose exec -T api sh -ec 'test -s /etc/ssl/certs/ca-certificates.crt && test -f /usr/share/zoneinfo/Europe/Bratislava'
+compose run --rm --no-deps -T --entrypoint sh worker -ec '
+    umask 077
+    mkdir -p "$GA_DATA_DIR/raw"
+    printf "synthetic file\n" > "$GA_DATA_DIR/raw/recovery-fixture"
+    printf "synthetic token\n" > "$GA_TOKEN_DIR/recovery-fixture"
+'
+./install.sh "${profile[@]}" backup
+archive=$(find backups -maxdepth 1 -type f -name 'manual-*.enc' -print -quit)
+test -n "$archive"
+"$python_bin" - "$archive" "$work/release-info.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -400,85 +378,82 @@ envelope = json.loads(info.read_text())["backup_envelope"].encode("ascii")
 with archive.open("rb") as source:
     assert envelope and source.read(len(envelope)) == envelope
 PY
-    ./install.sh "${profile[@]}" unpack-backup "${archive##*/}"
-    recovered=$(find backups -mindepth 2 -name database.jsonl.gz -type f -print -quit)
-    test -n "$recovered"
-    recovery_dir=${recovered%/*}
-    recovery_name=${recovery_dir##*/}
-    test ! -e "$recovery_dir/$snapshot_name"
+./install.sh "${profile[@]}" unpack-backup "${archive##*/}"
+recovered=$(find backups -mindepth 2 -name database.jsonl.gz -type f -print -quit)
+test -n "$recovered"
+recovery_dir=${recovered%/*}
+recovery_name=${recovery_dir##*/}
+test ! -e "$recovery_dir/$snapshot_name"
 
-    reject_restore() {
-        if ./install.sh "${profile[@]}" restore-db "$recovery_name" >"$work/restore-refusal.log" 2>&1; then
-            echo "Database restore succeeded when it should have been refused." >&2
-            return 1
-        fi
-        if ! grep -F -- "$1" "$work/restore-refusal.log"; then
-            cat "$work/restore-refusal.log" >&2
-            return 1
-        fi
-    }
-    reject_restore 'Stop the API and worker before restoring the database.'
-    compose stop api worker
-    reject_restore 'Restore requires an empty destination database'
-    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
-        "SELECT current_database(), EXISTS (SELECT FROM events)" | grep -Fx 'garmin_ai|t'
-    archive_sha=$(
-        "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
-    )
-    for _ in 1 2; do
-        compose run --rm --no-deps -T worker erase-all --confirm 'ERASE ALL LOCAL HEALTH DATA' \
-            | "$python_bin" -c 'import json,sys; assert json.load(sys.stdin)["erased"] is True'
-    done
-    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
-        "SELECT NOT EXISTS (SELECT FROM events), EXISTS (SELECT FROM app_state WHERE key='maintenance:erased')" \
-        | grep -Fx 't|t'
-    compose run --rm --no-deps -T --entrypoint sh worker -ec '
-        test -z "$(ls -A "$GA_DATA_DIR")"
-        test -z "$(ls -A "$GA_TOKEN_DIR")"
-        test -f "$GA_LOCK_DIR/erased"
-        test ! -e "$GA_LOCK_DIR/erasing"
-    '
-    compose run --rm --no-deps -T worker resume-storage | grep -Fx 'Storage re-enabled.'
-    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
-        "SELECT NOT EXISTS (SELECT FROM app_state WHERE key='maintenance:erased')" | grep -Fx t
-    compose run --rm --no-deps -T --entrypoint sh worker -ec '
-        test ! -e "$GA_LOCK_DIR/erased"
-        test ! -e "$GA_LOCK_DIR/activating"
-    '
-    compose run --rm --no-deps -T --entrypoint sh worker -ec '
-        umask 077
-        recovery="$GA_BACKUP_DIR/$1"
-        mkdir "$GA_DATA_DIR/raw"
-        cp -R "$recovery/raw/." "$GA_DATA_DIR/raw"
-        cp -R "$recovery/tokens/." "$GA_TOKEN_DIR"
-        printf "synthetic file\n" | cmp - "$GA_DATA_DIR/raw/recovery-fixture"
-        printf "synthetic token\n" | cmp - "$GA_TOKEN_DIR/recovery-fixture"
-    ' recovery-fixture "$recovery_name"
-    ./install.sh "${profile[@]}" restore-db "$recovery_name" | "$python_bin" -c '
+reject_restore() {
+    if ./install.sh "${profile[@]}" restore-db "$recovery_name" >"$work/restore-refusal.log" 2>&1; then
+        echo "Database restore succeeded when it should have been refused." >&2
+        return 1
+    fi
+    if ! grep -F -- "$1" "$work/restore-refusal.log"; then
+        cat "$work/restore-refusal.log" >&2
+        return 1
+    fi
+}
+reject_restore 'Stop the API and worker before restoring the database.'
+compose stop api worker
+reject_restore 'Restore requires an empty destination database'
+compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+    "SELECT current_database(), EXISTS (SELECT FROM events)" | grep -Fx 'garmin_ai|t'
+archive_sha=$(
+    "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
+)
+for _ in 1 2; do
+    compose run --rm --no-deps -T worker erase-all --confirm 'ERASE ALL LOCAL HEALTH DATA' \
+        | "$python_bin" -c 'import json,sys; assert json.load(sys.stdin)["erased"] is True'
+done
+compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+    "SELECT NOT EXISTS (SELECT FROM events), EXISTS (SELECT FROM app_state WHERE key='maintenance:erased')" \
+    | grep -Fx 't|t'
+compose run --rm --no-deps -T --entrypoint sh worker -ec '
+    test -z "$(ls -A "$GA_DATA_DIR")"
+    test -z "$(ls -A "$GA_TOKEN_DIR")"
+    test -f "$GA_LOCK_DIR/erased"
+    test ! -e "$GA_LOCK_DIR/erasing"
+'
+compose run --rm --no-deps -T worker resume-storage | grep -Fx 'Storage re-enabled.'
+compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+    "SELECT NOT EXISTS (SELECT FROM app_state WHERE key='maintenance:erased')" | grep -Fx t
+compose run --rm --no-deps -T --entrypoint sh worker -ec '
+    test ! -e "$GA_LOCK_DIR/erased"
+    test ! -e "$GA_LOCK_DIR/activating"
+'
+compose run --rm --no-deps -T --entrypoint sh worker -ec '
+    umask 077
+    recovery="$GA_BACKUP_DIR/$1"
+    mkdir "$GA_DATA_DIR/raw"
+    cp -R "$recovery/raw/." "$GA_DATA_DIR/raw"
+    cp -R "$recovery/tokens/." "$GA_TOKEN_DIR"
+    printf "synthetic file\n" | cmp - "$GA_DATA_DIR/raw/recovery-fixture"
+    printf "synthetic token\n" | cmp - "$GA_TOKEN_DIR/recovery-fixture"
+' recovery-fixture "$recovery_name"
+./install.sh "${profile[@]}" restore-db "$recovery_name" | "$python_bin" -c '
 import json
 import sys
 
 counts = json.load(sys.stdin)
 assert len(counts) == 30 and counts["events"] == 1
 '
-    reject_restore 'Restore requires an empty destination database'
-    test "$archive_sha" = "$(
-        "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
-    )"
-    ./install.sh "${profile[@]}" start
-    "$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
-        --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
-    check_native_database_languages
-    if [[ "$historical" == true ]]; then
-        compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
-            "SELECT value->>'retained' FROM app_state WHERE key='synthetic:release-upgrade'" | grep -Fx true
-    fi
+reject_restore 'Restore requires an empty destination database'
+test "$archive_sha" = "$(
+    "$python_bin" -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"), "sha256").hexdigest())' "$archive"
+)"
+./install.sh "${profile[@]}" start
+"$python_bin" "$root/scripts/verify_release_install.py" --env-file .env \
+    --state-file "$work/tracker.json" --phase check --url "http://127.0.0.1:$api_port"
+check_native_database_languages
+if [[ "$historical" == true ]]; then
+    compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
+        "SELECT value->>'retained' FROM app_state WHERE key='synthetic:release-upgrade'" | grep -Fx true
 fi
 
 mkdir -p "$root/test-results"
-app_platform_image='null'
-if [[ "$runtime" == rust ]]; then
-    app_platform_image=$("$python_bin" - "$platform" "$(compose ps -q api)" "$(compose ps -q worker)" <<'PY'
+app_platform_image=$("$python_bin" - "$platform" "$(compose ps -q api)" "$(compose ps -q worker)" <<'PY'
 import json
 import subprocess
 import sys
@@ -501,9 +476,8 @@ for container in running:
 print(json.dumps(image))
 PY
 )
-fi
 "$python_bin" - "$root/test-results/$evidence" "$architecture" \
-    "$revision" "$image_ref" "$runtime" "$platform" "$historical" "$gcp" "$image_source" \
+    "$revision" "$image_ref" "$platform" "$historical" "$gcp" "$image_source" \
     "$app_platform_image" "$work" <<'PY'
 import hashlib
 import json
@@ -513,36 +487,35 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-destination = Path(sys.argv[1])
-work = Path(sys.argv[11])
+report_path, architecture, revision, image_ref, platform, historical, gcp, image_source, image, work = sys.argv[1:]
+destination = Path(report_path)
+work = Path(work)
 with TemporaryDirectory(dir=destination.parent) as staging:
     staged = Path(staging)
-    native = {}
-    if sys.argv[5] == "rust":
-        license_archive = staged / "licenses.zip"
-        with ZipFile(license_archive, "w") as archive:
-            for name in ("notices.txt", "debian-packages.txt", "rust-third-party-inventory.json"):
-                archive.writestr(ZipInfo(name), (work / name).read_bytes(), compress_type=ZIP_DEFLATED)
-        with license_archive.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        archived = destination.with_name(f"native-licenses-{digest}.zip")
-        license_archive.replace(archived)
-        native = {
-            "app_platform_image": json.loads(sys.argv[10]),
-            "release_info": json.loads((work / "release-info.json").read_text()),
-            "license_evidence": {"file": archived.name, "sha256": digest},
-        }
+    license_archive = staged / "licenses.zip"
+    with ZipFile(license_archive, "w") as archive:
+        for name in ("notices.txt", "debian-packages.txt", "rust-third-party-inventory.json"):
+            archive.writestr(ZipInfo(name), (work / name).read_bytes(), compress_type=ZIP_DEFLATED)
+    with license_archive.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    archived = destination.with_name(f"native-licenses-{digest}.zip")
+    license_archive.replace(archived)
+    native = {
+        "app_platform_image": json.loads(image),
+        "release_info": json.loads((work / "release-info.json").read_text()),
+        "license_evidence": {"file": archived.name, "sha256": digest},
+    }
 
     report = {
         "checked_at": datetime.now(UTC).isoformat(),
-        "host_architecture": sys.argv[2],
-        "native_amd64": sys.argv[2] == "x86_64" and sys.argv[6] == "linux/amd64",
-        "git_sha": sys.argv[3],
-        "app_image": sys.argv[4],
-        "app_image_source": sys.argv[9],
+        "host_architecture": architecture,
+        "native_amd64": architecture == "x86_64" and platform == "linux/amd64",
+        "git_sha": revision,
+        "app_image": image_ref,
+        "app_image_source": image_source,
         **native,
-        "runtime": sys.argv[5],
-        "platform": sys.argv[6],
+        "runtime": "rust",
+        "platform": platform,
         "setup_preserved_settings": True,
         "owner_onboarding_without_integrations_verified": True,
         "fictional_tracker_survived_restart": True,
@@ -550,14 +523,14 @@ with TemporaryDirectory(dir=destination.parent) as staging:
         "backup_capacity_verified": True,
         "portable_database_export_verified": True,
         "garmin_enrollment_requires_confirmation_and_saved_session": True,
-        "native_runtime_processes_verified": sys.argv[5] == "rust",
-        "native_database_without_plpython_verified": sys.argv[5] == "rust",
-        "native_backup_and_recovery_verified": sys.argv[5] == "rust",
-        "native_bundle_restore_verified": sys.argv[5] == "rust",
-        "native_mounted_erasure_verified": sys.argv[5] == "rust",
-        "historical_upgrade_verified": sys.argv[7] == "true",
-        "staged_read_only_upgrade_verified": sys.argv[7] == "true",
-        "deployment_profile": "gcp" if sys.argv[8] == "true" else "standard",
+        "native_runtime_processes_verified": True,
+        "native_database_without_plpython_verified": True,
+        "native_backup_and_recovery_verified": True,
+        "native_bundle_restore_verified": True,
+        "native_mounted_erasure_verified": True,
+        "historical_upgrade_verified": historical == "true",
+        "staged_read_only_upgrade_verified": historical == "true",
+        "deployment_profile": "gcp" if gcp == "true" else "standard",
     }
     receipt = staged / destination.name
     receipt.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

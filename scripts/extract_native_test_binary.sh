@@ -10,7 +10,7 @@ destination=$1
 root=$(cd "$(dirname "$0")/.." && pwd)
 revision=$(git -C "$root" rev-parse HEAD)
 image="garmin-ai-native-proof:$revision"
-docker build -f "$root/Dockerfile.rust" --label "org.opencontainers.image.revision=$revision" \
+docker build --label "org.opencontainers.image.revision=$revision" \
     -t "$image" "$root"
 docker run --rm --network none --entrypoint sh "$image" -ec \
     'test "$(id -u)" -ne 0 && ! command -v python && ! command -v python3'

@@ -2,10 +2,13 @@
 
 ## Start and inspect
 
-`docker compose up -d --build` builds the private local image, waits for PostgreSQL, runs migrations,
-and starts the API and worker. `docker compose ps` should show healthy services. The API and database
+With the Rust image built and `GA_APP_IMAGE` selected, `docker compose up -d --wait`
+waits for PostgreSQL, runs migrations, and starts the API and worker. `docker compose ps` should show healthy services. The API and database
 ports bind only to loopback. Docker must be running; laptop sleep stops useful background execution.
 For continuous operation use an always-on machine with the same Compose configuration.
+See the [release installer](release-install.md) for the equivalent bundle commands.
+The host CLI examples use `garmin-ai-rust` built with `cargo build --locked --release -p ga-app`.
+Run it from the instance directory so it reads the local `.env`.
 
 `docker compose logs --tail 50 worker` emits job IDs, job types and safe error categories.
 It does not log diary text, health values, request URLs, bot tokens or Gemini prompts.
@@ -47,7 +50,7 @@ SELinux host has not been available for a deployment test.
 
 ## Garmin authentication and historical data
 
-Stop the worker with `docker compose stop worker`, then use `uv run garmin-ai login` on the host.
+Stop the worker with `docker compose stop worker`, then use `garmin-ai-rust login` on the host.
 It asks for email/password/MFA in the terminal and writes
 restricted token files under `tokens/garmin`. Passwords are not stored by this application.
 The container mounts that directory. Run `docker compose up -d worker` after login; the next retry
@@ -58,8 +61,8 @@ For a bounded historical investigation:
 
 ```sh
 docker compose stop worker
-uv run garmin-ai probe --start 2026-08-25 --end 2026-09-07
-uv run garmin-ai import-probe
+garmin-ai-rust probe --start 2026-08-25 --end 2026-09-07
+garmin-ai-rust import-probe
 docker compose up -d worker
 ```
 
@@ -79,7 +82,7 @@ a full page, split the date range into smaller runs.
 ## Telegram and Gemini
 
 Configure the bot token in `.env`, leave `GA_TELEGRAM_USER_ID=0`, and run
-`uv run garmin-ai migrate` followed by `uv run garmin-ai pair-telegram --env-file .env`
+`garmin-ai-rust migrate` followed by `garmin-ai-rust pair-telegram --env-file .env`
 before starting the worker. Follow
 the [pairing guide](telegram-pairing.md) to bind the owner without looking up a numeric ID. Leave
 `GA_GEMINI_THINKING_LEVEL` empty unless the selected model supports that option. The bot rejects groups
@@ -102,9 +105,9 @@ The key in `GA_BACKUP_KEY` encodes 32 random bytes and must be kept separately f
 
 ```sh
 docker compose stop worker
-uv run garmin-ai backup /path/to/backup.enc
+garmin-ai-rust backup /path/to/backup.enc
 docker compose up -d worker
-uv run garmin-ai unpack-backup /path/to/backup.enc /path/to/new-recovery-directory
+garmin-ai-rust unpack-backup /path/to/backup.enc /path/to/new-recovery-directory
 ```
 
 Manual backup holds the same file and database coordination locks as login/probe, so the worker
@@ -123,13 +126,12 @@ Publishing the complete tree requires exclusive rename support on macOS, Linux o
 unsupported platforms or filesystems return an error without replacing the destination. The recovered layout is
 `database.jsonl.gz`, `coverage-report.json` when present, `raw/`, and `tokens/`.
 
-Before restoring, stop the worker again (`docker compose stop worker` for this deployment);
-the manual backup example above restarts it, and restore needs the same exclusive storage lock.
-Keep it stopped until verification finishes. Provision an **empty** destination PostgreSQL database,
-point `GA_DATABASE_URL` at it, run `uv run garmin-ai migrate`, then:
+Before restoring, stop both the API and worker (`docker compose stop api worker`).
+Keep them stopped until verification finishes. Provision an **empty** destination PostgreSQL database,
+point `GA_DATABASE_URL` at it, run `garmin-ai-rust migrate`, then:
 
 ```sh
-uv run garmin-ai restore-db /path/to/new-recovery-directory/database.jsonl.gz
+garmin-ai-rust restore-db /path/to/new-recovery-directory/database.jsonl.gz
 ```
 
 Copy the recovered coverage report into the data directory if it exists. Copy recovered `raw/` into the configured data directory and `tokens/` into the token directory,
@@ -139,7 +141,7 @@ counts and representative queries in the restored database have been verified.
 
 ## Export and deletion
 
-`uv run garmin-ai export /private/path/export.jsonl.gz` creates a portable **unencrypted** JSON-lines
+`garmin-ai-rust export /private/path/export.jsonl.gz` creates a portable **unencrypted** JSON-lines
 export of the database, including audit and operational records. Permissions are restricted. Raw
 files are included in encrypted backups, not this database-only export.
 
@@ -148,12 +150,12 @@ stop the API and worker and close MCP clients. Run this command only with the in
 
 ```sh
 docker compose stop api worker
-uv run garmin-ai erase-all --confirm 'ERASE ALL LOCAL HEALTH DATA'
+garmin-ai-rust erase-all --confirm 'ERASE ALL LOCAL HEALTH DATA'
 ```
 
 Erasure removes database health/history rows, the configured data directory and Garmin tokens. The separate backup directory is retained. A persistent maintenance marker rejects late API/MCP writes.
 It does not erase separate backup copies, Telegram messages or provider-side records. After explicit
-new setup, `uv run garmin-ai resume-storage` re-enables the empty local store.
+new setup, `garmin-ai-rust resume-storage` re-enables the empty local store.
 
 ## Codex MCP configuration
 
@@ -161,8 +163,8 @@ Create a local `.codex/config.toml` in this trusted project; adjust absolute pat
 
 ```toml
 [mcp_servers.garmin-ai]
-command = "/absolute/path/to/uv"
-args = ["run", "--locked", "garmin-ai", "mcp"]
+command = "/absolute/path/to/garmin-ai/target/release/garmin-ai-rust"
+args = ["mcp"]
 cwd = "/absolute/path/to/garmin-ai"
 startup_timeout_sec = 30
 tool_timeout_sec = 60

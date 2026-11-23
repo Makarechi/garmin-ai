@@ -1,26 +1,16 @@
 # Verification record
 
-## Universal release gate
+## Current Rust checks
 
-The complete `UT-01`–`UT-53` evidence map is stored in
-[`tests/universal_acceptance_manifest.json`](../tests/universal_acceptance_manifest.json) and is
-validated by `tests/test_release_gate.py`. CI records the exact Git SHA and database revision
-`c54f8a72d130` in `test-results/release-metadata.json`, then preserves that file beside JUnit and
-coverage results. The commands are:
+CI builds and tests the Rust workspace on Linux amd64 and arm64. A disposable
+TimescaleDB exercises HTTP readiness, storage fences, job processing, Telegram,
+and browser workflows. The release installation workflow uses digest-pinned
+Rust bundles. Off-host recovery checks restore encrypted Rust and historical
+Python backups into empty databases with the Rust executable.
 
-```sh
-uv sync --locked --extra full
-uv run python scripts/release_metadata.py > test-results/release-metadata.json
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest -q -ra --junitxml=test-results/pytest.xml --cov=garmin_ai --cov-branch
-```
-
-A separate clean CI job runs `uv sync --locked` without provider/channel extras and verifies the
-core import, architecture boundaries and release manifest. The automated environment is a
-disposable synthetic PostgreSQL/TimescaleDB. No live Garmin, Telegram, model-provider or personal
-data call is part of this gate. Platform- or live-only skips remain visible with their reasons in
-the JUnit and `pytest -ra` output.
+The [UT-01–UT-53 evidence map](../tests/universal_acceptance_manifest.json)
+records the earlier Python release gate. Its scripts and results are
+reproducible from the frozen review snapshot described in the migration records.
 
 The verified recovery policy is backup/restore or forward recovery. Direct downgrade of an old
 binary over new custom data is not supported. No production database is touched, and WhatsApp is

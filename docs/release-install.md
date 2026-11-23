@@ -8,10 +8,9 @@ Docker Compose 2.24.0 or newer are required. Run the installer as a dedicated
 non-root account with Docker access. The database image is pinned in
 the bundle as well.
 
-To prepare a native candidate, build from the clean checkout with `Dockerfile.rust`
-and pass `--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"` to
-`docker buildx build`. Pass `--runtime rust` and the resulting registry digest
-to the bundle builder. On the host,
+Build from a clean checkout with the root `Dockerfile` and pass
+`--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"` to
+`docker buildx build`. Pass the resulting registry digest to the bundle builder. On the host,
 the native bundle uses Docker and Compose for setup, demo, start, status and
 stop. Pairing, login and encrypted backup use the native application inside
 the same image. Preserve the Compose project, settings and private storage
@@ -19,17 +18,15 @@ paths when rehearsing an upgrade on a separate copy of an installation.
 
 ## Build and inspect a candidate
 
-From a clean source revision, after building and checking an application image,
-replace the placeholder below with its actual registry digest:
+On the build host, run the bundle builder with Python 3.13 or newer. Replace
+the placeholder below with the actual registry digest of the checked image:
 
 ```sh
-uv run python scripts/build_release_bundle.py \
-  --runtime rust \
+python3 scripts/build_release_bundle.py \
   --app-image ghcr.io/OWNER/garmin-ai@sha256:FULL_64_CHARACTER_DIGEST
 ```
 
-The builder rejects uncommitted changes, images without a full digest, and a
-release Compose file that has drifted from the development service layout. It
+The builder rejects uncommitted changes, images without a full digest, and Compose configuration that builds from local source. It
 uses Docker Buildx to check that every image in a native registry digest starts
 the native application, matches its declared architecture and records the
 checkout's Git revision. A native index must resolve to one image per
@@ -69,8 +66,7 @@ files from the locked dependencies selected for that image's Linux architecture.
 When a crate omits the notice, the inventory identifies any texts taken from
 its pinned upstream source.
 Its machine-readable inventory is `/usr/share/doc/garmin-ai/rust-third-party-inventory.json`.
-Python bundles continue to include the installed Python distributions' license files
-and inventory. An entry marked `REVIEW REQUIRED` needs a missing license text.
+An entry marked `REVIEW REQUIRED` needs a missing license text.
 The final distribution review also covers the application base image,
 operating-system packages and the separate database image.
 
@@ -107,11 +103,7 @@ one-time code to the bot from your private Telegram chat, then run
 private storage; pairing writes the owner ID to the bundle's `.env`. Follow the
 [Garmin guidance](operations.md#garmin-authentication-and-historical-data),
 [Telegram pairing guide](telegram-pairing.md) and
-[provider consent](provider-consent.md) for the full steps. Source-installation
-commands in those guides use `uv`; use the bundle commands above on a host
-without source or Python. Credentials must be entered on the private host,
-never in a public chat or repository. A custom Python plugin requires a
-separately built trusted image; it is not silently installed by this bundle.
+[provider consent](provider-consent.md) for the full steps. Enter credentials only on the private installation host.
 
 For retained Garmin data without an owner binding, verify that the saved
 Garmin session belongs to the original owner. With the database running, run
@@ -142,7 +134,7 @@ new bundle. For a deliberate recovery inspection, run `./install.sh
 unpack-backup FILENAME.enc`; it creates a private recovery directory inside
 `GA_BACKUP_DIR`. Remove it securely after use. The general
 [backup guidance](operations.md#backup-and-restore) still applies to data
-handling, while its `uv` and bare Compose commands are for source installations.
+handling. Use the bundle commands for backup and recovery on the installation host.
 
 Run `./install.sh backup-space` with the database running to estimate the
 space needed in the configured data and backup locations. The estimate leaves
@@ -190,19 +182,12 @@ exclusive lease while running. Exit with Ctrl-C before starting the service.
 The Native release installation workflow tests clean installs and historical
 upgrades on physical Linux amd64 and arm64 runners. It also tests the GCP
 profile on amd64. The Native off-host recovery workflow verifies encrypted
-synthetic backups on a separate Linux runner, including recovery from Python
-to Rust and from Rust to Python.
+synthetic backups on a separate Linux runner. Rust restores archives generated
+by both the current release and a frozen historical Python release.
 
 Repeat the applicable checks for the exact candidate revision and image digest
 before publishing. The supported release also requires final third-party
 notices, approved live integration checks and a complete seven-day observation.
-
-The `native-amd64-install` CI job builds an amd64 image and runs a digest-pinned
-bundle on its x86_64 host with fictional data. It checks setup, API readiness,
-tracker persistence across restart and unchanged private settings after repeated
-setup. Its evidence file records the exact source SHA and image digest. This
-isolated CI run does not validate a published image digest, arm64 release image,
-third-party notices, external providers or long-running operation.
 
 To verify an existing native candidate image, run the Native release installation
 workflow at the image's Git revision and supply its immutable registry reference

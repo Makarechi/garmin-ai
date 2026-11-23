@@ -68,6 +68,6 @@ read/write/destructive tools and documents compatibility. Their coverage helped 
 it is not account-availability evidence. This project's Garmin adapter is read-only, diary mutations
 target its own database, and its MCP queries locally retained canonical history during Garmin outages.
 
-Run `uv run garmin-ai inventory`, `uv run garmin-ai probe --start YYYY-MM-DD --end YYYY-MM-DD`,
-and `uv run garmin-ai import-probe` locally. Structural reports can still contain identifying keys;
+Run `garmin-ai-rust inventory`, `garmin-ai-rust probe --start YYYY-MM-DD --end YYYY-MM-DD`,
+and `garmin-ai-rust import-probe` locally. Structural reports can still contain identifying keys;
 they are not safe to publish automatically.

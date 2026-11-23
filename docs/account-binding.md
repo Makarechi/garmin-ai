@@ -25,7 +25,7 @@ Empty stores enroll on their first guarded sync. Stores containing diary, audit,
 raw provenance or conversation state require an explicit local acknowledgment:
 
 ```sh
-uv run garmin-ai enroll-account --confirm-existing-owner
+garmin-ai-rust enroll-account --confirm-existing-owner
 ```
 
 Verify that the current token cache belongs to the original owner before using it.
