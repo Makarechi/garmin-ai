@@ -6,7 +6,10 @@ use ga_app::{
 };
 use ga_db::{
     Database,
-    jobs::telegram_inbound::{TelegramInboundState, TelegramInboundTarget},
+    jobs::telegram_inbound::{
+        LocalTelegramText, TelegramInboundState, TelegramInboundTarget, TelegramModelAdmission,
+        TelegramSafetyDecision,
+    },
     runtime_lease::RuntimeLease,
 };
 use ga_domain::timestamp::StoredInstant;
@@ -16,6 +19,126 @@ use time::OffsetDateTime;
 use tokio::time::{sleep, timeout};
 
 use ga_app::telegram_input::TelegramBinding;
+
+#[path = "support/telegram_ingress.rs"]
+mod telegram_ingress;
+
+#[tokio::test]
+#[ignore = "uses authenticated native ingress and a disposable TimescaleDB"]
+async fn capability_questions_use_local_help_before_and_after_screening()
+-> Result<(), Box<dyn Error>> {
+    let url = env::var("GA_TEST_DATABASE_URL")?;
+    let address = url
+        .strip_prefix("postgresql+psycopg://")
+        .ok_or("Expected fixture URL")?;
+    let options =
+        PgConnectOptions::from_str(&format!("postgresql://{address}"))?.disable_statement_logging();
+    let name = options
+        .get_database()
+        .filter(|name| name.ends_with("_test"))
+        .ok_or("Expected disposable database")?;
+    let pool = PgPool::connect_with(options.clone()).await?;
+    let actual: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(actual, name);
+    sqlx::query(
+        "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
+         SELECT gen_random_uuid(),id,'telegram','primary','42','test' FROM people",
+    )
+    .execute(&pool)
+    .await?;
+    let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    let mut runtime = database.acquire_runtime_lease().await?;
+    let settings =
+        TelegramIngressSettings::selected(Some("42"), None)?.ok_or("Missing settings")?;
+    let binding = settings.confirmed_binding(&database).await?;
+    let target = TelegramInboundTarget {
+        owner_id: binding.owner_id,
+        instance_id: binding.instance_id,
+    };
+    let transport = TelegramTransport::new("100:synthetic-capabilities")?;
+    inbound(
+        &mut runtime,
+        binding,
+        &pool,
+        201,
+        json!({"text":"«Что\u{00a0}ты умеешь?»"}),
+    )
+    .await?;
+    let response = timeout(Duration::from_secs(8), async {
+        tokio::select! {
+            result = await_reply(&pool, 201) => result,
+            worker = transport.run_local_text(&database, &settings, "ru", false) => worker,
+        }
+    })
+    .await??;
+    assert!(response.contains("/today") && response.contains("/history"));
+    assert!(!response.contains("сейчас недоступна"));
+
+    inbound(
+        &mut runtime,
+        binding,
+        &pool,
+        202,
+        json!({"text":"What can you do?"}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE jobs j SET payload=jsonb_set(payload,'{local_safety_checked}','true')
+         FROM inbound_messages i WHERE i.external_event_id='202'
+           AND j.dedup_key=concat('telegram:inbound:native:',i.id)",
+    )
+    .execute(&pool)
+    .await?;
+    let lease = database
+        .claim_telegram_model_text(target, clock(&pool).await?, 30)
+        .await?
+        .ok_or("Missing screened fixture")?;
+    assert!(matches!(
+        database
+            .admit_telegram_model_text(&lease, "UTC", "ru")
+            .await?,
+        TelegramModelAdmission::Replied
+    ));
+    assert!(
+        reply(&pool, 202)
+            .await?
+            .is_some_and(|text| text.starts_with("I can"))
+    );
+
+    inbound(
+        &mut runtime,
+        binding,
+        &pool,
+        203,
+        json!({"text":"Что ты умеешь посчитать по моим тренировкам?"}),
+    )
+    .await?;
+    let other = database
+        .claim_telegram_local_screen(target, clock(&pool).await?, 30)
+        .await?
+        .ok_or("Missing ordinary question")?;
+    database
+        .apply_local_telegram_text(
+            &other,
+            LocalTelegramText::Safety(TelegramSafetyDecision::Clear),
+            "ru",
+        )
+        .await?;
+    let model = database
+        .claim_telegram_model_text(target, clock(&pool).await?, 30)
+        .await?
+        .ok_or("The ordinary question must proceed to the model")?;
+    assert!(matches!(
+        database
+            .admit_telegram_model_text(&model, "UTC", "ru")
+            .await?,
+        TelegramModelAdmission::Ready { .. }
+    ));
+    assert!(reply(&pool, 203).await?.is_none());
+    Ok(())
+}
 
 async fn clock(pool: &PgPool) -> Result<StoredInstant, Box<dyn Error>> {
     let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -43,8 +166,7 @@ async fn inbound(
         .ok_or("Missing message")?
         .extend(extra.clone());
     assert!(
-        binding
-            .accept_polled_update(runtime, &update, now, true)
+        telegram_ingress::receive(runtime, binding, &update, now, true)
             .await?
             .inbound
             .is_some()
