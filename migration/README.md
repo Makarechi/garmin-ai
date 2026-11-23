@@ -1,5 +1,12 @@
 # Rust migration baseline (R00)
 
+The application in `main` is Rust. This directory preserves the migration
+records, contracts, and comparison tools. Run commands that import the retired
+`garmin_ai` Python package from the historical checkout named in the record.
+The last checkout with the packaged Python application was
+`9376d081620740799362282ac9faf2f1a1baaffa`. CI pins it for historical
+schema and encrypted backup fixtures.
+
 [baseline.json](baseline.json) pins the Python version of the product that Rust must match.
 [baseline-test-nodeids.txt](baseline-test-nodeids.txt) records every collected pytest case,
 including parameterized cases and cases later skipped. The fixture passwords in node IDs that

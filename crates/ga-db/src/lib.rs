@@ -46,7 +46,7 @@ use std::{str::FromStr, time::Duration};
 use sqlx::{ConnectOptions, Connection, Transaction};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgPoolOptions, Postgres};
 
-const SCHEMA_REVISION: &str = "c54f8a72d130";
+const SCHEMA_REVISION: &str = include_str!("../schema-revision.txt").trim_ascii();
 const STORAGE_LIFECYCLE_LOCK: i64 = 72104622;
 const OWNER_ENROLLMENT_LOCK: i64 = 72104625;
 const DATABASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);

@@ -1,5 +1,9 @@
 # Extension contract and local test kit
 
+The in-process Python examples below refer to archived source at
+`9376d081620740799362282ac9faf2f1a1baaffa`. Current Rust extension examples live in
+`examples/native-source`, `examples/native-channel`, and `examples/native-model`.
+
 The current Python extension contract is **version 1**. It uses the
 `garmin_ai.integrations` entry-point group; entry-point names are
 `source.provider`, `channel.provider` or `model.provider`. The owner must list

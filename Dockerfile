@@ -1,28 +1,52 @@
-FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
-FROM python:3.15.2-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS builder
-COPY --from=uv /uv /usr/local/bin/uv
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-COPY pyproject.toml uv.lock LICENSE ./
-RUN uv sync --locked --no-dev --no-install-project --extra full
-COPY src ./src
-COPY alembic.ini ./
-RUN uv sync --locked --no-dev --no-editable --extra full
-COPY scripts/collect_python_notices.py ./scripts/
-RUN .venv/bin/python scripts/collect_python_notices.py \
-    --notices /app/python-third-party-notices.txt \
-    --inventory /app/python-third-party-inventory.json
+# syntax=docker/dockerfile:1
+FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY src/garmin_ai/locales ./src/garmin_ai/locales
+COPY src/garmin_ai/prompts ./src/garmin_ai/prompts
+COPY src/garmin_ai/static/dashboard ./src/garmin_ai/static/dashboard
+COPY src/garmin_ai/static/garmin_auth ./src/garmin_ai/static/garmin_auth
+COPY src/garmin_ai/static/web_chat ./src/garmin_ai/static/web_chat
+COPY migration/contracts ./migration/contracts
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    cargo build --locked --release -p ga-app --bin garmin-ai-rust --bin garmin-ai-release-cleanup \
+    && install -m 0555 target/release/garmin-ai-rust /garmin-ai-rust \
+    && install -m 0555 target/release/garmin-ai-release-cleanup /garmin-ai-release-cleanup
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/collect_rust_notices.py ./scripts/
+COPY scripts/rust-license-notices ./scripts/rust-license-notices
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    target="$(rustc -vV | sed -n 's/^host: //p')" \
+    && cargo metadata --locked --format-version 1 --filter-platform "$target" > /tmp/metadata.json \
+    && cargo tree --locked --target "$target" -p ga-app --edges normal,no-proc-macro \
+       --prefix none --no-dedupe --format '{p}' > /tmp/tree.txt \
+    && python3 scripts/collect_rust_notices.py --metadata /tmp/metadata.json --tree /tmp/tree.txt \
+       --supplements scripts/rust-license-notices \
+       --notices /rust-third-party-notices.txt --inventory /rust-third-party-inventory.json
 
-FROM python:3.15.2-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd
-WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/src /app/src
-COPY alembic.ini ./
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libgcc-s1 tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -m 0700 -o 1000 -g 1000 /app/data/raw /app/tokens/garmin /app/state /app/backups \
+    && chown 1000:1000 /app /app/data /app/tokens \
+    && chmod 0700 /app/data \
+    && chmod 0755 /app/tokens
+COPY --from=builder /garmin-ai-rust /usr/local/bin/garmin-ai-rust
+COPY --from=builder /garmin-ai-release-cleanup /usr/local/bin/garmin-ai-release-cleanup
 COPY LICENSE /usr/share/doc/garmin-ai/LICENSE
-COPY --from=builder /app/python-third-party-notices.txt /usr/share/doc/garmin-ai/python-third-party-notices.txt
-COPY --from=builder /app/python-third-party-inventory.json /usr/share/doc/garmin-ai/python-third-party-inventory.json
-ENV PATH="/app/.venv/bin:$PATH"
+COPY crates/ga-domain/src/statistics/LICENSE-scipy.txt /usr/share/doc/garmin-ai/LICENSE-scipy.txt
+COPY crates/ga-domain/src/timestamp/LICENSE-python.txt /usr/share/doc/garmin-ai/LICENSE-python.txt
+COPY crates/ga-fit/profile/LICENSE-fitdecode.txt /usr/share/doc/garmin-ai/LICENSE-fitdecode.txt
+COPY --from=builder /rust-third-party-notices.txt /usr/share/doc/garmin-ai/rust-third-party-notices.txt
+COPY --from=builder /rust-third-party-inventory.json /usr/share/doc/garmin-ai/rust-third-party-inventory.json
+WORKDIR /app
+ENV GA_DATA_DIR=/app/data GA_LOCK_DIR=/app/state GA_BACKUP_DIR=/app/backups
 USER 1000:1000
-CMD ["garmin-ai", "worker"]
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["garmin-ai-rust", "healthcheck"]
+ENTRYPOINT ["garmin-ai-rust"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8080"]

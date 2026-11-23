@@ -32,18 +32,15 @@ if [[ ! $image_assignment =~ ^GA_APP_IMAGE=[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f
     exit 1
 fi
 image=${image_assignment#GA_APP_IMAGE=}
-runtime=$(sed -n 's/^GA_APP_RUNTIME=//p' release.env)
-legacy_entry=
-case "${runtime:-python}" in
-    rust) ;;
-    python) legacy_entry=garmin-ai ;;
-    *) echo "release.env must select the rust or python application runtime." >&2; exit 1 ;;
-esac
+if [[ $(sed -n '/^GA_APP_RUNTIME=/p' release.env) != GA_APP_RUNTIME=rust ]]; then
+    echo "release.env must select the Rust application runtime." >&2
+    exit 1
+fi
 
 install_command=./install.sh
 compose_files=(-f compose.release.yml)
 if [[ "${1:-}" == --gcp ]]; then
-    if [[ "$runtime" != rust || ! -f compose.gcp.yml ]]; then
+    if [[ ! -f compose.gcp.yml ]]; then
         echo "The GCP profile requires a native bundle containing compose.gcp.yml." >&2
         exit 2
     fi
@@ -84,21 +81,12 @@ stop_inspection() {
 case "${1:-}" in
     demo)
         shift
-        if [ -z "$legacy_entry" ]; then
-            exec docker run --rm --read-only --cap-drop ALL \
-                --user "$(id -u):$(id -g)" -p 127.0.0.1:8765:8765 \
-                "$image" demo --host 0.0.0.0 --port 8765 "$@"
-        fi
-        exec docker run --rm --read-only \
-            --user "$(id -u):$(id -g)" \
-            -p 127.0.0.1:8765:8765 \
-            --mount "type=bind,source=$PWD,target=/setup,readonly" \
-            --entrypoint python "$image" \
-            /setup/scripts/serve_demo.py --host 0.0.0.0 --port 8765 "$@"
+        exec docker run --rm --read-only --cap-drop ALL \
+            --user "$(id -u):$(id -g)" -p 127.0.0.1:8765:8765 \
+            "$image" demo --host 0.0.0.0 --port 8765 "$@"
         ;;
     licenses)
-        if [ -z "$legacy_entry" ]; then
-            exec docker run --rm --network none --read-only --cap-drop ALL \
+        exec docker run --rm --network none --read-only --cap-drop ALL \
                 --entrypoint sh "$image" -ec '
                     cd /usr/share/doc/garmin-ai
                     cat LICENSE LICENSE-scipy.txt LICENSE-python.txt LICENSE-fitdecode.txt \
@@ -119,39 +107,22 @@ case "${1:-}" in
                         cat "$license"
                     done
                 '
-        fi
-        docker run --rm --read-only --entrypoint cat "$image" \
-            /usr/share/doc/garmin-ai/LICENSE \
-            /usr/share/doc/garmin-ai/python-third-party-notices.txt
         ;;
     setup)
         shift
-        if [ -z "$legacy_entry" ]; then
-            mount_list=$(docker run --rm --read-only --cap-drop ALL --network none \
-                --user "$(id -u):$(id -g)" --workdir /setup \
-                --mount "type=bind,source=$PWD,target=/setup,readonly" \
-                "$image" configure --mount-sources "$PWD")
-        else
-            mount_list=$(docker run --rm --read-only \
-                --user "$(id -u):$(id -g)" \
-                --mount "type=bind,source=$PWD,target=/setup,readonly" \
-                --entrypoint python "$image" \
-                /setup/scripts/release_mounts.py /setup/.env "$PWD")
-        fi
+        mount_list=$(docker run --rm --read-only --cap-drop ALL --network none \
+            --user "$(id -u):$(id -g)" --workdir /setup \
+            --mount "type=bind,source=$PWD,target=/setup,readonly" \
+            "$image" configure --mount-sources "$PWD")
         mount_args=(--mount "type=bind,source=$PWD,target=$PWD")
         while IFS= read -r directory; do
             if [ -n "$directory" ]; then
                 mount_args+=(--mount "type=bind,source=$directory,target=$directory")
             fi
         done <<< "$mount_list"
-        if [ -z "$legacy_entry" ]; then
-            docker run --rm --cap-drop ALL --network none \
-                --user "$(id -u):$(id -g)" "${mount_args[@]}" --workdir "$PWD" \
-                "$image" configure "$@"
-        else
-            docker run --rm --user "$(id -u):$(id -g)" "${mount_args[@]}" \
-                --workdir "$PWD" --entrypoint python "$image" "$PWD/scripts/configure.py" "$@"
-        fi
+        docker run --rm --cap-drop ALL --network none \
+            --user "$(id -u):$(id -g)" "${mount_args[@]}" --workdir "$PWD" \
+            "$image" configure "$@"
         compose config --quiet
         ;;
     start)
@@ -160,7 +131,6 @@ case "${1:-}" in
         compose up -d --wait
         ;;
     migrate|inspect)
-        test "$runtime" = rust || { echo "This command requires a native bundle." >&2; exit 2; }
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         if [[ "$1" == migrate && $# -eq 2 && "$2" == --status ]]; then
             compose run --rm --no-deps migrate migrate --status
@@ -195,7 +165,7 @@ case "${1:-}" in
     login)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
-        compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} login "${@:2}"
+        compose run --rm --no-deps worker login "${@:2}"
         echo "Garmin login finished. Run $install_command start to recreate the worker."
         ;;
     enroll-account)
@@ -206,19 +176,19 @@ case "${1:-}" in
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
         echo "The worker is stopped. Run $install_command start when ready to resume." >&2
-        compose run --rm --no-deps -T worker ${legacy_entry:+"$legacy_entry"} enroll-account "$2"
+        compose run --rm --no-deps -T worker enroll-account "$2"
         ;;
     pair-telegram)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
         compose run --rm --no-deps --workdir "$PWD" \
-            -v "$PWD:$PWD" worker ${legacy_entry:+"$legacy_entry"} pair-telegram --env-file "$PWD/.env" --container-runtime
+            -v "$PWD:$PWD" worker pair-telegram --env-file "$PWD/.env" --container-runtime
         echo "Pairing finished. Run $install_command start to recreate API and worker with the saved owner ID."
         ;;
     backup-space)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         test "$#" -eq 1 || { echo "Unexpected command arguments." >&2; exit 2; }
-        compose run --rm --no-deps -T worker ${legacy_entry:+"$legacy_entry"} backup-space /app/backups/backup.enc
+        compose run --rm --no-deps -T worker backup-space /app/backups/backup.enc
         ;;
     export)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
@@ -226,7 +196,7 @@ case "${1:-}" in
             echo "Choose a new .jsonl.gz filename for the export in GA_DATA_DIR." >&2
             exit 2
         fi
-        compose run --rm --no-deps -T worker ${legacy_entry:+"$legacy_entry"} export "/app/data/$2"
+        compose run --rm --no-deps -T worker export "/app/data/$2"
         ;;
     backup)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
@@ -239,18 +209,13 @@ case "${1:-}" in
         fi
         compose stop worker
         backup_name="manual-$(date -u +%Y%m%dT%H%M%SZ)-$$.enc"
-        compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} backup "/app/backups/$backup_name"
+        compose run --rm --no-deps worker backup "/app/backups/$backup_name"
         verify_volume=$(docker volume create)
         trap 'docker volume rm -f "$verify_volume" >/dev/null' EXIT
         docker run --rm --network none --user 0 -v "$verify_volume:/verification" --entrypoint chown \
             "$image" "$worker_identity" /verification
-        if [ -z "$legacy_entry" ]; then
-            compose run --rm --no-deps -v "$verify_volume:/verification" worker \
-                unpack-backup "/app/backups/$backup_name" /verification/extracted
-        else
-            compose run --rm --no-deps -v "$PWD:/setup:ro" -v "$verify_volume:/verification" worker \
-                python /setup/scripts/verify_release_backup.py "/app/backups/$backup_name"
-        fi
+        compose run --rm --no-deps -v "$verify_volume:/verification" worker \
+            unpack-backup "/app/backups/$backup_name" /verification/extracted
         docker volume rm "$verify_volume" >/dev/null
         trap - EXIT
         echo "Verified encrypted backup: $backup_name in GA_BACKUP_DIR. Worker remains stopped."
@@ -263,12 +228,11 @@ case "${1:-}" in
             exit 2
         fi
         recovery_name="${backup_name%.enc}-recovery-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-        compose run --rm --no-deps worker ${legacy_entry:+"$legacy_entry"} unpack-backup \
+        compose run --rm --no-deps worker unpack-backup \
             "/app/backups/$backup_name" "/app/backups/$recovery_name"
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
     restore-db)
-        test "$runtime" = rust || { echo "This command requires a native bundle." >&2; exit 2; }
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         if [[ $# -ne 2 || ! "${2:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
             echo "Pass the recovery directory name from GA_BACKUP_DIR." >&2

@@ -1,4 +1,4 @@
-"""Compare Rust readiness with the Python application on a disposable TimescaleDB."""
+"""Check Rust readiness and storage fences on a disposable TimescaleDB."""
 
 import argparse
 import os
@@ -10,14 +10,12 @@ from pathlib import Path
 from time import monotonic
 
 import httpx
-from capture_reference import isolated_engine
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from garmin_ai.api import create_app
-from garmin_ai.config import Settings
-from garmin_ai.db import SCHEMA_REVISION
+SCHEMA_REVISION = (
+    (Path(__file__).resolve().parents[1] / "crates/ga-db/schema-revision.txt").read_text().strip()
+)
 
 READY = (200, {"status": "ready"})
 UNAVAILABLE = (503, {"detail": "Database unavailable or not migrated"})
@@ -86,9 +84,8 @@ def confirm_fixture(engine):
         )
 
 
-def compare_ready_cases(engine, python, rust):
-    for client in (python, rust):
-        expect(client, READY)
+def check_ready_cases(engine, rust):
+    expect(rust, READY)
     execute(
         engine,
         "UPDATE alembic_version SET version_num = :new WHERE version_num = :old",
@@ -96,8 +93,7 @@ def compare_ready_cases(engine, python, rust):
         new=UNKNOWN_REVISION,
     )
     try:
-        for client in (python, rust):
-            expect(client, MIGRATION_REQUIRED)
+        expect(rust, MIGRATION_REQUIRED)
     finally:
         execute(
             engine,
@@ -122,8 +118,7 @@ def compare_ready_cases(engine, python, rust):
 
     execute(engine, "INSERT INTO app_state (key, value) VALUES ('maintenance:erased', '{}')")
     try:
-        for client in (python, rust):
-            expect(client, ERASED)
+        expect(rust, ERASED)
     finally:
         execute(engine, "DELETE FROM app_state WHERE key = 'maintenance:erased'")
 
@@ -157,35 +152,32 @@ def main():
     url = make_url(os.environ["GA_TEST_DATABASE_URL"])
     if (
         url.drivername != "postgresql+psycopg"
+        or url.host not in {"127.0.0.1", "::1", "localhost"}
         or not (url.database or "").endswith("_test")
         or url.query
     ):
         parser.error(
             "GA_TEST_DATABASE_URL must name a dedicated PostgreSQL database ending in _test"
         )
-    engine = isolated_engine() if args.bootstrap else create_engine(url, hide_parameters=True)
+    binary = args.binary.resolve(strict=True)
+    engine = create_engine(url, hide_parameters=True)
     try:
+        if args.bootstrap:
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT current_database()")) == url.database
+                assert connection.scalar(
+                    text("SELECT NOT EXISTS (SELECT FROM pg_tables WHERE schemaname='public')")
+                ), "Bootstrap requires an empty fixture database"
+            env = {"GA_DATABASE_URL": url.render_as_string(hide_password=False)}
+            subprocess.run([binary, "migrate"], env=env, check=True, timeout=60)
         confirm_fixture(engine)
-        with tempfile.TemporaryDirectory() as work:
-            directory = Path(work)
-            settings = Settings(
-                _env_file=None,
-                data_dir=directory / "data",
-                token_dir=directory / "tokens",
-                lock_dir=directory / "locks",
-                backup_dir=directory / "backup",
-                integrations=[],
-            )
-            with (
-                TestClient(create_app(settings, engine=engine)) as python,
-                rust_server(args.binary.resolve(strict=True), engine.url) as rust,
-            ):
-                compare_ready_cases(engine, python, rust)
-                check_readiness_under_contention(engine, rust)
-            confirm_fixture(engine)
+        with rust_server(binary, engine.url) as rust:
+            check_ready_cases(engine, rust)
+            check_readiness_under_contention(engine, rust)
+        confirm_fixture(engine)
     finally:
         engine.dispose()
-    print("Python and Rust readiness matched. Invalid revisions and storage fences stayed closed.")
+    print("Rust readiness rejected invalid revisions and respected storage fences.")
 
 
 if __name__ == "__main__":

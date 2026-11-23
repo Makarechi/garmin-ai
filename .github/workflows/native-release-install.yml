@@ -10,12 +10,19 @@ on:
   pull_request:
     paths:
       - ".github/workflows/native-release-install.yml"
-      - "Dockerfile.rust"
-      - "Dockerfile.rust.dockerignore"
-      - "compose.rust-release.yml"
-      - "compose.rust-gcp.yml"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "compose.yml"
+      - "compose.gcp.yml"
       - "deploy/gcp/**"
       - "install.sh"
+      - "Cargo.lock"
+      - "crates/ga-app/Cargo.toml"
+      - "crates/ga-db/schema-revision.txt"
+      - "tests/test_release_bundle.py"
+      - "tests/test_rust_notices.py"
+      - "pyproject.toml"
+      - "uv.lock"
       - "scripts/build_release_bundle.py"
       - "scripts/collect_rust_notices.py"
       - "scripts/rust-license-notices/**"
@@ -27,12 +34,19 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/native-release-install.yml"
-      - "Dockerfile.rust"
-      - "Dockerfile.rust.dockerignore"
-      - "compose.rust-release.yml"
-      - "compose.rust-gcp.yml"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "compose.yml"
+      - "compose.gcp.yml"
       - "deploy/gcp/**"
       - "install.sh"
+      - "Cargo.lock"
+      - "crates/ga-app/Cargo.toml"
+      - "crates/ga-db/schema-revision.txt"
+      - "tests/test_release_bundle.py"
+      - "tests/test_rust_notices.py"
+      - "pyproject.toml"
+      - "uv.lock"
       - "scripts/build_release_bundle.py"
       - "scripts/collect_rust_notices.py"
       - "scripts/rust-license-notices/**"
@@ -68,20 +82,29 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version-file: .python-version
-      - run: uv sync --locked --no-dev
+      - run: uv sync --locked
+      - name: Check packaging and installer rules
+        run: uv run --locked pytest -q tests/test_release_bundle.py tests/test_rust_notices.py
       - name: Install and restart a source-free native bundle
-        env:
-          GA_SMOKE_RUNTIME: rust
         run: bash scripts/smoke_release_install.sh
+      - name: Check out the frozen historical schema fixture
+        uses: actions/checkout@v4
+        with:
+          ref: 9376d081620740799362282ac9faf2f1a1baaffa
+          path: test-results/historical-schema
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: test-results/historical-schema/.python-version
+      - run: uv sync --project test-results/historical-schema --locked --no-dev
       - name: Upgrade a historical installation with the native bundle
         env:
-          GA_SMOKE_RUNTIME: rust
           GA_SMOKE_HISTORICAL: "true"
+          GA_SMOKE_LEGACY_REFERENCE: test-results/historical-schema
         run: bash scripts/smoke_release_install.sh
       - name: Install the GCP profile from a source-free native bundle
         if: matrix.architecture == 'amd64'
         env:
-          GA_SMOKE_RUNTIME: rust
           GA_SMOKE_GCP: "true"
         run: bash scripts/smoke_release_install.sh
       - name: Preserve non-sensitive platform evidence

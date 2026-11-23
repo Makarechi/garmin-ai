@@ -7,46 +7,46 @@ dependencies and container images retain their own licenses.
 
 ## First local check
 
-Install Python 3.15.2 and [uv](https://docs.astral.sh/uv/), then run:
+Install Rust with rustup. The repository selects the toolchain in
+`rust-toolchain.toml`. Run:
+
+```sh
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+```
+
+Run integration tests against a dedicated loopback TimescaleDB database ending
+in `_test`. Set `GA_TEST_DATABASE_URL`, initialize it with
+`GA_DATABASE_URL="$GA_TEST_DATABASE_URL" target/release/garmin-ai-rust migrate`,
+and run the relevant ignored Cargo test with `-- --ignored`.
+Use fictional data and test credentials.
+
+## Packaging and browser checks
+
+The repository's `uv` environment installs development tools for browser and
+packaging checks. Install the version in `.python-version` and run:
 
 ```sh
 uv sync --locked
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest -q tests/test_architecture_boundaries.py tests/test_integrations.py
+uv run --locked pytest -q tests/test_release_bundle.py tests/test_rust_notices.py
+uv run --locked playwright install chromium
+cargo build --locked --release -p ga-app
+GA_TEST_NATIVE_WEB=target/release/garmin-ai-rust \
+GA_TEST_NATIVE_DEMO=target/release/garmin-ai-rust uv run --locked pytest -q \
+  tests/test_web_chat_browser.py tests/test_dashboard_demo_browser.py
 ```
-
-For a complete diary write/correction test, use a disposable PostgreSQL/TimescaleDB
-database whose name ends in `_test`, set `GA_TEST_DATABASE_URL`, and run
-`uv run pytest -q tests/test_core_only_flow.py`. The test suite refuses a database
-without that suffix. No provider SDK or real account is needed. Do not put a real
-credential in a test command or fixture.
-
-## Python runtime
-
-The supported runtime is CPython 3.15.2 through 3.15.x; Python 3.13 and 3.14
-are no longer declared supported. `.python-version`, package metadata, extension
-examples and the container use the same runtime. CI installs it explicitly before
-running `uv sync --locked`.
-
-If `uv` reports that no 3.15.2 download is available, install Python 3.15.2 from
-[python.org](https://www.python.org/downloads/release/python-3152/) and select it
-with `uv sync --locked --python /absolute/path/to/python3.15`. Do not fall back to
-3.15.1: it predates the 3.15.2 security fixes. Pydantic 2.14.1 or newer supplies
-Python 3.15 wheels; the lockfile pins the verified dependency set. Ruff keeps the
-existing source syntax/formatting target independently of runtime support.
 
 ## Where to work
 
 | Area | Main paths |
 | --- | --- |
-| Diary, definitions, forms | `src/garmin_ai/events.py`, `definitions.py`, `tracker_forms.py` |
-| Read and analysis | `queries.py`, `generic_analytics.py`, `agent.py` |
-| Sources and ingestion | `garmin.py`, `ingest.py`, `sync.py` |
-| Channels and models | `channels.py`, `telegram_adapter.py`, `llm.py` |
-| Integration selection | `config.py`, `integrations.py`, `runtime.py` |
-| HTTP and dashboard | `api.py`, `dashboard.py`, `static/dashboard/` |
-| Tests and architecture | `tests/`, `docs/architecture.md` |
+| Diary, definitions, forms | `crates/ga-db`, `crates/ga-domain` |
+| Storage, sources and ingestion | `crates/ga-db`, `crates/ga-archive`, `crates/ga-garmin`, `crates/ga-fit` |
+| Telegram, HTTP and job execution | `crates/ga-app` |
+| Model transport and validation | `crates/ga-model`, `crates/ga-domain` |
+| Embedded translations, prompts and web UI | `src/garmin_ai/locales`, `src/garmin_ai/prompts`, `src/garmin_ai/static` |
+| Tests and architecture | `crates/*/tests`, `tests/`, `docs/architecture.md` |
 
 Four useful kinds of contribution are: a declarative tracker pack, translation, or
 example; a source adapter or importer; a channel or model adapter; and a regression

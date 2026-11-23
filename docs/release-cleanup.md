@@ -44,33 +44,7 @@ sudo /usr/local/lib/garmin-ai/garmin-ai-release-cleanup
 sudo /usr/local/lib/garmin-ai/garmin-ai-release-cleanup --apply --record-only
 ```
 
-The retention rules and deployment lock below apply to both installers.
-
-## Legacy deployment
-
-Before enabling it, confirm that both `api` and `worker` are healthy and identify a
-distinct, previously working rollback image. Preview the exact selection on the VM:
-
-```sh
-sudo python3 deploy/gcp/release_cleanup.py \
-  --initialize-rollback garmin-ai:PREVIOUS_VERIFIED_TAG \
-  --archive-dir /home/UPLOAD_USER
-```
-
-Only after checking this preview, install from the same checked-out revision:
-
-```sh
-sudo sh deploy/gcp/install-cleanup.sh garmin-ai:PREVIOUS_VERIFIED_TAG /home/UPLOAD_USER
-sudo systemctl start garmin-ai-release-cleanup.service
-sudo journalctl -u garmin-ai-release-cleanup.service --no-pager -n 20
-systemctl list-timers garmin-ai-release-cleanup.timer
-```
-
-Installation records the retained image identities without deleting anything, then
-enables the persistent timer. The explicit service start above performs the first
-cleanup. Installation is repeatable without replacing an existing rollback record.
-The script requires only host Python 3 and the Docker CLI; it neither rebuilds the
-application nor runs database migrations.
+## Retention and deployment lock
 
 Upload future `docker save | gzip` installation files directly into the configured
 upload directory, named `garmin-ai-RELEASE.tar.gz`. Give each release a unique Docker
@@ -110,7 +84,7 @@ sudo flock /run/lock/garmin-ai-release-cleanup.lock sh
 # Complete uploads, load the image, and verify the rollout while the lock is held.
 # Exit this shell to release the deployment lock before recording the release.
 exit
-sudo python3 /usr/local/lib/garmin-ai/release_cleanup.py --apply --record-only
+sudo /usr/local/lib/garmin-ai/garmin-ai-release-cleanup --apply --record-only
 ```
 
 Record each successful rollout immediately. Once both application containers are
@@ -129,7 +103,7 @@ it contains only image identities and upload directory paths, never credentials.
 For a later read-only preview, run:
 
 ```sh
-sudo python3 /usr/local/lib/garmin-ai/release_cleanup.py
+sudo /usr/local/lib/garmin-ai/garmin-ai-release-cleanup
 ```
 
 After cleanup, verify application readiness, retained images, free space, and backup

@@ -2,10 +2,10 @@
 
 With the native executable installed, run `garmin-ai-rust demo`.
 
-Run from the repository root with Python 3.15.2:
+Run from the repository root with the project Rust toolchain:
 
 ```sh
-python3 scripts/serve_demo.py
+cargo run --locked -p ga-app -- demo
 ```
 
 Open `http://127.0.0.1:8765/dashboard`. The server binds to `127.0.0.1` and serves only the dashboard page, JavaScript and CSS. It exposes no personal API, accepts no writes and uses no database, Garmin account, Telegram bot or model key. Its content security policy blocks network connections from the page. No package installation is needed for this demo server.
@@ -20,6 +20,6 @@ Try this sequence:
 
 Use fictional input. The starter profile, generated tracker definitions and edits are held in a separate in-memory demo state; they never enter the personal database. The regular `/dashboard` page on a configured API instance keeps personal operations behind authentication and shows the demo before connection. Switching from personal mode to demo discards the page's token and loaded personal records.
 
-This demo shows the interaction, not the real AI, Garmin synchronization, Telegram delivery, server-side tracker validation or durable storage. To run the browser acceptance test locally, install its Chromium browser once with `uv run playwright install chromium`, then run `uv run pytest -q tests/test_dashboard_demo_browser.py`. The test clicks through creation, correction, recalculation, reset, reload and mobile width, and checks that the standalone demo requests only its static files.
+This demo shows the interaction, not the real AI, Garmin synchronization, Telegram delivery, server-side tracker validation or durable storage. To run the browser acceptance test locally, install its Chromium browser once with `uv run playwright install chromium`, then run `GA_TEST_NATIVE_DEMO=target/debug/garmin-ai-rust uv run --locked pytest -q tests/test_dashboard_demo_browser.py` after building the Rust executable. The test clicks through creation, correction, recalculation, reset, reload and mobile width, and checks that the standalone demo requests only its static files.
 
 Set `GA_TEST_NATIVE_DEMO` to the absolute path to the native binary to run the same browser cases against its demo server.

@@ -3,19 +3,16 @@
 import json
 import os
 import select
-import socket
 import subprocess
-import threading
-import time
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import uuid4
 
+import psycopg
 import pytest
-import uvicorn
 from playwright.sync_api import expect, sync_playwright
-
-from garmin_ai.api import create_app
-from garmin_ai.config import ApiToken, Settings
+from psycopg import sql
+from sqlalchemy.engine import make_url
 
 KEY = "synthetic-browser-owner-" + "c" * 32
 READ_KEY = "synthetic-browser-read-diary-" + "r" * 32
@@ -26,54 +23,54 @@ TOKENS = [
 
 
 @pytest.fixture
-def browser_api(db, db_engine, tmp_path):
-    db.commit()
+def browser_api(tmp_path):
     native = os.environ.get("GA_TEST_NATIVE_WEB")
-    if native:
-        binary = Path(native).resolve(strict=True)
-        with subprocess.Popen(
-            [binary, "serve", "--host", "127.0.0.1", "--port", "0"],
-            cwd=tmp_path,
-            env={
-                "GA_DATABASE_URL": os.environ["GA_TEST_DATABASE_URL"],
-                "GA_API_TOKENS": json.dumps(TOKENS),
-            },
-            stdout=subprocess.PIPE,
-            text=True,
-        ) as process:
-            try:
-                assert select.select([process.stdout], [], [], 10)[0], (
-                    "Native API startup timed out"
-                )
-                address = process.stdout.readline().strip().removeprefix("Listening on ")
-                url = urlsplit(address)
-                assert url.scheme == "http" and url.hostname == "127.0.0.1" and url.port
-                yield address
-            finally:
-                process.terminate()
+    database_url = os.environ.get("GA_TEST_DATABASE_URL")
+    if not native or not database_url:
+        pytest.skip("Requires the Rust binary and a local TimescaleDB fixture")
+
+    base = make_url(database_url)
+    assert base.drivername == "postgresql+psycopg"
+    assert base.host in {"127.0.0.1", "::1", "localhost"} and not base.query
+    assert base.database and base.database.endswith("_test")
+    admin = base.set(drivername="postgresql").render_as_string(hide_password=False)
+    name = f"garmin_browser_{uuid4().hex}_test"
+    environment = {
+        "GA_DATABASE_URL": base.set(database=name).render_as_string(hide_password=False),
+        "GA_API_TOKENS": json.dumps(TOKENS),
+    }
+    binary = Path(native).resolve(strict=True)
+    with psycopg.connect(admin, autocommit=True) as connection:
+        assert connection.execute("SELECT current_database()").fetchone() == (base.database,)
+        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+        try:
+            subprocess.run(
+                [binary, "migrate"], cwd=tmp_path, env=environment, check=True, timeout=60
+            )
+            with subprocess.Popen(
+                [binary, "serve", "--host", "127.0.0.1", "--port", "0"],
+                cwd=tmp_path,
+                env=environment,
+                stdout=subprocess.PIPE,
+                text=True,
+            ) as process:
                 try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-        return
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    app = create_app(Settings(api_tokens=[ApiToken(**token) for token in TOKENS]), db_engine)
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    for _ in range(100):
-        if server.started:
-            break
-        time.sleep(0.05)
-    assert server.started
-    try:
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        thread.join(timeout=5)
+                    assert select.select([process.stdout], [], [], 10)[0], (
+                        "Native API startup timed out"
+                    )
+                    address = process.stdout.readline().strip().removeprefix("Listening on ")
+                    url = urlsplit(address)
+                    assert url.scheme == "http" and url.hostname == "127.0.0.1" and url.port
+                    yield address
+                finally:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+        finally:
+            connection.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
 
 
 def test_browser_connect_note_history_and_disconnect(browser_api):

@@ -5,11 +5,11 @@ on:
   pull_request:
     paths:
       - ".github/workflows/native-offhost-restore.yml"
-      - "tests/evals/offhost_restore_probe.py"
-      - "migration/check_cutover_restore.py"
-      - "migration/check_worker_cutover.py"
       - "scripts/extract_native_test_binary.sh"
-      - "Dockerfile.rust"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "Cargo.lock"
+      - "crates/ga-db/schema-revision.txt"
       - "crates/ga-app/src/backup.rs"
       - "crates/ga-archive/src/backup*"
       - "crates/ga-archive/src/backup*/**"
@@ -19,11 +19,11 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/native-offhost-restore.yml"
-      - "tests/evals/offhost_restore_probe.py"
-      - "migration/check_cutover_restore.py"
-      - "migration/check_worker_cutover.py"
       - "scripts/extract_native_test_binary.sh"
-      - "Dockerfile.rust"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "Cargo.lock"
+      - "crates/ga-db/schema-revision.txt"
       - "crates/ga-app/src/backup.rs"
       - "crates/ga-archive/src/backup*"
       - "crates/ga-archive/src/backup*/**"
@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 env:
-  FROZEN_PYTHON_COMMIT: ee3a14a48a6ad30c1085951bac2f53c9088c2450
+  FROZEN_PYTHON_COMMIT: 9376d081620740799362282ac9faf2f1a1baaffa
 
 jobs:
   capture:
@@ -61,29 +61,29 @@ jobs:
         with:
           version: "0.13.5"
           enable-cache: true
-      - uses: actions/setup-python@v6
-        with:
-          python-version-file: .python-version
-      - if: matrix.runtime == 'python'
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.FROZEN_PYTHON_COMMIT }}
-          path: .offhost-python-reference
+          path: test-results/backup-fixture
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: test-results/backup-fixture/.python-version
       - if: matrix.runtime == 'rust'
         run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
       - name: Create encrypted synthetic backup
         env:
           PROBE_RUNTIME: ${{ matrix.runtime }}
         run: |
+          project="$GITHUB_WORKSPACE/test-results/backup-fixture"
+          test "$(git -C "$project" rev-parse HEAD)" = "$FROZEN_PYTHON_COMMIT"
           if [[ $PROBE_RUNTIME == rust ]]; then
-            project=.
             args=(--native-binary "$RUNNER_TEMP/garmin-ai-rust")
           else
-            project=.offhost-python-reference
             args=(--python-reference "$FROZEN_PYTHON_COMMIT")
           fi
-          PYTHONPATH="$project/src:migration" uv run --locked --project "$project" python tests/evals/offhost_restore_probe.py create \
+          PYTHONPATH="$project/src:$project/migration" uv run --locked --no-dev --project "$project" \
+            python "$project/tests/evals/offhost_restore_probe.py" create \
             "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA" "${args[@]}"
       # The short-lived key and archive contain only data generated in this job.
       - uses: actions/upload-artifact@v4
@@ -94,20 +94,12 @@ jobs:
           if-no-files-found: error
 
   recover:
-    name: Off-host recovery (${{ matrix.source }} to ${{ matrix.target }})
+    name: Off-host recovery (${{ matrix.source }} to Rust)
     needs: capture
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        include:
-          - source: python
-            target: rust
-          - source: rust
-            target: python
-          - source: rust
-            target: rust
-          - source: python
-            target: python
+        source: [python, rust]
     services:
       postgres:
         image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
@@ -126,41 +118,30 @@ jobs:
         with:
           version: "0.13.5"
           enable-cache: true
-      - uses: actions/setup-python@v6
-        with:
-          python-version-file: .python-version
-      - if: matrix.target == 'python'
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.FROZEN_PYTHON_COMMIT }}
-          path: .offhost-python-reference
+          path: test-results/backup-fixture
           persist-credentials: false
-      - if: matrix.target == 'rust' || matrix.source == 'python'
-        run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: test-results/backup-fixture/.python-version
+      - run: bash scripts/extract_native_test_binary.sh "$RUNNER_TEMP/garmin-ai-rust"
       - uses: actions/download-artifact@v4
         with:
           name: native-offhost-fixture-${{ matrix.source }}
           path: ${{ runner.temp }}/synthetic-offhost
-      - name: Verify recovery on a separate host
-        env:
-          PROBE_SOURCE: ${{ matrix.source }}
-          PROBE_RUNTIME: ${{ matrix.target }}
+      - name: Restore and verify with Rust on a separate host
         run: |
-          if [[ $PROBE_RUNTIME == rust ]]; then
-            project=.
-            args=(--native-binary "$RUNNER_TEMP/garmin-ai-rust")
-          else
-            project=.offhost-python-reference
-            args=(--python-reference "$FROZEN_PYTHON_COMMIT")
-          fi
-          if [[ $PROBE_SOURCE == python && $PROBE_RUNTIME == python ]]; then
-            args+=(--prewrite-inspector "$RUNNER_TEMP/garmin-ai-rust")
-          fi
-          PYTHONPATH="$project/src:migration" uv run --locked --project "$project" python tests/evals/offhost_restore_probe.py restore \
+          project="$GITHUB_WORKSPACE/test-results/backup-fixture"
+          test "$(git -C "$project" rev-parse HEAD)" = "$FROZEN_PYTHON_COMMIT"
+          PYTHONPATH="$project/src:$project/migration" uv run --locked --no-dev --project "$project" \
+            python "$project/tests/evals/offhost_restore_probe.py" restore \
             "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" \
-            --commit "$GITHUB_SHA" --evidence "$RUNNER_TEMP/native-offhost-result.json" "${args[@]}"
+            --native-binary "$RUNNER_TEMP/garmin-ai-rust" \
+            --commit "$GITHUB_SHA" --evidence "$RUNNER_TEMP/native-offhost-result.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: native-offhost-result-${{ matrix.source }}-to-${{ matrix.target }}
+          name: native-offhost-result-${{ matrix.source }}-to-rust
           path: ${{ runner.temp }}/native-offhost-result.json
           if-no-files-found: error

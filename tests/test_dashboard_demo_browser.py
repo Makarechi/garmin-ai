@@ -2,25 +2,25 @@
 
 import json
 import os
-import sys
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from subprocess import PIPE, Popen
 from urllib.parse import urlsplit
 
+import pytest
 from playwright.sync_api import expect, sync_playwright
-
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/serve_demo.py"
 
 
 @contextmanager
 def demo_server():
     native = os.environ.get("GA_TEST_NATIVE_DEMO")
-    command = [native, "demo"] if native else [sys.executable, str(SCRIPT)]
+    if not native:
+        pytest.skip("Requires the Rust binary")
+    binary = Path(native).resolve(strict=True)
     process = Popen(
-        [*command, "--port", "0"],
-        env={} if native else None,
+        [binary, "demo", "--port", "0"],
+        env={},
         stdout=PIPE,
         stderr=PIPE,
         text=True,

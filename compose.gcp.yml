@@ -1,4 +1,4 @@
-# Use together with compose.yml. Build and load the amd64 image before deployment.
+# Resource limits and optional Garmin sign-in gateway for the native GCP bundle.
 services:
   db:
     mem_limit: 320m
@@ -27,32 +27,21 @@ services:
         max-size: 5m
         max-file: '2'
   migrate:
-    image: ${GA_IMAGE:?Set GA_IMAGE to a unique versioned release tag}
     mem_limit: 256m
     logging: *bounded_logs
   api:
-    image: ${GA_IMAGE:?Set GA_IMAGE to a unique versioned release tag}
     mem_limit: 192m
+    memswap_limit: 384m
     healthcheck:
       start_period: 300s
       timeout: 30s
-    memswap_limit: 384m
-    environment: &numeric_threads
-      OPENBLAS_NUM_THREADS: '1'
-      OMP_NUM_THREADS: '1'
-      MKL_NUM_THREADS: '1'
     logging: *bounded_logs
   worker:
-    image: ${GA_IMAGE:?Set GA_IMAGE to a unique versioned release tag}
     mem_limit: 384m
-    volumes:
-      - ./deploy/gcp/healthcheck.py:/opt/garmin-ai-healthcheck.py:ro
-    healthcheck:
-      test: [CMD, python, /opt/garmin-ai-healthcheck.py]
-      start_period: 300s
-      timeout: 90s
     memswap_limit: 1024m
-    environment: *numeric_threads
+    healthcheck:
+      start_period: 300s
+      timeout: 30s
     logging: *bounded_logs
   auth-gateway:
     profiles: [garmin-web-auth]
