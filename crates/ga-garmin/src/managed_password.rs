@@ -12,7 +12,7 @@ const METADATA_TOKEN: &str =
 const SECRET_MANAGER: &str = "https://secretmanager.googleapis.com/v1";
 const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 const SECRET_TIMEOUT: Duration = Duration::from_secs(10);
-const RESPONSE_LIMIT: u64 = 96 * 1024;
+const RESPONSE_LIMIT: usize = 96 * 1024;
 
 pub struct GarminPasswordSecret(String);
 
@@ -123,7 +123,7 @@ async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, GarminPass
         return Err(GarminPasswordUnavailable);
     }
     let bytes = Zeroizing::new(
-        read_bounded(response, RESPONSE_LIMIT)
+        read_bounded(response, RESPONSE_LIMIT as u64)
             .await
             .map_err(|_| GarminPasswordUnavailable)?,
     );

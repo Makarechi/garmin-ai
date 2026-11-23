@@ -76,7 +76,10 @@ async fn persists_fallback_resume_and_fences_stale_attempts() -> Result<(), Box<
             .bind(resume.job_id).bind(case.cleared.to_string()).bind(format!("synthetic-resume:{}", case.name)).bind(resume.lease_token)
             .execute(&inspector).await?;
         let mut gate = db.lock_model_gate(&model_gate).await?;
-        assert!(gate.read_resume(resume).await?.is_empty());
+        assert_eq!(
+            gate.read_resume(resume).await?,
+            [] as [std::option::Option<std::string::String>; 0]
+        );
         gate.record_resume(resume, &excluded).await?;
         assert_eq!(
             stored(&inspector, resume.job_id).await?,
@@ -95,23 +98,29 @@ async fn persists_fallback_resume_and_fences_stale_attempts() -> Result<(), Box<
             request_fingerprint: &wrong_prompt,
             ..resume
         };
-        assert!(gate.read_resume(other_prompt).await?.is_empty());
+        assert_eq!(
+            gate.read_resume(other_prompt).await?,
+            [] as [std::option::Option<std::string::String>; 0]
+        );
         assert!(!gate.clear_resume(other_prompt).await?);
         let reordered: Vec<_> = models.iter().copied().rev().collect();
         if reordered != models {
-            assert!(
+            assert_eq!(
                 gate.read_resume(ModelResume {
                     models: &reordered,
                     ..resume
                 })
-                .await?
-                .is_empty()
+                .await?,
+                [] as [std::option::Option<std::string::String>; 0]
             );
         }
         drop(gate);
         let rotated = identity(&case.instance, "synthetic-other-credential")?;
         let mut other_gate = db.lock_model_gate(&rotated).await?;
-        assert!(other_gate.read_resume(resume).await?.is_empty());
+        assert_eq!(
+            other_gate.read_resume(resume).await?,
+            [] as [std::option::Option<std::string::String>; 0]
+        );
         assert!(!other_gate.clear_resume(resume).await?);
         drop(other_gate);
 

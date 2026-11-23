@@ -17,6 +17,7 @@ const METRICS: [&str; 8] = [
 ];
 
 /// Render the application-verified age and coverage of the permitted channels.
+#[must_use]
 pub fn render_current_state_freshness(
     channels: &Value,
     now: StoredInstant,
@@ -30,7 +31,7 @@ pub fn render_current_state_freshness(
     let mut recently_checked = true;
     for metric in METRICS {
         let channel = &channels[metric];
-        if !channel.as_object().is_some_and(|fields| !fields.is_empty()) {
+        if channel.as_object().is_none_or(serde_json::Map::is_empty) {
             continue;
         }
         let label = message(&format!("freshness.metric.{metric}"));
@@ -133,6 +134,11 @@ fn observation_time(value: &str, now: OffsetDateTime, timezone: &str) -> Result<
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "The display deliberately rounds down nonnegative elapsed minutes"
+)]
 fn lag_text(seconds: f64, locale: &str) -> String {
     let minutes = (seconds.max(0.0) / 60.0).floor() as u64;
     if minutes == 0 {

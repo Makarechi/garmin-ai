@@ -84,7 +84,7 @@ struct Body<'a, R> {
 
 impl<R: Read> Body<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> Result<(), FitError> {
-        let size = bytes.len() as u32;
+        let size = u32::try_from(bytes.len()).map_err(|_| FitError::InvalidRecord)?;
         if size > self.remaining {
             return Err(FitError::InvalidRecord);
         }

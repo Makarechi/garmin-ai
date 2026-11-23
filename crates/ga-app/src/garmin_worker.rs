@@ -178,14 +178,11 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
         if let Some(status) = self.defer_if_paused(lease).await? {
             return Ok(EndpointWork::Deferred(status));
         }
-        let resource = match LegacyRead::queued_endpoint(&endpoint, &key) {
-            Ok(resource) => resource,
-            Err(_) => {
-                return self
-                    .defer(lease, FailureReason::InvalidGarminWork, None)
-                    .await
-                    .map(EndpointWork::Deferred);
-            }
+        let Ok(resource) = LegacyRead::queued_endpoint(&endpoint, &key) else {
+            return self
+                .defer(lease, FailureReason::InvalidGarminWork, None)
+                .await
+                .map(EndpointWork::Deferred);
         };
 
         let response = self
@@ -195,21 +192,20 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
             Ok(bytes) => bytes.unwrap_or_else(|| b"null".to_vec()),
             Err(error) => return self.fetch_failed(lease, at, error).await,
         };
-        let captured = self
-            .with_renewal(
-                lease,
-                self.database.capture_garmin_endpoint(
-                    CaptureEndpoint {
-                        authenticated_fingerprint: account,
-                        lease,
-                        requested_at: at,
-                        body,
-                    },
-                    Arc::clone(&self.archive),
-                    self.limits,
-                ),
-            )
-            .await??;
+        let captured = Box::pin(self.with_renewal(
+            lease,
+            self.database.capture_garmin_endpoint(
+                CaptureEndpoint {
+                    authenticated_fingerprint: account,
+                    lease,
+                    requested_at: at,
+                    body,
+                },
+                Arc::clone(&self.archive),
+                self.limits,
+            ),
+        ))
+        .await??;
         let captured = match captured {
             EndpointCapture::Captured(source) => source,
             EndpointCapture::CollectionDisabled => {

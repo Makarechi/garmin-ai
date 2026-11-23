@@ -18,7 +18,7 @@ use crate::{
     scenario_packs::source_instance_selected,
 };
 
-const MUTATION_LOCK: i64 = 72104619;
+const MUTATION_LOCK: i64 = 72_104_619;
 const FREQUENT: &[&str] = &[
     "daily",
     "steps",

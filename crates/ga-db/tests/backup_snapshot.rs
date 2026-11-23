@@ -50,7 +50,7 @@ async fn captures_raw_inventory_with_runtime_and_token_coordination() -> Result<
 
     let database =
         Database::connect_lazy(&url).map_err(|_| "Test connection configuration failed")?;
-    for lock in [72104620_i64, 72104626] {
+    for lock in [72_104_620_i64, 72_104_626] {
         let mut active = inspect.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock)
@@ -64,7 +64,7 @@ async fn captures_raw_inventory_with_runtime_and_token_coordination() -> Result<
     }
 
     let mut lease = database.acquire_backup_sources().await?;
-    for lock in [72104620_i64, 72104626] {
+    for lock in [72_104_620_i64, 72_104_626] {
         let available: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(lock)
             .fetch_one(&mut inspect)
@@ -95,7 +95,7 @@ async fn captures_raw_inventory_with_runtime_and_token_coordination() -> Result<
         lease.export(time, &mut bytes).await,
         Err(DatabaseExportError::ArchiveReference),
     ));
-    assert!(bytes.is_empty());
+    assert_eq!(bytes, [] as [u8; 0]);
     drop(lease);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {

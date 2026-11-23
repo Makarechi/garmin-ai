@@ -257,7 +257,7 @@ impl Database {
                     .map_err(TelegramDiaryCommitError::Clarification)?.1
             };
             let selector = prior.as_ref().filter(|pending| pending["explicit_selector"] == true);
-            let actions = selector.map(|pending| {
+            let actions = selector.map_or_else(|| json!([]), |pending| {
                 let action = if pending["action"] == "close" {
                     "diary.history.open"
                 } else {
@@ -269,7 +269,7 @@ impl Database {
                     "Это не оно — история"
                 };
                 json!([{"action_id":action,"label":label,"operation_id":lease.operation_id.to_string()}])
-            }).unwrap_or_else(|| json!([]));
+            });
             let intent = OutboundIntent::normalize(json!({
                 "owner_id": binding.owner_id.to_string(),
                 "conversation_id": binding.conversation_id.to_string(),

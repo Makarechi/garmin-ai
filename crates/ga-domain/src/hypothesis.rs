@@ -23,6 +23,7 @@ pub struct HypothesisSpec {
 pub struct InvalidHypothesisSpec(Vec<Value>);
 
 impl InvalidHypothesisSpec {
+    #[must_use]
     pub fn details(self) -> Vec<Value> {
         self.0
     }
@@ -141,25 +142,32 @@ impl HypothesisSpec {
         })
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }
+    #[must_use]
     pub fn matches(&self, stored: &Value) -> bool {
         crate::event_schema::python_equal(&self.document, stored)
     }
+    #[must_use]
     pub fn id(&self) -> Uuid {
         self.id
     }
+    #[must_use]
     pub fn discovery_period(&self) -> (Date, Date) {
         (self.discovery_start, self.discovery_end)
     }
+    #[must_use]
     pub fn validation_period(&self) -> (Date, Date) {
         (self.validation_start, self.validation_end)
     }
+    #[must_use]
     pub fn expires(&self) -> Date {
         self.expires
     }
 
+    #[must_use]
     pub fn local_date(&self, at: crate::timestamp::StoredInstant) -> Option<Date> {
         let zone = python_timezone(self.document["timezone"].as_str()?)?;
         let utc = time::OffsetDateTime::from(at).to_offset(time::UtcOffset::UTC);
@@ -181,6 +189,7 @@ impl HypothesisSpec {
     }
 }
 
+#[must_use]
 pub fn classify_validation(direction: &str, discovery: &Value, result: &Value) -> &'static str {
     if result["status"] == "insufficient_evidence" {
         return "insufficient_evidence";

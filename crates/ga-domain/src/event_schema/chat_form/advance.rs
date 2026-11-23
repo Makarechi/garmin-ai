@@ -58,7 +58,10 @@ pub fn advance_chat_form(
         return Ok(changed());
     }
     let steps = steps(form, order)?;
-    let index = current["step"].as_u64().ok_or(ChatFormError::Invalid)? as usize;
+    let index = current["step"]
+        .as_u64()
+        .and_then(|step| usize::try_from(step).ok())
+        .ok_or(ChatFormError::Invalid)?;
     let Some(step) = steps.get(index) else {
         return Ok(ChatFormProgress::Cancelled(
             message(

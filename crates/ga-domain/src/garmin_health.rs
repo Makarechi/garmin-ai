@@ -17,6 +17,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Normalized => "normalized",
@@ -445,6 +446,10 @@ fn series(
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Provider descriptor indexes preserve the legacy conversion of decimal numbers to integers"
+)]
 fn body_battery(
     result: &mut HealthProjection,
     input: &Map<String, Value>,

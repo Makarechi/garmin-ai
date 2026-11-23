@@ -76,6 +76,10 @@ impl HistorySource {
 }
 
 impl ActivityExportSource for HistorySource {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn download(
         &self,
         _activity: NonZeroU64,
@@ -97,7 +101,7 @@ async fn drain(
         let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&fixture.inspect)
             .await?;
-        match worker.process_one(now.try_into()?).await? {
+        match Box::pin(worker.process_one(now.try_into()?)).await? {
             GarminQueueStep::Endpoint(EndpointWork::Publication(
                 EndpointPublication::Published(_),
             )) => {
@@ -159,11 +163,11 @@ async fn processes_shared_history_workload() -> Result<(), Box<dyn Error>> {
             .await?;
         assert_eq!(scheduled.queued, usize::from((days - offset).min(2)) * 20);
         if !preload {
-            completed += drain(&fixture, &worker, "syncwindow:").await?;
+            completed += Box::pin(drain(&fixture, &worker, "syncwindow:")).await?;
         }
     }
     if preload {
-        completed += drain(&fixture, &worker, "syncwindow:").await?;
+        completed += Box::pin(drain(&fixture, &worker, "syncwindow:")).await?;
     }
     let duration = started.elapsed().as_secs_f64();
     assert_eq!(completed, usize::from(days) * 20);

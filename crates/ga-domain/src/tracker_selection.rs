@@ -1,6 +1,6 @@
 //! Local matching of tracker labels, using the frozen Python text rules.
 
-use std::{collections::BTreeSet, sync::OnceLock};
+use std::{collections::BTreeSet, fmt::Write, sync::OnceLock};
 
 use fancy_regex::{Regex, RegexBuilder};
 
@@ -64,7 +64,9 @@ pub(crate) fn compile(source: &str) -> Result<Regex, SelectionError> {
         if ch == '\\' {
             match chars.next().ok_or(SelectionError)? {
                 'w' => pattern.push_str(&word),
-                'W' => pattern.push_str(&format!("[^{alnum}_]")),
+                'W' => {
+                    let _ = write!(pattern, "[^{alnum}_]");
+                }
                 'b' => pattern.push_str(&boundary),
                 's' => pattern.push_str(r"[\s\x{1c}-\x{1f}]"),
                 'S' => pattern.push_str(r"[^\s\x{1c}-\x{1f}]"),
@@ -148,6 +150,7 @@ pub struct TrackerLabel {
 }
 
 impl TrackerLabel {
+    #[must_use]
     pub fn new(label: &str) -> Self {
         let folded = casefold(label);
         Self {
@@ -281,7 +284,7 @@ mod tests {
     fn compact_class_matches_every_frozen_unicode_scalar() -> Result<(), Box<dyn std::error::Error>>
     {
         let class = Regex::new(&format!("^{}$", unicode::ALNUM_CLASS))?;
-        for point in 0..=0x10ffff {
+        for point in 0..=0x0010_ffff {
             if let Some(ch) = char::from_u32(point) {
                 assert_eq!(
                     class.is_match(ch.encode_utf8(&mut [0; 4]))?,

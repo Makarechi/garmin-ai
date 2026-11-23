@@ -88,10 +88,12 @@ impl TelegramIngressSettings {
         }))
     }
 
+    #[must_use]
     pub fn instance_id(&self) -> &str {
         &self.instance_id
     }
 
+    #[must_use]
     pub fn external_owner_id(&self) -> i64 {
         self.external_owner_id
     }

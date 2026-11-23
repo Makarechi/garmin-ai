@@ -109,6 +109,10 @@ impl Transport<NativeServer> for StreamingStdio {
         }
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn close(&mut self) -> io::Result<()> {
         self.reader.abort();
         self.writer.abort();
@@ -155,11 +159,11 @@ async fn write_messages<W: AsyncWrite + Send + Unpin>(
                     }
                 }
                 drop(chunks);
-                let encoded = encoder
+                let encoding_result = encoder
                     .await
                     .map_err(|_| io::Error::other("MCP encoder stopped"))?;
                 if result.is_ok() {
-                    result = encoded;
+                    result = encoding_result;
                 }
                 let failed = result.is_err();
                 let _ = done.send(result);

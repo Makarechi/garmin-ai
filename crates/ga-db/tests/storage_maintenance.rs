@@ -38,7 +38,7 @@ async fn erasure_fences_writers_and_preserves_unrelated_tables() -> Result<(), B
             .fetch_one(&mut inspect)
             .await?;
     assert!(configured, "Expected a separately prepared erasure fixture");
-    for lock in [72104620_i64, 72104622, 72104625] {
+    for lock in [72_104_620_i64, 72_104_622, 72_104_625] {
         let mut active = inspect.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
             .bind(lock)

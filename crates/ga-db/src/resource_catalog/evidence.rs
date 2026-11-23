@@ -19,7 +19,7 @@ use crate::{
 };
 
 pub const RESOURCE_CATALOG: &str = "resource_catalog";
-const MAX_MODEL_RESULT_BYTES: u64 = 96_000;
+const MAX_MODEL_RESULT_BYTES: usize = 96_000;
 
 pub struct ModelResourcePage {
     pub value: Value,
@@ -34,6 +34,7 @@ pub struct CatalogEvidence {
 }
 
 impl CatalogEvidence {
+    #[must_use]
     pub fn from_read(evidence: &Value) -> Option<Self> {
         if evidence["tool"] != RESOURCE_CATALOG || evidence["result"].get("error").is_some() {
             return None;
@@ -136,7 +137,7 @@ async fn read_model_page(
         categories.covers(ModelCategories::HEALTH),
     )
     .await?;
-    if document.byte_len() > MAX_MODEL_RESULT_BYTES {
+    if document.byte_len() > MAX_MODEL_RESULT_BYTES as u64 {
         return Err(CatalogError::ResultTooLarge);
     }
     let value = serde_json::from_reader(document.reader()).map_err(|_| CatalogError::Database)?;
@@ -150,6 +151,6 @@ fn result_hash(value: &Value) -> Option<String> {
     let mut ordered = value.clone();
     ordered.sort_all_objects();
     let json = serde_json::to_vec(&ordered).ok()?;
-    let encoded = encode_ascii(&json, Utf8Layout::Archive, MAX_MODEL_RESULT_BYTES as usize).ok()?;
+    let encoded = encode_ascii(&json, Utf8Layout::Archive, MAX_MODEL_RESULT_BYTES).ok()?;
     Some(sha256_hex(encoded.as_bytes()))
 }

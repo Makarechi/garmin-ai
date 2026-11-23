@@ -98,6 +98,7 @@ impl<'a> AnalysisStep<'a> {
         })
     }
 
+    #[must_use]
     pub fn language<'step>(&'step self, fallback: &'step str) -> &'step str {
         self.response_language.as_deref().unwrap_or(fallback)
     }

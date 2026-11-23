@@ -148,8 +148,8 @@ impl crate::Database {
             let data = draft.document()?;
             let clock = now(&mut txn).await?;
             if preview["draft_hash"] != digest(&data)?
-                || !StoredInstant::from_legacy_input(&preview["expires_at"])
-                    .is_some_and(|expiry| OffsetDateTime::from(expiry) > clock)
+                || StoredInstant::from_legacy_input(&preview["expires_at"])
+                    .is_none_or(|expiry| OffsetDateTime::from(expiry) <= clock)
             {
                 return Err(SourceMappingError::PreviewChanged);
             }

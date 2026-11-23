@@ -542,13 +542,13 @@ where
                     };
                     let result = result
                         .filter(|read| read.value.is_object() || read.value.is_array())
-                        .map(|read| {
-                            tracker_versions.extend(read.tracker_versions);
-                            schema_versions.extend(read.schema_versions);
-                            read.value
-                        })
-                        .unwrap_or_else(
+                        .map_or_else(
                             || json!({"error":"Invalid tool arguments; inspect schema and retry"}),
+                            |read| {
+                                tracker_versions.extend(read.tracker_versions);
+                                schema_versions.extend(read.schema_versions);
+                                read.value
+                            },
                         );
                     budget.check_evidence(&ordered(&result)?)?;
                     evidence.push(json!({
@@ -694,7 +694,9 @@ pub(crate) fn format_analysis_answer(
     }) {
         sources.push(message("agent.source.diary"));
     }
-    if !sources.is_empty() {
+    if sources.is_empty() {
+        body + message("agent.saved_data")
+    } else {
         let connector = if language
             .split('-')
             .next()
@@ -705,7 +707,5 @@ pub(crate) fn format_analysis_answer(
             " and "
         };
         body + &message("agent.saved_sources").replace("{sources}", &sources.join(connector))
-    } else {
-        body + message("agent.saved_data")
     }
 }

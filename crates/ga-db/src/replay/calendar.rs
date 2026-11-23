@@ -520,9 +520,7 @@ where
         return Ok((DocumentStatus::Stale, None));
     }
     let parser_changed = source.previous_parser_version != GARMIN_PARSER_VERSION;
-    let replacement = proof
-        .map(HealthReplacement::document)
-        .unwrap_or(Value::Null);
+    let replacement = proof.map_or(Value::Null, HealthReplacement::document);
     let unchanged = !parser_changed
         && !matches!(source.status.as_str(), "pending" | "error")
         && watermark.current["hash"].as_str() == Some(&hash)
@@ -561,7 +559,7 @@ where
                 preceding,
             )
             .await
-            .map(|status| status.label())
+            .map(ga_domain::garmin_health::HealthStatus::label)
             .map_err(CalendarReplayError::Publication),
             ReplayScope::ArchiveOnly => {
                 normalize_health_payload(endpoint, request.source_key, payload)
@@ -586,7 +584,7 @@ where
                     preceding,
                 )
                 .await
-                .map(|status| status.label())
+                .map(ga_domain::garmin_health::HealthStatus::label)
                 .map_err(CalendarReplayError::Publication)
             }
             ReplayScope::Intraday => intraday::rebuild(
@@ -605,7 +603,7 @@ where
                 },
             )
             .await
-            .map(|status| status.label()),
+            .map(ga_domain::garmin_health::HealthStatus::label),
         };
         match rebuilt {
             Ok(new) => {

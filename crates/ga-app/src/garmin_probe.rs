@@ -40,9 +40,8 @@ const FIT_LIMITS: PutLimits = PutLimits {
     ..JSON_LIMITS
 };
 pub(crate) const MAX_PROBE_DAYS: usize = 31;
-pub(crate) const MAX_SCOPED_ACTIVITIES: usize = 99;
-const ACTIVITY_LIST_LIMIT: NonZeroU16 =
-    NonZeroU16::new((MAX_SCOPED_ACTIVITIES + 1) as u16).unwrap();
+pub(crate) const MAX_SCOPED_ACTIVITIES: u16 = 99;
+const ACTIVITY_LIST_LIMIT: NonZeroU16 = NonZeroU16::new(MAX_SCOPED_ACTIVITIES + 1).unwrap();
 
 #[derive(Debug)]
 pub(crate) struct InvalidRange;
@@ -96,7 +95,7 @@ pub(crate) async fn run(
         .filter(|day| day.year() >= 1)
         .ok_or(InvalidRange)?;
     let days = (end - start).whole_days();
-    if !(0..MAX_PROBE_DAYS as i64).contains(&days) {
+    if !usize::try_from(days).is_ok_and(|days| days < MAX_PROBE_DAYS) {
         return Err(InvalidRange.into());
     }
     let activity_dates = if activities_in_range {
@@ -283,18 +282,17 @@ impl CoverageProbe<'_> {
                 }
             }
         }
-        let list = match self.activity_dates {
-            Some(dates) => LegacyRead::ActivitiesInRange {
+        let list = if let Some(dates) = self.activity_dates {
+            LegacyRead::ActivitiesInRange {
                 limit: ACTIVITY_LIST_LIMIT,
                 dates,
-            },
-            None => {
-                self.capture_json("devices", "global", LegacyRead::Devices)
-                    .await?;
-                LegacyRead::Activities {
-                    start: 0,
-                    limit: ACTIVITY_LIST_LIMIT,
-                }
+            }
+        } else {
+            self.capture_json("devices", "global", LegacyRead::Devices)
+                .await?;
+            LegacyRead::Activities {
+                start: 0,
+                limit: ACTIVITY_LIST_LIMIT,
             }
         };
         if let Some((list, archive_key)) = self.capture_json("activities", "recent", list).await?
@@ -366,8 +364,8 @@ impl CoverageProbe<'_> {
         };
         let archive_key = self.archive.put_json(bytes, JSON_LIMITS)?.to_string();
         let empty = value.is_null()
-            || value.as_object().is_some_and(|object| object.is_empty())
-            || value.as_array().is_some_and(|array| array.is_empty());
+            || value.as_object().is_some_and(serde_json::Map::is_empty)
+            || value.as_array().is_some_and(std::vec::Vec::is_empty);
         self.report.append(&json!({
             "endpoint": endpoint,
             "key": key,

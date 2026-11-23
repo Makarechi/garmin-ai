@@ -107,10 +107,11 @@ pub fn validate_custom_schema(schema: &Value) -> Result<(), CustomSchemaError> {
         if constraints.is_empty() {
             continue;
         }
-        let test = json!({"$defs": definitions.unwrap_or(&empty), "allOf": [constraints]});
+        let literal_schema =
+            json!({"$defs": definitions.unwrap_or(&empty), "allOf": [constraints]});
         let validator = jsonschema::draft202012::options()
             .should_validate_formats(false)
-            .build(&test)
+            .build(&literal_schema)
             .map_err(|_| CustomSchemaError::Constraint)?;
         if literals(node).any(|literal| !validator.is_valid(literal)) {
             return Err(CustomSchemaError::Contradiction);

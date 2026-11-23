@@ -30,6 +30,7 @@ pub enum VolumeRole {
 }
 
 impl VolumeRole {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Shared => "shared",
@@ -51,6 +52,7 @@ pub struct BackupSpace {
 }
 
 impl BackupSpace {
+    #[must_use]
     pub fn ready(&self) -> bool {
         self.volumes
             .iter()
@@ -175,7 +177,7 @@ fn source_estimate(
         }
         let (directory, exists) = existing_directory(path)?;
         if exists {
-            walk(directory, &mut tally, is_cancelled)?
+            walk(directory, &mut tally, is_cancelled)?;
         }
     }
     let overhead = checked(

@@ -20,8 +20,8 @@ use crate::{
 };
 
 const GARMIN_STATE_KEY: &str = "integration:garmin";
-const MINIMUM_RATE_LIMIT: Duration = Duration::from_secs(900);
-const MAXIMUM_PROVIDER_DELAY: Duration = Duration::from_secs(7 * 86_400);
+const MINIMUM_RATE_LIMIT: Duration = Duration::from_mins(15);
+const MAXIMUM_PROVIDER_DELAY: Duration = Duration::from_hours(168);
 
 #[derive(Clone, Copy, Debug)]
 pub enum GarminTransportOutcome {

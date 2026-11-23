@@ -13,6 +13,10 @@ struct LegacyTrackerProvider {
 }
 
 impl Sender for LegacyTrackerProvider {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn send(
         &self,
         input: &PreparedRequest,
@@ -232,7 +236,7 @@ async fn legacy_tracker_model_messages_match_the_frozen_conversation() -> Result
         .bind(pending.to_string())
         .execute(&pool)
         .await?;
-        let id = 71001 + index as i64;
+        let id = 71001 + i64::try_from(index)?;
         let wire = json!({"update_id":id,"message":{"message_id":id,"from":{"id":42},"chat":{"id":42,"type":"private"},
             "date":case["source_message_date"],"text":case["message"]["text"]}});
         let receipt = binding
@@ -318,7 +322,12 @@ async fn legacy_tracker_model_messages_match_the_frozen_conversation() -> Result
         cases.len(),
         provider.calls.load(Ordering::SeqCst)
     );
-    recovery::assert_safety_recovery(&worker, &pool, &mut runtime).await?;
+    Box::pin(recovery::assert_safety_recovery(
+        &worker,
+        &pool,
+        &mut runtime,
+    ))
+    .await?;
     if let Ok(status) = fs::read_to_string("/proc/self/status") {
         for line in status
             .lines()

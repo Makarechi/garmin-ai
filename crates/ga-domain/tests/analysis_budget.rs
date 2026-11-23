@@ -35,7 +35,7 @@ fn matches_shared_interpretation_and_answer_limits() -> Result<(), Box<dyn Error
             let actual =
                 match budget.record_model_call(stage, instruction, &prompt, origin + elapsed) {
                     Ok(time) => {
-                        assert_eq!(time, Duration::from_secs(120) - elapsed);
+                        assert_eq!(time, Duration::from_secs(120).saturating_sub(elapsed));
                         "accepted"
                     }
                     Err(AnalysisBudgetError::Limit) => "limit",

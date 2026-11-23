@@ -318,6 +318,7 @@ impl DiaryAnalysisFence {
 }
 
 impl DefinitionReadFence {
+    #[must_use]
     pub fn from_read(evidence: &Value) -> Option<Self> {
         let arguments = evidence["arguments"].as_object()?;
         DefinitionPage::parse(arguments)?;
@@ -357,6 +358,7 @@ impl DefinitionReadFence {
 }
 
 impl TimelineReadFence {
+    #[must_use]
     pub fn from_read(evidence: &Value) -> Option<Self> {
         if evidence["tool"] != TIMELINE || evidence["result"].get("error").is_some() {
             return None;

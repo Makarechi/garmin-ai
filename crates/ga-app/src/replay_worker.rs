@@ -39,7 +39,7 @@ const WORKER_POLL: Duration = Duration::from_secs(1);
 const CLAIM_RETRY: Duration = Duration::from_secs(5);
 const REPLAY_BUSY_RETRY_MICROSECONDS: i64 = 2_000_000;
 const PLAN_BUSY: Duration = Duration::from_secs(30);
-const PLAN_IDLE: Duration = Duration::from_secs(15 * 60);
+const PLAN_IDLE: Duration = Duration::from_mins(15);
 const LEASE_SECONDS: u32 = 120;
 const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const FIT_EXPORT_LIMITS: ExportLimits = ExportLimits {
@@ -334,15 +334,15 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
                 result = transport.run_trend_notifications(&database, settings, reminders, wait_for_recovery.clone()) => result,
                 result = async {
                     if let (Some(selected), Some(gateway)) = (&model_configuration, &model_gateway) {
-                        transport.run_model_diary(&database,settings,selected,gateway,&config.timezone,&config.locale).await
+                        transport.run_model_diary(&database,settings,selected,gateway,&config.timezone,&config.locale).await;
                     }
-                    future::pending().await
+                    future::pending::<()>().await;
                 } => result,
                 result = async {
                     if reminders_available {
-                        transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery.clone()).await
+                        transport.run_diary_reminders(&database, settings, reminders, wait_for_recovery.clone()).await;
                     }
-                    future::pending().await
+                    future::pending::<()>().await;
                 } => result,
             }
         }
@@ -350,14 +350,13 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     };
     let garmin_work = async {
         if let Some(settings) = &garmin {
-            settings
-                .run(
-                    &database,
-                    &config.raw_archive,
-                    &config.timezone,
-                    backups.is_some() && backup_worker.is_some(),
-                )
-                .await
+            Box::pin(settings.run(
+                &database,
+                &config.raw_archive,
+                &config.timezone,
+                backups.is_some() && backup_worker.is_some(),
+            ))
+            .await
         } else {
             future::pending().await
         }

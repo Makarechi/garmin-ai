@@ -87,14 +87,11 @@ async fn update(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(data) => data,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Scenario pack request exceeds the size limit",
-            );
-        }
+    let Ok(data) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Scenario pack request exceeds the size limit",
+        );
     };
     let value = match super::request_json::parse(&data, headers) {
         Ok(value) => value,
@@ -150,9 +147,10 @@ fn validate(value: Value) -> Result<PackSelection, Vec<Value>> {
     let mut flags = [false; 5];
     for (flag, &key) in flags.iter_mut().zip(FLAGS) {
         match fields.get(key) {
-            Some(input) => match legacy_boolean(input) {
-                Some(boolean) => *flag = boolean,
-                None => {
+            Some(input) => {
+                if let Some(boolean) = legacy_boolean(input) {
+                    *flag = boolean;
+                } else {
                     let (kind, message) = if input.is_string()
                         || input.as_f64().is_some_and(|number| number.fract() == 0.0)
                     {
@@ -166,7 +164,7 @@ fn validate(value: Value) -> Result<PackSelection, Vec<Value>> {
                     errors
                         .push(json!({"type":kind,"loc":["body",key],"msg":message,"input":input}));
                 }
-            },
+            }
             None => errors.push(missing(key)),
         }
     }

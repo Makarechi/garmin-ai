@@ -71,6 +71,7 @@ pub(super) struct Native {
 }
 
 impl LegacySession {
+    #[must_use]
     pub fn fingerprint(&self) -> String {
         self.profile.id.fingerprint()
     }
@@ -234,7 +235,7 @@ impl Native {
                     GarminError::Unauthorized
                     | GarminError::Forbidden
                     | GarminError::UnexpectedStatus(400),
-                ) => continue,
+                ) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -355,8 +356,8 @@ impl Native {
             .header(AUTHORIZATION, bearer)
             .header(ACCEPT, "application/json");
         let response = successful(schedule.send(self.pacing, request).await?)?;
-        let raw = read_bounded(response, MAX_PROFILE_BYTES).await?;
-        let id = GarminProfileId::from_profile_json(&raw, MAX_PROFILE_BYTES as usize)
+        let raw = read_bounded(response, MAX_PROFILE_BYTES as u64).await?;
+        let id = GarminProfileId::from_profile_json(&raw, MAX_PROFILE_BYTES)
             .map_err(|_| GarminError::ProfileUnavailable)?;
         let value: serde_json::Value =
             serde_json::from_slice(&raw).map_err(|_| GarminError::ProfileUnavailable)?;

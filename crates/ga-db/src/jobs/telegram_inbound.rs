@@ -70,22 +70,27 @@ type ClaimedTelegramInbound = (
 );
 
 impl TelegramInboundLease {
+    #[must_use]
     pub fn message_id(&self) -> Uuid {
         self.message_id
     }
 
+    #[must_use]
     pub fn operation_id(&self) -> Uuid {
         self.operation_id
     }
 
+    #[must_use]
     pub fn job_identity(&self) -> (Uuid, Uuid) {
         (self.job_id, self.token)
     }
 
+    #[must_use]
     pub fn expires_at(&self) -> OffsetDateTime {
         self.expires_at
     }
 
+    #[must_use]
     pub fn envelope_json(&self) -> &str {
         &self.envelope
     }
@@ -337,9 +342,7 @@ impl Database {
         lane: InboxLane,
         work: InboxWork,
     ) -> Result<Option<TelegramInboundLease>, JobStoreError> {
-        if !(1..=86_400).contains(&lease_seconds) {
-            return Err(JobStoreError::InvalidLeaseDuration);
-        }
+        let seconds = super::lease_seconds_for_sql(lease_seconds)?;
         if !(1..=200).contains(&target.instance_id.chars().count())
             || target.instance_id.contains('\0')
         {
@@ -485,7 +488,7 @@ impl Database {
             .bind(target.owner_id)
             .bind(target.instance_id)
             .bind(now)
-            .bind(lease_seconds as i32)
+            .bind(seconds)
             .bind(token)
             .bind(ATTEMPT_LIMIT)
             .bind(lane.label())

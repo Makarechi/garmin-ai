@@ -130,9 +130,7 @@ async fn enqueue(
     {
         return Err(QueueIntentError::ConsentRequired);
     }
-    let key = dedup_key
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("operation:{operation_id}:reply"));
+    let key = dedup_key.map_or_else(|| format!("operation:{operation_id}:reply"), str::to_owned);
     let existing: Option<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
         "SELECT id,owner_id,conversation_id,operation_id FROM outbox_messages WHERE dedup_key=$1",
     )

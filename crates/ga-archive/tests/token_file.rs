@@ -23,7 +23,7 @@ fn private_token_files_can_be_rotated_and_reopened() -> Result<(), Box<dyn Error
     let path = root.join("garmin_tokens.json");
     assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     assert!(matches!(
-        guard.replace(&[0; 65_537]),
+        guard.replace(&vec![0; 65_537]),
         Err(ArchiveError::PayloadTooLarge)
     ));
     assert_eq!(fs::read(&path)?, b"synthetic initial session");
@@ -61,7 +61,7 @@ fn rejects_aliases_unsafe_permissions_and_oversized_existing_files() -> Result<(
     assert!(matches!(guard.read(), Err(ArchiveError::InvalidObject)));
     fs::remove_file(&path)?;
     assert_eq!(fs::read(&target)?, b"synthetic untouched");
-    fs::write(&path, [0; 65_537])?;
+    fs::write(&path, vec![0; 65_537])?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
     assert!(matches!(guard.read(), Err(ArchiveError::InvalidObject)));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;

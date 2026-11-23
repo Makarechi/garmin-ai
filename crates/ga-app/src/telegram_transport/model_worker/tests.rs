@@ -43,6 +43,10 @@ struct SyntheticProvider {
 }
 
 impl Sender for SyntheticProvider {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn send(
         &self,
         input: &PreparedRequest,
@@ -309,7 +313,7 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
                 &json!({"update_id":id,"message":{
                     "message_id":id,"from":{"id":42},"chat":{"id":42,"type":"private"},
                     "text":text,"date":message_at,
-                    "reply_to_message":(id==3).then(||json!({"message_id":810004}))
+                    "reply_to_message":(id==3).then(||json!({"message_id":810_004}))
                 }}),
                 started,
                 false,
@@ -416,7 +420,7 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
     assert!(matches!(kind.as_str(), "selection" | "legacy" | "guided"));
     let mut pending = json!({"button":"tracker_select","question":"Synthetic local-only tracker schema",
         "options":[{"id":format!("create:{}",Uuid::nil()),"label":"Synthetic local-only tracker schema","definition_version_id":Uuid::nil().to_string()}],
-        "created_at":started.to_string(),"prompt_order":[0,999999],"channel_instance_id":"telegram:primary"});
+        "created_at":started.to_string(),"prompt_order":[0,999_999],"channel_instance_id":"telegram:primary"});
     if kind != "selection" {
         pending["button"] = json!("tracker_form");
         pending["definition_version_id"] = json!(Uuid::nil().to_string());
@@ -465,12 +469,12 @@ async fn runs_screened_telegram_logging_and_cited_analysis_through_the_worker()
         1
     );
     database.forget_conversation_memory(conversation).await?;
-    assert!(
+    assert_eq!(
         database
             .conversation_memory(conversation, observed)
             .await?
-            .turns
-            .is_empty()
+            .turns,
+        [] as [serde_json::Value; 0]
     );
     println!(
         "Analysis replies bypassed the {kind} tracker prompt without exposing its schema in seven SDK calls"

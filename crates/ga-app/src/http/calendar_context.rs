@@ -34,9 +34,7 @@ pub(super) async fn import(State(state): State<AppState>, request: Request) -> R
 
 async fn handle(state: AppState, request: Request, method: &'static str) -> Response {
     let (parts, body) = request.into_parts();
-    let response = if parts.method != method {
-        method_not_allowed(method)
-    } else {
+    let response = if parts.method == method {
         match authorized(&state, &parts.headers, &[Scope::Admin]).await {
             Ok((database, owner)) if parts.method == Method::POST => {
                 import_items(database, owner, body).await
@@ -44,6 +42,8 @@ async fn handle(state: AppState, request: Request, method: &'static str) -> Resp
             Ok((database, owner)) => list(database, owner, &parts.uri).await,
             Err(status) => access_failure(status),
         }
+    } else {
+        method_not_allowed(method)
     };
     private_cache(response, &parts.headers)
 }
@@ -53,12 +53,12 @@ async fn list(database: &Database, owner: Uuid, uri: &Uri) -> Response {
     let parameters: BTreeMap<_, _> = form_urlencoded::parse(query.as_bytes()).collect();
     let mut errors = Vec::new();
     let start = instant(
-        parameters.get("start").map(|value| value.as_ref()),
+        parameters.get("start").map(std::convert::AsRef::as_ref),
         "start",
         &mut errors,
     );
     let end = instant(
-        parameters.get("end").map(|value| value.as_ref()),
+        parameters.get("end").map(std::convert::AsRef::as_ref),
         "end",
         &mut errors,
     );
@@ -80,14 +80,11 @@ async fn list(database: &Database, owner: Uuid, uri: &Uri) -> Response {
 }
 
 async fn import_items(database: &Database, owner: Uuid, body: Body) -> Response {
-    let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Calendar batch exceeds the size limit",
-            );
-        }
+    let Ok(bytes) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Calendar batch exceeds the size limit",
+        );
     };
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
     let Ok(value) = serde_json::from_slice::<Value>(bytes) else {

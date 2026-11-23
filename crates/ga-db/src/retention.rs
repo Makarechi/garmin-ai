@@ -218,7 +218,7 @@ async fn prune_answers(
         .execute(&mut **txn)
         .await?;
     }
-    let next = if page.len() as i64 == window.limit {
+    let next = if i64::try_from(page.len()) == Ok(window.limit) {
         page.last().map(|entry| entry.0)
     } else {
         None

@@ -11,6 +11,7 @@ pub enum Scope {
 }
 
 impl Scope {
+    #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "read:health" => Self::ReadHealth,
@@ -35,14 +36,17 @@ impl FromIterator<Scope> for Scopes {
 }
 
 impl Scopes {
+    #[must_use]
     pub fn includes(self, scope: Scope) -> bool {
         self.0 & scope as u8 != 0
     }
 
+    #[must_use]
     pub fn permits(self, required: &[Scope]) -> bool {
         self.includes(Scope::Admin) || required.iter().all(|scope| self.includes(*scope))
     }
 
+    #[must_use]
     pub fn permits_tool(self, name: &str, input: ReadToolInput<'_>) -> bool {
         use Scope::{ReadDiary, ReadHealth};
         let required: &[Scope] = match (name, input) {

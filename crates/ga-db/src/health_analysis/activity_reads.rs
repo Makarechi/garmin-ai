@@ -303,7 +303,7 @@ async fn details_in(
 }
 
 fn document_byte_limit(model: bool) -> Option<i32> {
-    model.then_some((4 * MODEL_RESULT_CHARS) as i32)
+    model.then_some(i32::try_from(4 * MODEL_RESULT_CHARS).ok()?)
 }
 
 fn account_for_value(

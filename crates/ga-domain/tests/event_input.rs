@@ -59,7 +59,7 @@ fn event_context_and_timestamps_match_the_pinned_python_model() -> Result<(), Bo
         let outcome = result.as_ref().map_or(Value::Null, |event| {
             json!({
                 "start": event.start().unix_microseconds(),
-                "end": event.end().map(|value| value.unix_microseconds()),
+                "end": event.end().map(ga_domain::timestamp::StoredInstant::unix_microseconds),
                 "timezone": event.timezone(),
                 "source": event.source().label(),
                 "status": event.status().label(),

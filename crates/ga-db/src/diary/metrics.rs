@@ -32,6 +32,10 @@ pub(super) struct ExpectedMetrics<'a> {
     pub day: Date,
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Event duration is expressed in fractional minutes with microsecond input precision"
+)]
 pub(super) async fn expected_metrics<'a>(
     txn: &mut Transaction<'_, Postgres>,
     snapshot: &'a Value,

@@ -56,6 +56,7 @@ pub struct StagedFitProjection {
 }
 
 impl StagedFitProjection {
+    #[must_use]
     pub fn inventory(&self) -> ExportProjectionInventory {
         self.inventory
     }

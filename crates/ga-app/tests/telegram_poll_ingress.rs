@@ -50,7 +50,7 @@ async fn poll_commits_inbox_button_and_cursor_under_the_runtime_lease() -> Resul
     };
     let cases = &fixture["cases"];
     let message = json!({
-        "message_id":7001,"text":"synthetic message 🧪","date":1793883600,
+        "message_id":7001,"text":"synthetic message 🧪","date":1_793_883_600,
         "chat":{"type":"private","id":external_owner_id},"from":{"id":external_owner_id}
     });
 
@@ -65,7 +65,7 @@ async fn poll_commits_inbox_button_and_cursor_under_the_runtime_lease() -> Resul
 
     let mut edited_message = message.clone();
     edited_message["text"] = json!("synthetic edit");
-    edited_message["edit_date"] = json!(1793883660);
+    edited_message["edit_date"] = json!(1_793_883_660);
     let edit = json!({"update_id":1011,"edited_message":edited_message});
     let receipt = binding
         .accept_polled_update(&mut lease, &edit, now, false)

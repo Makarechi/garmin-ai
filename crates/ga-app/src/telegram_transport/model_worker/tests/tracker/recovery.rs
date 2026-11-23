@@ -81,7 +81,14 @@ pub(super) async fn assert_safety_recovery(
     ))?;
     let before = worker.sender.calls.load(Ordering::SeqCst);
     for (index, row) in rows.iter().enumerate() {
-        let lease = accept(database, pool, runtime, version, 74001 + index as i64).await?;
+        let lease = accept(
+            database,
+            pool,
+            runtime,
+            version,
+            74001 + i64::try_from(index)?,
+        )
+        .await?;
         sqlx::query("UPDATE jobs SET payload=payload||$2::jsonb WHERE id=$1")
             .bind(lease.job_identity().0)
             .bind(json!({"retained":{"synthetic":true},"form_safety":row["initial"]}).to_string())
@@ -143,7 +150,14 @@ pub(super) async fn assert_safety_recovery(
     .into_iter()
     .enumerate()
     {
-        let abandoned = accept(database, pool, runtime, version, 75001 + index as i64).await?;
+        let abandoned = accept(
+            database,
+            pool,
+            runtime,
+            version,
+            75001 + i64::try_from(index)?,
+        )
+        .await?;
         database
             .record_telegram_tracker_safety(&abandoned, version, status)
             .await?;
@@ -189,7 +203,7 @@ pub(super) async fn assert_safety_recovery(
         let after_events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
             .fetch_one(pool)
             .await?;
-        assert_eq!(after_events, before_events + expected_calls as i64);
+        assert_eq!(after_events, before_events + i64::try_from(expected_calls)?);
         let reply: String = sqlx::query_scalar(
             "SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE inbound_message_id=$1",
         )
@@ -267,7 +281,14 @@ pub(super) async fn assert_safety_recovery(
     .into_iter()
     .enumerate()
     {
-        let lease = accept(database, pool, runtime, version, 77001 + index as i64).await?;
+        let lease = accept(
+            database,
+            pool,
+            runtime,
+            version,
+            77001 + i64::try_from(index)?,
+        )
+        .await?;
         worker.sender.safety_outcome.store(index, Ordering::SeqCst);
         let calls = worker.sender.calls.load(Ordering::SeqCst);
         worker.process(&lease, clock(pool).await?).await;

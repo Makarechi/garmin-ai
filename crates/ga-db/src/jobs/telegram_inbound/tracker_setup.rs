@@ -272,7 +272,8 @@ async fn legacy_storage_counter(
     let digest = ga_domain::sha256_hex(namespace.as_bytes());
     let number =
         u64::from_str_radix(&digest[..16], 16).map_err(|_| TelegramDiaryCommitError::Database)?;
-    let storage = -((number & i64::MAX as u64).max(1) as i64);
+    let positive = (number & (u64::MAX >> 1)).max(1);
+    let storage = -i64::try_from(positive).map_err(|_| TelegramDiaryCommitError::Database)?;
     let collision: Option<String> =
         sqlx::query_scalar("SELECT payload::text FROM telegram_updates WHERE id=$1")
             .bind(storage)
@@ -349,7 +350,7 @@ async fn advance(
                 update,
             )
         });
-    let stale = order.map_or_else(
+    let outdated = order.map_or_else(
         || {
             state
                 .get("last_update_id")
@@ -359,13 +360,13 @@ async fn advance(
         },
         |last| (clock.epoch, clock.update) <= last,
     );
-    if stale
+    if outdated
         || answer != "/cancel"
             && stamp(&state["last_prompt_advanced_at"]).is_some_and(|at| clock.received <= at)
     {
         return Ok(if answer == "/confirm_tracker"
             && state["confirmation_token"].is_string()
-            && !stale
+            && !outdated
         {
             say(
                 &locale,
@@ -412,7 +413,7 @@ async fn advance(
             "Draft privacy updated.",
         )
         .to_owned()
-    } else if !state["name"].as_str().is_some_and(|name| !name.is_empty()) {
+    } else if state["name"].as_str().is_none_or(str::is_empty) {
         if !(1..=64).contains(&answer.chars().count()) || answer.starts_with('/') {
             return Ok(say(
                 &locale,
@@ -520,12 +521,10 @@ async fn advance(
                 if fields.len() >= 32 {
                     return Ok(field_help(&locale).to_owned());
                 }
-                let field = match parse_tracker_chat_field(
-                    answer,
-                    &format!("field_{}", fields.len() + 1),
-                ) {
-                    Ok(field) => field,
-                    Err(_) => return Ok(field_help(&locale).to_owned()),
+                let Ok(field) =
+                    parse_tracker_chat_field(answer, &format!("field_{}", fields.len() + 1))
+                else {
+                    return Ok(field_help(&locale).to_owned());
                 };
                 fields.push(field);
                 state["confirmation_token"] = Value::Null;

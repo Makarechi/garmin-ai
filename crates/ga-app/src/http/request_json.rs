@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::tools::{detail, invalid_arguments};
 
-/// Decode a typed FastAPI request before the endpoint validates its fields.
+/// Decode a typed `FastAPI` request before the endpoint validates its fields.
 pub(super) fn parse(input: &[u8], headers: &HeaderMap) -> Result<Value, ParseError> {
     if input.is_empty() {
         return Ok(Value::Null);

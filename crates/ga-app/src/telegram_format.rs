@@ -24,6 +24,7 @@ pub struct TextEntity {
 }
 
 impl TextEntity {
+    #[must_use]
     pub fn as_json(&self) -> Value {
         let mut object = json!({
             "type": self.kind,
@@ -44,6 +45,7 @@ struct EntityRange {
     url: Option<String>,
 }
 
+#[must_use]
 pub fn message_parts(source: &str) -> Vec<MessagePart> {
     let normalized = source
         .replace("\r\n", "\n")

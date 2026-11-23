@@ -121,7 +121,7 @@ fn unsupported_methods_and_unknown_paths_have_python_error_shapes()
         assert!(headers.contains("allow: GET"));
         assert!(headers.contains("content-type: application/json"));
         if method == "HEAD" {
-            assert!(body.is_empty());
+            assert_eq!(body, "");
             assert!(headers.contains("content-length: 31"));
         } else {
             assert_eq!(body, r#"{"detail":"Method Not Allowed"}"#);
@@ -233,7 +233,7 @@ fn startup_rejects_bad_token_config_without_leaking_it() -> Result<(), Box<dyn s
             .args(["serve", "--port", "0"])
             .output()?;
         assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, [] as [u8; 0]);
         assert_eq!(
             String::from_utf8(output.stderr)?,
             "Could not run the HTTP server.\n"
@@ -253,8 +253,14 @@ fn scope_matrix_matches_reference_at_http_boundary() -> Result<(), Box<dyn std::
     let legacy = document["legacy"]
         .as_str()
         .ok_or_else(|| io::Error::other("legacy fixture key"))?;
-    let scoped = document["scoped"].to_string();
-    let server = Server::configured(&[("GA_API_KEY", legacy), ("GA_API_TOKENS", &scoped)], None)?;
+    let credential_scopes = document["scoped"].to_string();
+    let server = Server::configured(
+        &[
+            ("GA_API_KEY", legacy),
+            ("GA_API_TOKENS", &credential_scopes),
+        ],
+        None,
+    )?;
     let cases = document["http"]
         .as_array()
         .ok_or_else(|| io::Error::other("HTTP cases"))?;
@@ -461,7 +467,7 @@ async fn service_webhook_requires_current_owner_pairing() -> Result<(), Box<dyn 
             "update_id": update_id,
             "message": {
                 "message_id": 761, "from": {"id": 42},
-                "chat": {"id": 42, "type": "private"}, "date": 1794916800,
+                "chat": {"id": 42, "type": "private"}, "date": 1_794_916_800,
                 "text": "synthetic Telegram service test",
             },
         });

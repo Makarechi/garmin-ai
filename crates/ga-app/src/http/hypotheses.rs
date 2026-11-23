@@ -29,9 +29,7 @@ fn now() -> Option<StoredInstant> {
 
 pub(super) async fn collection(State(state): State<AppState>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let response = if parts.method != Method::POST {
-        method_not_allowed("POST")
-    } else {
+    let response = if parts.method == Method::POST {
         match diary::authorized(
             &state,
             &parts.headers,
@@ -51,6 +49,8 @@ pub(super) async fn collection(State(state): State<AppState>, request: Request) 
                 .await
             }
         }
+    } else {
+        method_not_allowed("POST")
     };
     private_cache(response, &parts.headers)
 }
@@ -89,9 +89,7 @@ pub(super) async fn item(
     Path(identity): Path<String>,
     request: Request,
 ) -> Response {
-    let response = if request.method() != Method::GET {
-        method_not_allowed("GET")
-    } else {
+    let response = if request.method() == Method::GET {
         match diary::authorized(
             &state,
             request.headers(),
@@ -105,6 +103,8 @@ pub(super) async fn item(
                 Err(error) => validation_response(error),
             },
         }
+    } else {
+        method_not_allowed("GET")
     };
     private_cache(response, request.headers())
 }
@@ -126,9 +126,7 @@ pub(super) async fn stop(
 }
 
 async fn mutate(state: AppState, identity: String, request: Request, recheck: bool) -> Response {
-    let response = if request.method() != Method::POST {
-        method_not_allowed("POST")
-    } else {
+    let response = if request.method() == Method::POST {
         match diary::authorized(
             &state,
             request.headers(),
@@ -159,6 +157,8 @@ async fn mutate(state: AppState, identity: String, request: Request, recheck: bo
                 }
             }
         }
+    } else {
+        method_not_allowed("POST")
     };
     private_cache(response, request.headers())
 }

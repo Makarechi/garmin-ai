@@ -131,7 +131,7 @@ async fn local_text_worker_screens_urgent_reports_before_older_diary_jobs()
     .await?;
     inbound(&mut runtime, binding, &pool, 104, json!({"voice":voice})).await?;
 
-    let poll = async {
+    let expected_replies = async {
         assert_eq!(json!(await_reply(&pool, 103).await?), expected["emergency"]);
         assert!(reply(&pool, 102).await?.is_none());
         assert!(reply(&pool, 104).await?.is_none());
@@ -170,12 +170,12 @@ async fn local_text_worker_screens_urgent_reports_before_older_diary_jobs()
         assert_eq!(diary_writes, 0);
         Ok::<_, Box<dyn Error>>(())
     };
-    timeout(Duration::from_secs(8), async {
+    Box::pin(timeout(Duration::from_secs(8), async {
         tokio::select! {
-            result = poll => result,
+            result = expected_replies => result,
             worker = transport.run_local_text(&database, &settings, "en", false) => worker,
         }
-    })
+    }))
     .await??;
 
     let wait_for_screen = async {
@@ -224,12 +224,12 @@ async fn local_text_worker_screens_urgent_reports_before_older_diary_jobs()
         assert!(reply(&pool, 107).await?.is_none());
         Ok::<_, Box<dyn Error>>(())
     };
-    timeout(Duration::from_secs(15), async {
+    Box::pin(timeout(Duration::from_secs(15), async {
         tokio::select! {
             result = wait_for_screen => result,
             worker = transport.run_local_text(&database, &settings, "en", true) => worker,
         }
-    })
+    }))
     .await??;
     Ok(())
 }

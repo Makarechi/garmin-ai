@@ -47,8 +47,8 @@ use sqlx::{ConnectOptions, Connection, Transaction};
 use sqlx_postgres::{PgConnectOptions, PgPool, PgPoolOptions, Postgres};
 
 const SCHEMA_REVISION: &str = include_str!("../schema-revision.txt").trim_ascii();
-const STORAGE_LIFECYCLE_LOCK: i64 = 72104622;
-const OWNER_ENROLLMENT_LOCK: i64 = 72104625;
+const STORAGE_LIFECYCLE_LOCK: i64 = 72_104_622;
+const OWNER_ENROLLMENT_LOCK: i64 = 72_104_625;
 const DATABASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROL_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(1500);
 

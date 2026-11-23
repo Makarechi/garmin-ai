@@ -253,10 +253,12 @@ impl<'wire, 'binding> PreparedUpdate<'wire, 'binding> {
 }
 
 impl AuthenticatedTelegramUpdate<'_, '_> {
+    #[must_use]
     pub fn update_id(&self) -> i64 {
         self.update_id
     }
 
+    #[must_use]
     pub fn callback_data(&self) -> Option<&str> {
         match self.kind {
             InputKind::Callback(callback) => callback["data"].as_str(),
@@ -442,6 +444,10 @@ fn voice(message: &Value) -> Result<Option<Value>, TelegramInputError> {
     })))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Fractional Telegram dates are rounded to microseconds and checked against the exact i64 bounds"
+)]
 fn message_time(message: &Value) -> Result<Option<StoredInstant>, TelegramInputError> {
     let value = message.get("edit_date").unwrap_or(&message["date"]);
     if let Some(seconds) = value.as_i64() {

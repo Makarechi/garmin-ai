@@ -23,6 +23,10 @@ from garmin_ai.tracker_chat_form import (
 from garmin_ai.tracker_forms import ActionSpec, FormFieldSpec, FormSpec
 
 
+def rust_decimal(code):
+    return format(code, "_d") if code >= 100_000 else str(code)
+
+
 def capture_unicode():
     rows = []
     digits = []
@@ -35,7 +39,7 @@ def capture_unicode():
             digits.append(code)
     s = "// Generated from the frozen CPython Unicode case-fold and digit behavior.\n"
     s += "pub(super) const CASEFOLD: &[(u32, &str)] = &[\n" + "\n".join(rows) + "\n];\n"
-    s += "pub(super) const EXTRA_DIGITS: &[u32] = &[" + ",".join(map(str, digits)) + "];\n"
+    s += "pub(super) const EXTRA_DIGITS: &[u32] = &[" + ",".join(map(rust_decimal, digits)) + "];\n"
     ranges = []
     first = None
     for code in range(0x110001):
@@ -47,7 +51,7 @@ def capture_unicode():
             first = None
     s += (
         "pub(super) const NONPRINTABLE: &[(u32,u32)] = &[\n"
-        + "".join(f"    ({first}, {last}),\n" for first, last in ranges)
+        + "".join(f"    ({rust_decimal(first)}, {rust_decimal(last)}),\n" for first, last in ranges)
         + "];\n"
     )
     return s

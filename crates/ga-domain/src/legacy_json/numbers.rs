@@ -12,7 +12,7 @@ pub fn integer_argument(value: &Value) -> Option<BigInt> {
         }
         Value::Number(_) => {
             let value = number(value).ok()?;
-            if value.fract() != 0.0 || value.abs() >= i64::MAX as f64 {
+            if value.fract() != 0.0 || value.abs() >= 9_223_372_036_854_775_808.0 {
                 return None;
             }
             bounded_integer_text(&format!("{value:.0}"))?
@@ -61,7 +61,7 @@ pub fn multiply_numbers(first: &Value, second: &Value) -> Result<Value, JsonErro
 }
 
 /// Reproduce the application's Python sum over retained numeric evidence.
-/// The floating accumulator follows CPython 3.15.2 Python/bltinmodule.c.
+/// The floating accumulator follows `CPython` 3.15.2 Python/bltinmodule.c.
 /// Its source notice is retained in timestamp/LICENSE-python.txt.
 pub fn sum_numbers<'a>(values: impl IntoIterator<Item = &'a Value>) -> Result<Value, JsonError> {
     let mut exact = BigInt::from(0);

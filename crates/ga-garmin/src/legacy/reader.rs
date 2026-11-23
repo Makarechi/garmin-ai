@@ -83,6 +83,7 @@ impl LegacyReader {
     }
 
     /// Account identity verified when the reader restored or refreshed its session.
+    #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.inner.expected_fingerprint
     }

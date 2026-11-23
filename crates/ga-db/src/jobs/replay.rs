@@ -29,10 +29,12 @@ pub struct ReplayJobLease {
 }
 
 impl ReplayJobLease {
+    #[must_use]
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    #[must_use]
     pub fn attempt(&self) -> i32 {
         self.attempt
     }
@@ -41,8 +43,9 @@ impl ReplayJobLease {
         &self.endpoint
     }
 
+    #[must_use]
     pub fn lease_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.seconds as u64)
+        std::time::Duration::from_secs(u64::try_from(self.seconds).unwrap_or_default())
     }
 
     pub(crate) fn source(&self) -> Option<(Uuid, String)> {
@@ -125,10 +128,7 @@ impl Database {
         lease_seconds: u32,
         endpoints: Vec<&str>,
     ) -> Result<Option<ReplayJobLease>, JobStoreError> {
-        if !(1..=86_400).contains(&lease_seconds) {
-            return Err(JobStoreError::InvalidLeaseDuration);
-        }
-        let seconds = lease_seconds as i32;
+        let seconds = super::lease_seconds_for_sql(lease_seconds)?;
         let mut txn = begin(&self.work).await?;
         let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(STORAGE_QUEUE_LOCK)

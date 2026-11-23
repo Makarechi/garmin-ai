@@ -42,6 +42,10 @@ pub(super) enum FieldWrite<'a> {
     Replay { preceding: Option<&'a str> },
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The step count is rounded and validated in the nonnegative PostgreSQL integer range"
+)]
 pub(super) async fn publish_fields(
     txn: &mut Transaction<'_, Postgres>,
     request: &ApplyActivity<'_>,
@@ -140,6 +144,10 @@ pub(super) async fn publish_fields(
     Ok(changed)
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "The writer compares exact normalized numeric values before updating a field"
+)]
 fn equal_field(previous: &Value, new_value: &Value) -> bool {
     match (previous.as_f64(), new_value.as_f64()) {
         (Some(previous), Some(new_value)) => previous == new_value,

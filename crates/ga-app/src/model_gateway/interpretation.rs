@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use std::{collections::BTreeSet, error::Error, fmt, time::Instant};
 
 use ga_db::{diary::DiaryReadError, share_policy::ShareRequirement};
@@ -247,14 +249,13 @@ impl PreparedPrompt {
             },
             text: request.text,
         };
-        let json = match encode_prompt(&prompt)? {
-            Some(json) => json,
-            None => {
-                prompt.context.offered.history_truncated = true;
-                prompt.context.offered.recent_events.clear();
-                prompt.context.offered.pending_clarification = None;
-                encode_prompt(&prompt)?.ok_or(HistoryTooLarge)?
-            }
+        let json = if let Some(json) = encode_prompt(&prompt)? {
+            json
+        } else {
+            prompt.context.offered.history_truncated = true;
+            prompt.context.offered.recent_events.clear();
+            prompt.context.offered.pending_clarification = None;
+            encode_prompt(&prompt)?.ok_or(HistoryTooLarge)?
         };
         let offered = prompt.context.offered;
         Ok(Self {
@@ -350,18 +351,19 @@ fn local_time(now: OffsetDateTime) -> String {
     let (hour, minute, second, micros) = now.to_hms_micro();
     let mut text = format!("{}T{hour:02}:{minute:02}:{second:02}", now.date());
     if micros != 0 {
-        text.push_str(&format!(".{micros:06}"));
+        let _ = write!(text, ".{micros:06}");
     }
     let offset = now.offset();
     let sign = if offset.is_negative() { '-' } else { '+' };
     let (hours, minutes, seconds) = offset.as_hms();
-    text.push_str(&format!(
+    let _ = write!(
+        text,
         "{sign}{:02}:{:02}",
         hours.unsigned_abs(),
         minutes.unsigned_abs()
-    ));
+    );
     if seconds != 0 {
-        text.push_str(&format!(":{:02}", seconds.unsigned_abs()));
+        let _ = write!(text, ":{:02}", seconds.unsigned_abs());
     }
     text
 }

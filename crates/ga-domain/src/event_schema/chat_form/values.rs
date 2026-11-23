@@ -99,7 +99,7 @@ fn printable(character: char) -> bool {
     let code = u32::from(character);
     let ranges = unicode::NONPRINTABLE;
     let index = ranges.partition_point(|&(_, last)| last < code);
-    !ranges.get(index).is_some_and(|&(first, _)| first <= code)
+    ranges.get(index).is_none_or(|&(first, _)| first > code)
 }
 
 /// Produce the exact labels accepted for enumerated chat answers.
@@ -230,7 +230,7 @@ pub fn parse_chat_form_value(
             let mut normalized = String::with_capacity(text.len());
             for character in text.chars() {
                 if character == '-' {
-                    normalized.push('-')
+                    normalized.push('-');
                 } else {
                     normalized.push(char::from(
                         b'0' + decimal_value(character).ok_or(ChatFormError::Invalid)?,
@@ -506,7 +506,10 @@ fn chat_decimal(token: &str) -> Option<Decimal> {
     let fraction = coefficient
         .split_once('.')
         .map_or(0, |(_, fraction)| fraction.len());
-    let exponent = exponent.parse::<i64>().ok()?.checked_sub(fraction as i64)?;
+    let exponent = exponent
+        .parse::<i64>()
+        .ok()?
+        .checked_sub(i64::try_from(fraction).ok()?)?;
     let significant = coefficient
         .bytes()
         .filter(|&byte| byte != b'.')
@@ -515,7 +518,7 @@ fn chat_decimal(token: &str) -> Option<Decimal> {
     let adjusted = if significant == 0 {
         exponent
     } else {
-        exponent.checked_add(significant as i64 - 1)?
+        exponent.checked_add(i64::try_from(significant).ok()? - 1)?
     };
     if exponent < -1_999_999_999_999_999_997 || adjusted > 999_999_999_999_999_999 {
         return None;

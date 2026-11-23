@@ -31,6 +31,7 @@ pub enum MetricAggregateError {
 }
 
 impl MetricAggregateError {
+    #[must_use]
     pub fn class_name(self) -> &'static str {
         match self {
             Self::Type => "TypeError",
@@ -125,7 +126,7 @@ mod tests {
             );
             if let Some(expected) = case["error"].as_str() {
                 assert_eq!(
-                    actual.err().map(|error| error.class_name()),
+                    actual.err().map(super::MetricAggregateError::class_name),
                     Some(expected),
                     "case {index}"
                 );

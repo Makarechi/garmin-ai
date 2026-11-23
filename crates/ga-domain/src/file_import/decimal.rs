@@ -26,8 +26,8 @@ impl Decimal {
         let exponent = exponent
             .parse::<i64>()
             .ok()?
-            .checked_sub(fraction.len() as i64)?
-            .checked_add((digits.len() - last - 1) as i64)?;
+            .checked_sub(i64::try_from(fraction.len()).ok()?)?
+            .checked_add(i64::try_from(digits.len() - last - 1).ok()?)?;
         digits.truncate(last + 1);
         Some(Self {
             negative,
@@ -40,7 +40,8 @@ impl Decimal {
         if self.significant.is_empty() {
             Some(zero_exponent)
         } else {
-            self.exponent.checked_add(self.significant.len() as i64 - 1)
+            self.exponent
+                .checked_add(i64::try_from(self.significant.len() - 1).ok()?)
         }
     }
 

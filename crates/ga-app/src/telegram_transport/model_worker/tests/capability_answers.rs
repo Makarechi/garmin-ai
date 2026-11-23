@@ -15,6 +15,10 @@ struct CapabilityModel {
 }
 
 impl Sender for CapabilityModel {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn send(
         &self,
         request: &PreparedRequest,

@@ -88,7 +88,7 @@ pub(crate) fn decode(
         let sign_shift = (8 - width) * 8;
         match identifier {
             0x01 | 0x83 | 0x85 | 0x8e => {
-                let signed = ((bits << sign_shift) as i64) >> sign_shift;
+                let signed = (bits << sign_shift).cast_signed() >> sign_shift;
                 if signed == i64::MAX >> sign_shift {
                     Invalid
                 } else {
@@ -97,7 +97,10 @@ pub(crate) fn decode(
             }
             0x88 | 0x89 => {
                 let value = if identifier == 0x88 {
-                    f64::from(f32::from_bits(bits as u32))
+                    let Ok(bits) = u32::try_from(bits) else {
+                        return Invalid;
+                    };
+                    f64::from(f32::from_bits(bits))
                 } else {
                     f64::from_bits(bits)
                 };

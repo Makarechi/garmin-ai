@@ -18,6 +18,7 @@ pub struct SourcePluginLease {
 }
 
 impl SourcePluginLease {
+    #[must_use]
     pub fn instance(&self) -> &str {
         &self.instance
     }

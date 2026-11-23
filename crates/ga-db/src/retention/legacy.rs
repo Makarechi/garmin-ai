@@ -25,6 +25,10 @@ pub(super) fn cursor(raw: &str) -> Result<Position, RetentionError> {
     Ok(Position { microseconds, id })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Legacy floating cursor components are truncated toward zero and then checked as i64"
+)]
 fn python_integer(value: &Value) -> Option<i64> {
     match value {
         Value::Bool(value) => Some(i64::from(*value)),
@@ -124,7 +128,7 @@ pub(super) async fn prune(
             .await?;
         }
     }
-    let next = if candidates.len() as i64 == window.limit {
+    let next = if i64::try_from(candidates.len()) == Ok(window.limit) {
         let (id, at, _) = candidates.last().ok_or(RetentionError::Database)?;
         Some(format!("[\"{}\", {id}]", stamp(*at)?))
     } else {

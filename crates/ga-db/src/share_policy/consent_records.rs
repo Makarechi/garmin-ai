@@ -72,6 +72,7 @@ impl TrackerShareConsent {
         }
     }
 
+    #[must_use]
     pub fn document(&self) -> Value {
         consent_document(
             self.definition_id,

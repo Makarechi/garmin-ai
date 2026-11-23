@@ -32,14 +32,11 @@ async fn accept(state: &AppState, headers: &HeaderMap, body: Body) -> Response {
     else {
         return detail(StatusCode::UNAUTHORIZED, "Wearable authentication required");
     };
-    let data = match to_bytes(body, MAX_BATCH_BYTES).await {
-        Ok(data) => data,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Wearable upload exceeds the size limit",
-            );
-        }
+    let Ok(data) = to_bytes(body, MAX_BATCH_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Wearable upload exceeds the size limit",
+        );
     };
     let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
     let Ok(marks) = parse_batch(data) else {

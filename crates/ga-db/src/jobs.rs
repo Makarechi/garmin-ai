@@ -26,7 +26,7 @@ use crate::{
 const ATTEMPT_LIMIT: i32 = 8;
 const KIND: &str = "channel_initiatives";
 pub(crate) const GARMIN_PUBLICATION_SECONDS: i32 = 30;
-pub(crate) const STORAGE_QUEUE_LOCK: i64 = 72104624;
+pub(crate) const STORAGE_QUEUE_LOCK: i64 = 72_104_624;
 const GARMIN_KINDS: &[&str] = &["garmin_endpoint", "garmin_activities", "garmin_fit"];
 
 #[derive(Debug)]
@@ -70,10 +70,12 @@ pub struct InitiativeLease {
 }
 
 impl InitiativeLease {
+    #[must_use]
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    #[must_use]
     pub fn attempt(&self) -> i32 {
         self.attempt
     }
@@ -151,6 +153,7 @@ impl GarminJobKind {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Endpoint => "garmin_endpoint",
@@ -171,22 +174,27 @@ pub struct GarminJobLease {
 }
 
 impl GarminJobLease {
+    #[must_use]
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    #[must_use]
     pub fn attempt(&self) -> i32 {
         self.attempt
     }
 
+    #[must_use]
     pub fn kind(&self) -> GarminJobKind {
         self.kind
     }
 
+    #[must_use]
     pub fn lease_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.seconds as u64)
+        std::time::Duration::from_secs(u64::try_from(self.seconds).unwrap_or_default())
     }
 
+    #[must_use]
     pub fn payload_json(&self) -> &str {
         &self.payload
     }
@@ -227,10 +235,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<InitiativeLease>, JobStoreError> {
-        if !(1..=86_400).contains(&lease_seconds) {
-            return Err(JobStoreError::InvalidLeaseDuration);
-        }
-        let seconds = lease_seconds as i32;
+        let seconds = lease_seconds_for_sql(lease_seconds)?;
         let now = OffsetDateTime::from(now);
         let mut txn = begin(&self.work).await?;
         fail_exhausted(&mut txn, now, Some(&[KIND])).await?;
@@ -307,10 +312,7 @@ impl Database {
         backups_enabled: bool,
         source_instance: Option<&str>,
     ) -> Result<Option<GarminJobLease>, JobStoreError> {
-        if !(1..=86_400).contains(&lease_seconds) {
-            return Err(JobStoreError::InvalidLeaseDuration);
-        }
-        let seconds = lease_seconds as i32;
+        let seconds = lease_seconds_for_sql(lease_seconds)?;
         let mut txn = begin(&self.work).await?;
         if let Some(instance) = source_instance {
             match current_source_selected(&mut txn, instance).await {
@@ -747,4 +749,11 @@ async fn fail_exhausted(
     .execute(&mut **txn)
     .await?;
     Ok(())
+}
+
+fn lease_seconds_for_sql(seconds: u32) -> Result<i32, JobStoreError> {
+    i32::try_from(seconds)
+        .ok()
+        .filter(|seconds| (1..=86_400).contains(seconds))
+        .ok_or(JobStoreError::InvalidLeaseDuration)
 }

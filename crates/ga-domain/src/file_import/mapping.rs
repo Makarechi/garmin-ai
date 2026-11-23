@@ -121,38 +121,47 @@ impl FileMapping {
         })
     }
 
+    #[must_use]
     pub fn format(&self) -> FileFormat {
         self.format
     }
 
+    #[must_use]
     pub fn definition_key(&self) -> &str {
         &self.definition_key
     }
 
+    #[must_use]
     pub fn source_instance(&self) -> &str {
         &self.source_instance_id
     }
 
+    #[must_use]
     pub fn device(&self) -> &str {
         &self.device_id
     }
 
+    #[must_use]
     pub fn timezone(&self) -> &str {
         &self.timezone
     }
 
+    #[must_use]
     pub fn end_column(&self) -> Option<&str> {
         self.end_column.as_deref()
     }
 
+    #[must_use]
     pub fn units(&self) -> &[(String, String)] {
         &self.units
     }
 
+    #[must_use]
     pub fn field_columns(&self) -> &[(String, String)] {
         &self.field_columns
     }
 
+    #[must_use]
     pub fn document(&self) -> Value {
         json!({
             "format": match self.format() { FileFormat::Csv => "csv", FileFormat::Json => "json" },
@@ -253,20 +262,22 @@ impl<'a> DocumentFrame<'a> {
 
     fn next(&mut self, out: &mut Vec<u8>) -> Result<Option<DocumentValue<'a>>, ImportFileError> {
         let (key, value) = match &mut self.items {
-            DocumentItems::Object(items) => match items.next() {
-                Some((key, value)) => (Some(key), value),
-                None => {
+            DocumentItems::Object(items) => {
+                if let Some((key, value)) = items.next() {
+                    (Some(key), value)
+                } else {
                     out.push(b'}');
                     return Ok(None);
                 }
-            },
-            DocumentItems::Array(items) => match items.next() {
-                Some(value) => (None, value),
-                None => {
+            }
+            DocumentItems::Array(items) => {
+                if let Some(value) = items.next() {
+                    (None, value)
+                } else {
                     out.push(b']');
                     return Ok(None);
                 }
-            },
+            }
         };
         if !self.first {
             out.push(b',');

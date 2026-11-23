@@ -75,14 +75,11 @@ async fn write(state: &AppState, headers: &HeaderMap, body: Body, required: &[Sc
         Ok(value) => value,
         Err(error) => return error.response(),
     };
-    let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(data) => data,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Consent request exceeds the size limit",
-            );
-        }
+    let Ok(data) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Consent request exceeds the size limit",
+        );
     };
     let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
     let consent = match TrackerShareConsent::parse(data) {

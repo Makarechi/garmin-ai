@@ -61,6 +61,7 @@ impl Metric {
     }
 }
 
+#[must_use]
 pub fn legacy_metric_contracts() -> Map<String, Value> {
     METRICS
         .iter()

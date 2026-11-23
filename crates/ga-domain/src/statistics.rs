@@ -17,6 +17,10 @@ pub struct Description {
 }
 
 /// Describe the finite observations. Missing and non-finite inputs stay outside the denominator.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample counts are denominators in binary64 descriptive statistics"
+)]
 pub fn describe(values: impl IntoIterator<Item = Option<f64>>) -> Description {
     let mut values: Vec<_> = values
         .into_iter()
@@ -34,7 +38,7 @@ pub fn describe(values: impl IntoIterator<Item = Option<f64>>) -> Description {
     });
     values.sort_unstable_by(f64::total_cmp);
     let median = if n.is_multiple_of(2) {
-        (values[n / 2 - 1] + values[n / 2]) / 2.0
+        f64::midpoint(values[n / 2 - 1], values[n / 2])
     } else {
         values[n / 2]
     };
@@ -48,6 +52,11 @@ pub fn describe(values: impl IntoIterator<Item = Option<f64>>) -> Description {
     }
 }
 
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample counts weight the binary64 pooled estimate"
+)]
 pub fn standardized_difference(
     difference: Option<f64>,
     first: Description,
@@ -65,6 +74,11 @@ pub fn standardized_difference(
 }
 
 /// Descriptive Pearson correlation for at least ten paired observations.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The paired observation count is a binary64 denominator"
+)]
 pub fn pearson(first: &[f64], second: &[f64]) -> Option<f64> {
     if first.len() != second.len() || first.len() < 10 {
         return None;
@@ -97,6 +111,10 @@ pub fn pearson(first: &[f64], second: &[f64]) -> Option<f64> {
         .then(|| correlation.clamp(-1.0, 1.0))
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The observation count is a binary64 denominator"
+)]
 fn mean(values: &[f64]) -> f64 {
     pairwise_sum(values) / values.len() as f64
 }
@@ -124,6 +142,12 @@ fn pairwise_sum(values: &[f64]) -> f64 {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "A fraction between zero and one selects floor and ceiling indexes in a nonempty sample"
+)]
 fn quantile(sorted: &[f64], fraction: f64) -> f64 {
     let position = (sorted.len() - 1) as f64 * fraction;
     let lower = sorted[position.floor() as usize];

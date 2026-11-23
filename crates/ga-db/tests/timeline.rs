@@ -1,4 +1,4 @@
-use std::{env, error::Error, fs, future::ready, io, str::FromStr};
+use std::{collections::BTreeMap, env, error::Error, fs, future::ready, io, str::FromStr};
 
 use ga_db::{
     Database,
@@ -102,7 +102,7 @@ async fn check_timeline_before_model_delivery(
     .await?;
     let memory = MemoryFence {
         target_epoch: epoch,
-        source_epochs: Default::default(),
+        source_epochs: BTreeMap::default(),
     };
     let subject = AnalysisSubject::Web {
         binding: ConversationBinding {

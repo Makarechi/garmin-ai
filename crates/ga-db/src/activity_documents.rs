@@ -44,12 +44,14 @@ impl ActivityDocument {
         Self::Weather,
     ];
 
+    #[must_use]
     pub fn for_endpoint(endpoint: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|kind| kind.endpoint() == endpoint)
     }
 
+    #[must_use]
     pub const fn endpoint(self) -> &'static str {
         match self {
             Self::Details => "activity_details",
@@ -79,12 +81,14 @@ pub enum ActivitySummaryKind {
 impl ActivitySummaryKind {
     pub(crate) const ALL: [Self; 2] = [Self::Single, Self::Page];
 
+    #[must_use]
     pub fn for_endpoint(endpoint: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|kind| kind.endpoint() == endpoint)
     }
 
+    #[must_use]
     pub const fn endpoint(self) -> &'static str {
         match self {
             Self::Single => "activity",
@@ -359,21 +363,22 @@ impl Database {
         let mut outcome = None;
         if !unchanged || request.projection.shared() {
             let mut effects = txn.begin().await?;
-            match apply_effects(&mut effects, &request, empty, &status, parser, unchanged).await {
-                Ok(status) => outcome = Some(status),
-                Err(_) => {
-                    effects.rollback().await?;
-                    raw_status(txn, request.source_id, "error", parser).await?;
-                    metadata.insert("timezone".to_owned(), json!(request.timezone));
-                    metadata.insert("failed_parser_version".to_owned(), json!(PARSER_VERSION));
-                    put_state(txn, &meta_key, &Value::Object(metadata)).await?;
-                    let mut attempt = attempt;
-                    attempt["parser_version"] = json!(PARSER_VERSION);
-                    state.insert("status".to_owned(), json!("error"));
-                    state.insert("latest_attempt".to_owned(), attempt);
-                    put_state(txn, &state_key, &Value::Object(state)).await?;
-                    return Ok(DocumentStatus::Error);
-                }
+            if let Ok(status) =
+                apply_effects(&mut effects, &request, empty, &status, parser, unchanged).await
+            {
+                outcome = Some(status);
+            } else {
+                effects.rollback().await?;
+                raw_status(txn, request.source_id, "error", parser).await?;
+                metadata.insert("timezone".to_owned(), json!(request.timezone));
+                metadata.insert("failed_parser_version".to_owned(), json!(PARSER_VERSION));
+                put_state(txn, &meta_key, &Value::Object(metadata)).await?;
+                let mut attempt = attempt;
+                attempt["parser_version"] = json!(PARSER_VERSION);
+                state.insert("status".to_owned(), json!("error"));
+                state.insert("latest_attempt".to_owned(), attempt);
+                put_state(txn, &state_key, &Value::Object(state)).await?;
+                return Ok(DocumentStatus::Error);
             }
             effects.commit().await?;
             if !unchanged {
@@ -879,6 +884,10 @@ async fn summary_owners(
     Ok((owners, protected))
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "Summary equality determines whether an update changes stored numeric data"
+)]
 fn same_summary_value(field: &str, current: &Value, historical: &Value) -> bool {
     if let (Some(current), Some(historical)) = (current.as_f64(), historical.as_f64()) {
         return current == historical;

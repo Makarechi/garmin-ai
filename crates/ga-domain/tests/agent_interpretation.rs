@@ -59,7 +59,7 @@ fn capability_answers_cannot_carry_record_actions() -> Result<(), Interpretation
 fn matches_structured_commands_and_cross_field_validation() -> Result<(), Box<dyn Error>> {
     let fixture: Vec<Value> =
         serde_json::from_slice(&fs::read(env::var("GA_TEST_AGENT_INTERPRETATION")?)?)?;
-    assert!(!fixture.is_empty());
+    assert_ne!(fixture, [] as [serde_json::Value; 0]);
     for case in fixture {
         let result = AgentInterpretation::from_value(&case["input"]);
         if case["result"].is_null() {

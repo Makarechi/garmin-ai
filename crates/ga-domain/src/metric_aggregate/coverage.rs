@@ -2,6 +2,10 @@ use serde_json::Value;
 
 use super::{MetricAggregate, MetricAggregateError, MetricSample, values};
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Coverage intervals are reported as fractional seconds"
+)]
 fn seconds(start: i64, end: i64) -> f64 {
     (end - start) as f64 / 1_000_000.0
 }

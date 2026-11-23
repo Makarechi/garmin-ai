@@ -179,7 +179,9 @@ pub(crate) async fn revalidate_tracker_checkin(
         }
     };
     let effective = retry_at.unwrap_or(now);
-    if usage_in(txn, effective, timezone, policy.exclusions).await? >= daily_budget as i64 {
+    if usage_in(txn, effective, timezone, policy.exclusions).await?
+        >= i64::try_from(daily_budget).unwrap_or(i64::MAX)
+    {
         return Ok(Cancel);
     }
     let expiry = StoredInstant::from_legacy_input(&intent["expires_at"]);

@@ -116,7 +116,10 @@ fn median(samples: &[MetricSample], ordinal: bool) -> Result<Value, MetricAggreg
     if ordinal || !values.len().is_multiple_of(2) {
         return Ok(values[(values.len() - 1) / 2].clone());
     }
-    finite((number(values[middle - 1])? + number(values[middle])?) / 2.0)
+    finite(f64::midpoint(
+        number(values[middle - 1])?,
+        number(values[middle])?,
+    ))
 }
 
 fn delta(
@@ -132,18 +135,22 @@ fn delta(
     }
     let mut deltas = Vec::with_capacity(values.len() - 1);
     for pair in values.windows(2) {
-        if compare(pair[1], pair[0])? != Ordering::Less {
+        if compare(pair[1], pair[0])? == Ordering::Less {
+            number(pair[1])?;
+            deltas.push(pair[1].clone());
+        } else {
             let negative = multiply_numbers(pair[0], &Value::from(-1))
                 .map_err(|_| MetricAggregateError::Type)?;
             deltas.push(sum([pair[1], &negative])?);
-        } else {
-            number(pair[1])?;
-            deltas.push(pair[1].clone());
         }
     }
     sum(deltas.iter())
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample counts are denominators in floating-point aggregates"
+)]
 pub(super) fn calculate(
     samples: &[MetricSample],
     value_kind: &str,

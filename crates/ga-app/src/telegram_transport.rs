@@ -410,11 +410,12 @@ async fn read_body(
     {
         return Err(TelegramTransportError::InvalidResponse);
     }
-    let length = response.content_length().unwrap_or_default();
-    if length > limit as u64 {
+    let length = usize::try_from(response.content_length().unwrap_or_default())
+        .map_err(|_| TelegramTransportError::ResponseTooLarge)?;
+    if length > limit {
         return Err(TelegramTransportError::ResponseTooLarge);
     }
-    let mut body = Vec::with_capacity(length as usize);
+    let mut body = Vec::with_capacity(length);
     while let Some(chunk) = response
         .chunk()
         .await

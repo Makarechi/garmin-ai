@@ -185,14 +185,17 @@ impl TrackerSetupDraft {
         })
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }
 
+    #[must_use]
     pub fn definition(&self) -> &CustomDefinition {
         &self.definition
     }
 
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }
@@ -246,6 +249,11 @@ struct Field<'a> {
 }
 
 impl<'a> Field<'a> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "The maximum text length is checked to be an integer from 1 through 16000"
+    )]
     fn from_json(value: &'a Value) -> Result<Self, TrackerSetupError> {
         use TrackerSetupError::Invalid;
         let raw = fields(
@@ -403,6 +411,10 @@ impl<'a> Field<'a> {
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Scale endpoints are validated as integers in the exact binary64 range"
+    )]
     fn metadata(&self, key: &str, locale: &str) -> Value {
         let semantic = match self.kind {
             Kind::Text => "text",

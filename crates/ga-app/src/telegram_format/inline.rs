@@ -173,8 +173,8 @@ impl Host for InlineOnly {
 }
 
 fn percent_byte(mut digits: impl Iterator<Item = u8>) -> Option<u8> {
-    let high = char::from(digits.next()?).to_digit(16)? as u8;
-    let low = char::from(digits.next()?).to_digit(16)? as u8;
+    let high = u8::try_from(char::from(digits.next()?).to_digit(16)?).ok()?;
+    let low = u8::try_from(char::from(digits.next()?).to_digit(16)?).ok()?;
     Some((high << 4) | low)
 }
 

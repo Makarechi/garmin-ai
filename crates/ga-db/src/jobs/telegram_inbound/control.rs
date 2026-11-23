@@ -63,6 +63,7 @@ impl fmt::Display for TelegramControlError {
 }
 impl Error for TelegramControlError {}
 impl TelegramControlError {
+    #[must_use]
     pub fn is_busy(&self) -> bool {
         matches!(
             self,

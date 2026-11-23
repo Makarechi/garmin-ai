@@ -198,6 +198,10 @@ pub(crate) async fn load(
     Ok((goals, stored))
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The API change marker preserves the legacy fractional Unix seconds format"
+)]
 pub(crate) async fn set_in(
     txn: &mut Transaction<'_, Postgres>,
     owner: Uuid,
@@ -296,6 +300,11 @@ async fn lock_goals(txn: &mut Transaction<'_, Postgres>) -> Result<(), PersonalG
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Order comparisons preserve the legacy whole and fractional Unix seconds format"
+)]
 fn superseded(stored: &Value, incoming: GoalCommandOrder<'_>) -> Result<bool, PersonalGoalsError> {
     if !stored["api_changed_at"].is_null() {
         let changed_at = stored["api_changed_at"]

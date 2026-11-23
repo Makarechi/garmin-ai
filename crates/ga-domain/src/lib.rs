@@ -39,6 +39,7 @@ pub mod wearable;
 
 use sha2::{Digest, Sha256};
 
+#[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
     lower_hex(&Sha256::digest(bytes))
 }

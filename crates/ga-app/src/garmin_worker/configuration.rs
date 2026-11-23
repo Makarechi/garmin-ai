@@ -87,6 +87,7 @@ impl GarminSourceSettings {
         Ok(None)
     }
 
+    #[must_use]
     pub fn instance_id(&self) -> &str {
         &self.instance
     }
@@ -107,6 +108,7 @@ fn valid_id(value: &str) -> bool {
 }
 
 /// Validate the administrator-configured URL for the Garmin authentication page.
+#[must_use]
 pub fn garmin_auth_url(value: &str) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(value).ok()?;
     (url.scheme() == "https"

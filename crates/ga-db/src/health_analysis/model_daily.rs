@@ -198,6 +198,7 @@ pub enum DailyAnalysisQuery {
 }
 
 impl DailyAnalysisQuery {
+    #[must_use]
     pub fn from_arguments(tool: &str, arguments: &Map<String, Value>) -> Option<Self> {
         serde_json::from_value(json!({"tool":tool,"arguments":arguments})).ok()
     }
@@ -545,6 +546,7 @@ pub struct DailyAnalysisEvidence {
 }
 
 impl DailyAnalysisEvidence {
+    #[must_use]
     pub fn is_daily_tool(tool: &str) -> bool {
         matches!(
             tool,
@@ -579,6 +581,7 @@ impl DailyAnalysisEvidence {
         )
     }
 
+    #[must_use]
     pub fn from_read(evidence: &Value, timezone: &str) -> Option<Self> {
         let arguments = evidence["arguments"].as_object()?;
         let query = DailyAnalysisQuery::from_arguments(evidence["tool"].as_str()?, arguments)?;
@@ -830,10 +833,13 @@ fn oversized_model_result() -> Value {
 }
 
 pub(crate) fn compact_document(document: JsonDocument) -> Result<Value, HealthAnalysisError> {
-    if document.byte_len() > MAX_MODEL_RESULT_BYTES as u64 {
+    let Some(length) = usize::try_from(document.byte_len())
+        .ok()
+        .filter(|length| *length <= MAX_MODEL_RESULT_BYTES)
+    else {
         return Ok(oversized_model_result());
-    }
-    let mut bytes = Vec::with_capacity(document.byte_len() as usize);
+    };
+    let mut bytes = Vec::with_capacity(length);
     document
         .reader()
         .read_to_end(&mut bytes)

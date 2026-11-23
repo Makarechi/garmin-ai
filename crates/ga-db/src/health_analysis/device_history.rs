@@ -257,7 +257,7 @@ async fn read_records(
         "device_history/records.sql"
     ))
     .bind(id)
-    .bind(MAX_RECORDS as i64)
+    .bind(i64::try_from(MAX_RECORDS).unwrap_or(i64::MAX))
     .fetch_all(&mut **txn)
     .await?;
     let mut records = Vec::new();

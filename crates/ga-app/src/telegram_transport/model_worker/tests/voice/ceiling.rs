@@ -106,7 +106,7 @@ async fn transcribes_maximum_audio_and_rejects_one_extra_byte() -> Result<(), Bo
     let model = RuntimeModelSettings::resolve(
         |name| {
             Ok(match name {
-                "GA_LLM_ENABLED" => Some("true".into()),
+                "GA_LLM_ENABLED" | "GA_GEMINI_FALLBACK_ENABLED" => Some("true".into()),
                 "GA_LLM_CONSENT" => Some(
                     json!({"provider":"gemini","provider_instance_id":"model:gemini:primary",
                            "model":PRIMARY,"fallback_models":[FALLBACK],
@@ -116,7 +116,6 @@ async fn transcribes_maximum_audio_and_rejects_one_extra_byte() -> Result<(), Bo
                 ),
                 "GA_GEMINI_API_KEY" => Some("synthetic-gemini".into()),
                 "GA_GEMINI_MODEL" => Some(PRIMARY.into()),
-                "GA_GEMINI_FALLBACK_ENABLED" => Some("true".into()),
                 "GA_GEMINI_FALLBACK_MODELS" => Some(json!([FALLBACK]).to_string()),
                 _ => None,
             })
@@ -215,7 +214,7 @@ async fn transcribes_maximum_audio_and_rejects_one_extra_byte() -> Result<(), Bo
         }
         Ok::<_, Box<dyn Error>>(())
     };
-    let (server, _) = tokio::time::timeout(Duration::from_secs(100), async {
+    let (server, ()) = tokio::time::timeout(Duration::from_secs(100), async {
         tokio::join!(server, worker.process_voice(&transport, &lease, at))
     })
     .await?;

@@ -78,7 +78,7 @@ pub(super) async fn serve(service: Mcp) -> Result<(), &'static str> {
 
 impl Service<NativeServer> for Mcp {
     fn get_info(&self) -> ServerConfig {
-        Mcp::get_info(self)
+        Mcp::get_info()
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
@@ -92,7 +92,7 @@ impl Service<NativeServer> for Mcp {
     ) -> Result<Response, ErrorData> {
         match request {
             ClientRequest::InitializeRequest(request) => {
-                let mut info = self.get_info();
+                let mut info = Mcp::get_info();
                 if SUPPORTED.contains(&request.params.protocol_version) {
                     info.protocol_version = request.params.protocol_version.clone();
                 }
@@ -129,6 +129,10 @@ impl Service<NativeServer> for Mcp {
         }
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn handle_notification(
         &self,
         _: ClientNotification,

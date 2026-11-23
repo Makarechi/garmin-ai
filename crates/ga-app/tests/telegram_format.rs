@@ -31,7 +31,7 @@ fn splits_astral_boundary_and_keeps_code_out_of_styles() {
 fn matches_pinned_text_and_entities() -> Result<(), Box<dyn Error>> {
     let fixture: Vec<Value> =
         serde_json::from_slice(&fs::read(env::var("GA_TEST_TELEGRAM_FORMAT")?)?)?;
-    assert!(!fixture.is_empty());
+    assert_ne!(fixture, [] as [serde_json::Value; 0]);
     for case in fixture {
         let source = case["source"].as_str().ok_or("Missing Markdown input")?;
         let actual: Vec<_> = message_parts(source)
@@ -40,7 +40,7 @@ fn matches_pinned_text_and_entities() -> Result<(), Box<dyn Error>> {
                 let entities: Vec<_> = part
                     .entities
                     .iter()
-                    .map(|entity| entity.as_json())
+                    .map(ga_app::telegram_format::TextEntity::as_json)
                     .collect();
                 json!({"text": part.text, "entities": entities})
             })

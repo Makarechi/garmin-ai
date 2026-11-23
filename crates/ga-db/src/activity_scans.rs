@@ -20,7 +20,7 @@ use crate::{
     garmin_owner::{OwnerVerificationError, verify_owner_in_transaction},
 };
 
-const MUTATION_LOCK: i64 = 72104619;
+const MUTATION_LOCK: i64 = 72_104_619;
 const RECENT_DAYS: u16 = 14;
 const MAX_HORIZON: u16 = 3660;
 

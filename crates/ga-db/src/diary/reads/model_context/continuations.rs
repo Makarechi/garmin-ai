@@ -137,9 +137,11 @@ pub(crate) async fn interpretation_context_in(
         events: &mut events,
         allow_additional_events: input.mentioned_events.is_empty(),
     };
-    let recent_questions = continuations.questions(txn, &audience, &packs, now).await?;
+    let recent_questions = continuations
+        .questions(txn, &audience, packs.as_ref(), now)
+        .await?;
     let (pending_clarification, selection_unavailable) = continuations
-        .clarification(txn, &audience, &packs, now, pending)
+        .clarification(txn, &audience, packs.as_ref(), now, pending)
         .await?;
     let memory = conversation_memory::snapshot(txn, input.binding, input.now, false)
         .await
@@ -182,8 +184,8 @@ async fn model_packs(
     }))
 }
 
-fn permits(packs: &Option<BTreeSet<String>>, key: &str) -> bool {
-    packs.as_ref().is_none_or(|packs| packs.contains(key))
+fn permits(packs: Option<&BTreeSet<String>>, key: &str) -> bool {
+    packs.is_none_or(|packs| packs.contains(key))
 }
 
 struct Continuations<'a> {
@@ -196,7 +198,7 @@ impl Continuations<'_> {
         &mut self,
         txn: &mut Transaction<'_, Postgres>,
         audience: &ModelAudience<'_>,
-        packs: &Option<BTreeSet<String>>,
+        packs: Option<&BTreeSet<String>>,
         now: OffsetDateTime,
     ) -> Result<Vec<Value>, DiaryReadError> {
         let mut visible = Vec::new();
@@ -259,7 +261,7 @@ impl Continuations<'_> {
         &mut self,
         txn: &mut Transaction<'_, Postgres>,
         audience: &ModelAudience<'_>,
-        packs: &Option<BTreeSet<String>>,
+        packs: Option<&BTreeSet<String>>,
         now: OffsetDateTime,
         pending: Option<Value>,
     ) -> Result<(Option<Value>, bool), DiaryReadError> {

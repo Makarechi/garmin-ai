@@ -216,7 +216,7 @@ fn anthropic_text(envelope: &Value) -> Result<&str, ModelResponseError> {
     let mut text = None;
     for block in content {
         match block["type"].as_str() {
-            Some("thinking" | "redacted_thinking") => continue,
+            Some("thinking" | "redacted_thinking") => {}
             Some("text") => {
                 let value = block["text"]
                     .as_str()
@@ -243,6 +243,7 @@ fn tokens(value: &Value) -> Result<Option<u32>, ModelResponseError> {
     value
         .as_u64()
         .filter(|count| *count <= MAX_USAGE_TOKENS)
-        .map(|count| Some(count as u32))
+        .and_then(|count| u32::try_from(count).ok())
+        .map(Some)
         .ok_or(ModelResponseError::InvalidOutput)
 }
