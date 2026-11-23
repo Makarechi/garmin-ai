@@ -6,12 +6,14 @@ use std::{
     process::{Command, Stdio},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use ga_archive::{Archive, PutLimits};
 use ga_db::{Database, raw_capture::LegacyCapture};
 use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
 use time::OffsetDateTime;
+use tokio::io::AsyncBufReadExt;
 use uuid::Uuid;
 
 const ACCOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -48,6 +50,11 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
         ('integration:garmin',jsonb_build_object('status','reauth_required'))",
     )
     .bind(ACCOUNT)
+    .execute(&inspect)
+    .await?;
+    sqlx::query(
+        "UPDATE module_configs SET collection_enabled=true WHERE pack_key IN ('training','wellbeing')",
+    )
     .execute(&inspect)
     .await?;
     let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -178,6 +185,80 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
     .await?;
     assert_eq!(unchanged, 2);
 
+    let delayed = database
+        .capture_legacy_json(
+            LegacyCapture {
+                authenticated_fingerprint: ACCOUNT,
+                endpoint: "daily",
+                source_key: "2026-10-23",
+                fetched_at: now.try_into()?,
+                body: br#"{"totalSteps":60}"#.to_vec(),
+            },
+            archive,
+            PutLimits {
+                max_bytes: 10_000,
+                disk_reserve_bytes: 0,
+            },
+        )
+        .await?;
+    let mut blocked = inspect.begin().await?;
+    sqlx::query("LOCK TABLE source_payloads IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocked)
+        .await?;
+    let mut worker = tokio::process::Command::from(command(&url, &data));
+    let mut running = worker
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stderr = running.stderr.take().ok_or("Worker stderr unavailable")?;
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut planning_retried = false;
+        let mut claim_retried = false;
+        let mut last_line = String::new();
+        while let Some(line) = lines.next_line().await? {
+            planning_retried |= line.starts_with("Archive replay planning will retry:");
+            claim_retried |= line.starts_with("Archive replay job claim will retry:");
+            if planning_retried && claim_retried {
+                return Ok(());
+            }
+            assert!(
+                line != "Replay inventory could not be read",
+                "An archive query timeout stopped the worker"
+            );
+            last_line = line;
+        }
+        Err(std::io::Error::other(format!(
+            "Worker exited without scheduling both archive retries. Last diagnostic: {last_line}"
+        )))
+    })
+    .await??;
+    assert!(running.try_wait()?.is_none());
+    let occupied = command(&url, &data).arg("--once").output()?;
+    assert!(!occupied.status.success());
+    assert_eq!(
+        occupied.stderr,
+        b"Another Garmin AI worker is already running\n",
+    );
+    blocked.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let completed: bool =
+                sqlx::query_scalar("SELECT parser_version=9 FROM source_payloads WHERE id=$1")
+                    .bind(delayed.id)
+                    .fetch_one(&inspect)
+                    .await?;
+            if completed {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await??;
+    assert!(running.try_wait()?.is_none());
+    running.kill().await?;
+
     #[cfg(unix)]
     {
         let mut running = command(&url, &data).stdout(Stdio::piped()).spawn()?;
@@ -199,6 +280,7 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
                 .success()
         );
     }
+
     sqlx::query("INSERT INTO app_state(key,value) VALUES('maintenance:erased','{}')")
         .execute(&inspect)
         .await?;

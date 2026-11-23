@@ -114,6 +114,10 @@ async fn begin_planning(
     check_readiness(&mut txn)
         .await
         .map_err(ReplaySelectionError::Unavailable)?;
+    // Bounded archive pages can still need to search older projections.
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *txn)
+        .await?;
     Ok(txn)
 }
 

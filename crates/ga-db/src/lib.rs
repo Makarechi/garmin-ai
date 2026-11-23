@@ -52,6 +52,12 @@ const OWNER_ENROLLMENT_LOCK: i64 = 72104625;
 const DATABASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROL_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(1500);
 
+fn query_canceled(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|error| error.code().as_deref() == Some("57014"))
+}
+
 #[derive(Clone)]
 pub struct Database {
     control: PgPool,
