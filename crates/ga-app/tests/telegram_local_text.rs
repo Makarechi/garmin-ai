@@ -20,6 +20,9 @@ use tokio::time::{sleep, timeout};
 
 use ga_app::telegram_input::TelegramBinding;
 
+#[path = "support/telegram_ingress.rs"]
+mod telegram_ingress;
+
 #[tokio::test]
 #[ignore = "uses authenticated native ingress and a disposable TimescaleDB"]
 async fn capability_questions_use_local_help_before_and_after_screening()
@@ -163,8 +166,7 @@ async fn inbound(
         .ok_or("Missing message")?
         .extend(extra.clone());
     assert!(
-        binding
-            .accept_polled_update(runtime, &update, now, true)
+        telegram_ingress::receive(runtime, binding, &update, now, true)
             .await?
             .inbound
             .is_some()
