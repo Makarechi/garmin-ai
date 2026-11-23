@@ -9,6 +9,7 @@ use ga_db::Database;
 use crate::configuration;
 
 const DEADLINE: Duration = Duration::from_secs(1);
+const READY_RESPONSE_DEADLINE: Duration = Duration::from_millis(4750);
 
 #[tokio::main(flavor = "current_thread")]
 pub(crate) async fn worker() -> bool {
@@ -25,16 +26,16 @@ pub(crate) fn probe(port: u16, ready: bool) -> io::Result<bool> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut connection = TcpStream::connect_timeout(&address, DEADLINE)?;
     connection.set_write_timeout(Some(DEADLINE))?;
-    let endpoint = if ready {
-        "/health/ready"
+    let (endpoint, response_timeout) = if ready {
+        ("/health/ready", READY_RESPONSE_DEADLINE)
     } else {
-        "/health/live"
+        ("/health/live", DEADLINE)
     };
     write!(
         connection,
         "GET {endpoint} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
     )?;
-    let deadline = Instant::now() + DEADLINE;
+    let deadline = Instant::now() + response_timeout;
     let mut status = [0; 128];
     let mut used = 0;
     let line_end = loop {
