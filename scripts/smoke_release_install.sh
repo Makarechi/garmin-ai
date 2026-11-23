@@ -100,6 +100,24 @@ if [[ -z "$image_ref" ]]; then
     }
     docker run -d --rm -p 127.0.0.1::5000 --name "$registry_name" registry:2 >/dev/null
     registry_port=$(docker port "$registry_name" 5000/tcp | sed -n 's/.*://p')
+    "$python_bin" - "$registry_port" <<'PY'
+import sys
+from time import monotonic, sleep
+from urllib.error import URLError
+from urllib.request import ProxyHandler, build_opener
+
+endpoint = f"http://127.0.0.1:{int(sys.argv[1])}/v2/"
+client = build_opener(ProxyHandler({}))
+deadline = monotonic() + 15
+while monotonic() < deadline:
+    try:
+        with client.open(endpoint, timeout=2):
+            break
+    except (URLError, TimeoutError):
+        sleep(0.25)
+else:
+    raise SystemExit("The disposable registry did not become ready.")
+PY
     registry_tag="127.0.0.1:$registry_port/garmin-ai:smoke"
     docker tag "$image_tag" "$registry_tag"
     docker push "$registry_tag" >"$work/push.log" 2>&1 || {

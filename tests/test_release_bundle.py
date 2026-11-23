@@ -309,6 +309,7 @@ def test_release_compose_tracks_the_reviewed_service_layout():
     check_compose(content)
     assert "build:" not in content
     assert content.count("${GA_APP_IMAGE:") == 1
+    assert content.count("create_host_path: false") == 4
     assert "service_completed_successfully" in content
     assert "127.0.0.1:${GA_API_PORT:-8080}:8080" in content
 
@@ -550,7 +551,7 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path, m
     for name in ("migrate", "api", "worker"):
         state = next(path for path in services[name]["volumes"] if path["target"] == "/app/state")
         assert state["source"] == str(root / ".state")
-        assert state["bind"]["create_host_path"] is False
+        assert state.get("bind", {}).get("create_host_path", False) is False
     if gcp:
         assert "auth-gateway" not in services
         assert services["db"]["mem_limit"] == str(320 * 1024**2)
