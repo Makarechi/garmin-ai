@@ -77,7 +77,7 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
         assert_eq!(*menu[0].description, fixture["menu"]);
         let result = reader
             .read("events", args)
-            .await
+            .await?
             .ok_or("Expected visible diary page")?;
         assert_eq!(result.value, case["result"]);
         assert!(!result.value.to_string().contains("synthetic quote"));
@@ -100,10 +100,10 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
             .collect::<Result<BTreeSet<_>, _>>()?;
         assert!(!versions.is_empty());
         assert_eq!(result.tracker_versions, versions);
-        assert!(reader.read("update_event", args).await.is_none());
+        assert!(reader.read("update_event", args).await?.is_none());
         let mut injected = args.clone();
         injected.insert("channel".into(), json!("telegram:allowed"));
-        assert!(reader.read("events", &injected).await.is_none());
+        assert!(reader.read("events", &injected).await?.is_none());
     }
 
     verify_native_ingress(&db, &inspect, owner_id, now, &fixture).await?;
@@ -132,14 +132,14 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
         },
         "model:primary",
     )?;
-    assert!(!foreign.context_current().await && foreign.read("events", args).await.is_none());
+    assert!(!foreign.context_current().await && foreign.read("events", args).await?.is_none());
     sqlx::query(
         "UPDATE app_state SET value=value || jsonb_build_object('model_categories','[\"health\"]'::jsonb)
                  WHERE key='preferences:onboarding'",
     )
     .execute(&inspect)
     .await?;
-    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    assert!(!reader.context_current().await && reader.read("events", args).await?.is_none());
     sqlx::query(
         "UPDATE app_state SET value=value || jsonb_build_object('model_categories','[\"diary\"]'::jsonb)
                  WHERE key='preferences:onboarding'",
@@ -151,7 +151,7 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
     )
     .execute(&inspect)
     .await?;
-    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    assert!(!reader.context_current().await && reader.read("events", args).await?.is_none());
     sqlx::query(
         "UPDATE channel_bindings SET external_id='900001' WHERE channel_instance_id='allowed'",
     )
@@ -164,7 +164,7 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
         ..binding
     })
     .await?;
-    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    assert!(!reader.context_current().await && reader.read("events", args).await?.is_none());
     let memory = db.conversation_memory(binding, now).await?;
     let context = AnalysisReadContext {
         memory: &memory.fence,
@@ -183,7 +183,7 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
             },
         )
         .await?;
-    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    assert!(!reader.context_current().await && reader.read("events", args).await?.is_none());
     let reader = DiaryAnalysisTools::new(
         &db,
         AnalysisReadContext {
@@ -200,7 +200,7 @@ async fn diary_tool_is_bound_to_the_current_question() -> Result<(), Box<dyn Err
            external_event_id,sender_ref,received_at,'edit','{}',2,operation_id,id
          FROM inbound_messages WHERE id=$1",
     ).bind(context.inbound_id).execute(&inspect).await?;
-    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    assert!(!reader.context_current().await && reader.read("events", args).await?.is_none());
     Ok(())
 }
 
@@ -253,7 +253,7 @@ async fn verify_native_ingress(
     assert_eq!(
         reader
             .read("events", args)
-            .await
+            .await?
             .ok_or("Native diary read was rejected")?
             .value,
         fixture["cases"][0]["result"]
@@ -264,7 +264,7 @@ async fn verify_native_ingress(
             .await?;
     sqlx::query("UPDATE app_state SET value=value-'channel'-'fallback_channels' WHERE key='preferences:onboarding'")
         .execute(inspect).await?;
-    assert!(!reader.context_current().await && reader.read("events", args).await.is_none());
+    assert!(!reader.context_current().await && reader.read("events", args).await?.is_none());
     sqlx::query("UPDATE app_state SET value=$1::jsonb WHERE key='preferences:onboarding'")
         .bind(selected)
         .execute(inspect)

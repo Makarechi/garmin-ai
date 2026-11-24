@@ -457,6 +457,7 @@ fn interpretation_disposition(error: DiaryInterpretationError) -> Disposition {
 fn analysis_disposition(error: AnalysisError) -> Disposition {
     match error {
         AnalysisError::Model(error) => model_disposition(error),
+        AnalysisError::Read(error) => Disposition::Text(error.notice_key()),
         AnalysisError::Budget(error) => budget_disposition(error),
         AnalysisError::EvidenceChanged => Disposition::Text("agent.data_changed"),
         _ => Disposition::Text("agent.answer_unverified"),

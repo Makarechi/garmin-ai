@@ -54,6 +54,7 @@
   "agent.answer.unknown": "unknown",
   "agent.budget": "Analysis reached its data or computation limit. This does not mean there is no data. Narrow the time period or choose one metric.",
   "agent.timeout": "The answer could not be completed in time. Try again a little later. This does not mean there is no data.",
+  "agent.data_unavailable": "Saved data could not be read right now. Try asking again a little later. This does not mean there is no data.",
   "agent.reply_context_missing": "The selected reply's context is no longer available. Repeat the original question and analysis period.",
   "agent.goals_changed": "Personal goals changed. Repeat the question with the new settings.",
   "agent.conversation_deleted": "Conversation context was deleted. Repeat the question for a new analysis.",

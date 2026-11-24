@@ -3,13 +3,14 @@ use std::sync::LazyLock;
 use ga_db::{
     Database,
     conversation_memory::AnalysisSubject,
-    diary::{DefinitionPage, DiaryEventRange, EVENT_DEFINITIONS},
+    diary::{DefinitionPage, DiaryEventRange, DiaryReadError, EVENT_DEFINITIONS},
     health_analysis::{
         ACTIVITIES, ACTIVITY_DETAILS, AnalysisTimelineQuery, COFFEE_SLEEP, DATA_FRESHNESS,
         DEVICE_HISTORY, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
-        EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, INSIGHTS_LIST, LAGGED_ASSOCIATION,
-        METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY,
-        SLEEP_ANALYSIS, STRESS_HOURS, TIMELINE, WELLBEING_OBSERVATIONS,
+        EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, HealthAnalysisError, INSIGHTS_LIST,
+        LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE,
+        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS, TIMELINE, TimelineError,
+        WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
     resource_catalog::{CatalogError, RESOURCE_CATALOG, ResourcePage},
@@ -21,7 +22,7 @@ use ga_domain::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{AnalysisReadTools, AnalysisToolRead, OfferedReadTool};
+use super::{AnalysisReadError, AnalysisReadTools, AnalysisToolRead, OfferedReadTool};
 use crate::{model_gateway::CurrentModelPolicy, read_tool_catalog::ReadTool};
 
 const EVENTS: &str = "events";
@@ -271,77 +272,102 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
             .ok()?
     }
 
-    async fn read(&self, name: &str, args: &Map<String, Value>) -> Option<AnalysisToolRead> {
+    async fn read(
+        &self,
+        name: &str,
+        args: &Map<String, Value>,
+    ) -> Result<Option<AnalysisToolRead>, AnalysisReadError> {
         if name == EVENT_DEFINITIONS {
-            let page = DefinitionPage::parse(args)?;
-            let result = self
+            let Some(page) = DefinitionPage::parse(args) else {
+                return Ok(None);
+            };
+            return match self
                 .database
                 .read_analysis_definitions(self.context, self.model, page)
                 .await
-                .ok()?;
-            return Some(AnalysisToolRead {
-                value: result.value,
-                schema_versions: result.schema_versions,
-                ..Default::default()
-            });
+            {
+                Ok(result) => Ok(Some(AnalysisToolRead {
+                    value: result.value,
+                    schema_versions: result.schema_versions,
+                    ..Default::default()
+                })),
+                Err(error) => diary_read_failure(error),
+            };
         }
         if name == RESOURCE_CATALOG {
-            let page = ResourcePage::parse(args).ok()?;
+            let Ok(page) = ResourcePage::parse(args) else {
+                return Ok(None);
+            };
             return match self
                 .database
                 .read_model_resource_catalog(self.context, self.model, self.categories(), page)
                 .await
             {
-                Ok(read) => Some(AnalysisToolRead {
+                Ok(read) => Ok(Some(AnalysisToolRead {
                     value: read.value,
                     schema_versions: read.schema_versions,
                     ..Default::default()
-                }),
-                Err(CatalogError::ResultTooLarge) => Some(AnalysisToolRead {
+                })),
+                Err(CatalogError::ResultTooLarge) => Ok(Some(AnalysisToolRead {
                     value: json!({
                         "error": "result_too_large",
                         "instruction": "Request a smaller page or one resource. Do not treat this as empty data.",
                     }),
                     ..Default::default()
-                }),
-                Err(_) => None,
+                })),
+                Err(CatalogError::Database) => Err(AnalysisReadError::Unavailable),
+                Err(CatalogError::Health(error)) => health_read_failure(error),
+                Err(_) => Ok(None),
             };
         }
         if name == GENERIC_ANALYSIS {
-            let spec = GenericAnalysisEvidence::input(args)?;
+            let Some(spec) = GenericAnalysisEvidence::input(args) else {
+                return Ok(None);
+            };
             let read = self
                 .database
                 .read_model_generic(self.context, self.model, self.categories(), &spec)
                 .await;
             return match read {
-                Ok(read) => Some(AnalysisToolRead {
+                Ok(read) => Ok(Some(AnalysisToolRead {
                     value: read.value,
                     tracker_versions: read.tracker_versions,
                     ..Default::default()
-                }),
-                Err(GenericAnalysisError::ResultTooLarge) => Some(AnalysisToolRead {
+                })),
+                Err(GenericAnalysisError::ResultTooLarge) => Ok(Some(AnalysisToolRead {
                     value: json!({
                         "error": "result_too_large",
                         "instruction": "Narrow the date range or use an analysis tool. Do not treat this as empty data.",
                     }),
                     ..Default::default()
-                }),
-                Err(_) => None,
+                })),
+                Err(GenericAnalysisError::Database) => Err(AnalysisReadError::Unavailable),
+                Err(GenericAnalysisError::Health(error)) => health_read_failure(error),
+                Err(_) => Ok(None),
             };
         }
         if name == TIMELINE {
-            self.daily_read.as_ref()?;
-            let query = AnalysisTimelineQuery::from_arguments(args)?;
-            let result = self
+            if self.daily_read.is_none() {
+                return Ok(None);
+            }
+            let Some(query) = AnalysisTimelineQuery::from_arguments(args) else {
+                return Ok(None);
+            };
+            return match self
                 .database
                 .read_analysis_timeline(self.context, self.model, &query)
                 .await
-                .ok()?;
-            return Some(AnalysisToolRead {
-                value: result.value,
-                tracker_versions: result.tracker_versions,
-                ..Default::default()
-            });
+            {
+                Ok(result) => Ok(Some(AnalysisToolRead {
+                    value: result.value,
+                    tracker_versions: result.tracker_versions,
+                    ..Default::default()
+                })),
+                Err(TimelineError::Database) => Err(AnalysisReadError::Unavailable),
+                Err(TimelineError::Health(error)) => health_read_failure(error),
+                Err(TimelineError::Diary(error)) => diary_read_failure(error),
+                Err(_) => Ok(None),
+            };
         }
         let read_access = if name == WELLBEING_OBSERVATIONS {
             self.wellbeing_read
@@ -353,32 +379,61 @@ impl AnalysisReadTools for DiaryAnalysisTools<'_> {
         if let Some((timezone, at)) = read_access
             && DailyAnalysisEvidence::is_daily_tool(name)
         {
-            let query = DailyAnalysisQuery::from_arguments(name, args)?;
-            return Some(AnalysisToolRead {
-                value: self
-                    .database
-                    .read_analysis_daily(self.context, &query, timezone, at)
-                    .await
-                    .ok()??,
-                ..Default::default()
-            });
+            let Some(query) = DailyAnalysisQuery::from_arguments(name, args) else {
+                return Ok(None);
+            };
+            return match self
+                .database
+                .read_analysis_daily(self.context, &query, timezone, at)
+                .await
+            {
+                Ok(value) => Ok(value.map(|value| AnalysisToolRead {
+                    value,
+                    ..Default::default()
+                })),
+                Err(error) => health_read_failure(error),
+            };
         }
         if name != EVENTS {
-            return None;
+            return Ok(None);
         }
-        let page = self
+        let Some(range) = DiaryEventRange::from_analysis_arguments(args) else {
+            return Ok(None);
+        };
+        match self
             .database
-            .list_analysis_events(
-                self.context,
-                self.model,
-                DiaryEventRange::from_analysis_arguments(args)?,
-            )
+            .list_analysis_events(self.context, self.model, range)
             .await
-            .ok()?;
-        Some(AnalysisToolRead {
-            value: page.value,
-            tracker_versions: page.tracker_versions,
-            ..Default::default()
-        })
+        {
+            Ok(page) => Ok(Some(AnalysisToolRead {
+                value: page.value,
+                tracker_versions: page.tracker_versions,
+                ..Default::default()
+            })),
+            Err(error) => diary_read_failure(error),
+        }
+    }
+}
+
+fn health_read_failure(
+    error: HealthAnalysisError,
+) -> Result<Option<AnalysisToolRead>, AnalysisReadError> {
+    match error {
+        HealthAnalysisError::Storage(_) | HealthAnalysisError::Database => {
+            Err(AnalysisReadError::Unavailable)
+        }
+        HealthAnalysisError::ReplayPending => Err(AnalysisReadError::ReplayPending),
+        _ => Ok(None),
+    }
+}
+
+fn diary_read_failure(
+    error: DiaryReadError,
+) -> Result<Option<AnalysisToolRead>, AnalysisReadError> {
+    match error {
+        DiaryReadError::Storage(_) | DiaryReadError::Database => {
+            Err(AnalysisReadError::Unavailable)
+        }
+        _ => Ok(None),
     }
 }

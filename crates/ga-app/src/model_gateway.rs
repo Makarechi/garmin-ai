@@ -6,8 +6,8 @@ mod safety;
 mod tracker;
 
 pub use analysis::{
-    AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisReadTools, AnalysisResult,
-    AnalysisToolRead, DiaryAnalysisTools, OfferedReadTool,
+    AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisReadError, AnalysisReadTools,
+    AnalysisResult, AnalysisToolRead, DiaryAnalysisTools, OfferedReadTool,
 };
 pub(crate) use analysis::{analysis_conversation, format_analysis_answer};
 pub use configuration::{ConfiguredModel, ModelEnvironmentError, RuntimeModelSettings};
