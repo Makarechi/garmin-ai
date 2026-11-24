@@ -229,7 +229,7 @@ assert json.load(sys.stdin) == {"revision":"f103aa712b44","current":False}
     ./install.sh "${profile[@]}" migrate
     ./install.sh "${profile[@]}" migrate --status | "$python_bin" -c '
 import json, sys
-assert json.load(sys.stdin) == {"revision":"c54f8a72d130","current":True}
+assert json.load(sys.stdin) == {"revision":"d1f7a9306e42","current":True}
 '
     PYTHONPATH="$root/scripts" "$python_bin" - "$api_port" "${profile[@]}" <<'PY'
 import sys
@@ -352,7 +352,7 @@ check_native_database_languages
 if [[ "$historical" == true ]]; then
     compose exec -T db psql -X -U garmin -d garmin_ai -At -c \
         "SELECT current_database(),version_num,value->>'retained' FROM alembic_version CROSS JOIN app_state WHERE key='synthetic:release-upgrade'" \
-        | grep -Fx 'garmin_ai|c54f8a72d130|true'
+        | grep -Fx 'garmin_ai|d1f7a9306e42|true'
 fi
 if [[ "$gcp" == true ]]; then
     test "$(docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}' "$(compose ps -q db)")" \

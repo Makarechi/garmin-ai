@@ -6,7 +6,7 @@ use ga_app::garmin_worker::{
 };
 use ga_archive::{Archive, PutLimits};
 use ga_db::{
-    Database,
+    Database, WorkTopic,
     garmin_integration::{GarminSourceAdmission, GarminTransportOutcome},
     garmin_periodic::GarminSyncSchedule,
 };
@@ -17,7 +17,7 @@ use super::{FIT_EXPORT_LIMITS, MAX_JSON_BYTES, clock};
 use crate::configuration;
 
 const PLAN_INTERVAL: Duration = Duration::from_secs(30);
-const JOB_INTERVAL: Duration = Duration::from_secs(1);
+const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(super) enum GarminWorkerError {
@@ -70,7 +70,12 @@ impl GarminWorkerSettings {
         let mut session: Option<LegacyReader> = None;
         let mut archive = None;
         let mut next_plan = Instant::now();
+        let mut work = database.work_subscription(WorkTopic::Garmin);
+        let mut schedule = database.work_subscription(WorkTopic::GarminSchedule);
         loop {
+            if schedule.take_pending() {
+                next_plan = Instant::now();
+            }
             let Ok(at) = clock() else {
                 sleep(PLAN_INTERVAL).await;
                 continue;
@@ -88,12 +93,12 @@ impl GarminWorkerSettings {
                         eprintln!("{error}");
                     }
                     session = None;
-                    sleep(PLAN_INTERVAL).await;
+                    work.wait(PLAN_INTERVAL).await;
                     continue;
                 }
                 Ok(_) => {
                     session = None;
-                    sleep(PLAN_INTERVAL).await;
+                    work.wait(PLAN_INTERVAL).await;
                     continue;
                 }
                 Err(error) => {
@@ -182,7 +187,7 @@ impl GarminWorkerSettings {
                 match scheduled.plan(now).await {
                     Ok(GarminSyncSchedule::Paused | GarminSyncSchedule::Disabled { .. }) => {
                         session = None;
-                        sleep(PLAN_INTERVAL).await;
+                        work.wait(PLAN_INTERVAL).await;
                         continue;
                     }
                     Err(error) => {
@@ -198,15 +203,28 @@ impl GarminWorkerSettings {
                 continue;
             };
             match Box::pin(scheduled.process_one(now)).await {
-                Ok(GarminQueueStep::Idle) => sleep(JOB_INTERVAL).await,
+                Ok(GarminQueueStep::Idle) => {
+                    let wait = next_plan.saturating_duration_since(Instant::now());
+                    tokio::select! {
+                        biased;
+                        signaled = schedule.wait(wait) => {
+                            // A newly received conversation can request fresh data;
+                            // ordinary queue changes only need another claim.
+                            if signaled {
+                                next_plan = Instant::now();
+                            }
+                        }
+                        _ = work.wait(wait) => {}
+                    }
+                }
                 Ok(GarminQueueStep::Inactive) => {
                     session = None;
-                    sleep(PLAN_INTERVAL).await;
+                    work.wait(PLAN_INTERVAL).await;
                 }
                 Ok(_) => {}
                 Err(error) => {
                     eprintln!("{error}");
-                    sleep(JOB_INTERVAL).await;
+                    sleep(RETRY_INTERVAL).await;
                 }
             }
         }

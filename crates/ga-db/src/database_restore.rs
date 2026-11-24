@@ -15,6 +15,7 @@ use crate::{
     Database, OWNER_ENROLLMENT_LOCK, SCHEMA_REVISION, STORAGE_LIFECYCLE_LOCK,
     database_export::{ExportCounts, FORMAT, TABLES},
     runtime_lease::RUNTIME_LOCK,
+    schema_migration::BEFORE_QUEUE_WAKEUPS,
 };
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -105,7 +106,11 @@ impl Database {
         let mut line = Vec::new();
         read_line(source, &mut line, MAX_HEADER_BYTES)?;
         let header: Header = serde_json::from_slice(&line)?;
-        if header.format != FORMAT || header.revision != SCHEMA_REVISION {
+        // This transition adds only functions/triggers: the exported tables and
+        // row shapes are identical. The destination must still be current.
+        if header.format != FORMAT
+            || ![SCHEMA_REVISION, BEFORE_QUEUE_WAKEUPS].contains(&header.revision.as_str())
+        {
             return Err(DatabaseRestoreError::Revision);
         }
         let mut txn = self.work.begin().await?;

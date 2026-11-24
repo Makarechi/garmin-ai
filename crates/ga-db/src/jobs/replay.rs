@@ -135,7 +135,7 @@ impl Database {
             .fetch_one(&mut *txn)
             .await?;
         if !admitted {
-            return Ok(None);
+            return Err(JobStoreError::Busy);
         }
         let token = Uuid::new_v4();
         let claimed =

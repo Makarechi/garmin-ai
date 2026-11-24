@@ -7,7 +7,7 @@ use std::{
 };
 
 use ga_db::{
-    Database,
+    Database, WorkTopic,
     jobs::{FailureReason, JobOutcome},
     source_pages::{PublicationState, SourcePoll},
 };
@@ -32,7 +32,7 @@ const MAX_PAGES: usize = 10;
 const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(45);
 const PLAN_INTERVAL: Duration = Duration::from_secs(30);
-const JOB_INTERVAL: Duration = Duration::from_secs(1);
+const JOB_RETRY: Duration = Duration::from_secs(1);
 
 pub(crate) fn configured_source_fingerprint(input: Option<&str>, id: &str) -> Option<String> {
     SourceSettings::selected(input, id)
@@ -195,6 +195,7 @@ impl ScheduledSourcePlugins {
 
     pub(crate) async fn run(&self, database: &Database) -> ! {
         let sources: Vec<_> = self.sources.keys().map(String::as_str).collect();
+        let mut work = database.work_subscription(WorkTopic::Extensions);
         let mut next_plan = Instant::now();
         loop {
             let Ok(now) = clock() else {
@@ -240,11 +241,19 @@ impl ScheduledSourcePlugins {
                     {
                         eprintln!("{error}");
                     }
+                    // Keep the existing pacing of real external work.
+                    sleep(JOB_RETRY).await;
+                    continue;
                 }
                 Ok(None) => {}
-                Err(error) => eprintln!("{error}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    sleep(JOB_RETRY).await;
+                    continue;
+                }
             }
-            sleep(JOB_INTERVAL).await;
+            work.wait(next_plan.saturating_duration_since(Instant::now()))
+                .await;
         }
     }
 }

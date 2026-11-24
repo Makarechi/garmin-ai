@@ -95,6 +95,7 @@ async fn migrates_only_a_supported_disposable_schema() -> Result<(), Box<dyn Err
                 "before_ingestion" => SchemaState::BeforeIngestionTime,
                 "before_revisions" => SchemaState::BeforeRevisions,
                 "before_fence" => SchemaState::BeforeFence,
+                "before_queue_wakeups" => SchemaState::BeforeQueueWakeups,
                 _ => return Err("Unrecognized fixture case".into()),
             };
             assert_eq!(database.schema_status().await?, expected);
@@ -109,6 +110,13 @@ async fn migrates_only_a_supported_disposable_schema() -> Result<(), Box<dyn Err
             running.rollback().await?;
             assert_eq!(database.migrate_schema().await?, expected);
             assert_eq!(database.schema_status().await?, SchemaState::Current);
+            let triggers: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal
+                 AND tgname IN ('ga_jobs_work_wakeup','ga_outbox_work_wakeup')",
+            )
+            .fetch_one(&mut inspect)
+            .await?;
+            assert_eq!(triggers, 2);
             assert_eq!(database.migrate_schema().await?, SchemaState::Current);
         }
     }

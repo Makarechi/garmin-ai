@@ -323,6 +323,7 @@ async fn local_tracker_setup_matches_frozen_conversation() -> Result<(), Box<dyn
         serde_json::from_slice(&fs::read(env::var("GA_TEST_TRACKER_CHAT_SETUP")?)?)?;
     tokio::select! {
         result=exercise(&database,&mut runtime,&settings,&pool,&cases)=>result?,
+        worker=database.run_work_wakeups()=>worker,
         worker=transport.run_tracker_setup(&database,&settings,"UTC","en",false)=>worker,
         worker=transport.run_local_text(&database,&settings,"en",false)=>worker,
         worker=transport.run_local_diary(&database,&settings,"UTC")=>worker,

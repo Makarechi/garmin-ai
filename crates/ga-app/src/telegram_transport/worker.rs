@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use ga_db::{
-    Database,
+    Database, WorkTopic,
     jobs::telegram_inbound::{
         TelegramControlError, TelegramDiaryCommitError, TelegramInboundState, TelegramInboundTarget,
     },
@@ -26,7 +26,8 @@ const MODE_REFRESH: Duration = Duration::from_secs(30);
 const WEBHOOK_BACKLOG_INTERVAL: Duration = Duration::from_secs(1);
 const INACTIVE_RETRY: Duration = Duration::from_secs(2);
 const EMPTY_POLL_RETRY: Duration = Duration::from_millis(250);
-const ACK_IDLE: Duration = Duration::from_millis(250);
+const QUEUE_RETRY: Duration = Duration::from_millis(250);
+pub(super) const IDLE_RECHECK: Duration = Duration::from_secs(30);
 const CONTROL_LEASE_SECONDS: u32 = 5;
 const HISTORY_LEASE_SECONDS: u32 = 10;
 const DELIVERY_LEASE_SECONDS: u32 = 90;
@@ -157,16 +158,21 @@ impl TelegramTransport {
         database: &Database,
         settings: &TelegramIngressSettings,
     ) -> ! {
+        let mut work = database.work_subscription(WorkTopic::TelegramAcknowledgements);
         loop {
-            let wait = match settings.confirmed_binding(database).await {
+            let idle = match settings.confirmed_binding(database).await {
                 Ok(binding) => match self.acknowledge_once(database, binding).await {
                     Ok(Some(_)) => continue,
-                    Ok(None) => ACK_IDLE,
-                    Err(_) => INACTIVE_RETRY,
+                    Ok(None) => true,
+                    Err(_) => false,
                 },
-                Err(_) => INACTIVE_RETRY,
+                Err(_) => false,
             };
-            sleep(wait).await;
+            if idle {
+                work.wait(IDLE_RECHECK).await;
+            } else {
+                sleep(INACTIVE_RETRY).await;
+            }
         }
     }
 
@@ -178,7 +184,9 @@ impl TelegramTransport {
         question_budget: u16,
         configured_timezone: &str,
     ) -> ! {
+        let mut work = database.work_subscription(WorkTopic::TelegramInbound);
         loop {
+            let mut idle = false;
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
             {
@@ -186,11 +194,13 @@ impl TelegramTransport {
                     owner_id: binding.owner_id,
                     instance_id: binding.instance_id,
                 };
-                if let Ok(Some(lease)) = database
+                match database
                     .claim_local_telegram_control(target, now, CONTROL_LEASE_SECONDS)
                     .await
                 {
-                    match database
+                    Ok(None) => idle = true,
+                    Err(_) => {}
+                    Ok(Some(lease)) => match database
                         .apply_telegram_owner_control(&lease, question_budget, configured_timezone)
                         .await
                     {
@@ -210,10 +220,14 @@ impl TelegramTransport {
                             }
                         }
                         Err(_) => {}
-                    }
+                    },
                 }
             }
-            sleep(ACK_IDLE).await;
+            if idle {
+                work.wait(IDLE_RECHECK).await;
+            } else {
+                sleep(QUEUE_RETRY).await;
+            }
         }
     }
 
@@ -228,7 +242,9 @@ impl TelegramTransport {
         settings: &TelegramIngressSettings,
         configured_timezone: &str,
     ) -> ! {
+        let mut work = database.work_subscription(WorkTopic::TelegramInbound);
         loop {
+            let mut idle = false;
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
             {
@@ -236,11 +252,13 @@ impl TelegramTransport {
                     owner_id: binding.owner_id,
                     instance_id: binding.instance_id,
                 };
-                if let Ok(Some(lease)) = database
+                match database
                     .claim_local_telegram_history(target, now, HISTORY_LEASE_SECONDS)
                     .await
                 {
-                    match database
+                    Ok(None) => idle = true,
+                    Err(_) => {}
+                    Ok(Some(lease)) => match database
                         .apply_local_telegram_diary(&lease, configured_timezone)
                         .await
                     {
@@ -271,10 +289,14 @@ impl TelegramTransport {
                             }
                         }
                         Err(_) => {}
-                    }
+                    },
                 }
             }
-            sleep(ACK_IDLE).await;
+            if idle {
+                work.wait(IDLE_RECHECK).await;
+            } else {
+                sleep(QUEUE_RETRY).await;
+            }
         }
     }
 
@@ -290,8 +312,11 @@ impl TelegramTransport {
         settings: &TelegramIngressSettings,
         garmin_notice: Option<&GarminReauthNoticeSettings>,
     ) -> ! {
+        let mut work = database.work_subscription(WorkTopic::TelegramOutbox);
         let mut recover_at = Instant::now();
         let mut notice_at = Instant::now();
+        let mut rescan_at = Instant::now();
+        let mut scan_outbox = true;
         loop {
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
@@ -329,31 +354,59 @@ impl TelegramTransport {
                     }
                     notice_at = Instant::now() + NOTICE_INTERVAL;
                 }
-                if let Ok(Some(claim)) = database
-                    .claim_outbox_reply(destination, now, DELIVERY_LEASE_SECONDS)
-                    .await
-                {
-                    if self
-                        .dispatch_runtime_reply(database, binding, claim, &[], garmin_notice)
+                if scan_outbox {
+                    match database
+                        .claim_outbox_reply(destination, now, DELIVERY_LEASE_SECONDS)
                         .await
-                        .is_ok()
                     {
-                        continue;
-                    }
-                    if let Ok(observed) = wall_clock()
-                        && let Ok(retry_at) = StoredInstant::from_unix_microseconds(
-                            observed
-                                .unix_microseconds()
-                                .saturating_add(SEND_RETRY_MICROSECONDS),
-                        )
-                    {
-                        let _ = database
-                            .defer_unsent_reply(binding.owner_id, claim, retry_at)
-                            .await;
+                        Ok(None) => rescan_at = Instant::now() + IDLE_RECHECK,
+                        Err(_) => {
+                            sleep(QUEUE_RETRY).await;
+                            continue;
+                        }
+                        Ok(Some(claim)) => {
+                            if self
+                                .dispatch_runtime_reply(
+                                    database,
+                                    binding,
+                                    claim,
+                                    &[],
+                                    garmin_notice,
+                                )
+                                .await
+                                .is_ok()
+                            {
+                                continue;
+                            }
+                            if let Ok(observed) = wall_clock()
+                                && let Ok(retry_at) = StoredInstant::from_unix_microseconds(
+                                    observed
+                                        .unix_microseconds()
+                                        .saturating_add(SEND_RETRY_MICROSECONDS),
+                                )
+                            {
+                                let _ = database
+                                    .defer_unsent_reply(binding.owner_id, claim, retry_at)
+                                    .await;
+                            }
+                            sleep(QUEUE_RETRY).await;
+                            continue;
+                        }
                     }
                 }
+            } else {
+                sleep(QUEUE_RETRY).await;
+                scan_outbox = true;
+                continue;
             }
-            sleep(ACK_IDLE).await;
+            // A housekeeping deadline does not imply a new reply. Retain the
+            // outbox generation across those ticks and scan only for actual
+            // queue changes, retry deadlines, or the reconciliation fallback.
+            let next = recover_at.min(notice_at).min(rescan_at);
+            let notified = work
+                .wait(next.saturating_duration_since(Instant::now()))
+                .await;
+            scan_outbox = notified || Instant::now() >= rescan_at;
         }
     }
 }

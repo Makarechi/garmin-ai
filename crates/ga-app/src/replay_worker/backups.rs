@@ -12,7 +12,7 @@ use std::{
 
 use ga_archive::scheduled_backup::confirm_daily_backup;
 use ga_db::{
-    Database,
+    Database, WorkTopic,
     jobs::{DailyBackupLease, JobStoreError},
     runtime_lease::RuntimeWorkerIdentity,
 };
@@ -23,7 +23,7 @@ use super::clock;
 use crate::{backup, backup_space, configuration};
 
 const PLAN_INTERVAL: Duration = Duration::from_secs(30);
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const WORK_INTERVAL: Duration = Duration::from_secs(1);
 const LEASE_SECONDS: u32 = 300;
 
 async fn keep_lease(
@@ -177,36 +177,57 @@ impl ScheduledBackups {
         notify_telegram: bool,
     ) -> ! {
         let mut next_plan = Instant::now();
+        let mut work = database.work_subscription(WorkTopic::Maintenance);
         loop {
             let Ok(now) = clock() else {
                 sleep(PLAN_INTERVAL).await;
                 continue;
             };
+            let mut failed = false;
+            let mut handled = false;
             if Instant::now() >= next_plan {
                 next_plan = Instant::now() + PLAN_INTERVAL;
                 if let Err(error) = database.schedule_daily_backup(now).await {
                     eprintln!("{error}");
+                    failed = true;
                 }
                 if let Err(error) = database.schedule_storage_check(now).await {
                     eprintln!("{error}");
+                    failed = true;
                 }
             }
             match database.claim_daily_backup(now, LEASE_SECONDS).await {
                 Ok(Some(lease)) => {
+                    handled = true;
                     if let Err(error) = self.with_renewal(database, worker, &lease).await {
                         eprintln!("{error}");
+                        failed = true;
                         if let Ok(now) = clock() {
                             let _ = database.defer_failed_daily_backup(&lease, now).await;
                         }
                     }
                 }
                 Ok(None) => {}
-                Err(error) => eprintln!("{error}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    failed = true;
+                }
             }
-            if let Err(error) = self.check_capacity(database, worker, notify_telegram).await {
-                eprintln!("{error}");
+            match self.check_capacity(database, worker, notify_telegram).await {
+                Ok(checked) => handled |= checked,
+                Err(error) => {
+                    eprintln!("{error}");
+                    failed = true;
+                }
             }
-            sleep(POLL_INTERVAL).await;
+            if failed || handled {
+                // Preserve the existing pacing for actual maintenance work and
+                // retries; only an empty queue waits for a signal or deadline.
+                sleep(WORK_INTERVAL).await;
+            } else {
+                work.wait(next_plan.saturating_duration_since(Instant::now()))
+                    .await;
+            }
         }
     }
 
@@ -215,10 +236,10 @@ impl ScheduledBackups {
         database: &Database,
         worker: RuntimeWorkerIdentity,
         notify_telegram: bool,
-    ) -> Result<(), ScheduledBackupError> {
+    ) -> Result<bool, ScheduledBackupError> {
         let at = clock().map_err(|_| ScheduledBackupError::Clock)?;
         let Some(lease) = database.claim_storage_check(at, LEASE_SECONDS).await? else {
-            return Ok(());
+            return Ok(false);
         };
         let cancellation = CancelBackup(Arc::new(AtomicBool::new(false)));
         let cancelled = Arc::clone(&cancellation.0);
@@ -235,7 +256,7 @@ impl ScheduledBackups {
         let result = tokio::select! {
             biased;
             result=estimate=>result,
-            expired=renew=>return expired,
+            expired=renew=>return expired.map(|()| true),
         };
         match result {
             Ok(estimate) => {
@@ -249,7 +270,7 @@ impl ScheduledBackups {
                 return Err(ScheduledBackupError::Capacity(error));
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn with_renewal(

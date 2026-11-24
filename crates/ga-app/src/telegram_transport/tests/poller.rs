@@ -198,6 +198,7 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
     let callback = async {
         wait_for_poll.await?;
         tokio::select! {
+            worker = database.run_work_wakeups() => worker,
             result = transport.run_acknowledgements(&database, &settings) => result,
             result = transport.run_owner_controls(&database, &settings, 2, "Europe/Bratislava") => result,
             result = transport.run_replies(&database, &settings) => result,

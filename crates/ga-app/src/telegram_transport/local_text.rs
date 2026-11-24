@@ -2,7 +2,7 @@ use std::{sync::OnceLock, time::Duration};
 
 use fancy_regex::Regex;
 use ga_db::{
-    Database,
+    Database, WorkTopic,
     jobs::telegram_inbound::{
         LocalTelegramText, SetupMetadata, TelegramDiaryCommitError, TelegramInboundLease,
         TelegramInboundState, TelegramInboundTarget, TelegramSafetyDecision,
@@ -12,7 +12,7 @@ use ga_db::{
 use ga_domain::{event_payload::python_whitespace, event_schema::parse_tracker_chat_field};
 use tokio::time::sleep;
 
-use super::{TelegramTransport, poller::wall_clock};
+use super::{TelegramTransport, poller::wall_clock, worker::IDLE_RECHECK};
 use crate::{
     telegram_settings::TelegramIngressSettings,
     urgent_screen::{
@@ -33,7 +33,9 @@ impl TelegramTransport {
         locale: &str,
         provider_available: bool,
     ) -> ! {
+        let mut work = database.work_subscription(WorkTopic::TelegramInbound);
         loop {
+            let mut idle = false;
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
             {
@@ -41,40 +43,57 @@ impl TelegramTransport {
                     owner_id: binding.owner_id,
                     instance_id: binding.instance_id,
                 };
-                if let Ok(Some(lease)) = database
+                idle = true;
+                match database
                     .claim_telegram_local_screen(target, now, LOCAL_LEASE)
                     .await
-                    && let Ok(decision) = local_screen(&lease)
                 {
-                    let result = database
-                        .apply_local_telegram_text(
-                            &lease,
-                            LocalTelegramText::Safety(decision),
-                            locale,
-                        )
-                        .await;
-                    if complete_or_retry(database, &lease, result).await {
-                        continue;
+                    Ok(None) => {}
+                    Err(_) => idle = false,
+                    Ok(Some(lease)) => {
+                        idle = false;
+                        if let Ok(decision) = local_screen(&lease) {
+                            let result = database
+                                .apply_local_telegram_text(
+                                    &lease,
+                                    LocalTelegramText::Safety(decision),
+                                    locale,
+                                )
+                                .await;
+                            if complete_or_retry(database, &lease, result).await {
+                                continue;
+                            }
+                        }
                     }
                 }
-                if !provider_available
-                    && let Ok(Some(lease)) = database
+                if !provider_available {
+                    match database
                         .claim_telegram_no_model_text(target, now, LOCAL_LEASE)
                         .await
-                {
-                    let result = database
-                        .apply_local_telegram_text(
-                            &lease,
-                            LocalTelegramText::ProviderUnavailable,
-                            locale,
-                        )
-                        .await;
-                    if complete_or_retry(database, &lease, result).await {
-                        continue;
+                    {
+                        Ok(None) => {}
+                        Err(_) => idle = false,
+                        Ok(Some(lease)) => {
+                            idle = false;
+                            let result = database
+                                .apply_local_telegram_text(
+                                    &lease,
+                                    LocalTelegramText::ProviderUnavailable,
+                                    locale,
+                                )
+                                .await;
+                            if complete_or_retry(database, &lease, result).await {
+                                continue;
+                            }
+                        }
                     }
                 }
             }
-            sleep(IDLE).await;
+            if idle {
+                work.wait(IDLE_RECHECK).await;
+            } else {
+                sleep(IDLE).await;
+            }
         }
     }
 }

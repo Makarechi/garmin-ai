@@ -22,7 +22,7 @@ use ga_db::{
     activity_scans::{ActivityPageResult, ActivityScansStarted, StartActivityScans},
     fit_ingest::{FitIngestError, FitIngestOutcome},
     garmin_endpoint::EndpointPublication,
-    garmin_integration::GarminTransportOutcome,
+    garmin_integration::{GarminIntegrationError, GarminTransportOutcome},
     garmin_periodic::GarminSyncSchedule,
     jobs::{GarminJobLease, JobStoreError, RecordedJobStatus},
 };
@@ -898,6 +898,17 @@ impl ActivityExportSource for ScheduledSource {
 async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_source()
 -> Result<(), Box<dyn Error>> {
     let (fixture, _root) = setup().await?;
+    // Fresh installations require an explicit choice to collect Garmin data.
+    sqlx::query(
+        "INSERT INTO module_configs(id,owner_id,pack_key,tracking_enabled,collection_enabled,
+         reminders_enabled,visible,llm_enabled,settings,revision)
+         SELECT gen_random_uuid(),people.id,packs.pack_key,false,true,false,false,false,'{}',1
+         FROM people CROSS JOIN (VALUES ('training'),('wellbeing')) AS packs(pack_key)
+         WHERE people.singleton
+         ON CONFLICT (owner_id,pack_key) DO UPDATE SET collection_enabled=true",
+    )
+    .execute(&fixture.inspect)
+    .await?;
     let started = Arc::new(Notify::new());
     let source = ScheduledSource {
         at: fixture.start,
@@ -929,10 +940,12 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     sqlx::query("SELECT pg_advisory_xact_lock(72104621::bigint)")
         .execute(&mut *onboarding)
         .await?;
-    assert_eq!(
-        Box::pin(worker.process_one(now().await?)).await?,
-        GarminQueueStep::Idle
-    );
+    assert!(matches!(
+        Box::pin(worker.process_one(now().await?)).await,
+        Err(EndpointWorkerError::Integration(
+            GarminIntegrationError::Busy
+        ))
+    ));
     assert_eq!(source.calls.load(Ordering::Relaxed), 0);
     onboarding.commit().await?;
     assert!(matches!(
@@ -1152,7 +1165,7 @@ async fn waits_to_claim_when_source_selection_becomes_busy() -> Result<(), Box<d
             .database
             .claim_selected_garmin_job(now, fixture.start.date(), 120, false, instance)
     };
-    assert!(claim().await?.is_none());
+    assert!(matches!(claim().await, Err(JobStoreError::Busy)));
     let untouched: (String, i32, bool) =
         sqlx::query_as("SELECT status,attempts,lease_token IS NULL FROM jobs WHERE id=$1")
             .bind(id)

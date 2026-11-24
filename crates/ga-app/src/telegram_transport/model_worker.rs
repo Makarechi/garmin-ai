@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use ga_db::{
-    Database,
+    Database, WorkTopic,
     conversation_memory::{AnalysisReadContext, ConversationBinding, MemoryError},
     jobs::telegram_inbound::{
         TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundTarget,
@@ -23,7 +23,7 @@ use tokio::time::sleep;
 
 use super::{
     DiaryReplyOutcome, DiaryReplyPreferences, TelegramTransport, model_reply::text_reply,
-    poller::wall_clock, publish_telegram_interpretation,
+    poller::wall_clock, publish_telegram_interpretation, worker::IDLE_RECHECK,
 };
 use crate::{
     model_gateway::{
@@ -63,7 +63,9 @@ impl TelegramTransport {
             timezone,
             locale,
         };
+        let mut work = database.work_subscription(WorkTopic::TelegramInbound);
         loop {
+            let mut idle = false;
             if let (Ok(binding), Ok(now)) =
                 (settings.confirmed_binding(database).await, wall_clock())
             {
@@ -71,17 +73,27 @@ impl TelegramTransport {
                     owner_id: binding.owner_id,
                     instance_id: binding.instance_id,
                 };
-                if let Ok(Some(lease)) =
-                    database.claim_telegram_model_text(target, now, LEASE).await
-                {
-                    worker.process(&lease, now).await;
-                } else if let Ok(Some(lease)) =
-                    database.claim_telegram_voice(target, now, LEASE).await
-                {
-                    worker.process_voice(self, &lease, now).await;
+                match database.claim_telegram_model_text(target, now, LEASE).await {
+                    Ok(Some(lease)) => {
+                        worker.process(&lease, now).await;
+                        continue;
+                    }
+                    Ok(None) => match database.claim_telegram_voice(target, now, LEASE).await {
+                        Ok(Some(lease)) => {
+                            worker.process_voice(self, &lease, now).await;
+                            continue;
+                        }
+                        Ok(None) => idle = true,
+                        Err(_) => {}
+                    },
+                    Err(_) => {}
                 }
             }
-            sleep(IDLE).await;
+            if idle {
+                work.wait(IDLE_RECHECK).await;
+            } else {
+                sleep(IDLE).await;
+            }
         }
     }
 }

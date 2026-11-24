@@ -285,6 +285,7 @@ async fn starts_garmin_reauth_notices_through_the_ordinary_reply_worker()
     timeout(Duration::from_secs(8), async {
         tokio::select! {
             result = server => result,
+            worker = database.run_work_wakeups() => worker,
             worker = transport.run_replies_with_garmin_notices(&database, &settings, Some(&launch)) => worker,
         }
     })

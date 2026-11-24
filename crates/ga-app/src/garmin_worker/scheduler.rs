@@ -57,7 +57,6 @@ impl<S: ActivityExportSource> ScheduledGarminWorker<'_, S> {
             .await;
         let admission = match admission {
             Ok(state) => state,
-            Err(GarminIntegrationError::Busy) => return Ok(GarminQueueStep::Idle),
             Err(error) => return Err(error.into()),
         };
         match admission {

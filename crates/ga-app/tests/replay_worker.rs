@@ -262,6 +262,13 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
     sqlx::query("SELECT pg_advisory_xact_lock(72104622)")
         .execute(&mut *unavailable)
         .await?;
+    // Idle workers no longer claim every second. Wake the replay lane while
+    // storage is fenced to exercise its existing transient-error retry path.
+    // Use a separate committed statement: notifications in `unavailable`
+    // itself would not be delivered until that transaction releases the fence.
+    sqlx::query("SELECT pg_notify('ga_work_ready','replay')")
+        .execute(&inspect)
+        .await?;
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(line) = lines.next_line().await? {
             if line == "Archive replay job claim will retry: Job storage is unavailable" {
@@ -276,7 +283,8 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
             "Worker exited without retrying temporary storage unavailability",
         ))
     })
-    .await??;
+    .await
+    .map_err(|_| "Worker did not retry a signaled replay claim while storage was fenced")??;
     assert!(running.try_wait()?.is_none());
     sqlx::query("UPDATE source_payloads SET parser_version=8 WHERE id=$1")
         .bind(delayed.id)

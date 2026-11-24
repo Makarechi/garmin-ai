@@ -80,11 +80,10 @@ async fn garmin_claims_preserve_freshness_priority_cooldown_backup_and_lease_rec
     sqlx::query("SELECT pg_advisory_xact_lock(72104624)")
         .execute(&mut *other_claim)
         .await?;
-    assert!(
-        db.claim_garmin_job(at(0)?, today, 60, false)
-            .await?
-            .is_none()
-    );
+    assert!(matches!(
+        db.claim_garmin_job(at(0)?, today, 60, false).await,
+        Err(JobStoreError::Busy)
+    ));
     other_claim.rollback().await?;
     assert!(
         db.claim_garmin_job(at(0)?, today, 60, true)

@@ -69,7 +69,10 @@ async fn schedules_and_recovers_daily_backups_with_the_garmin_wait_window()
     sqlx::query("SELECT pg_advisory_xact_lock(72104624)")
         .execute(&mut *manual_storage)
         .await?;
-    assert!(db.claim_daily_backup(at(33)?, 60).await?.is_none());
+    assert!(matches!(
+        db.claim_daily_backup(at(33)?, 60).await,
+        Err(JobStoreError::Busy)
+    ));
     manual_storage.rollback().await?;
 
     let first = db

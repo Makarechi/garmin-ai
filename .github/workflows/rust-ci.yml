@@ -75,6 +75,27 @@ jobs:
       - run: cargo test --locked -p ga-db --test job_leases -- --ignored
       - run: cargo test --locked -p ga-db --test garmin_owner -- --ignored
       - run: cargo test --locked -p ga-db --test raw_capture -- --ignored
+      - name: Wake durable queues on commits and scheduled deadlines
+        run: |
+          docker exec "${{ job.services.postgres.id }}" createdb -U garmin work_wakeups_test
+          export GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/work_wakeups_test"
+          GA_DATABASE_URL="$GA_TEST_DATABASE_URL" target/release/garmin-ai-rust migrate
+          cargo test --locked -p ga-db --test work_wakeups -- --ignored --nocapture
+      - name: Keep idle Telegram consumers quiet and wake messages and retries
+        run: |
+          for fixture in worker_wait storage_notices poller garmin_notices; do
+            database="telegram_${fixture}_test"
+            docker exec "${{ job.services.postgres.id }}" createdb -U garmin "$database"
+            export GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/$database"
+            GA_DATABASE_URL="$GA_TEST_DATABASE_URL" target/release/garmin-ai-rust migrate
+            case "$fixture" in
+              worker_wait) test_name=idle_consumers_wait_and_webhook_work_wakes_control_and_delivery ;;
+              storage_notices) test_name=warns_about_storage_only_while_current_and_preserves_the_receipt ;;
+              poller) test_name=worker_receives_updates_and_acknowledges_them_under_the_runtime_lease ;;
+              garmin_notices) test_name=starts_garmin_reauth_notices_through_the_ordinary_reply_worker ;;
+            esac
+            cargo test --locked -p ga-app --lib "telegram_transport::tests::$fixture::$test_name" -- --exact --ignored --nocapture
+          done
       - name: Skip archive scans for empty trend notification polls
         run: |
           docker exec "${{ job.services.postgres.id }}" createdb -U garmin trend_notifications_test
