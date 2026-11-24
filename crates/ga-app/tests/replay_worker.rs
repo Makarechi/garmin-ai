@@ -257,6 +257,50 @@ async fn plans_and_restores_the_archive_from_the_cli() -> Result<(), Box<dyn Err
     })
     .await??;
     assert!(running.try_wait()?.is_none());
+
+    let mut unavailable = inspect.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(72104622)")
+        .execute(&mut *unavailable)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = lines.next_line().await? {
+            if line == "Archive replay job claim will retry: Job storage is unavailable" {
+                return Ok(());
+            }
+            assert!(
+                line != "Job storage is unavailable",
+                "A temporary storage readiness failure stopped the worker"
+            );
+        }
+        Err(std::io::Error::other(
+            "Worker exited without retrying temporary storage unavailability",
+        ))
+    })
+    .await??;
+    assert!(running.try_wait()?.is_none());
+    sqlx::query("UPDATE source_payloads SET parser_version=8 WHERE id=$1")
+        .bind(delayed.id)
+        .execute(&mut *unavailable)
+        .await?;
+    sqlx::query(
+        "UPDATE jobs SET status='pending',run_at=clock_timestamp(),completed_at=NULL
+         WHERE dedup_key=concat('raw-replay:',$1::uuid,':9')",
+    )
+    .bind(delayed.id)
+    .execute(&mut *unavailable)
+    .await?;
+    unavailable.commit().await?;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let (attempts, status, parser, _) = result(&inspect, delayed.id).await?;
+            if (attempts, status.as_str(), parser) == (2, "done", 9) {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await??;
+    assert!(running.try_wait()?.is_none());
     running.kill().await?;
 
     #[cfg(unix)]
