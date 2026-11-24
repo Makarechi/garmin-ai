@@ -102,13 +102,9 @@ async fn prepare(
             .await
             .map_err(|_| ProactiveControlError::InvalidStoredState)?
             .is_some()
-        || projection_pending(txn, GARMIN_PARSER_VERSION).await?
     {
         return Ok(None);
     }
-    let timezone = owner_timezone(txn, settings.timezone)
-        .await
-        .map_err(|_| ProactiveControlError::InvalidStoredState)?;
     let rows = sqlx::query_as::<_, (Uuid, String, String, String, Option<String>)>(
         "SELECT insight.id,split_part(insight.dedup_key,':',2) AS metric,
                 insight.statement,insight.evidence::text,last.value::text
@@ -134,6 +130,17 @@ async fn prepare(
     .bind(destination.owner_id)
     .fetch_all(&mut **txn)
     .await?;
+    // Idle polls need no archive-wide projection check. Retain the replay fence
+    // and validate readiness before reserving or sending any candidate.
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if projection_pending(txn, GARMIN_PARSER_VERSION).await? {
+        return Ok(None);
+    }
+    let timezone = owner_timezone(txn, settings.timezone)
+        .await
+        .map_err(|_| ProactiveControlError::InvalidStoredState)?;
     for (id, metric, text, evidence, recent) in rows {
         let key = format!("outbox:insight:{id}:0");
         let reservation = format!("insight:last:{metric}");
