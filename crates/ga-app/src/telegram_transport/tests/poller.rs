@@ -1,7 +1,7 @@
 use super::{bind, request, respond};
 use crate::telegram_input::{CallbackResolution, TelegramBinding};
 use crate::telegram_settings::TelegramIngressSettings;
-use crate::telegram_transport::TelegramLoopError;
+use crate::telegram_transport::{TelegramLoopError, poller::PollProgress};
 
 use std::{env, error::Error, str::FromStr, time::Duration};
 
@@ -121,7 +121,7 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
             .await?;
         poll_started
             .send(())
-            .map_err(|_| "Missing callback worker")?;
+            .map_err(|()| "Missing callback worker")?;
         timeout(Duration::from_secs(2), async {
             loop {
                 let deferred: bool = sqlx::query_scalar(
@@ -192,7 +192,7 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
             long_poll.read_to_end(&mut remainder),
         )
         .await??;
-        assert!(remainder.is_empty());
+        assert_eq!(remainder, [] as [u8; 0]);
         Ok::<_, Box<dyn Error>>(())
     };
     let callback = async {
@@ -213,9 +213,9 @@ async fn worker_receives_updates_and_acknowledges_them_under_the_runtime_lease()
             result = callback => result,
         }
     };
-    timeout(Duration::from_secs(8), async {
+    Box::pin(timeout(Duration::from_secs(8), async {
         tokio::try_join!(server, completion)
-    })
+    }))
     .await??;
     let retained: Vec<(String, String)> = sqlx::query_as(
         "SELECT external_event_id,status FROM inbound_messages ORDER BY external_event_id",
@@ -267,7 +267,7 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
     let binding = TelegramBinding {
         owner_id,
         instance_id: "primary",
-        external_owner_id: 1234567890123,
+        external_owner_id: 1_234_567_890_123,
     };
     sqlx::query(
         "INSERT INTO channel_bindings(id,owner_id,channel,channel_instance_id,external_id,confirmation_method)
@@ -338,13 +338,13 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
             &json!({"ok":true,"result":backlog}).to_string(),
         )
         .await?;
-        let (mut poll, _) = listener.accept().await?;
-        let request_poll = request(&mut poll).await?;
+        let (mut connection, _) = listener.accept().await?;
+        let request_poll = request(&mut connection).await?;
         assert_eq!(request_poll["endpoint"], "getUpdates");
         assert_eq!(request_poll["fields"]["offset"], 121);
         notify_ack
             .send(())
-            .map_err(|_| "Missing parallel acknowledgement task")?;
+            .map_err(|()| "Missing parallel acknowledgement task")?;
         let (mut ack, _) = listener.accept().await?;
         let request_ack = request(&mut ack).await?;
         assert_eq!(request_ack["endpoint"], "answerCallbackQuery");
@@ -363,7 +363,7 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
             r#"{"ok":false,"parameters":{"retry_after":3}}"#,
         )
         .await?;
-        respond(&mut poll, "200 OK", &[], r#"{"ok":true,"result":[]}"#).await?;
+        respond(&mut connection, "200 OK", &[], r#"{"ok":true,"result":[]}"#).await?;
         let (mut current, _) = listener.accept().await?;
         assert_eq!(request(&mut current).await?["fields"]["offset"], 121);
         respond(
@@ -382,7 +382,7 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
         Ok::<_, Box<dyn Error>>(())
     };
     let client = async {
-        let mut progress = Default::default();
+        let mut progress = PollProgress::default();
         let first = transport
             .poll_once(&mut lease, binding, &mut progress)
             .await?;
@@ -413,9 +413,9 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
         );
         Ok::<_, Box<dyn Error>>(())
     };
-    let (server, client) = timeout(Duration::from_secs(10), async {
+    let (server, client) = Box::pin(timeout(Duration::from_secs(10), async {
         tokio::join!(server, client)
-    })
+    }))
     .await?;
     server?;
     client?;
@@ -494,14 +494,14 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
     let (listener, transport) = bind().await?;
     let late_delivery = json!({"update_id":122,"message":message});
     let server = async {
-        let (mut poll, _) = listener.accept().await?;
-        assert_eq!(request(&mut poll).await?["fields"]["offset"], 122);
+        let (mut connection, _) = listener.accept().await?;
+        assert_eq!(request(&mut connection).await?["fields"]["offset"], 122);
         sqlx::query("UPDATE channel_bindings SET external_id='43' WHERE owner_id=$1")
             .bind(owner_id)
             .execute(&pool)
             .await?;
         respond(
-            &mut poll,
+            &mut connection,
             "200 OK",
             &[],
             &json!({"ok":true,"result":[late_delivery]}).to_string(),
@@ -509,7 +509,7 @@ async fn drains_poll_backlog_and_acknowledges_without_waiting_for_the_next_poll(
         .await?;
         Ok::<_, Box<dyn Error>>(())
     };
-    let mut progress = Default::default();
+    let mut progress = PollProgress::default();
     let (server, result) = timeout(Duration::from_secs(5), async {
         tokio::join!(
             server,

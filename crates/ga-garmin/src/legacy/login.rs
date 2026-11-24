@@ -157,7 +157,7 @@ impl SsoResponse {
             .is_some_and(|error| error.status == 429 || error.status == "429")
         {
             return Err(GarminError::RateLimited {
-                retry_after: Duration::from_secs(900),
+                retry_after: Duration::from_mins(15),
             });
         }
         self.response_status

@@ -233,7 +233,7 @@ async fn sync_page(
     .await?;
     let next = trackers
         .last()
-        .filter(|_| trackers.len() == PAGE_SIZE as usize)
+        .filter(|_| i64::try_from(trackers.len()) == Ok(PAGE_SIZE))
         .map(|tracker| tracker.id);
     let onboarding = onboarding_routes(txn).await?;
     if let ReminderDestination::Telegram(route) = &route {

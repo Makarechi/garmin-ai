@@ -168,7 +168,7 @@ impl Archive {
         if bytes > max_bytes {
             return Err(ArchiveError::PayloadTooLarge);
         }
-        let mut buffer = [0; BUFFER_SIZE];
+        let mut buffer = vec![0; BUFFER_SIZE];
         verify_digest(&mut file, key, &mut buffer, bytes, cancelled)?;
         file.rewind()?;
         Ok(file)
@@ -242,7 +242,7 @@ impl Archive {
         let _publication = staging::lock_for_write(&self.root)?;
         let mut stage = Stage::create(&self.root)?;
         let mut hasher = Sha256::new();
-        let mut buffer = [0; BUFFER_SIZE];
+        let mut buffer = vec![0; BUFFER_SIZE];
         let mut total = 0_u64;
         loop {
             let count = match source.read(&mut buffer) {

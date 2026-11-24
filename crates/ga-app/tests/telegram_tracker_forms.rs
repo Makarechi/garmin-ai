@@ -415,7 +415,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
             .enumerate()
             .filter(|(_, case)| case["recover"] != true)
         {
-            let id = 71001 + index as i64;
+            let id = 71001 + i64::try_from(index)?;
             let at = clock(&pool).await?;
             let update = wire(&pool, &database, case, id, at).await?;
             let receipt = receive(&mut runtime, binding, &update, at, true)
@@ -471,7 +471,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
         .filter(|case| case["recover"] == true)
         .ok_or("Expected recovered final submission")?;
     let at = clock(&pool).await?;
-    let id = 71001 + cases.len() as i64 - 1;
+    let id = 71001 + i64::try_from(cases.len())? - 1;
     let update = wire(&pool, &database, final_case, id, at).await?;
     let receipt = receive(&mut runtime, binding, &update, at, true)
         .await?
@@ -575,7 +575,7 @@ async fn native_tracker_forms_match_frozen_locale_transitions() -> Result<(), Bo
     for (index, case) in cases.iter().enumerate() {
         let locale = case["locale"].as_str().ok_or("Expected locale")?;
         let now = clock(&pool).await?;
-        let update = wire(&pool, &database, case, 71001 + index as i64, now).await?;
+        let update = wire(&pool, &database, case, 71001 + i64::try_from(index)?, now).await?;
         let receipt = receive(&mut runtime, binding, &update, now, true)
             .await?
             .inbound

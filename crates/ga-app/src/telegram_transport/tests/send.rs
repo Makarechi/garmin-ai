@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-const CHAT: i64 = 1234567890123;
+const CHAT: i64 = 1_234_567_890_123;
 const OWNER: Uuid = Uuid::from_u128(1001);
 const BINDING: TelegramBinding<'static> = TelegramBinding {
     owner_id: OWNER,

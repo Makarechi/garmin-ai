@@ -95,11 +95,11 @@ async fn restores_only_fields_still_owned_by_the_verified_activity_source()
         let status = match result {
             CalendarReplayOutcome::Applied(DocumentStatus::Normalized) => "normalized",
             CalendarReplayOutcome::Applied(DocumentStatus::Empty) => "empty",
-            CalendarReplayOutcome::Applied(DocumentStatus::Unchanged) => "unchanged",
+            CalendarReplayOutcome::Applied(DocumentStatus::Unchanged)
+            | CalendarReplayOutcome::Skipped(ReplaySkip::Unchanged) => "unchanged",
             CalendarReplayOutcome::Applied(DocumentStatus::Error)
             | CalendarReplayOutcome::Failed => "error",
             CalendarReplayOutcome::Skipped(ReplaySkip::SupersededRevision) => "superseded_revision",
-            CalendarReplayOutcome::Skipped(ReplaySkip::Unchanged) => "unchanged",
             _ => return Err("Unexpected synthetic summary replay outcome".into()),
         };
         assert_eq!(status, case.status, "{}", case.name);

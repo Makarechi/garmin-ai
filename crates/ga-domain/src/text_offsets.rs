@@ -8,6 +8,7 @@ pub struct TextOffsets {
 
 /// Convert a half-open span indexed by Python Unicode code points into byte
 /// offsets and into the UTF-16 offsets used by Telegram message entities.
+#[must_use]
 pub fn from_code_points(text: &str, span: Range<usize>) -> Option<TextOffsets> {
     if span.start > span.end {
         return None;

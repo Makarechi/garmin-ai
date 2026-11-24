@@ -120,14 +120,16 @@ fn read_metadata(stream: &mut impl Read, size: u64) -> io::Result<Vec<u8>> {
     if size > MAX_METADATA_BYTES {
         return Err(invalid());
     }
-    let mut metadata = vec![0; size as usize];
+    let length = usize::try_from(size).map_err(|_| invalid())?;
+    let mut metadata = vec![0; length];
     stream.read_exact(&mut metadata)?;
     skip_padding(stream, size)?;
     Ok(metadata)
 }
 
 pub(super) fn skip_padding(stream: &mut impl Read, size: u64) -> io::Result<()> {
-    let padded = (BLOCK - size as usize % BLOCK) % BLOCK;
+    let remainder = usize::try_from(size % BLOCK as u64).map_err(|_| invalid())?;
+    let padded = (BLOCK - remainder) % BLOCK;
     stream.read_exact(&mut [0; BLOCK][..padded])
 }
 

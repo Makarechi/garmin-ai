@@ -143,20 +143,19 @@ impl GarminWorkerSettings {
             let Some(reader) = session.as_ref() else {
                 continue;
             };
-            let archive = match &archive {
-                Some(archive) => Arc::clone(archive),
-                None => {
-                    let opened = match Archive::open(raw_archive) {
-                        Ok(opened) => Arc::new(opened),
-                        Err(error) => {
-                            eprintln!("{error}");
-                            sleep(PLAN_INTERVAL).await;
-                            continue;
-                        }
-                    };
-                    archive = Some(Arc::clone(&opened));
-                    opened
-                }
+            let archive = if let Some(archive) = &archive {
+                Arc::clone(archive)
+            } else {
+                let opened = match Archive::open(raw_archive) {
+                    Ok(opened) => Arc::new(opened),
+                    Err(error) => {
+                        eprintln!("{error}");
+                        sleep(PLAN_INTERVAL).await;
+                        continue;
+                    }
+                };
+                archive = Some(Arc::clone(&opened));
+                opened
             };
             let scheduled = ScheduledGarminWorker {
                 runner: EndpointWorker {
@@ -198,7 +197,7 @@ impl GarminWorkerSettings {
                 sleep(PLAN_INTERVAL).await;
                 continue;
             };
-            match scheduled.process_one(now).await {
+            match Box::pin(scheduled.process_one(now)).await {
                 Ok(GarminQueueStep::Idle) => sleep(JOB_INTERVAL).await,
                 Ok(GarminQueueStep::Inactive) => {
                     session = None;

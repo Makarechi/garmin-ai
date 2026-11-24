@@ -31,7 +31,7 @@ async fn list(state: AppState, request: Request) -> Response {
         } else if let Some(database) = state.database.as_ref() {
             let query = parts.uri.query().unwrap_or_default();
             let parameters: BTreeMap<_, _> = form_urlencoded::parse(query.as_bytes()).collect();
-            let parameter = |name| parameters.get(name).map(|value| value.as_ref());
+            let parameter = |name| parameters.get(name).map(std::convert::AsRef::as_ref);
             let mut errors = Vec::new();
             let before_version = positive(
                 parameter("before_version"),

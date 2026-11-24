@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub(crate) const GARMIN_LEGACY_SOURCE: &str = "garmin_connect";
-const MUTATION_LOCK: i64 = 72104619;
+const MUTATION_LOCK: i64 = 72_104_619;
 
 pub struct LegacyCapture<'a> {
     pub authenticated_fingerprint: &'a str,
@@ -114,7 +114,7 @@ impl Database {
             .await
             .map_err(CaptureError::Storage)?;
         authorize_legacy_mutation(&mut txn, fingerprint, packs).await?;
-        let scope = format!("{GARMIN_LEGACY_SOURCE}:{}:{}", endpoint, source_key);
+        let scope = format!("{GARMIN_LEGACY_SOURCE}:{endpoint}:{source_key}");
         lock_legacy_scope(&mut txn, &scope).await?;
         Ok(txn)
     }

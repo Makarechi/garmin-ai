@@ -73,13 +73,12 @@ async fn run(mode: LocalGarminSetupMode) -> CommandResult {
         },
     };
     let client = TransportConfig::default();
-    let candidate = match mode {
-        LocalGarminSetupMode::Login { .. } => authenticate(&mut Terminal::open()?, client).await?,
-        _ => {
-            let store = GarminTokenFile::open_existing(&token_dir)?
-                .ok_or(GarminError::AuthenticationRequired)?;
-            LegacySession::restore_for_local_enrollment(&store, client).await?
-        }
+    let candidate = if let LocalGarminSetupMode::Login { .. } = mode {
+        authenticate(&mut Terminal::open()?, client).await?
+    } else {
+        let store = GarminTokenFile::open_existing(&token_dir)?
+            .ok_or(GarminError::AuthenticationRequired)?;
+        LegacySession::restore_for_local_enrollment(&store, client).await?
     };
     let fingerprint = candidate.fingerprint();
     let publish = || {

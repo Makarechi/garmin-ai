@@ -119,7 +119,7 @@ pub fn verify_frames(
 ) -> Result<FitInventory, FitError> {
     let mut inventory = FitInventory::default();
     let limit = max_bytes.min(MAX_FIT_BYTES);
-    let mut buffer = [0; READ_BUFFER_BYTES];
+    let mut buffer = vec![0; READ_BUFFER_BYTES];
     loop {
         check_cancelled(&mut cancelled)?;
         let Some((frame, header)) = read_frame_header(&mut source, inventory, limit)? else {

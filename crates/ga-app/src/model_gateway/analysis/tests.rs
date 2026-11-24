@@ -22,10 +22,18 @@ impl AnalysisReadTools for Reader {
         ModelCategories::HEALTH_AND_DIARY
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn context_current(&self) -> bool {
         self.current.load(Ordering::SeqCst)
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn read(&self, name: &str, arguments: &Map<String, Value>) -> Option<AnalysisToolRead> {
         assert_eq!(name, self.tool);
         if name == "personal_baseline" {

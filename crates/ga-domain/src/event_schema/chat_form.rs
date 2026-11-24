@@ -126,12 +126,17 @@ fn parse_time(
     let zone = timezone().ok_or(ChatFormError::Invalid)?;
     let date = time::Date::from_calendar_date(
         i32::from(civil.year()),
-        time::Month::try_from(civil.month() as u8).map_err(|_| invalid())?,
-        civil.day() as u8,
+        time::Month::try_from(u8::try_from(civil.month()).map_err(|_| invalid())?)
+            .map_err(|_| invalid())?,
+        civil.day().try_into().map_err(|_| invalid())?,
     )
     .map_err(|_| invalid())?;
-    let clock =
-        time::Time::from_hms(civil.hour() as u8, civil.minute() as u8, 0).map_err(|_| invalid())?;
+    let clock = time::Time::from_hms(
+        civil.hour().try_into().map_err(|_| invalid())?,
+        civil.minute().try_into().map_err(|_| invalid())?,
+        0,
+    )
+    .map_err(|_| invalid())?;
     let offset = if characters.len() == 16 {
         match zone.to_ambiguous_timestamp(civil).offset() {
             jiff::tz::AmbiguousOffset::Unambiguous { offset } => {
@@ -186,9 +191,10 @@ pub(crate) fn timezone_offset(
     zone: &jiff::tz::TimeZone,
     instant: StoredInstant,
 ) -> Result<UtcOffset, ChatFormError> {
-    let timestamp = match jiff::Timestamp::from_microsecond(instant.unix_microseconds()) {
-        Ok(timestamp) => timestamp,
-        Err(_) => {
+    let timestamp =
+        if let Ok(timestamp) = jiff::Timestamp::from_microsecond(instant.unix_microseconds()) {
+            timestamp
+        } else {
             // The Gregorian POSIX tail repeats every 400 years. Use the previous
             // cycle for the final UTC day beyond Jiff's offset-safe timestamp window.
             let at = OffsetDateTime::from(instant);
@@ -201,8 +207,7 @@ pub(crate) fn timezone_offset(
                     .unix_microseconds(),
             )
             .map_err(|_| ChatFormError::Invalid)?
-        }
-    };
+        };
     UtcOffset::from_whole_seconds(zone.to_offset(timestamp).seconds())
         .map_err(|_| ChatFormError::Invalid)
 }

@@ -38,27 +38,25 @@ pub(super) fn prepare(values: &mut ValueMap, port: u16) -> Result<(), &'static s
         (None, Some(password)) => password.to_owned(),
         (None, None) => URL_SAFE_NO_PAD.encode(random::<32>()?),
     };
-    let database = match database {
-        Some(url) => url,
-        None => {
-            let encoded = utf8_percent_encode(&password, PASSWORD_ENCODE);
-            Url::parse(&format!(
-                "postgresql+psycopg://garmin:{encoded}@127.0.0.1:{port}/garmin_ai"
-            ))
-            .map_err(|_| HOST_ERROR)?
-        }
+    let database = if let Some(url) = database {
+        url
+    } else {
+        let encoded = utf8_percent_encode(&password, PASSWORD_ENCODE);
+        Url::parse(&format!(
+            "postgresql+psycopg://garmin:{encoded}@127.0.0.1:{port}/garmin_ai"
+        ))
+        .map_err(|_| HOST_ERROR)?
     };
     if !endpoint(&database, "127.0.0.1", port) {
         return Err(HOST_ERROR);
     }
-    let container = match configured_url(values, CONTAINER_KEY) {
-        Some(value) => Url::parse(value).map_err(|_| CONTAINER_ERROR)?,
-        None => {
-            let mut url = database.clone();
-            url.set_host(Some("db")).map_err(|_| CONTAINER_ERROR)?;
-            url.set_port(Some(5432)).map_err(|()| CONTAINER_ERROR)?;
-            url
-        }
+    let container = if let Some(value) = configured_url(values, CONTAINER_KEY) {
+        Url::parse(value).map_err(|_| CONTAINER_ERROR)?
+    } else {
+        let mut url = database.clone();
+        url.set_host(Some("db")).map_err(|_| CONTAINER_ERROR)?;
+        url.set_port(Some(5432)).map_err(|()| CONTAINER_ERROR)?;
+        url
     };
     if !endpoint(&container, "db", 5432) {
         return Err(CONTAINER_ERROR);
@@ -105,7 +103,7 @@ fn password_from(url: &Url) -> Option<String> {
     percent_decode_str(url.password().filter(|password| !password.is_empty())?)
         .decode_utf8()
         .ok()
-        .map(|value| value.into_owned())
+        .map(std::borrow::Cow::into_owned)
 }
 
 fn validate_query(url: &Url) -> Result<(), &'static str> {

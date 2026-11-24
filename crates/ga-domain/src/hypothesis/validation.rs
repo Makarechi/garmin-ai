@@ -82,13 +82,12 @@ impl<'a> Body<'a> {
         key: &str,
         parse: impl FnOnce(&'a Value) -> Result<T, FieldError>,
     ) -> Option<T> {
-        match self.fields.get(key) {
-            Some(input) => self.parse(key, input, parse),
-            None => {
-                self.errors
-                    .push(missing().document(&["body", key], self.input));
-                None
-            }
+        if let Some(input) = self.fields.get(key) {
+            self.parse(key, input, parse)
+        } else {
+            self.errors
+                .push(missing().document(&["body", key], self.input));
+            None
         }
     }
 

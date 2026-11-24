@@ -19,6 +19,7 @@ use crate::{
 
 pub const MODEL_HEALTH_PACKS: &[&str] = &["general_diary", "sleep", "training", "wellbeing"];
 
+#[must_use]
 pub fn model_metric_packs(metric: &str) -> &'static [&'static str] {
     let metric = metric.strip_prefix("system.").unwrap_or(metric);
     match metric {

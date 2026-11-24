@@ -30,6 +30,7 @@ pub enum SchemaState {
 }
 
 impl SchemaState {
+    #[must_use]
     pub fn revision(self) -> Option<&'static str> {
         match self {
             Self::Empty => None,

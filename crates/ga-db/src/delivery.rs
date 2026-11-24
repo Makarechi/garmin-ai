@@ -30,6 +30,7 @@ pub enum DeliveryState {
 }
 
 impl DeliveryState {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -44,10 +45,12 @@ impl DeliveryState {
         }
     }
 
+    #[must_use]
     pub fn confirms_delivery(self) -> bool {
         matches!(self, Self::Delivered | Self::Read)
     }
 
+    #[must_use]
     pub fn confirms_read(self) -> bool {
         self == Self::Read
     }
@@ -65,10 +68,9 @@ impl DeliveryState {
             Self::Queued | Self::Sending if prior == "uncertain" => false,
             Self::Queued => rank < 0,
             Self::Sending => rank < 1,
-            Self::ProviderAccepted => rank < 2,
+            Self::ProviderAccepted | Self::Cancelled | Self::Expired => rank < 2,
             Self::Delivered | Self::Failed | Self::Uncertain => rank < 3,
             Self::Read => rank < 4,
-            Self::Cancelled | Self::Expired => rank < 2,
         }
     }
 }

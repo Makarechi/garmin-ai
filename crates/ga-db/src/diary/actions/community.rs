@@ -146,8 +146,8 @@ impl Database {
                 .fetch_one(&mut *txn)
                 .await?;
             if preview["hash"] != pack.hash()
-                || !StoredInstant::from_legacy_input(&preview["expires_at"])
-                    .is_some_and(|expires| OffsetDateTime::from(expires) > at)
+                || StoredInstant::from_legacy_input(&preview["expires_at"])
+                    .is_none_or(|expires| OffsetDateTime::from(expires) <= at)
             {
                 return Err(CommunityPackError::PreviewChanged);
             }

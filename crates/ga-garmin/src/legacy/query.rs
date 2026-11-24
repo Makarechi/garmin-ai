@@ -65,6 +65,7 @@ impl LegacyInventoryEntry {
         }
     }
 
+    #[must_use]
     pub fn scope(self) -> &'static str {
         match self.resource {
             LegacyResource::Day(_) => "day",
@@ -293,7 +294,7 @@ impl DailyEndpoint {
                 .ok_or(GarminError::ProfileUnavailable)?;
             let mut url = query(path, pairs)?;
             url.path_segments_mut()
-                .map_err(|_| GarminError::InvalidConfiguration)?
+                .map_err(|()| GarminError::InvalidConfiguration)?
                 .push(name);
             Ok(url)
         };

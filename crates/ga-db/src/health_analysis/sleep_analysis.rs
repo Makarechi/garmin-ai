@@ -445,6 +445,10 @@ fn stamp(value: OffsetDateTime) -> Result<String, HealthAnalysisError> {
         .map_err(|_| HealthAnalysisError::Database)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The observation count is a binary64 denominator"
+)]
 fn mean(series: &[f64]) -> Option<f64> {
     (!series.is_empty()).then(|| series.iter().sum::<f64>() / series.len() as f64)
 }

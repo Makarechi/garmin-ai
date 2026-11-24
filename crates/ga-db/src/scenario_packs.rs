@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
 
-const WRITER_LOCK: i64 = 72104619;
-const POLICY_LOCK: i64 = 72104621;
-const CONTEXT_DELIVERY_LOCK: i64 = 72104643;
+const WRITER_LOCK: i64 = 72_104_619;
+const POLICY_LOCK: i64 = 72_104_621;
+const CONTEXT_DELIVERY_LOCK: i64 = 72_104_643;
 
 #[derive(Debug)]
 pub enum ScenarioPackError {

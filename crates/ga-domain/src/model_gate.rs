@@ -11,7 +11,7 @@ use crate::{
 
 pub const PRIMARY_GEMINI_INSTANCE: &str = "model:gemini:primary";
 pub const PRIMARY_GEMINI_STATE: &str = "provider:gemini:gate";
-const PRIMARY_GEMINI_LOCK: i64 = 72104634;
+const PRIMARY_GEMINI_LOCK: i64 = 72_104_634;
 const MAX_CONFIGURATION_BYTES: usize = 64 * 1024;
 
 /// The existing state, resume and PostgreSQL lock identities for an integration.
@@ -83,8 +83,9 @@ impl ModelGateIdentity {
         inherits_legacy_gemini_state: bool,
     ) -> Self {
         let digest: [u8; 32] = Sha256::digest(scope).into();
-        let [a, b, c, d, e, f, g, h, ..] = digest;
-        let lock_key = i64::from_be_bytes([a, b, c, d, e, f, g, h]);
+        let mut prefix = [0; 8];
+        prefix.copy_from_slice(&digest[..8]);
+        let lock_key = i64::from_be_bytes(prefix);
         let resume_configuration = sha256_hex(format!("{state_key}\0{configuration}").as_bytes());
         Self {
             state_key,
@@ -95,22 +96,27 @@ impl ModelGateIdentity {
         }
     }
 
+    #[must_use]
     pub fn state_key(&self) -> &str {
         &self.state_key
     }
 
+    #[must_use]
     pub fn lock_key(&self) -> i64 {
         self.lock_key
     }
 
+    #[must_use]
     pub fn configuration(&self) -> &str {
         &self.configuration
     }
 
+    #[must_use]
     pub fn resume_configuration(&self) -> &str {
         &self.resume_configuration
     }
 
+    #[must_use]
     pub fn inherits_legacy_gemini_state(&self) -> bool {
         self.inherits_legacy_gemini_state
     }
@@ -148,6 +154,7 @@ pub struct ModelGateState {
 }
 
 impl ModelGateState {
+    #[must_use]
     pub fn read(value: &Value, identity: &ModelGateIdentity, now: StoredInstant) -> Self {
         if value["configuration"].as_str() != Some(identity.configuration()) {
             return Self::default();
@@ -177,6 +184,7 @@ impl ModelGateState {
         }
     }
 
+    #[must_use]
     pub fn scheduler_paused(&self) -> bool {
         self.blocked.is_some() || self.scheduler_pause_until.is_some()
     }

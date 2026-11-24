@@ -44,12 +44,14 @@ impl Entry {
 
     #[cfg(not(target_os = "linux"))]
     fn from_stat(stat: fs::Stat) -> Self {
+        let major = fs::major(stat.st_dev);
+        let minor = fs::minor(stat.st_dev);
         Self {
             identity: Identity {
-                device: (fs::major(stat.st_dev), fs::minor(stat.st_dev)),
+                device: (major, minor),
                 inode: stat.st_ino,
             },
-            mount: stat.st_dev as u64,
+            mount: (u64::from(major) << 32) | u64::from(minor),
             kind: FileType::from_raw_mode(stat.st_mode),
         }
     }

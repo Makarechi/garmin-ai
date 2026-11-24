@@ -20,12 +20,14 @@ pub struct StorageCheckLease {
 }
 
 impl StorageCheckLease {
+    #[must_use]
     pub fn lease_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.seconds as u64)
+        std::time::Duration::from_secs(u64::try_from(self.seconds).unwrap_or_default())
     }
 }
 
 /// The CLI and the worker expose the same sanitized estimate.
+#[must_use]
 pub fn backup_capacity_report(estimate: &BackupSpace) -> Value {
     let volumes: Vec<_> = estimate
         .volumes
@@ -73,9 +75,7 @@ impl Database {
         now: StoredInstant,
         lease_seconds: u32,
     ) -> Result<Option<StorageCheckLease>, JobStoreError> {
-        if !(1..=86_400).contains(&lease_seconds) {
-            return Err(JobStoreError::InvalidLeaseDuration);
-        }
+        let seconds = super::lease_seconds_for_sql(lease_seconds)?;
         let mut txn = begin(&self.work).await?;
         let admitted: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
             .bind(STORAGE_QUEUE_LOCK)
@@ -87,7 +87,6 @@ impl Database {
         let at = OffsetDateTime::from(now);
         fail_exhausted(&mut txn, at, Some(&[KIND])).await?;
         let token = Uuid::new_v4();
-        let seconds = lease_seconds as i32;
         let id: Option<Uuid> = sqlx::query_scalar(
             "WITH eligible AS (
                 SELECT job.id FROM jobs job WHERE job.kind=$1 AND job.attempts<$2

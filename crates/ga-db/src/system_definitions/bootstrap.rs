@@ -95,13 +95,12 @@ async fn backfill(
         link(txn, &matched, current_version).await?;
         if !historical.is_empty() {
             let contract = old.as_ref().ok_or(DefinitionStoreError::InvalidCatalog)?;
-            let id = match old_version {
-                Some(id) => id,
-                None => {
-                    let id = ensure_legacy_version(txn, contract).await?;
-                    old_version = Some(id);
-                    id
-                }
+            let id = if let Some(id) = old_version {
+                id
+            } else {
+                let id = ensure_legacy_version(txn, contract).await?;
+                old_version = Some(id);
+                id
             };
             link(txn, &historical, id).await?;
         }

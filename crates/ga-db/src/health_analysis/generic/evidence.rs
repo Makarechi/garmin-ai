@@ -47,6 +47,7 @@ struct GenericMetricSnapshot {
 }
 
 impl GenericAnalysisEvidence {
+    #[must_use]
     pub fn input(arguments: &Map<String, Value>) -> Option<AnalysisSpec> {
         if arguments.len() != 1 {
             return None;
@@ -54,6 +55,7 @@ impl GenericAnalysisEvidence {
         AnalysisSpec::from_json(arguments.get("spec")?).ok()
     }
 
+    #[must_use]
     pub fn from_read(value: &Value, request_time: &str) -> Option<Self> {
         if value["tool"] != GENERIC_ANALYSIS || value["result"].get("error").is_some() {
             return None;

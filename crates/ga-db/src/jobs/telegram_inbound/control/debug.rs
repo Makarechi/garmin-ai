@@ -113,7 +113,7 @@ async fn read(txn: &mut Transaction<'_, Postgres>) -> Result<Value, sqlx::Error>
             serde_json::from_str(&value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
         })
         .transpose()
-        .map(|value| value.unwrap_or_default())
+        .map(std::option::Option::unwrap_or_default)
 }
 
 fn number(state: &Value, field: &str, fallback: i64) -> i64 {

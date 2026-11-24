@@ -107,7 +107,7 @@ async fn matches_pinned_periodic_garmin_schedule() -> Result<(), Box<dyn Error>>
         match case.name.as_str() {
             "paused" => assert_eq!(result, GarminSyncSchedule::Paused),
             "disabled" => {
-                assert!(matches!(result, GarminSyncSchedule::Disabled { retired } if retired > 0))
+                assert!(matches!(result, GarminSyncSchedule::Disabled { retired } if retired > 0));
             }
             _ => assert!(matches!(result, GarminSyncSchedule::Scheduled { .. })),
         }

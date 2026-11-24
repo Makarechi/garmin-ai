@@ -124,7 +124,7 @@ impl Database {
                 }
                 let read = context.scopes.permits(&[Scope::ReadDiary]);
                 let manage = context.scopes.permits(&[Scope::ManageDefinitions]);
-                if (!read && !manage) || (request.selected_event_id.is_some() && !read) {
+                if !read && (!manage || request.selected_event_id.is_some()) {
                     return Err(TrackerTextError::Forbidden);
                 }
                 match Self::tracker_text_operation_in(

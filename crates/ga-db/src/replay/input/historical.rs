@@ -416,7 +416,7 @@ fn read_replacement(
     value: &Value,
     endpoint: &str,
 ) -> Result<Option<ReplayReplacement>, ReplayInputError> {
-    if value.is_null() || value.as_object().is_some_and(|record| record.is_empty()) {
+    if value.is_null() || value.as_object().is_some_and(serde_json::Map::is_empty) {
         return Ok(None);
     }
     let error = ReplayInputError::HistoricalContract;

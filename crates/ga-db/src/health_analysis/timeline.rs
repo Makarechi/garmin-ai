@@ -40,6 +40,7 @@ pub struct AnalysisTimelineQuery {
 }
 
 impl AnalysisTimelineQuery {
+    #[must_use]
     pub fn from_arguments(args: &Map<String, Value>) -> Option<Self> {
         serde_json::from_value(Value::Object(args.clone())).ok()
     }
@@ -521,7 +522,7 @@ async fn read_intervals(
     )
     .bind(start)
     .bind(end)
-    .bind(i64::from(MAX_ANNOTATIONS) - rows.len() as i64 + 1)
+    .bind(i64::from(MAX_ANNOTATIONS) - i64::try_from(rows.len()).unwrap_or(i64::MAX) + 1)
     .fetch(&mut **txn);
     while let Some((label, source, confidence, confirmed, begin, finish, evidence)) =
         intervals.try_next().await?

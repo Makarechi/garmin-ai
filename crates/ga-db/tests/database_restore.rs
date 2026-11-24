@@ -52,7 +52,7 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
     );
     assert_ne!(missing_predecessor, fixture);
 
-    for lock in [72104620_i64, 72104622, 72104625] {
+    for lock in [72_104_620_i64, 72_104_622, 72_104_625] {
         let mut active = inspect.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock)

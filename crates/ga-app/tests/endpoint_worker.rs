@@ -203,7 +203,7 @@ async fn defers_busy_endpoint_without_spending_its_attempt() -> Result<(), Box<d
         .execute(&mut *blocker)
         .await?;
     assert_eq!(
-        worker.run(&lease).await?,
+        Box::pin(worker.run(&lease)).await?,
         EndpointWork::Deferred(RecordedJobStatus::Deferred),
     );
     assert_eq!(fixture.job(&lease).await?, ("pending".into(), 0));
@@ -234,7 +234,7 @@ async fn defers_busy_endpoint_without_spending_its_attempt() -> Result<(), Box<d
         .ok_or("Expected due history retry")?;
     assert_eq!(retry.id(), lease.id());
     assert_eq!(
-        worker.run(&retry).await?,
+        Box::pin(worker.run(&retry)).await?,
         EndpointWork::Publication(EndpointPublication::Published(DocumentStatus::Normalized)),
     );
     assert_eq!(fixture.job(&retry).await?, ("done".into(), 1));
@@ -304,7 +304,7 @@ async fn reports_durable_endpoint_publication_when_transport_status_is_busy()
     sqlx::query("SELECT pg_advisory_xact_lock(72104624::bigint)")
         .execute(&mut *blocker)
         .await?;
-    let result = fixture.worker(&source).run(&lease).await;
+    let result = Box::pin(fixture.worker(&source).run(&lease)).await;
     assert_eq!(fixture.job(&lease).await?, ("done".into(), 1));
     let counts: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM source_payloads),(SELECT count(*) FROM measurements)",
@@ -350,7 +350,7 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
     };
     let success = Source::new(Ok(Some(body(77)?)), Duration::from_millis(1300));
     assert_eq!(
-        fixture.worker(&success).run(&first).await?,
+        Box::pin(fixture.worker(&success).run(&first)).await?,
         EndpointWork::Publication(EndpointPublication::Published(DocumentStatus::Normalized)),
     );
     assert_eq!(fixture.job(&first).await?, ("done".into(), 1));
@@ -371,7 +371,7 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
         Duration::ZERO,
     );
     assert!(matches!(
-        fixture.worker(&limited).run(&rate).await,
+        Box::pin(fixture.worker(&limited).run(&rate)).await,
         Err(EndpointWorkerError::Fetch(GarminError::RateLimited { .. }))
     ));
     let state = fixture.stored("integration:garmin").await?;
@@ -386,7 +386,7 @@ async fn publishes_late_response_and_pauses_already_leased_work() -> Result<(), 
     assert!(OffsetDateTime::from(blocked) - now > time::Duration::seconds(898));
     assert_eq!(fixture.job(&rate).await?, ("pending".into(), 0));
     assert_eq!(
-        fixture.worker(&success).run(&preleased).await?,
+        Box::pin(fixture.worker(&success).run(&preleased)).await?,
         EndpointWork::Deferred(RecordedJobStatus::Deferred),
     );
     assert_eq!(fixture.job(&preleased).await?, ("pending".into(), 0));
@@ -852,6 +852,10 @@ impl EndpointSource for ScheduledSource {
         ACCOUNT
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn read(
         &self,
         resource: LegacyRead,
@@ -926,7 +930,7 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
         .execute(&mut *onboarding)
         .await?;
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Idle
     );
     assert_eq!(source.calls.load(Ordering::Relaxed), 0);
@@ -949,13 +953,13 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     );
     worker.backups_enabled = true;
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Idle
     );
     assert_eq!(source.calls.load(Ordering::Relaxed), 0);
     worker.backups_enabled = false;
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Activities(ActivityPageWork::Publication(
             ActivityPageResult::Published(DocumentStatus::Normalized)
         )),
@@ -966,7 +970,7 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
          INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"source_instance_ids\":[]}');"
     ).execute(&fixture.inspect).await?;
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Inactive
     );
     let fit_attempts: i32 = sqlx::query_scalar("SELECT attempts FROM jobs WHERE kind='garmin_fit'")
@@ -1009,7 +1013,7 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     .execute(&fixture.inspect)
     .await?;
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Fit(ActivityFitWork::Publication(FitIngestOutcome::Normalized {
             rows: 1
         })),
@@ -1036,7 +1040,7 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     sqlx::query("INSERT INTO app_state(key,value) VALUES('preferences:onboarding','{\"source_instance_ids\":[\"source:garmin:primary\"]}')")
         .execute(&fixture.inspect).await?;
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Endpoint(EndpointWork::Publication(EndpointPublication::Published(
             DocumentStatus::Normalized
         ))),
@@ -1053,7 +1057,7 @@ async fn scheduled_worker_dispatches_all_native_garmin_jobs_for_the_current_sour
     assert_eq!(source.calls.load(Ordering::Relaxed), 2);
     assert_eq!(source.fit.calls.load(Ordering::Relaxed), 2);
     assert_eq!(
-        worker.process_one(now().await?).await?,
+        Box::pin(worker.process_one(now().await?)).await?,
         GarminQueueStep::Idle
     );
     assert_eq!(

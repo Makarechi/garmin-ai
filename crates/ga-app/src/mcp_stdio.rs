@@ -1,6 +1,6 @@
 use ga_app::read_tool_catalog::ReadTool;
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use ga_db::{
     Database,
@@ -109,9 +109,9 @@ fn read_tool(tool: ReadTool) -> Result<Tool, &'static str> {
 }
 
 impl Mcp {
-    fn get_info(&self) -> ServerConfig {
+    fn get_info() -> ServerConfig {
         let mut capabilities = ServerCapabilities::builder().enable_tools().build();
-        capabilities.experimental = Some(Default::default());
+        capabilities.experimental = Some(BTreeMap::default());
         if let Some(tools) = capabilities.tools.as_mut() {
             tools.list_changed = Some(false);
         }
@@ -172,7 +172,8 @@ impl Mcp {
             })
             .await
             .map_err(|error| generic_error_class(&error))?;
-        let spec = generic_input(&args).map_err(|error| error.class_name())?;
+        let spec = generic_input(&args)
+            .map_err(ga_domain::analysis_spec::InvalidAnalysisSpec::class_name)?;
         let document = reader
             .read(&spec)
             .await
@@ -440,6 +441,10 @@ fn revision_target(args: &Map<String, Value>) -> Result<(Uuid, i32), &'static st
     Ok((event, revision))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The parser checks integrality and the supported positive database integer range"
+)]
 fn positive_revision(value: &Value) -> Option<i32> {
     let revision = match value {
         Value::Number(number) => number.as_f64()?,

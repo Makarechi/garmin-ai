@@ -20,7 +20,7 @@ use crate::{
 };
 
 // The Python delivery worker uses the same fallback when no retry time is provided.
-const UNSUPPORTED_RETRY: Duration = Duration::from_secs(15 * 60);
+const UNSUPPORTED_RETRY: Duration = Duration::from_mins(15);
 
 impl TelegramTransport {
     /// Send an ordinary neutral reply inside its revalidated database delivery fence.

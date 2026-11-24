@@ -118,7 +118,7 @@ pub(super) async fn running_efficiency_in(
     let runs = sqlx::query_as::<_,Run>("SELECT id,start,extract(timezone FROM start)::integer AS start_offset,kind,distance_m,moving_seconds,duration_seconds,avg_hr,ascent_m
         FROM activities WHERE start >= $1 AND start < $2 AND kind IN ('running','trail_running','treadmill_running',
             'track_running','indoor_running','ultra_run','virtual_run','obstacle_run') ORDER BY start LIMIT $3")
-        .bind(start).bind(end).bind(MAX_RUNS as i64+1).fetch_all(&mut **txn).await?;
+        .bind(start).bind(end).bind(i64::try_from(MAX_RUNS + 1).unwrap_or(i64::MAX)).fetch_all(&mut **txn).await?;
     let total = runs.len();
     if total > MAX_RUNS {
         return Err(ActivityReadError::ActivityAnalysisLimit);

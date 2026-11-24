@@ -66,7 +66,7 @@ impl Database {
                 .bind(start_at)
                 .bind(end_at)
                 .bind(Option::<&str>::None)
-                .bind((ROW_LIMIT + 1) as i64)
+                .bind(i64::try_from(ROW_LIMIT + 1).unwrap_or(i64::MAX))
                 .bind(Option::<&str>::None)
                 .bind(Option::<&str>::None)
                 .bind(&[] as &[&str])

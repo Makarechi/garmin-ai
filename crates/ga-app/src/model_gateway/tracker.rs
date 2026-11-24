@@ -55,53 +55,48 @@ impl ModelGateway<'_> {
         } else {
             Some(TrackerSafetyStatus::Unavailable)
         };
-        let status = match cached {
-            Some(status) => status,
-            None => {
-                let screen = self
-                    .execute_with_context(
-                        ModelInput::Structured {
-                            contract: ApprovedModelSchema::SafetyScreen,
-                            instruction: include_str!(
-                                "../../../../src/garmin_ai/prompts/form_safety.txt"
-                            )
-                            .trim(),
-                            prompt: envelope
-                                .text()
-                                .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?,
-                            categories: ModelCategories::HEALTH_AND_DIARY,
-                        },
-                        policy,
-                        ModelRequestScope {
-                            uses_voice_text: lease.has_voice_text(),
-                            requirements: &safety_requirements,
-                            channel: Some(ModelChannelSharing {
-                                destination: channel,
-                                requirements: &[],
-                                conversation: None,
-                            }),
-                            job,
-                        },
-                        sender,
-                    )
-                    .await;
-                let status = match screen
-                    .ok()
-                    .and_then(|screen| screen.value["urgent"].as_bool())
-                {
-                    Some(true) => TrackerSafetyStatus::Urgent,
-                    Some(false) => TrackerSafetyStatus::Checked,
-                    None => TrackerSafetyStatus::Unavailable,
-                };
-                self.database
-                    .record_telegram_tracker_safety(
-                        lease,
-                        safety_requirements[0].version_id,
-                        status,
-                    )
-                    .await?;
-                status
-            }
+        let status = if let Some(status) = cached {
+            status
+        } else {
+            let screen = self
+                .execute_with_context(
+                    ModelInput::Structured {
+                        contract: ApprovedModelSchema::SafetyScreen,
+                        instruction: include_str!(
+                            "../../../../src/garmin_ai/prompts/form_safety.txt"
+                        )
+                        .trim(),
+                        prompt: envelope
+                            .text()
+                            .ok_or(TelegramDiaryCommitError::UnsupportedMessage)?,
+                        categories: ModelCategories::HEALTH_AND_DIARY,
+                    },
+                    policy,
+                    ModelRequestScope {
+                        uses_voice_text: lease.has_voice_text(),
+                        requirements: &safety_requirements,
+                        channel: Some(ModelChannelSharing {
+                            destination: channel,
+                            requirements: &[],
+                            conversation: None,
+                        }),
+                        job,
+                    },
+                    sender,
+                )
+                .await;
+            let status = match screen
+                .ok()
+                .and_then(|screen| screen.value["urgent"].as_bool())
+            {
+                Some(true) => TrackerSafetyStatus::Urgent,
+                Some(false) => TrackerSafetyStatus::Checked,
+                None => TrackerSafetyStatus::Unavailable,
+            };
+            self.database
+                .record_telegram_tracker_safety(lease, safety_requirements[0].version_id, status)
+                .await?;
+            status
         };
         if status == TrackerSafetyStatus::Urgent {
             return self
@@ -198,12 +193,11 @@ impl ModelGateway<'_> {
                 sender,
             )
             .await;
-        let extraction = match response
+        let Some(extraction) = response
             .ok()
             .and_then(|response| TrackerExtraction::from_value(&response.value).ok())
-        {
-            Some(extraction) => extraction,
-            None => return session.fallback().await,
+        else {
+            return session.fallback().await;
         };
         session.apply(extraction).await
     }

@@ -109,7 +109,7 @@ async fn dispatches_once_and_preserves_ambiguous_delivery() -> Result<(), Box<dy
             let pool = &pool;
             let question = &question;
             async move {
-                assert!(!text.is_empty());
+                assert_ne!(text, "");
                 assert_eq!(
                     marker(pool, question.id).await.unwrap_or_default()["status"],
                     "sending"

@@ -39,7 +39,7 @@ fn matches_pinned_file_values_and_timestamps() -> Result<(), Box<dyn Error>> {
             let actual = match mapping.map_row(row, &fields, &mut seen) {
                 Ok(mapped) => json!({
                     "id":mapped.source_id,"start":mapped.start.unix_microseconds(),
-                    "end":mapped.end.map(|end| end.unix_microseconds()),
+                    "end":mapped.end.map(ga_domain::timestamp::StoredInstant::unix_microseconds),
                     "values":mapped.values,"units":mapped.units,
                 }),
                 Err(issue) => json!({"code":issue.code,"field":issue.field}),

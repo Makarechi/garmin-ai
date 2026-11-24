@@ -67,13 +67,13 @@ async fn model_sees_only_allowed_page_rows() -> Result<(), Box<dyn Error>> {
         let tracker_versions: Vec<_> = document
             .tracker_versions
             .iter()
-            .map(|version| version.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(tracker_versions, case.tracker_versions, "case {index}");
         let versions: Vec<_> = document
             .channel_versions
             .iter()
-            .map(|version| version.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(versions, case.channel_versions, "case {index}");
         assert!(!document.value.to_string().contains("synthetic quote"));

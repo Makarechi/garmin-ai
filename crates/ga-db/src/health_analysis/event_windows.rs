@@ -123,7 +123,7 @@ pub(super) async fn event_windows_in(
                 metric,
                 left,
                 right,
-                ((high - low) * 60) as u16,
+                u16::try_from((high - low) * 60).map_err(|_| SeriesReadError::Invalid)?,
                 32,
                 left,
             )

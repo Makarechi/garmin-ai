@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 mod activity_reads;
 mod coffee;
 mod device_history;
@@ -74,7 +76,7 @@ fn isoformat(at: OffsetDateTime) -> String {
     let sign = if seconds < 0 { '-' } else { '+' };
     let mut offset = format!("{sign}{:02}:{:02}", absolute / 3600, absolute / 60 % 60);
     if !absolute.is_multiple_of(60) {
-        offset.push_str(&format!(":{:02}", absolute % 60));
+        let _ = write!(offset, ":{:02}", absolute % 60);
     }
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}{offset}",
@@ -377,7 +379,7 @@ fn period_document(
         "metric": metric, "start": period.start.to_string(), "end": period.end.to_string(),
         "n": stats.n, "mean": stats.mean, "median": stats.median, "sd": stats.sd,
         "min": stats.min, "max": stats.max, "observed_dates": days,
-        "missing_days": period.days() - values.len() as i64,
+        "missing_days": period.days() - i64::try_from(values.len()).unwrap_or(i64::MAX),
         "method": "observed daily values; missing days are not zero",
     })
 }

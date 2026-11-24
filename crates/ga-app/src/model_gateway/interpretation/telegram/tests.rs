@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 use super::{super::EXTRACT, *};
 
 #[test]
-fn extracts_unique_explicit_records_with_exact_hex_boundaries() -> Result<(), Box<dyn Error>> {
+fn extracts_unique_explicit_records_with_exact_hex_boundaries() {
     let first = Uuid::from_u128(42);
     let second = Uuid::from_u128(43);
     let ignored = Uuid::from_u128(44);
@@ -17,7 +17,6 @@ fn extracts_unique_explicit_records_with_exact_hex_boundaries() -> Result<(), Bo
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(mentions(&many).len(), 21);
-    Ok(())
 }
 
 #[test]
@@ -79,6 +78,10 @@ async fn uses_current_native_message_context_and_queues_its_clarification()
     }
 
     impl Sender for SyntheticModel {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "Keep the async trait method deferred until the returned future is polled"
+        )]
         async fn send(
             &self,
             request: &PreparedRequest,

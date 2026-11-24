@@ -41,6 +41,7 @@ impl TelegramTrackerTextSession {
         self.inner.sharing_requirements()
     }
 
+    #[must_use]
     pub fn channel_requirement(&self) -> ShareRequirement<'static> {
         ShareRequirement {
             version_id: self.version,

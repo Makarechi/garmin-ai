@@ -52,6 +52,7 @@ impl BackupWorkspace {
         })
     }
 
+    #[must_use]
     pub fn export_path(&self) -> &Path {
         &self.export
     }

@@ -36,6 +36,7 @@ impl MappingDraft {
         Ok(draft)
     }
 
+    #[must_use]
     pub fn instance(&self) -> &str {
         &self.source_instance_id
     }
@@ -85,7 +86,7 @@ pub(super) async fn confirmed_mappings(
     .bind(MAPPING_LIMIT + 1)
     .fetch_all(&mut **txn)
     .await?;
-    if rows.len() as i64 > MAPPING_LIMIT {
+    if i64::try_from(rows.len()).unwrap_or(i64::MAX) > MAPPING_LIMIT {
         return Err(SourcePageError::Mapping);
     }
     let mut result = Vec::new();

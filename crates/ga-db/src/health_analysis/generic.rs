@@ -81,7 +81,7 @@ impl From<sqlx::Error> for GenericAnalysisError {
     fn from(error: sqlx::Error) -> Self {
         if error
             .as_database_error()
-            .and_then(|database| database.code())
+            .and_then(sqlx::error::DatabaseError::code)
             .is_some_and(|code| code.starts_with("22"))
         {
             Self::Data
@@ -180,10 +180,11 @@ pub(crate) async fn model_read_in(
     // The reference compacts at 24,000 characters. Bound the encoded read
     // before decoding even when every character is four UTF-8 bytes.
     const MAX_RESULT_CHARACTERS: usize = 24_000;
-    if document.byte_len() > (MAX_RESULT_CHARACTERS * 4) as u64 {
-        return Err(GenericAnalysisError::ResultTooLarge);
-    }
-    let mut bytes = Vec::with_capacity(document.byte_len() as usize);
+    let length = usize::try_from(document.byte_len())
+        .ok()
+        .filter(|length| *length <= MAX_RESULT_CHARACTERS * 4)
+        .ok_or(GenericAnalysisError::ResultTooLarge)?;
+    let mut bytes = Vec::with_capacity(length);
     document
         .reader()
         .read_to_end(&mut bytes)

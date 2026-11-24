@@ -58,13 +58,14 @@ impl fmt::Display for BackupError {
             Self::Authentication => "Backup authentication failed",
             Self::Cipher => "Backup encryption could not be completed",
             Self::TooLarge => "Backup exceeds the authenticated format limit",
-            Self::InvalidPath => "Backup path is invalid or redirects",
+            Self::InvalidPath | Self::Workspace(StorageFilesError::Unsafe) => {
+                "Backup path is invalid or redirects"
+            }
             Self::Exists => "Backup destination already exists",
             Self::Entropy => "Backup nonce could not be generated",
             Self::Workspace(StorageFilesError::Occupied) => {
                 "Backup recovery is already in progress"
             }
-            Self::Workspace(StorageFilesError::Unsafe) => "Backup path is invalid or redirects",
             Self::Workspace(_) | Self::Filesystem(_) | Self::Io(_) => {
                 "Backup filesystem operation failed"
             }
@@ -310,7 +311,7 @@ fn read_authenticated(
     let mut input = vec![0; CHUNK].into_boxed_slice();
     let mut output = vec![0; CHUNK + 16].into_boxed_slice();
     while remaining != 0 {
-        let bytes = remaining.min(CHUNK as u64) as usize;
+        let bytes = usize::try_from(remaining).unwrap_or(CHUNK).min(CHUNK);
         read_frame(source, &mut input[..bytes])?;
         let returned = cipher
             .update(&input[..bytes], &mut output)

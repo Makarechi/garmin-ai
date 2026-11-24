@@ -42,6 +42,7 @@ pub enum NotificationReason {
 }
 
 impl NotificationReason {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::OwnerPaused => "owner_paused",

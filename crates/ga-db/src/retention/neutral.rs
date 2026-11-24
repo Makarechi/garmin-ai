@@ -89,11 +89,8 @@ impl Cursor {
     }
 
     fn render(&self) -> String {
-        let render = |position: Option<&Position>| {
-            position
-                .map(Position::render)
-                .unwrap_or_else(|| "null".into())
-        };
+        let render =
+            |position: Option<&Position>| position.map_or_else(|| "null".into(), Position::render);
         format!(
             "{{\"inbound_after\": {}, \"inbound_done\": {}, \"orphan_after\": {}}}",
             render(self.inbound_after.as_ref()),
@@ -151,7 +148,8 @@ pub(super) async fn prune(
         .filter(|id| !unavailable.contains(id))
         .collect();
 
-    let remaining = window.limit - inbound.len() as i64;
+    let inbound_count = i64::try_from(inbound.len()).unwrap_or(i64::MAX);
+    let remaining = window.limit - inbound_count;
     let mut orphan: Vec<(OffsetDateTime, Uuid)> = if remaining > 0 {
         sqlx::query_as(
             "SELECT created_at,id FROM outbox_messages
@@ -176,13 +174,13 @@ pub(super) async fn prune(
     } else {
         Vec::new()
     };
-    let orphan_more = orphan.len() as i64 > remaining;
-    orphan.truncate(remaining as usize);
+    let orphan_more = i64::try_from(orphan.len()).unwrap_or(i64::MAX) > remaining;
+    orphan.truncate(usize::try_from(remaining).unwrap_or(usize::MAX));
     if window.apply {
         let direct: Vec<_> = orphan.iter().map(|(_, id)| *id).collect();
         redact(txn, &eligible, &direct, &window.now).await?;
     }
-    let inbound_more = !cursor.inbound_done && inbound.len() as i64 == window.limit;
+    let inbound_more = !cursor.inbound_done && inbound_count == window.limit;
     let next = if inbound_more || orphan_more {
         if let Some(row) = inbound.last().copied() {
             cursor.inbound_after = Some(Position::from_row(row)?);

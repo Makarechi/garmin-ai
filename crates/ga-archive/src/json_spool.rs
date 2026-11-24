@@ -54,7 +54,9 @@ impl JsonSpool {
         match self.0 {
             SpoolStorage::Memory(bytes) => Ok(JsonDocument(DocumentStorage::Memory(bytes.into()))),
             SpoolStorage::File(file) => {
-                let file = file.into_inner().map_err(|error| error.into_error())?;
+                let file = file
+                    .into_inner()
+                    .map_err(std::io::IntoInnerError::into_error)?;
                 file.sync_data()?;
                 let bytes = file.metadata()?.len();
                 Ok(JsonDocument(DocumentStorage::File {
@@ -84,6 +86,7 @@ impl fmt::Debug for JsonDocument {
 }
 
 impl JsonDocument {
+    #[must_use]
     pub fn byte_len(&self) -> u64 {
         match &self.0 {
             DocumentStorage::Memory(bytes) => bytes.len() as u64,
@@ -92,6 +95,7 @@ impl JsonDocument {
     }
 
     /// Create an independent reader whose position is unaffected by other readers.
+    #[must_use]
     pub fn reader(&self) -> JsonReader {
         let storage = match &self.0 {
             DocumentStorage::Memory(bytes) => ReaderStorage::Memory(Cursor::new(bytes.clone())),

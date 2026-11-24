@@ -20,7 +20,9 @@ fn matches_neutral_telegram_reply_rendering() -> Result<(), Box<dyn Error>> {
         external_owner_id: fixture["chat"].as_i64().ok_or("Missing private chat")?,
     };
     let cases = fixture["cases"].as_array().ok_or("Missing cases")?;
-    assert!(!cases.is_empty());
+    if cases.is_empty() {
+        return Err("Missing synthetic Telegram reply cases".into());
+    }
     for case in cases {
         let intent = OutboundIntent::normalize(case["intent"].clone())?;
         let result = prepare_reply(binding, &intent, now);
@@ -74,7 +76,7 @@ fn checks_the_owner_and_refuses_unsigned_or_duplicate_buttons() -> Result<(), Bo
     let binding = TelegramBinding {
         owner_id: owner,
         instance_id: "primary",
-        external_owner_id: 1234567890123,
+        external_owner_id: 1_234_567_890_123,
     };
     let wrong_owner = TelegramBinding {
         owner_id: Uuid::from_u128(804),

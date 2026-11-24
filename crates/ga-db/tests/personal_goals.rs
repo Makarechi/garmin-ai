@@ -2,7 +2,9 @@ use std::{env, error::Error, fs, str::FromStr};
 
 use ga_db::{
     Database,
-    personal_goals::{GoalCommandOrder, GoalSelection, PersonalGoal, PersonalGoalsError},
+    personal_goals::{
+        GoalCommandOrder, GoalSelection, PersonalGoal, PersonalGoals, PersonalGoalsError,
+    },
 };
 use ga_domain::timestamp::StoredInstant;
 use serde::Deserialize;
@@ -49,7 +51,10 @@ async fn preserves_explicit_goal_preferences_and_command_order() -> Result<(), B
         .fetch_one(&pool)
         .await?;
     let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
-    assert_eq!(database.personal_goals(owner).await?, Default::default());
+    assert_eq!(
+        database.personal_goals(owner).await?,
+        PersonalGoals::default()
+    );
     let cases: Vec<Case> = serde_json::from_slice(&fs::read(env::var("GA_TEST_PERSONAL_GOALS")?)?)?;
 
     for (index, case) in cases.iter().enumerate() {

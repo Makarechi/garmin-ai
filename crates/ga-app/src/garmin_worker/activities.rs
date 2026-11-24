@@ -75,21 +75,20 @@ impl<S: EndpointSource> EndpointWorker<'_, S> {
                 return Err(EndpointWorkerError::Fetch(error));
             }
         };
-        let captured = self
-            .with_renewal(
-                lease,
-                self.database.capture_activity_page(
-                    CaptureActivityPage {
-                        authenticated_fingerprint: account,
-                        lease,
-                        requested_at,
-                        body,
-                    },
-                    Arc::clone(&self.archive),
-                    self.limits,
-                ),
-            )
-            .await??;
+        let captured = Box::pin(self.with_renewal(
+            lease,
+            self.database.capture_activity_page(
+                CaptureActivityPage {
+                    authenticated_fingerprint: account,
+                    lease,
+                    requested_at,
+                    body,
+                },
+                Arc::clone(&self.archive),
+                self.limits,
+            ),
+        ))
+        .await??;
         let source = match captured {
             ActivityPageCapture::Captured(source) => source,
             ActivityPageCapture::Superseded => {

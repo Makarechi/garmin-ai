@@ -306,13 +306,12 @@ async fn prepare_snapshot(
     let topology = match original["topology"].as_str() {
         Some("point") => EventTopology::Point,
         Some("open_interval") => EventTopology::OpenInterval,
-        Some("bounded_interval") => EventTopology::BoundedInterval,
         Some("flexible") => EventTopology::Flexible,
         None if end.is_none() && matches!(kind.as_str(), "migraine" | "illness") => {
             EventTopology::OpenInterval
         }
         None if end.is_none() || end == Some(start) => EventTopology::Point,
-        None => EventTopology::BoundedInterval,
+        None | Some("bounded_interval") => EventTopology::BoundedInterval,
         Some(_) => return Err(DiaryWriteError::InvalidRecordedState),
     };
     original["topology"] = json!(topology.label());

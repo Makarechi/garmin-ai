@@ -34,6 +34,7 @@ pub struct TelegramWebhook {
 }
 
 impl TelegramWebhook {
+    #[must_use]
     pub fn configured(database: Option<Database>) -> Self {
         let [secret, chat, integrations] = webhook_settings();
         Self::from_settings(
@@ -103,20 +104,19 @@ async fn receive(State(receiver): State<TelegramWebhook>, request: Request) -> R
             "Telegram integration is disabled",
         );
     };
-    let body = match to_bytes(request.into_body(), BODY_LIMIT).await {
-        Ok(body) => body,
-        Err(_) => return failure(StatusCode::PAYLOAD_TOO_LARGE, "Update too large"),
+    let Ok(body) = to_bytes(request.into_body(), BODY_LIMIT).await else {
+        return failure(StatusCode::PAYLOAD_TOO_LARGE, "Update too large");
     };
     let update: Value = match serde_json::from_slice(&body) {
         Ok(update) => update,
         Err(_) => return failure(StatusCode::BAD_REQUEST, "Invalid Telegram update"),
     };
-    let received = OffsetDateTime::now_utc()
+    let now_micros = OffsetDateTime::now_utc()
         .unix_timestamp_nanos()
         .div_euclid(1_000);
-    let Some(received) = i64::try_from(received)
+    let Some(accepted_at) = i64::try_from(now_micros)
         .ok()
-        .and_then(|received| StoredInstant::from_unix_microseconds(received).ok())
+        .and_then(|micros| StoredInstant::from_unix_microseconds(micros).ok())
     else {
         return database_unavailable();
     };
@@ -132,7 +132,7 @@ async fn receive(State(receiver): State<TelegramWebhook>, request: Request) -> R
                 _ => TelegramPollError::InvalidSelection,
             })?;
         binding
-            .accept_webhook_update(database, &update, received)
+            .accept_webhook_update(database, &update, accepted_at)
             .await
     })
     .await;

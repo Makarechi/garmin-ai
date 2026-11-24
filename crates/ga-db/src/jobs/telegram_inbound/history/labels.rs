@@ -157,7 +157,7 @@ fn dose_display(value: f64) -> String {
         let digits = mantissa.trim_end_matches('0').trim_end_matches('.');
         return format!("{digits}e{exponent:+03}");
     }
-    let decimals = (5 - exponent) as usize;
+    let decimals = usize::try_from(5 - exponent).unwrap_or_default();
     let decimal = format!("{value:.decimals$}");
     if decimals == 0 {
         decimal

@@ -19,6 +19,7 @@ pub struct GarminOwner {
 }
 
 impl GarminOwner {
+    #[must_use]
     pub fn owner_id(self) -> Uuid {
         self.owner_id
     }

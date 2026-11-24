@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 mod outbound;
 pub use outbound::{OutboundError, OutboundIntent};
 
@@ -19,6 +21,7 @@ pub fn telegram_conversation_id(owner: Uuid, instance: &str, chat: impl fmt::Dis
     )
 }
 
+#[must_use]
 pub fn legacy_telegram_action_id(update_id: i64) -> Uuid {
     Uuid::new_v5(
         &TELEGRAM_NAMESPACE,
@@ -69,6 +72,7 @@ impl InboundKind {
         })
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -98,9 +102,11 @@ impl ChannelInstance {
         })
     }
 
+    #[must_use]
     pub fn channel(&self) -> &str {
         &self.channel
     }
+    #[must_use]
     pub fn instance_id(&self) -> &str {
         &self.instance_id
     }
@@ -224,42 +230,55 @@ impl InboundEnvelope {
         })
     }
 
+    #[must_use]
     pub fn message_id(&self) -> Uuid {
         self.message_id
     }
+    #[must_use]
     pub fn owner_id(&self) -> Uuid {
         self.owner_id
     }
+    #[must_use]
     pub fn conversation_id(&self) -> Uuid {
         self.conversation_id
     }
+    #[must_use]
     pub fn channel(&self) -> &ChannelInstance {
         &self.channel
     }
+    #[must_use]
     pub fn external_event_id(&self) -> &str {
         &self.external_event_id
     }
+    #[must_use]
     pub fn external_message_id(&self) -> Option<&str> {
         self.external_message_id.as_deref()
     }
+    #[must_use]
     pub fn sender_ref(&self) -> &str {
         &self.sender_ref
     }
+    #[must_use]
     pub fn occurred_at(&self) -> Option<OffsetDateTime> {
         self.occurred_at
     }
+    #[must_use]
     pub fn received_at(&self) -> OffsetDateTime {
         self.received_at
     }
+    #[must_use]
     pub fn kind(&self) -> InboundKind {
         self.kind
     }
+    #[must_use]
     pub fn text(&self) -> Option<&str> {
         self.text.as_deref()
     }
+    #[must_use]
     pub fn revision(&self) -> i32 {
         self.revision
     }
+    #[must_use]
     pub fn action_operation(&self) -> Option<Uuid> {
         self.action.as_ref().map(|(id, _)| *id)
     }
@@ -320,7 +339,7 @@ fn datetime_text(at: OffsetDateTime) -> String {
         at.second()
     );
     if at.microsecond() != 0 {
-        text.push_str(&format!(".{:06}", at.microsecond()));
+        let _ = write!(text, ".{:06}", at.microsecond());
     }
     if at.offset() == UtcOffset::UTC {
         text.push('Z');
@@ -328,11 +347,15 @@ fn datetime_text(at: OffsetDateTime) -> String {
         let seconds = at.offset().whole_seconds();
         let sign = if seconds < 0 { '-' } else { '+' };
         let minutes = seconds.unsigned_abs() / 60;
-        text.push_str(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60));
+        let _ = write!(text, "{sign}{:02}:{:02}", minutes / 60, minutes % 60);
     }
     text
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Integral input is checked against the exact i64 bounds"
+)]
 fn integer(value: &Value) -> Option<i64> {
     if let Some(value) = value.as_i64() {
         return Some(value);

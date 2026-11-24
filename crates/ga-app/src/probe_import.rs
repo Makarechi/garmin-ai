@@ -35,7 +35,7 @@ use crate::{
 };
 
 // Twenty daily endpoints, activity list, legacy device inventory and seven requests per activity.
-const MAX_REQUESTS: usize = MAX_PROBE_DAYS * 20 + 2 + MAX_SCOPED_ACTIVITIES * 7;
+const MAX_REQUESTS: usize = MAX_PROBE_DAYS * 20 + 2 + MAX_SCOPED_ACTIVITIES as usize * 7;
 const JSON_LIMITS: PutLimits = PutLimits {
     max_bytes: 8 * 1024 * 1024,
     disk_reserve_bytes: 64 * 1024 * 1024,

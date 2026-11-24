@@ -23,9 +23,7 @@ use super::{AppState, method_not_allowed, private_cache, tools::MAX_REQUEST_BYTE
 
 pub(super) async fn messages(State(state): State<AppState>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let response = if !matches!(parts.method, Method::GET | Method::POST) {
-        method_not_allowed("POST")
-    } else {
+    let response = if matches!(parts.method, Method::GET | Method::POST) {
         match owner_database(&state, &parts.headers) {
             Ok(database) => {
                 let result = if parts.method == Method::POST {
@@ -33,10 +31,12 @@ pub(super) async fn messages(State(state): State<AppState>, request: Request) ->
                 } else {
                     database.web_chat_messages().await
                 };
-                result.map(stream_snapshot).unwrap_or_else(failure)
+                result.map_or_else(failure, stream_snapshot)
             }
             Err((status, detail)) => (status, Json(json!({"detail":detail}))).into_response(),
         }
+    } else {
+        method_not_allowed("POST")
     };
     private_cache(response, &parts.headers)
 }
@@ -129,9 +129,7 @@ pub(super) async fn mark_read(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    let response = if method != Method::POST {
-        method_not_allowed("POST")
-    } else {
+    let response = if method == Method::POST {
         match (owner_database(&state, &headers), Uuid::parse_str(&id)) {
             (Ok(database), Ok(id)) => match database.mark_web_chat_read(id).await {
                 Ok(()) => Json(json!({"status":"read"})).into_response(),
@@ -146,6 +144,8 @@ pub(super) async fn mark_read(
             ).into_response(),
             (Err((status, detail)), _) => (status, Json(json!({"detail":detail}))).into_response(),
         }
+    } else {
+        method_not_allowed("POST")
     };
     private_cache(response, &headers)
 }

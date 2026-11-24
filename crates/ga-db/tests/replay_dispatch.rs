@@ -140,7 +140,7 @@ impl Fixture {
         Ok(capture.source_id())
     }
 
-    fn request<'a>(&self, lease: &'a ReplayJobLease) -> RunReplayJob<'a> {
+    fn request(lease: &ReplayJobLease) -> RunReplayJob<'_> {
         RunReplayJob {
             lease,
             configured_timezone: "UTC",
@@ -265,7 +265,7 @@ async fn routes_supported_jobs_and_fences_fit_publication() -> Result<(), Box<dy
     let result = run
         .database
         .run_replay_job(
-            run.request(&fit_lease),
+            Fixture::request(&fit_lease),
             run.archive.clone(),
             slow_verification(),
         )
@@ -313,7 +313,7 @@ async fn routes_supported_jobs_and_fences_fit_publication() -> Result<(), Box<dy
         }
         let result = run
             .database
-            .run_replay_job(run.request(&lease), run.archive.clone(), || false)
+            .run_replay_job(Fixture::request(&lease), run.archive.clone(), || false)
             .await?;
         assert_eq!(
             result.replay,
@@ -338,7 +338,7 @@ async fn routes_supported_jobs_and_fences_fit_publication() -> Result<(), Box<dy
     };
     let (result, invalidated) = tokio::join!(
         run.database.run_replay_job(
-            run.request(&lease),
+            Fixture::request(&lease),
             run.archive.clone(),
             slow_verification()
         ),
@@ -366,7 +366,7 @@ async fn routes_supported_jobs_and_fences_fit_publication() -> Result<(), Box<dy
     assert_eq!(retry.id(), job);
     let result = run
         .database
-        .run_replay_job(run.request(&retry), run.archive.clone(), || false)
+        .run_replay_job(Fixture::request(&retry), run.archive.clone(), || false)
         .await?;
     assert_eq!(result.job, RecordedJobStatus::Completed);
     assert_eq!(run.job(job).await?, ("done".into(), 2));

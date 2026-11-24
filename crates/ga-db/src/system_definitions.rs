@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
 
-const REGISTRY_LOCK: i64 = 72104628;
+const REGISTRY_LOCK: i64 = 72_104_628;
 static CATALOG: LazyLock<Result<Vec<CatalogEntry>, DefinitionStoreError>> = LazyLock::new(load);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

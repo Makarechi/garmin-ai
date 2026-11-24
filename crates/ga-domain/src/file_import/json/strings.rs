@@ -83,7 +83,8 @@ fn hex_unit(bytes: &[u8], index: usize) -> Option<u16> {
     bytes.get(index + 2..index + 6)?.iter().try_fold(0, |n, b| {
         char::from(*b)
             .to_digit(16)
-            .map(|digit| n * 16 + digit as u16)
+            .and_then(|digit| u16::try_from(digit).ok())
+            .map(|digit| n * 16 + digit)
     })
 }
 

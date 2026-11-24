@@ -387,9 +387,8 @@ async fn create_entry(
     let Ok(idempotency) = idempotency_key(headers) else {
         return invalid_arguments();
     };
-    let body = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(data) => data,
-        Err(_) => return report_too_large(),
+    let Ok(body) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return report_too_large();
     };
     let Some(_body_permit) = writes.reserve_body(body.len()) else {
         return write_failure(DiaryWriteError::Busy);

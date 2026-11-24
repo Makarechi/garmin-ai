@@ -118,10 +118,12 @@ impl SystemPayload {
         })
     }
 
+    #[must_use]
     pub fn kind(&self) -> &str {
         &self.kind
     }
 
+    #[must_use]
     pub fn json(&self) -> &Value {
         &self.json
     }
@@ -299,6 +301,10 @@ fn strict_rating(value: Value) -> Option<Value> {
     (rating <= 10).then_some(value)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Integral ratings are validated in the range 0 through 10"
+)]
 fn rating(value: Value) -> Option<Value> {
     let rating: i64 = match value {
         Value::String(raw) => {
@@ -332,6 +338,7 @@ pub(crate) fn boolean(value: Value) -> Option<Value> {
 }
 
 /// Coerce a boolean as accepted by the existing Python settings and data contracts.
+#[must_use]
 pub fn legacy_boolean(value: &Value) -> Option<bool> {
     let converted = match value {
         Value::Bool(value) => *value,
@@ -350,6 +357,10 @@ pub fn legacy_boolean(value: &Value) -> Option<bool> {
     Some(converted)
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "An exclusive JSON Schema bound rejects an exactly equal value"
+)]
 pub(crate) fn finite_number(
     min: f64,
     max: f64,
@@ -387,6 +398,7 @@ pub(crate) fn numeric_text(text: &str) -> Option<Cow<'_, str>> {
 }
 
 /// Match the whitespace recognized by the pinned Python string operations.
+#[must_use]
 pub fn python_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{001c}'..='\u{001f}')
 }

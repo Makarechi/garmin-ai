@@ -112,18 +112,22 @@ impl HealthReplacement {
         Ok(())
     }
 
+    #[must_use]
     pub fn start(&self) -> StoredInstant {
         self.start
     }
 
+    #[must_use]
     pub fn end(&self) -> StoredInstant {
         self.end
     }
 
+    #[must_use]
     pub fn metrics(&self) -> &[String] {
         &self.metrics
     }
 
+    #[must_use]
     pub fn document(&self) -> Value {
         json!({
             "start": self.start.to_string(), "end": self.end.to_string(),
@@ -132,6 +136,7 @@ impl HealthReplacement {
     }
 }
 
+#[must_use]
 pub fn replacement_channels(endpoint: &str) -> &[&str] {
     match endpoint {
         "heart_rate" => &["heart_rate_bpm"],

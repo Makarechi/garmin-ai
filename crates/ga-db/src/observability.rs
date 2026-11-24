@@ -322,6 +322,7 @@ fn capacity(now: StoredInstant, value: &Value) -> Option<Capacity> {
 }
 
 impl OperationsSnapshot {
+    #[must_use]
     pub fn prometheus(&self) -> String {
         let mut lines = Vec::new();
         for (name, age) in [

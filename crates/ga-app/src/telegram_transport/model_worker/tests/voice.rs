@@ -457,7 +457,15 @@ async fn runs_voice_ingress_transcription_and_cached_diary_processing() -> Resul
     assert_eq!(sender.transcriptions.load(Ordering::SeqCst), 2);
     set_audio_consent(&pool, true).await?;
 
-    recorded_commands(&worker, &transport, binding, &mut runtime, &pool, at).await?;
+    Box::pin(recorded_commands(
+        &worker,
+        &transport,
+        binding,
+        &mut runtime,
+        &pool,
+        at,
+    ))
+    .await?;
 
     screen_with_short_voice_lease(&worker, &transport, binding, &mut runtime, &pool, at).await?;
 

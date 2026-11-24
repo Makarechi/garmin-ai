@@ -167,7 +167,7 @@ pub(crate) async fn select_sources(
         .bind(include_current)
         .fetch_all(&mut **txn)
         .await?;
-    let next_after = if rows.len() as i64 == SCAN_LIMIT {
+    let next_after = if i64::try_from(rows.len()) == Ok(SCAN_LIMIT) {
         rows.last().map(|row| row.0)
     } else {
         None

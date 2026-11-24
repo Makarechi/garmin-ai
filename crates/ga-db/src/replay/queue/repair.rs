@@ -39,7 +39,7 @@ pub(super) async fn repair_jobs(
     let Some(last_scanned) = entries.last().map(|entry| entry.0) else {
         return Ok((0, false));
     };
-    let mut incomplete = entries.len() as i64 == SCAN_LIMIT;
+    let mut incomplete = i64::try_from(entries.len()) == Ok(SCAN_LIMIT);
     if wrapped && incomplete {
         incomplete = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM jobs

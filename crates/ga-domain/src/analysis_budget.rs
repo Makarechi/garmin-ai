@@ -54,6 +54,7 @@ pub struct AnalysisBudget {
 }
 
 impl AnalysisBudget {
+    #[must_use]
     pub fn new(started: Instant) -> Self {
         Self {
             started,
@@ -92,7 +93,7 @@ impl AnalysisBudget {
         if elapsed >= MAX_TIME {
             Err(AnalysisBudgetError::Timeout)
         } else {
-            Ok(MAX_TIME - elapsed)
+            Ok(MAX_TIME.saturating_sub(elapsed))
         }
     }
 
@@ -106,10 +107,12 @@ impl AnalysisBudget {
         Ok(())
     }
 
+    #[must_use]
     pub fn remaining_tool_calls(&self) -> u8 {
         MAX_TOOL_CALLS - self.tool_calls
     }
 
+    #[must_use]
     pub fn remaining_tool_rounds(&self, answer_turn: u8) -> u8 {
         if answer_turn >= MAX_CALLS - 1 || self.remaining_tool_calls() == 0 {
             return 0;

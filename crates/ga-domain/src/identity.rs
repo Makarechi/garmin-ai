@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::{metric_contract::decimal_value, sha256_hex};
 
 /// Parse the UUID spelling accepted by Python for legacy page cursors.
+#[must_use]
 pub fn python_cursor_uuid(value: &str) -> Option<Uuid> {
     // Python strips these literals in order before validating the 32 code points.
     let unwrapped = value.replace("urn:", "").replace("uuid:", "");
@@ -86,6 +87,7 @@ impl GarminProfileId {
         }
     }
 
+    #[must_use]
     pub fn fingerprint(self) -> String {
         sha256_hex(format!("garmin:socialProfile:profileId:v1:{}", self.0).as_bytes())
     }

@@ -227,7 +227,7 @@ fn archive(path: &Path, entry: &str, tags: &[&str], old: bool) -> TestResult {
     tar.append_data(&mut header, entry, manifest.as_slice())?;
     let file = tar.into_inner()?.finish()?;
     if old {
-        let modified = SystemTime::now() - Duration::from_secs(2 * 86400);
+        let modified = SystemTime::now() - Duration::from_hours(48);
         file.set_times(FileTimes::new().set_modified(modified))?;
     }
     Ok(())
@@ -271,9 +271,10 @@ fn public_command_previews_records_and_cleans_only_obsolete_release_files() -> T
     fs::hard_link(&private_archive, &hardlink_path)?;
     let corrupt = host.uploads.join("garmin-ai-corrupt.tar.gz");
     fs::write(&corrupt, b"synthetic corrupt file")?;
-    File::options().write(true).open(&corrupt)?.set_times(
-        FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(2 * 86400)),
-    )?;
+    File::options()
+        .write(true)
+        .open(&corrupt)?
+        .set_times(FileTimes::new().set_modified(SystemTime::now() - Duration::from_hours(48)))?;
 
     let uploads = host.uploads.to_str().ok_or("fixture path must be UTF-8")?;
     let arguments = [
@@ -487,7 +488,7 @@ fn held_lock_invalid_inventory_and_replaced_tag_prevent_deletion() -> TestResult
     let (output, report) = host.run(&["--apply"])?;
     assert_eq!(output.status.code(), Some(1), "{report}");
     assert_eq!(report["error"], "Docker command failed: image ls");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert!(!host.root.join("deletions").exists());
 
     fs::remove_file(fault)?;

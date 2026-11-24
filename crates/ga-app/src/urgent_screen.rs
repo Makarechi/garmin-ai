@@ -6,7 +6,16 @@ use std::{error::Error, fmt, sync::OnceLock};
 
 use fancy_regex::{Captures, Regex, RegexBuilder};
 
-use patterns::*;
+use patterns::{
+    ABSENT, AGAIN_IN_HISTORY, AGAIN_NOW, ARM, BLEEDING, BREATHING, CHEST_AND_SWEAT, DATE,
+    DATE_SUFFIX, DISTANT_HISTORY_1, DISTANT_HISTORY_2, DISTANT_HISTORY_3, DISTANT_HISTORY_4,
+    DISTANT_HISTORY_5, DOUBLE_NEGATIVE, FACE, FAST_CURRENT_PRELUDE, GENERAL_QUESTION,
+    HISTORICAL_MARKER, NEGATED_FAST_SIGN, NEGATIVE_PREFIX, PAIN_NOW, PAIN_ONGOING, PRIOR_WEEK,
+    RECURRENCE_AFTER, RECURRENCE_NOW, REPEATED_EMERGENCY_NOW, REPEATED_SYMPTOM_NOW,
+    RUSSIAN_CLAUSE_SEPARATOR, RUSSIAN_CURRENT_PRELUDE, RUSSIAN_HISTORY, RUSSIAN_HISTORY_PRELUDE,
+    RUSSIAN_RECURRENCE, RUSSIAN_TRAILING_CLAUSE, SELF_REPORT, SYMPTOM_RETURNED, THIRD_PARTY,
+    URGENT,
+};
 
 #[derive(Debug)]
 pub struct UrgentScreenUnavailable;
@@ -365,6 +374,7 @@ pub fn obvious_third_party_emergency(text: &str) -> Result<bool, UrgentScreenUna
     )
 }
 
+#[must_use]
 pub fn urgent_notice(locale: &str) -> &'static str {
     if locale
         .split('-')

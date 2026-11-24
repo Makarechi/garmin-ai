@@ -188,6 +188,10 @@ pub(super) fn timestamp(
         .map_err(|_| HealthAnalysisError::Database)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Freshness reports fractional seconds from microsecond timestamps"
+)]
 fn elapsed(at: StoredInstant, from: StoredInstant) -> f64 {
     (at.unix_microseconds() - from.unix_microseconds()) as f64 / 1_000_000.0
 }

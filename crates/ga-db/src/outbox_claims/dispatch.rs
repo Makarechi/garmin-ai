@@ -678,28 +678,25 @@ async fn persist(
         },
     )
     .await;
-    match result {
-        Ok(id) => {
-            if tracker && observation.state == DeliveryState::Failed {
-                remember_tracker_fallback(&mut txn, target.owner_id, target.outbox_id).await?;
-            }
-            if let Some((notice, instance)) = notice {
-                notice
-                    .complete(
-                        &mut txn,
-                        instance,
-                        observation.state,
-                        observation.provider_reference.as_deref(),
-                    )
-                    .await?;
-            }
-            txn.commit().await?;
-            Ok(id)
+    if let Ok(id) = result {
+        if tracker && observation.state == DeliveryState::Failed {
+            remember_tracker_fallback(&mut txn, target.owner_id, target.outbox_id).await?;
         }
-        Err(_) => {
-            txn.rollback().await?;
-            Err(ReplyDispatchError::Database)
+        if let Some((notice, instance)) = notice {
+            notice
+                .complete(
+                    &mut txn,
+                    instance,
+                    observation.state,
+                    observation.provider_reference.as_deref(),
+                )
+                .await?;
         }
+        txn.commit().await?;
+        Ok(id)
+    } else {
+        txn.rollback().await?;
+        Err(ReplyDispatchError::Database)
     }
 }
 

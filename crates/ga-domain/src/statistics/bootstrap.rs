@@ -35,20 +35,20 @@ pub fn paired_mean_difference(differences: &[f64]) -> PairedDifference {
     }
     distribution.sort_unstable_by(f64::total_cmp);
     let observed = mean(differences).abs();
-    let mut extreme = 0;
+    let mut extreme = 0_u32;
     for _ in 0..2000 {
         for (value, &difference) in sample.iter_mut().zip(differences) {
             let sign = if stream.below(2) == 0 { -1.0 } else { 1.0 };
             *value = sign * difference;
         }
-        extreme += usize::from(mean(&sample).abs() >= observed);
+        extreme += u32::from(mean(&sample).abs() >= observed);
     }
     PairedDifference {
         ci95: Some([
             quantile(&distribution, 0.025),
             quantile(&distribution, 0.975),
         ]),
-        sign_permutation_p: Some((extreme + 1) as f64 / 2001.0),
+        sign_permutation_p: Some(f64::from(extreme + 1) / 2001.0),
     }
 }
 
@@ -111,6 +111,10 @@ impl BootstrapRandom {
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "The pinned PCG stream extracts the low bits of the state and output words"
+    )]
     fn next_word(&mut self) -> u32 {
         if let Some(word) = self.saved_word.take() {
             return word;
@@ -125,6 +129,10 @@ impl BootstrapRandom {
         bits as u32
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "The bounded NumPy sampler uses the low word of the product for rejection"
+    )]
     fn below(&mut self, length: usize) -> usize {
         // The caller's database date window is bounded to 3661 observations.
         let length = length as u64;

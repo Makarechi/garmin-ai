@@ -106,6 +106,11 @@ impl RuntimeModelSettings {
     }
 
     /// Resolve storage-neutral settings while reading only the selected provider's credential.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "The token budget is checked to be an integer from 256 through 8192"
+    )]
     pub fn resolve(
         mut variable: impl FnMut(&str) -> Result<Option<String>, ModelEnvironmentError>,
         mut secret: impl FnMut(&str) -> Result<Option<String>, ModelEnvironmentError>,
@@ -375,6 +380,7 @@ impl ConfiguredModel<'_> {
         }
     }
 
+    #[must_use]
     pub fn current(&self) -> CurrentModelPolicy<'_> {
         let fallback_enabled = matches!(
             self.settings.options,

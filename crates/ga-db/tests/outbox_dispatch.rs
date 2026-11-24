@@ -247,10 +247,10 @@ async fn retires_dispatch_tokens_and_blocks_stale_or_unapproved_content()
     )
     .execute(&pool)
     .await?;
-    let expires =
+    let deadline =
         StoredInstant::from_unix_microseconds(clock(&pool).await?.unix_microseconds() + 200_000)?;
     sqlx::query("UPDATE outbox_messages SET intent=jsonb_set(intent,'{expires_at}',to_jsonb($2::text)) WHERE id=$1")
-        .bind(expiring).bind(expires.to_string()).execute(&pool).await?;
+        .bind(expiring).bind(deadline.to_string()).execute(&pool).await?;
     let _ = database
         .dispatch_outbox_reply(destination(), expiring_claim, &[], proceed)
         .await?;

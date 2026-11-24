@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::ReplaySelectionError;
 use crate::{Database, check_readiness};
 
-pub(crate) const REPLAY_MUTATION_LOCK: i64 = 72104619;
+pub(crate) const REPLAY_MUTATION_LOCK: i64 = 72_104_619;
 
 #[derive(Debug, serde::Serialize, Eq, PartialEq)]
 pub struct ReplayStatus {

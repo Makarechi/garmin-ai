@@ -24,7 +24,7 @@ const API_ORIGIN: &str = "https://connectapi.garmin.com/";
 const DI_PATH: &str = "di-oauth2-service/oauth/token";
 const PROFILE_PATH: &str = "userprofile-service/socialProfile";
 const MAX_AUTH_BYTES: u64 = 64 * 1024;
-const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
+const MAX_PROFILE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 struct Hosts {

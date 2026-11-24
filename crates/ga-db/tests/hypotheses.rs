@@ -75,12 +75,12 @@ async fn setup(
         .execute(&mut *txn)
         .await?;
     sqlx::query("DELETE FROM source_payloads WHERE id=$1")
-        .bind(Uuid::from_u128(7300001))
+        .bind(Uuid::from_u128(7_300_001))
         .execute(&mut *txn)
         .await?;
     if case["replay"] == true {
         sqlx::query("INSERT INTO source_payloads(id,source,endpoint,source_key,payload_hash,archive_key,fetched_at,parser_version,status,payload) VALUES ($1,'garmin_connect','daily','2026-09-10',repeat('c',64),'sha256:'||repeat('c',64),'2026-09-10T00:00:00Z',0,'pending','{\"totalSteps\":0}'::jsonb)")
-            .bind(Uuid::from_u128(7300001)).execute(&mut *txn).await?;
+            .bind(Uuid::from_u128(7_300_001)).execute(&mut *txn).await?;
     }
     txn.commit().await?;
     Ok(())
@@ -198,7 +198,7 @@ async fn compares_hypothesis_history() -> Result<(), Box<dyn Error>> {
     setup(&pool, &concurrent, identity, score).await?;
     let first_spec = HypothesisSpec::from_json(&concurrent["spec"])?;
     let mut second_document = concurrent["spec"].clone();
-    second_document["id"] = serde_json::json!(Uuid::from_u128(7400101).to_string());
+    second_document["id"] = serde_json::json!(Uuid::from_u128(7_400_101).to_string());
     let second_spec = HypothesisSpec::from_json(&second_document)?;
     let now: StoredInstant = concurrent["now"].as_str().ok_or("Missing clock")?.parse()?;
     let (first, second) = tokio::join!(

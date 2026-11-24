@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use ga_domain::{event_input::source_calendar_wall_time, timestamp::StoredInstant};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -92,7 +94,7 @@ pub(crate) async fn capture_today(
         ("Готовность", readiness),
     ] {
         let value = value.map_or_else(|| "нет данных".into(), format_number);
-        reply.push_str(&format!("\n{label}: {value}"));
+        let _ = write!(reply, "\n{label}: {value}");
     }
     Ok((reply, fence))
 }
@@ -133,11 +135,12 @@ pub(crate) async fn capture_status(
             .ok_or_else(|| protocol_error("Invalid owner timezone"))?;
         let day = date.day();
         let month = u8::from(date.month());
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             " Последний успешный ответ Garmin: {day:02}.{month:02} {:02}:{:02}.",
             clock.hour(),
-            clock.minute(),
-        ));
+            clock.minute()
+        );
     }
     if report["archive_replay"]["ready"] != true {
         text.push_str("\nПересчёт архива не завершён; анализ Garmin временно недоступен.");
@@ -147,7 +150,7 @@ pub(crate) async fn capture_status(
     let hr = &report["channels"]["heart_rate_bpm"];
     text.push_str("\nПульс часов: ");
     if let Some(lag) = hr["observation_lag_seconds"].as_f64() {
-        text.push_str(&format!("последнее измерение {:.1} ч назад.", lag / 3600.0));
+        let _ = write!(text, "последнее измерение {:.1} ч назад.", lag / 3600.0);
     } else {
         text.push_str("нет сохранённых измерений.");
     }
@@ -155,17 +158,18 @@ pub(crate) async fn capture_status(
         text.push_str(" Данных недостаточно для оценки текущего состояния.");
     }
     if let Some(coverage) = hr["coverage_ratio"].as_f64() {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             " Покрытие дня без заполнения пропусков: {:.0}%.",
             coverage * 100.0
-        ));
+        );
     }
     text.push_str("\nНочной HRV: ");
     if let Some(date) = report["channels"]["hrv_nightly_avg"]["source_calendar_date"]
         .as_str()
         .filter(|date| !date.is_empty())
     {
-        text.push_str(&format!("сводка за {date}."));
+        let _ = write!(text, "сводка за {date}.");
     } else {
         text.push_str("нет данных.");
     }

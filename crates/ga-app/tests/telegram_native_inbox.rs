@@ -48,7 +48,7 @@ async fn polling_preserves_work_ownership_and_enqueues_atomically() -> Result<()
             "update_id": id,
             "message": {
                 "message_id": id + 100, "from": {"id": 42}, "chat": {"type": "private", "id": 42},
-                "date": 1794916800, "text": "synthetic native inbox test",
+                "date": 1_794_916_800, "text": "synthetic native inbox test",
             }
         })
     };

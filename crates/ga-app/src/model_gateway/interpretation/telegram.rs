@@ -35,6 +35,7 @@ pub struct TelegramDiaryInterpretation {
 }
 
 impl TelegramDiaryInterpretation {
+    #[must_use]
     pub fn publication_context<'a>(
         &'a self,
         configured_timezone: &'a str,
@@ -240,7 +241,7 @@ impl<'a> TelegramText<'a> {
             || envelope.message_id() != lease.message_id()
             || !(matches!(envelope.kind(), InboundKind::Text | InboundKind::Edit)
                 || lease.has_voice_text())
-            || !envelope.text().is_some_and(|text| !text.trim().is_empty())
+            || envelope.text().is_none_or(|text| text.trim().is_empty())
         {
             return Err(DiaryInterpretationError::InvalidTelegramMessage);
         }

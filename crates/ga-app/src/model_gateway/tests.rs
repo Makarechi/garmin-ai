@@ -41,7 +41,7 @@ impl Mock {
     fn attempts(&self) -> Vec<String> {
         self.attempted
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 }
@@ -62,7 +62,7 @@ impl Sender for Mock {
         .ok_or(ModelTransportError::InvalidConfiguration)?;
         self.attempted
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(model.to_owned());
         let primary = model == PRIMARY;
         match (self.responses, primary) {
@@ -78,9 +78,9 @@ impl Sender for Mock {
                     .map_err(|_| ModelTransportError::InvalidConfiguration)?;
                 let channel = matches!(self.responses, Responses::CheckChannelFence);
                 let locks: &[i64] = if channel {
-                    &[72104621, 72104631, 72104632]
+                    &[72_104_621, 72_104_631, 72_104_632]
                 } else {
-                    &[72104621]
+                    &[72_104_621]
                 };
                 for lock in locks {
                     let writable: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
@@ -260,7 +260,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
         }))
     ));
     python.rollback().await?;
-    assert!(blocked.attempts().is_empty());
+    assert_eq!(blocked.attempts(), [] as [std::string::String; 0]);
 
     let stale = ActiveModelJob {
         lease_token: Uuid::from_u128(802),
@@ -272,7 +272,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
             .await,
         Err(GatewayError::State(ModelGateError::LeaseLost))
     ));
-    assert!(blocked.attempts().is_empty());
+    assert_eq!(blocked.attempts(), [] as [std::string::String; 0]);
 
     let stalled = Mock::new(&pool, Responses::InvalidThenStall);
     assert!(matches!(
@@ -317,7 +317,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
             .await,
         Err(GatewayError::Attempt(FallbackError::ConsentRequired))
     ));
-    assert!(blocked.attempts().is_empty());
+    assert_eq!(blocked.attempts(), [] as [std::string::String; 0]);
 
     let mut tracker_change = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(72104632)")
@@ -333,7 +333,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
         }))
     ));
     tracker_change.rollback().await?;
-    assert!(blocked.attempts().is_empty());
+    assert_eq!(blocked.attempts(), [] as [std::string::String; 0]);
 
     let revoked = Mock::new(&pool, Responses::RevokeAfterInvalid);
     assert!(matches!(
@@ -356,7 +356,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
             .await,
         Err(GatewayError::Consent(ModelConsentError::ConsentRequired))
     ));
-    assert!(blocked.attempts().is_empty());
+    assert_eq!(blocked.attempts(), [] as [std::string::String; 0]);
 
     sqlx::raw_sql(
         "CREATE FUNCTION fail_synthetic_gate_write() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -401,7 +401,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
             .fetch_one(&pool)
             .await?;
     assert_eq!(notices, 1);
-    assert!(blocked.attempts().is_empty());
+    assert_eq!(blocked.attempts(), [] as [std::string::String; 0]);
 
     sqlx::query("DELETE FROM app_state WHERE key='provider:gemini:gate'")
         .execute(&pool)
@@ -468,7 +468,7 @@ async fn enforces_consent_and_resumes_without_repeating_invalid_paid_attempts()
                 ModelConsentError::UnsupportedCapability
             ))
         ));
-        assert!(mock.attempts().is_empty());
+        assert_eq!(mock.attempts(), [] as [std::string::String; 0]);
         assert_eq!(
             structured
                 .execute_with(input(), &policy, &[], None, &mock)

@@ -250,7 +250,7 @@ impl Extension<'_> {
             return Some(cancelled_delivery(now));
         }
         let params = json!({"intent":intent.document(),"now":now.to_string()});
-        let policy = match self
+        let Ok(policy) = self
             .request(
                 2,
                 "delivery_policy",
@@ -259,9 +259,8 @@ impl Extension<'_> {
                 &mut cancelled,
             )
             .await
-        {
-            Ok(value) => value,
-            Err(_) => return preflight_retry(now),
+        else {
+            return preflight_retry(now);
         };
         let Ok(policy) = serde_json::from_str::<Policy>(policy.get()) else {
             return Some(cancelled_delivery(now));

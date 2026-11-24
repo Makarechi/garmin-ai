@@ -14,8 +14,8 @@ use super::{
 };
 use crate::{Database, check_readiness, replay::REPLAY_MUTATION_LOCK};
 
-const DELIVERY_POLICY_LOCK: i64 = 72104621;
-const CONTEXT_DELIVERY_LOCK: i64 = 72104643;
+const DELIVERY_POLICY_LOCK: i64 = 72_104_621;
+const CONTEXT_DELIVERY_LOCK: i64 = 72_104_643;
 const PRIMARY_CHANNEL: &str = "telegram:primary";
 const PENDING_KEY: &str = "analysis:conversation:pending";
 

@@ -11,6 +11,7 @@ pub enum EventTopology {
 }
 
 impl EventTopology {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Point => "point",
@@ -104,6 +105,7 @@ impl EventInput {
 }
 
 /// Reconstruct older audit envelopes where the source may be file import.
+#[must_use]
 pub fn restore_legacy_provenance(
     actor: &str,
     source: &str,
