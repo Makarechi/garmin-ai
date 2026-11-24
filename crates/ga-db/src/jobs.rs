@@ -362,6 +362,8 @@ impl Database {
                     )
                   ))
                 ORDER BY CASE
+                  WHEN job.kind='garmin_endpoint' AND starts_with(job.dedup_key,'telegram-refresh:')
+                       AND job.payload->>'key'=day.today THEN -1
                   WHEN job.payload->'backfill' IS DISTINCT FROM 'true'::jsonb
                       AND ((job.kind = 'garmin_endpoint' AND job.payload->>'key' = day.today
                            AND job.payload->>'endpoint' IN ('heart_rate', 'stress'))
