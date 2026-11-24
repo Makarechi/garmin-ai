@@ -105,6 +105,21 @@ async fn refreshes_stale_data_once_per_telegram_conversation() -> Result<(), Box
     message(&pool, owner, conversation, "2026-11-24T13:30:00Z", delayed).await?;
     db.schedule_garmin_sync(request(delayed)?).await?;
     assert_eq!(refresh_jobs(&pool).await?, after_pause);
+
+    let fresh_after_delayed = "2026-11-24T14:04:00Z";
+    let new_opener = message(
+        &pool,
+        owner,
+        conversation,
+        fresh_after_delayed,
+        fresh_after_delayed,
+    )
+    .await?;
+    db.schedule_garmin_sync(request(fresh_after_delayed)?)
+        .await?;
+    let after_backlog = refresh_jobs(&pool).await?;
+    assert_eq!(after_backlog.len(), 3);
+    assert!(after_backlog.contains(&format!("telegram-refresh:{new_opener}:sleep")));
     Ok(())
 }
 

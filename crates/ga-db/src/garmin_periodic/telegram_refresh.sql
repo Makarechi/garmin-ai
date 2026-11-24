@@ -14,8 +14,10 @@ WITH opener AS MATERIALIZED (
           SELECT 1 FROM inbound_messages AS prior
           WHERE prior.conversation_id=incoming.conversation_id AND prior.kind IN ('text','voice')
             AND NOT starts_with(ltrim(coalesce(prior.normalized_text,'')), '/')
-            AND prior.received_at>incoming.received_at-interval '15 minutes'
-            AND (prior.received_at,prior.id)<(incoming.received_at,incoming.id)
+            AND coalesce(prior.occurred_at,prior.received_at)
+                > coalesce(incoming.occurred_at,incoming.received_at)-interval '15 minutes'
+            AND (coalesce(prior.occurred_at,prior.received_at),prior.received_at,prior.id)
+                < (coalesce(incoming.occurred_at,incoming.received_at),incoming.received_at,incoming.id)
       )
     ORDER BY incoming.received_at DESC,incoming.id DESC
     LIMIT 1
