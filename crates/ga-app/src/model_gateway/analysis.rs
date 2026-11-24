@@ -81,16 +81,43 @@ pub struct AnalysisToolRead {
     pub schema_versions: BTreeSet<Uuid>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnalysisReadError {
+    Unavailable,
+    ReplayPending,
+}
+
+impl AnalysisReadError {
+    pub(crate) fn notice_key(self) -> &'static str {
+        match self {
+            Self::Unavailable => "agent.data_unavailable",
+            Self::ReplayPending => "agent.replay",
+        }
+    }
+}
+
+impl fmt::Display for AnalysisReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable => "Analysis data could not be read",
+            Self::ReplayPending => "Garmin projections are being rebuilt",
+        })
+    }
+}
+impl Error for AnalysisReadError {}
+
 /// Read-only adapter tied to the owner, the offered arguments, and the current
 /// revision of the evidence. Tool names in model-provided data grant no access.
 pub trait AnalysisReadTools: Sync {
     fn categories(&self) -> ModelCategories;
     fn context_current(&self) -> impl Future<Output = bool> + Send;
+    /// `None` preserves argument/access rejection. Storage failures must stop
+    /// the attempt instead of asking the model to revise valid arguments.
     fn read(
         &self,
         name: &str,
         arguments: &Map<String, Value>,
-    ) -> impl Future<Output = Option<AnalysisToolRead>> + Send;
+    ) -> impl Future<Output = Result<Option<AnalysisToolRead>, AnalysisReadError>> + Send;
 
     fn quality_report(&self) -> impl Future<Output = Option<(Value, bool)>> + Send {
         std::future::ready(None)
@@ -122,6 +149,7 @@ pub enum AnalysisResult {
 #[derive(Debug)]
 pub enum AnalysisError {
     Budget(AnalysisBudgetError),
+    Read(AnalysisReadError),
     EvidenceChanged,
     Step(AnalysisStepError),
     Model(GatewayError),
@@ -132,6 +160,7 @@ impl fmt::Display for AnalysisError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Budget(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
             Self::Step(error) => error.fmt(f),
             Self::Model(error) => error.fmt(f),
             Self::EvidenceChanged => f.write_str("Analysis context changed during the question"),
@@ -537,6 +566,7 @@ where
                             )
                             .await
                             .map_err(|_| AnalysisBudgetError::Timeout)?
+                            .map_err(AnalysisError::Read)?
                         }
                         _ => None,
                     };

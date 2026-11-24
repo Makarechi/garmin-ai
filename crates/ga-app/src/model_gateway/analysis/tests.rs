@@ -13,7 +13,7 @@ struct Reader {
     current: AtomicBool,
     reads: AtomicUsize,
     revoke_after_read: bool,
-    result: Value,
+    result: Result<Option<Value>, AnalysisReadError>,
     tracker_version: Option<Uuid>,
 }
 
@@ -34,7 +34,11 @@ impl AnalysisReadTools for Reader {
         clippy::unused_async_trait_impl,
         reason = "Keep the async trait method deferred until the returned future is polled"
     )]
-    async fn read(&self, name: &str, arguments: &Map<String, Value>) -> Option<AnalysisToolRead> {
+    async fn read(
+        &self,
+        name: &str,
+        arguments: &Map<String, Value>,
+    ) -> Result<Option<AnalysisToolRead>, AnalysisReadError> {
         assert_eq!(name, self.tool);
         if name == "personal_baseline" {
             assert_eq!(arguments["metric"], "sleep_score");
@@ -43,11 +47,11 @@ impl AnalysisReadTools for Reader {
         if self.revoke_after_read {
             self.current.store(false, Ordering::SeqCst);
         }
-        Some(AnalysisToolRead {
-            value: self.result.clone(),
+        Ok(self.result.clone()?.map(|value| AnalysisToolRead {
+            value,
             tracker_versions: self.tracker_version.into_iter().collect(),
             ..Default::default()
-        })
+        }))
     }
 }
 
@@ -72,7 +76,7 @@ async fn shares_the_interpretation_budget_and_executes_only_offered_reads()
         current: AtomicBool::new(true),
         reads: AtomicUsize::new(0),
         revoke_after_read: false,
-        result: json!({"mean":78.5}),
+        result: Ok(Some(json!({"mean":78.5}))),
         tracker_version: Some(Uuid::from_u128(42)),
     };
     let empty = json!({});
@@ -155,11 +159,11 @@ async fn stops_before_a_second_model_call_after_context_revocation_or_oversized_
             reads: AtomicUsize::new(0),
             revoke_after_read: revoked,
             tracker_version: None,
-            result: if revoked {
+            result: Ok(Some(if revoked {
                 json!({"value":42})
             } else {
                 json!({"value":"x".repeat(100_000)})
-            },
+            })),
         };
         let mut calls = 0;
         let result = answer_with(
@@ -195,7 +199,7 @@ async fn carries_timeline_evidence_to_the_next_send_check() -> Result<(), Box<dy
         current: AtomicBool::new(true),
         reads: AtomicUsize::new(0),
         revoke_after_read: false,
-        result: json!({"layers": [{"label": "synthetic timeline"}]}),
+        result: Ok(Some(json!({"layers": [{"label": "synthetic timeline"}]}))),
         tracker_version: None,
     };
     let empty = json!({});
@@ -225,5 +229,93 @@ async fn carries_timeline_evidence_to_the_next_send_check() -> Result<(), Box<dy
     )
     .await?;
     assert_eq!(checked, [0, 1]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stops_before_more_reads_or_model_calls_when_storage_is_unavailable() {
+    let empty = json!({});
+    let description = json!({"name": "personal_baseline"});
+    let menu = [OfferedReadTool {
+        name: "personal_baseline",
+        description: &description,
+    }];
+    for error in [
+        AnalysisReadError::Unavailable,
+        AnalysisReadError::ReplayPending,
+    ] {
+        let reader = Reader {
+            tool: "personal_baseline",
+            current: AtomicBool::new(true),
+            reads: AtomicUsize::new(0),
+            revoke_after_read: false,
+            result: Err(error),
+            tracker_version: None,
+        };
+        let mut calls = 0;
+        let result = answer_with(
+            request(&menu, &empty),
+            &mut AnalysisBudget::new(Instant::now()),
+            &reader,
+            |_, _, _, _| {
+                calls += 1;
+                let read = json!({
+                    "name": "personal_baseline",
+                    "arguments_json": r#"{"metric":"sleep_score","start":"2026-11-15","end":"2026-11-16"}"#,
+                });
+                ready(Ok(json!({"calls": [read.clone(), read]})))
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(AnalysisError::Read(actual)) if actual == error));
+        assert_eq!(calls, 1);
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+        assert!(catalog_text("en", error.notice_key()).is_some());
+        assert!(catalog_text("ru", error.notice_key()).is_some());
+    }
+}
+
+#[tokio::test]
+async fn keeps_argument_rejection_available_for_model_correction() -> Result<(), Box<dyn Error>> {
+    let reader = Reader {
+        tool: SLEEP_ANALYSIS,
+        current: AtomicBool::new(true),
+        reads: AtomicUsize::new(0),
+        revoke_after_read: false,
+        result: Ok(None),
+        tracker_version: None,
+    };
+    let empty = json!({});
+    let description = json!({"name": SLEEP_ANALYSIS});
+    let menu = [OfferedReadTool {
+        name: SLEEP_ANALYSIS,
+        description: &description,
+    }];
+    let mut prompts = Vec::new();
+    let result = answer_with(
+        request(&menu, &empty),
+        &mut AnalysisBudget::new(Instant::now()),
+        &reader,
+        |prompt, _, _, _| {
+            prompts.push(prompt);
+            ready(Ok(if prompts.len() == 1 {
+                json!({"calls": [{
+                    "name": SLEEP_ANALYSIS,
+                    "arguments_json": r#"{"start":"invalid","end":"2026-11-16"}"#,
+                } ]})
+            } else {
+                json!({})
+            }))
+        },
+    )
+    .await?;
+    assert!(matches!(result, AnalysisResult::NoAnswer { .. }));
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(prompts.len(), 2);
+    let correction: Value = serde_json::from_str(&prompts[1])?;
+    assert_eq!(
+        correction["evidence"][0]["result"]["error"],
+        "Invalid tool arguments; inspect schema and retry"
+    );
     Ok(())
 }

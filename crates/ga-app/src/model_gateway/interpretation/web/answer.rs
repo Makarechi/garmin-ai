@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::{CurrentModelPolicy, ModelGateway, WebInterpretation, urgent_notice};
 use crate::model_gateway::{
-    AnalysisDestination, AnalysisQuestion, AnalysisResult, DiaryAnalysisTools,
+    AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisResult, DiaryAnalysisTools,
     analysis_conversation, format_analysis_answer,
 };
 
@@ -120,8 +120,17 @@ impl ModelGateway<'_> {
                 },
                 self.sender(),
             )
-            .await
-            .ok()?;
+            .await;
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(AnalysisError::Read(error)) => {
+                return Some(WebAnswer::Notice(catalog_text(
+                    language,
+                    error.notice_key(),
+                )?));
+            }
+            Err(_) => return None,
+        };
         match answer {
             AnalysisResult::Safety { language } => {
                 Some(WebAnswer::Notice(urgent_notice(&language)))
