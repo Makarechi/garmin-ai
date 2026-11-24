@@ -215,6 +215,12 @@ impl WorkWakeups {
                 }
                 () = wait_until(refresh_at) => {
                     let Ok(next) = future_deadlines(listener).await else { return };
+                    // The snapshot excludes due rows. Wake timers that expired
+                    // during this refresh even if another topic triggered it.
+                    let now = Instant::now();
+                    for &(topic, at) in &deadlines {
+                        after_refresh[topic as usize] |= at <= now;
+                    }
                     deadlines = next;
                     refresh_at = None;
                     // A near-future retry may become due between the immediate

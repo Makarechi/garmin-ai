@@ -276,6 +276,73 @@ async fn verify_busy_is_not_empty(
     Ok(())
 }
 
+async fn verify_cross_topic_deadline(
+    pool: &PgPool,
+    replay: &mut WorkSubscription,
+    outbox: &mut WorkSubscription,
+) -> Result<(), Box<dyn Error>> {
+    let delayed = insert_job(pool, "raw_replay", 500).await?;
+    assert!(
+        replay.wait(Duration::from_secs(2)).await,
+        "Missing commit hint"
+    );
+    assert!(
+        replay.wait(Duration::from_secs(2)).await,
+        "Missing snapshot hint"
+    );
+
+    // Hold the outbox relation lock long enough for the cached replay deadline
+    // to expire while a refresh for the outbox topic is in flight.
+    let mut blocker = pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    sqlx::query("LOCK TABLE outbox_messages IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    sqlx::query("SELECT pg_notify('ga_work_ready','telegram_outbox')")
+        .execute(pool)
+        .await?;
+    assert!(
+        outbox.wait(Duration::from_secs(2)).await,
+        "Missing outbox hint"
+    );
+    timeout(Duration::from_millis(300), async {
+        loop {
+            let refresh_waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                 WHERE application_name='garmin-ai-work-wakeups' AND $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await?;
+            if refresh_waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await??;
+    assert!(
+        !replay.take_pending(),
+        "The replay timer fired before the refresh"
+    );
+    sqlx::query(
+        "SELECT pg_sleep(greatest(0, extract(epoch FROM run_at-clock_timestamp())))
+         FROM jobs WHERE id=$1",
+    )
+    .bind(delayed)
+    .execute(pool)
+    .await?;
+    blocker.commit().await?;
+
+    assert!(
+        replay.wait(Duration::from_secs(2)).await,
+        "An outbox refresh must wake the expired replay deadline"
+    );
+    Ok(())
+}
+
 async fn verify_deadlines_and_reconnect(
     database: &Database,
     pool: &PgPool,
@@ -288,6 +355,8 @@ async fn verify_deadlines_and_reconnect(
     sleep(Duration::from_millis(80)).await;
     replay.take_pending();
     outbox.take_pending();
+
+    verify_cross_topic_deadline(pool, &mut replay, &mut outbox).await?;
 
     // The immediate commit hint arrives before a future retry is eligible.
     let delayed = insert_job(pool, "raw_replay", 300).await?;
