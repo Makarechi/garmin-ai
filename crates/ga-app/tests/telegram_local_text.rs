@@ -173,6 +173,7 @@ async fn local_text_worker_screens_urgent_reports_before_older_diary_jobs()
     Box::pin(timeout(Duration::from_secs(8), async {
         tokio::select! {
             result = expected_replies => result,
+            worker = database.run_work_wakeups() => worker,
             worker = transport.run_local_text(&database, &settings, "en", false) => worker,
         }
     }))
@@ -227,6 +228,7 @@ async fn local_text_worker_screens_urgent_reports_before_older_diary_jobs()
     Box::pin(timeout(Duration::from_secs(15), async {
         tokio::select! {
             result = wait_for_screen => result,
+            worker = database.run_work_wakeups() => worker,
             worker = transport.run_local_text(&database, &settings, "en", true) => worker,
         }
     }))

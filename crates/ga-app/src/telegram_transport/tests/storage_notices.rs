@@ -273,6 +273,7 @@ async fn warns_about_storage_only_while_current_and_preserves_the_receipt()
     timeout(Duration::from_secs(6), async {
         tokio::select! {
             completion = server => completion,
+            worker = database.run_work_wakeups() => worker,
             worker = transport.run_replies(&database, &settings) => worker,
         }
     })

@@ -20,7 +20,7 @@ use ga_app::{
 };
 use ga_archive::Archive;
 use ga_db::{
-    Database, ReadinessError,
+    Database, ReadinessError, WorkTopic,
     fit_ingest::{FitIngestError, FitReplayError},
     jobs::{JobStoreError, RecordedJobStatus},
     replay::{CalendarReplayError, ReplaySelectionError, ReplayWorkerError, RunReplayJob},
@@ -35,7 +35,7 @@ use crate::{
     extensions::{ScheduledChannelPlugins, ScheduledSourcePlugins},
 };
 
-const WORKER_POLL: Duration = Duration::from_secs(1);
+const WORKER_IDLE: Duration = Duration::from_secs(30);
 const CLAIM_RETRY: Duration = Duration::from_secs(5);
 const REPLAY_BUSY_RETRY_MICROSECONDS: i64 = 2_000_000;
 const PLAN_BUSY: Duration = Duration::from_secs(30);
@@ -403,6 +403,7 @@ pub async fn run(once: bool, worker: bool) -> Result<(), ReplayServiceError> {
     tokio::select! {
         biased;
         result = shutdown => result.map_err(|_| ReplayServiceError::Shutdown),
+        _ = database.run_work_wakeups() => future::pending().await,
         result = receive => result,
         result = telegram_work => result,
         result = garmin_work => result,
@@ -421,6 +422,9 @@ async fn process_archive(
     timezone: &str,
     once: bool,
 ) -> Result<(), ReplayServiceError> {
+    // Subscribe before the first claim so a commit between an empty claim and
+    // waiting is retained. The database listener also wakes future retries.
+    let mut work = database.work_subscription(WorkTopic::Replay);
     let mut next_plan = Instant::now();
     loop {
         if Instant::now() >= next_plan {
@@ -440,6 +444,10 @@ async fn process_archive(
         }
         let lease = match database.claim_replay_job(clock()?, LEASE_SECONDS).await {
             Ok(lease) => lease,
+            Err(JobStoreError::Busy) if !once => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
             Err(
                 error @ (JobStoreError::StatementCanceled
                 | JobStoreError::Storage(ReadinessError::Unavailable)),
@@ -512,7 +520,8 @@ async fn process_archive(
         } else if once {
             println!("No archive replay is due");
         } else {
-            tokio::time::sleep(WORKER_POLL).await;
+            work.wait(WORKER_IDLE.min(next_plan.saturating_duration_since(Instant::now())))
+                .await;
         }
         if once {
             return Ok(());

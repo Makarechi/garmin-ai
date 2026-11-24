@@ -81,7 +81,7 @@ fn reports_storage_versions_without_installation_settings() -> Result<(), Box<dy
         serde_json::from_slice::<Value>(&output.stdout)?,
         serde_json::json!({
             "application_version": env!("CARGO_PKG_VERSION"),
-            "database_revision": "c54f8a72d130",
+            "database_revision": "d1f7a9306e42",
             "garmin_parser_version": 9,
             "fit_parser_version": 9,
             "fit_profile_version": "21.171",

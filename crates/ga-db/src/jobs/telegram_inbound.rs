@@ -356,7 +356,10 @@ impl Database {
             };
             let mut txn = begin(pool).await?;
             if !try_ingress_lock(&mut txn).await? {
-                return Ok(None);
+                // A competing lane can hold this lock without claiming any
+                // work. No queue change will wake us after it releases the
+                // lock, so contention must use the short retry path.
+                return Err(JobStoreError::Busy);
             }
             let now = OffsetDateTime::from(now);
             fail_exhausted(&mut txn, now, Some(&[KIND])).await?;

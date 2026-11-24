@@ -347,6 +347,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
     };
     tokio::select! {
         result=timeout(Duration::from_secs(5),urgent_reply)=>result??,
+        worker=database.run_work_wakeups()=>worker,
         worker=transport.run_local_text(&database,&settings,&locale,true)=>worker,
     }
     let voice = timeout(Duration::from_secs(3), async {
@@ -452,6 +453,7 @@ async fn local_tracker_entry_forms_match_frozen_conversation() -> Result<(), Box
     };
     tokio::select! {
         result=proof=>result?,
+        worker=database.run_work_wakeups()=>worker,
         worker=transport.run_tracker_forms(&database,&settings,"UTC",&locale,false)=>worker,
         worker=transport.run_tracker_setup(&database,&settings,"UTC",&locale,false)=>worker,
         worker=transport.run_local_text(&database,&settings,&locale,provider_available)=>worker,

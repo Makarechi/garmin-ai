@@ -1,4 +1,5 @@
--- Current public schema recorded from pinned Alembic head c54f8a72d130.
+-- Public row schema from c54f8a72d130, plus work_wakeups.sql in the same
+-- installation transaction, produces current revision d1f7a9306e42.
 -- Converted to a Timescale hypertable before the migration is recorded.
 
 CREATE FUNCTION public.reject_event_definition_version_update() RETURNS trigger

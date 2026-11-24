@@ -82,7 +82,7 @@ impl Database {
             .fetch_one(&mut *txn)
             .await?;
         if !admitted {
-            return Ok(None);
+            return Err(JobStoreError::Busy);
         }
         let at = OffsetDateTime::from(now);
         fail_exhausted(&mut txn, at, Some(&[KIND])).await?;

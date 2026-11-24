@@ -37,7 +37,7 @@ impl Database {
             .fetch_one(&mut *txn)
             .await?;
         if !admitted {
-            return Ok(());
+            return Err(JobStoreError::Busy);
         }
         let at = OffsetDateTime::from(now);
         let hour = at.unix_timestamp().div_euclid(3600);

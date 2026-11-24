@@ -32,6 +32,7 @@ const GARMIN_KINDS: &[&str] = &["garmin_endpoint", "garmin_activities", "garmin_
 #[derive(Debug)]
 pub enum JobStoreError {
     Storage(ReadinessError),
+    Busy,
     InvalidLeaseDuration,
     LeaseLost,
     PublicationTimedOut,
@@ -44,6 +45,7 @@ impl fmt::Display for JobStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Storage(_) => "Job storage is unavailable",
+            Self::Busy => "Job queue is busy",
             Self::InvalidLeaseDuration => "Lease duration must be between one second and one day",
             Self::LeaseLost => "Job lease expired or belongs to a different worker",
             Self::PublicationTimedOut => "Job publication timed out",
@@ -317,7 +319,8 @@ impl Database {
         if let Some(instance) = source_instance {
             match current_source_selected(&mut txn, instance).await {
                 Ok(true) => {}
-                Ok(false) | Err(GarminIntegrationError::Busy) => return Ok(None),
+                Ok(false) => return Ok(None),
+                Err(GarminIntegrationError::Busy) => return Err(JobStoreError::Busy),
                 Err(_) => return Err(JobStoreError::Database),
             }
         }
@@ -326,7 +329,7 @@ impl Database {
             .fetch_one(&mut *txn)
             .await?;
         if !admitted {
-            return Ok(None);
+            return Err(JobStoreError::Busy);
         }
         fail_exhausted(&mut txn, now.into(), None).await?;
         let paused = crate::garmin_integration::garmin_pause(&mut *txn, now)

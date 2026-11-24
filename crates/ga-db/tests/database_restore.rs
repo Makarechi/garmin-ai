@@ -36,6 +36,9 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
     let operation =
         Database::connect_lazy(&url).map_err(|_| "Test connection configuration failed")?;
     let fixture = fs::read_to_string(env::var("GA_TEST_RESTORE_INPUT")?)?;
+    let header: Value = serde_json::from_str(fixture.lines().next().ok_or("Missing header")?)?;
+    let fixture_revision = header["revision"].as_str().ok_or("Missing revision")?;
+    assert!(matches!(fixture_revision, "c54f8a72d130" | "d1f7a9306e42"));
     let (rows, footer) = fixture
         .trim_end()
         .rsplit_once('\n')
@@ -68,7 +71,7 @@ async fn restores_a_complete_snapshot_and_rolls_back_incomplete_input() -> Resul
     }
 
     let invalid = [
-        (fixture.replacen("c54f8a72d130", "unknown", 1), true),
+        (fixture.replacen(fixture_revision, "unknown", 1), true),
         (format!("{rows}\n"), false),
         (wrong_footer, false),
         (malformed_json, false),

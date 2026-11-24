@@ -331,6 +331,7 @@ async fn pages_history_with_signed_current_actions() -> Result<(), Box<dyn Error
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         tokio::select! {
             result = delivered => result,
+            worker = database.run_work_wakeups() => worker,
             outcome = worker.run_history(&database, &settings) => outcome,
         }
     })

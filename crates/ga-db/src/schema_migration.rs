@@ -17,6 +17,7 @@ const BEFORE_TELEGRAM_REPAIR: &str = "a42d9e18c701";
 const BEFORE_INGESTION_TIME: &str = "a72d9f4c8e31";
 const BEFORE_REVISIONS: &str = "b7c4e1a92d60";
 const BEFORE_FENCE: &str = "c8f51d3a7e20";
+pub(crate) const BEFORE_QUEUE_WAKEUPS: &str = "c54f8a72d130";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaState {
@@ -26,6 +27,7 @@ pub enum SchemaState {
     BeforeIngestionTime,
     BeforeRevisions,
     BeforeFence,
+    BeforeQueueWakeups,
     Current,
 }
 
@@ -39,6 +41,7 @@ impl SchemaState {
             Self::BeforeIngestionTime => Some(BEFORE_INGESTION_TIME),
             Self::BeforeRevisions => Some(BEFORE_REVISIONS),
             Self::BeforeFence => Some(BEFORE_FENCE),
+            Self::BeforeQueueWakeups => Some(BEFORE_QUEUE_WAKEUPS),
             Self::Current => Some(SCHEMA_REVISION),
         }
     }
@@ -111,6 +114,7 @@ impl Database {
             SchemaState::BeforeIngestionTime => measurement_ingestion(&mut txn).await?,
             SchemaState::BeforeRevisions => measurement_revisions(&mut txn).await?,
             SchemaState::BeforeFence => delivery_fence(&mut txn).await?,
+            SchemaState::BeforeQueueWakeups => queue_wakeups(&mut txn).await?,
             SchemaState::Current => {}
         }
         if initialize {
@@ -160,6 +164,7 @@ async fn schema_state(
             .await?;
     match revisions.as_slice() {
         [revision] if revision == SCHEMA_REVISION => Ok(SchemaState::Current),
+        [revision] if revision == BEFORE_QUEUE_WAKEUPS => Ok(SchemaState::BeforeQueueWakeups),
         [revision] if revision == BEFORE_FENCE => Ok(SchemaState::BeforeFence),
         [revision] if revision == BEFORE_REVISIONS => Ok(SchemaState::BeforeRevisions),
         [revision] if revision == BEFORE_INGESTION_TIME => Ok(SchemaState::BeforeIngestionTime),
@@ -205,6 +210,7 @@ async fn install(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrat
     sqlx::raw_sql(include_str!("schema_migration/bootstrap.sql"))
         .execute(&mut **txn)
         .await?;
+    install_queue_wakeups(txn).await?;
     sqlx::query(
         "SELECT public.create_hypertable('public.measurements', 'ts', create_default_indexes => FALSE)",
     ).execute(&mut **txn).await?;
@@ -251,7 +257,22 @@ async fn delivery_fence(txn: &mut Transaction<'_, Postgres>) -> Result<(), Schem
     sqlx::query("ALTER TABLE public.outbox_messages ADD COLUMN memory_fence JSONB")
         .execute(&mut **txn)
         .await?;
-    advance(txn, BEFORE_FENCE, SCHEMA_REVISION).await
+    advance(txn, BEFORE_FENCE, BEFORE_QUEUE_WAKEUPS).await?;
+    queue_wakeups(txn).await
+}
+
+async fn install_queue_wakeups(
+    txn: &mut Transaction<'_, Postgres>,
+) -> Result<(), SchemaMigrationError> {
+    sqlx::raw_sql(include_str!("schema_migration/work_wakeups.sql"))
+        .execute(&mut **txn)
+        .await?;
+    Ok(())
+}
+
+async fn queue_wakeups(txn: &mut Transaction<'_, Postgres>) -> Result<(), SchemaMigrationError> {
+    install_queue_wakeups(txn).await?;
+    advance(txn, BEFORE_QUEUE_WAKEUPS, SCHEMA_REVISION).await
 }
 
 async fn advance(

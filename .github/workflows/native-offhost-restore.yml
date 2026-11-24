@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/native-offhost-restore.yml"
       - "scripts/extract_native_test_binary.sh"
+      - "scripts/run_native_offhost_probe.py"
+      - "tests/test_native_offhost_probe.py"
       - "Dockerfile"
       - ".dockerignore"
       - "Cargo.lock"
@@ -20,6 +22,8 @@ on:
     paths:
       - ".github/workflows/native-offhost-restore.yml"
       - "scripts/extract_native_test_binary.sh"
+      - "scripts/run_native_offhost_probe.py"
+      - "tests/test_native_offhost_probe.py"
       - "Dockerfile"
       - ".dockerignore"
       - "Cargo.lock"
@@ -78,12 +82,14 @@ jobs:
           project="$GITHUB_WORKSPACE/test-results/backup-fixture"
           test "$(git -C "$project" rev-parse HEAD)" = "$FROZEN_PYTHON_COMMIT"
           if [[ $PROBE_RUNTIME == rust ]]; then
-            args=(--native-binary "$RUNNER_TEMP/garmin-ai-rust")
+            probe="$GITHUB_WORKSPACE/scripts/run_native_offhost_probe.py"
+            args=(--reference "$project" --native-binary "$RUNNER_TEMP/garmin-ai-rust")
           else
+            probe="$project/tests/evals/offhost_restore_probe.py"
             args=(--python-reference "$FROZEN_PYTHON_COMMIT")
           fi
           PYTHONPATH="$project/src:$project/migration" uv run --locked --no-dev --project "$project" \
-            python "$project/tests/evals/offhost_restore_probe.py" create \
+            python "$probe" create \
             "$RUNNER_TEMP/synthetic-offhost" --commit "$GITHUB_SHA" "${args[@]}"
       # The short-lived key and archive contain only data generated in this job.
       - uses: actions/upload-artifact@v4
@@ -136,8 +142,9 @@ jobs:
           project="$GITHUB_WORKSPACE/test-results/backup-fixture"
           test "$(git -C "$project" rev-parse HEAD)" = "$FROZEN_PYTHON_COMMIT"
           PYTHONPATH="$project/src:$project/migration" uv run --locked --no-dev --project "$project" \
-            python "$project/tests/evals/offhost_restore_probe.py" restore \
+            python "$GITHUB_WORKSPACE/scripts/run_native_offhost_probe.py" restore \
             "$RUNNER_TEMP/synthetic-offhost" --work "$RUNNER_TEMP/synthetic-restored" \
+            --reference "$project" \
             --native-binary "$RUNNER_TEMP/garmin-ai-rust" \
             --commit "$GITHUB_SHA" --evidence "$RUNNER_TEMP/native-offhost-result.json"
       - uses: actions/upload-artifact@v4

@@ -40,6 +40,9 @@ pub mod telegram_binding;
 pub mod telegram_cursor;
 mod telegram_garmin;
 pub mod web_chat;
+pub mod work_wakeups;
+
+pub use work_wakeups::{WorkSubscription, WorkTopic};
 
 use std::{str::FromStr, time::Duration};
 
@@ -63,6 +66,7 @@ pub struct Database {
     control: PgPool,
     work: PgPool,
     model_operations: PgPool,
+    work_wakeups: std::sync::Arc<work_wakeups::WorkWakeups>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +107,7 @@ impl Database {
         Ok(Self {
             control: small_pool(options.clone()),
             work: small_pool(options.clone()),
+            work_wakeups: work_wakeups::WorkWakeups::new(options.clone()),
             model_operations: small_pool(options),
         })
     }

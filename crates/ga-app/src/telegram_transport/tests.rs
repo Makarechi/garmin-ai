@@ -16,6 +16,7 @@ mod garmin_notices;
 mod reminders;
 mod storage_notices;
 mod voice;
+mod worker_wait;
 
 const FIXTURE_TOKEN: &str = "100:synthetic-transport";
 
