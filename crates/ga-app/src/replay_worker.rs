@@ -20,7 +20,7 @@ use ga_app::{
 };
 use ga_archive::Archive;
 use ga_db::{
-    Database,
+    Database, ReadinessError,
     fit_ingest::{FitIngestError, FitReplayError},
     jobs::{JobStoreError, RecordedJobStatus},
     replay::{CalendarReplayError, ReplaySelectionError, ReplayWorkerError, RunReplayJob},
@@ -427,7 +427,10 @@ async fn process_archive(
             let delay = match database.schedule_bound_replay(clock()?).await {
                 Ok(plan) if plan.plan_again_soon() => PLAN_BUSY,
                 Ok(_) => PLAN_IDLE,
-                Err(error @ ReplaySelectionError::StatementCanceled) if !once => {
+                Err(
+                    error @ (ReplaySelectionError::StatementCanceled
+                    | ReplaySelectionError::Unavailable(ReadinessError::Unavailable)),
+                ) if !once => {
                     eprintln!("Archive replay planning will retry: {error}");
                     PLAN_BUSY
                 }
@@ -437,7 +440,10 @@ async fn process_archive(
         }
         let lease = match database.claim_replay_job(clock()?, LEASE_SECONDS).await {
             Ok(lease) => lease,
-            Err(error @ JobStoreError::StatementCanceled) if !once => {
+            Err(
+                error @ (JobStoreError::StatementCanceled
+                | JobStoreError::Storage(ReadinessError::Unavailable)),
+            ) if !once => {
                 eprintln!("Archive replay job claim will retry: {error}");
                 tokio::time::sleep(CLAIM_RETRY).await;
                 continue;
@@ -479,10 +485,18 @@ async fn process_archive(
                     } else {
                         None
                     };
-                    match database.fail_replay_job(&lease, busy_until).await {
-                        Ok(status) => Some(status),
-                        Err(JobStoreError::LeaseLost) => None,
-                        Err(error) => return Err(ReplayServiceError::Jobs(error)),
+                    loop {
+                        match database.fail_replay_job(&lease, busy_until).await {
+                            Ok(status) => break Some(status),
+                            Err(JobStoreError::LeaseLost) => break None,
+                            Err(error @ JobStoreError::Storage(ReadinessError::Unavailable))
+                                if !once =>
+                            {
+                                eprintln!("Archive replay failure recording will retry: {error}");
+                                tokio::time::sleep(CLAIM_RETRY).await;
+                            }
+                            Err(error) => return Err(ReplayServiceError::Jobs(error)),
+                        }
                     }
                 }
             };
