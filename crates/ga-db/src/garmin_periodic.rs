@@ -250,6 +250,13 @@ impl Database {
             endpoints.contains(&"devices"),
         )?;
         let (periodic, compacted) = save_periodic_jobs(&mut txn, request.now, &plan).await?;
+        sqlx::query(include_str!("garmin_periodic/telegram_refresh.sql"))
+            .bind(owner.owner_id())
+            .bind(today.to_string())
+            .bind(OffsetDateTime::from(request.now))
+            .bind(&days)
+            .execute(&mut *txn)
+            .await?;
         txn.commit().await?;
         Ok(GarminSyncSchedule::Scheduled {
             history,
@@ -388,10 +395,19 @@ async fn save_periodic_jobs(
 ) -> Result<(u64, u64), GarminSyncScheduleError> {
     let at = OffsetDateTime::from(now);
     let inserted = sqlx::query(
-        "INSERT INTO jobs (id,kind,payload,dedup_key,status,run_at,attempts)
+        "WITH chat_refresh AS MATERIALIZED (
+             SELECT payload->>'endpoint' AS endpoint, payload->>'key' AS source_key
+             FROM jobs WHERE kind='garmin_endpoint' AND starts_with(dedup_key,'telegram-refresh:')
+               AND (status IN ('pending','running') OR
+                    (status='done' AND run_at>$1::timestamptz-interval '15 minutes'
+                     AND completed_at>$1::timestamptz-interval '3 minutes'))
+         )
+         INSERT INTO jobs (id,kind,payload,dedup_key,status,run_at,attempts)
          SELECT gen_random_uuid(),'garmin_endpoint',jsonb_build_object('endpoint',endpoint,'key',source_key),
                 dedup,'pending',$1::timestamptz+(delay+random()*jitter)*interval '1 second',0
          FROM jsonb_to_recordset($2::jsonb) AS planned(endpoint text,source_key text,dedup text,delay integer,jitter integer)
+         WHERE NOT EXISTS (SELECT 1 FROM chat_refresh chat
+                           WHERE chat.endpoint=planned.endpoint AND chat.source_key=planned.source_key)
          ON CONFLICT(dedup_key) DO NOTHING",
     )
     .bind(at)
