@@ -84,8 +84,10 @@ behind R02 remain reproducible.
 
 ## Reproduce
 
-From the repository root, use the locked project Python environment to generate
-synthetic fixtures and the probe's independent Cargo lock to compile it.
+To reproduce the measurements, use the
+[frozen checkout](https://github.com/Makarechi/garmin-ai/tree/9376d081620740799362282ac9faf2f1a1baaffa/migration)
+and run the commands from its root. Its locked Python environment generates the
+synthetic fixtures and the probe's own Cargo lock selects its Rust dependencies.
 
 ```sh
 cargo build --locked --release --manifest-path migration/fit_decoder_probe/Cargo.toml

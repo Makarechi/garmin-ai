@@ -25,7 +25,9 @@ docker run --rm --network none --read-only "$GA_APP_IMAGE" release-info
 
 ## Rehearse with synthetic data
 
-Use the frozen Python test environment and the exact native release binary.
+Run the commands below from the
+[frozen Python test checkout](https://github.com/Makarechi/garmin-ai/tree/9376d081620740799362282ac9faf2f1a1baaffa/migration)
+with the exact native release binary.
 Supply a new disposable TimescaleDB database through the fixture environment.
 Names must end in `_test`. The restore check uses three distinct databases on
 the same isolated server, through `GA_TEST_DATABASE_URL`,

@@ -34,8 +34,9 @@ Each row remains a candidate until the FIT checksum and the enclosing export
 both pass. The next step owns validation of the complete activity export and
 atomic publication to the existing database view.
 
-From the project root, the reference corpus can be regenerated with the locked
-Python environment. The generated fixtures contain synthetic values only.
+Run this historical procedure from the root of the
+[frozen checkout](https://github.com/Makarechi/garmin-ai/tree/9376d081620740799362282ac9faf2f1a1baaffa/migration)
+with its locked Python environment. The generated fixtures contain synthetic values only.
 
 ```sh
 PYTHONPATH=migration uv run python migration/fit_decoder_probe/corpus.py create test-results/fit-probe
