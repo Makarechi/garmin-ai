@@ -23,6 +23,7 @@ pub enum TelegramControl {
 }
 
 impl TelegramControl {
+    #[must_use]
     pub fn from_envelope(envelope: &InboundEnvelope) -> Option<Self> {
         if !matches!(envelope.kind(), InboundKind::Text | InboundKind::Voice) {
             return None;

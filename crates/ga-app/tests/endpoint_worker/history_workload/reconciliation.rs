@@ -40,7 +40,7 @@ async fn reconciles_two_shared_periodic_windows() -> Result<(), Box<dyn Error>> 
         )
         .execute(&fixture.inspect)
         .await?;
-        let completed = drain(&fixture, &worker, "").await?;
+        let completed = Box::pin(drain(&fixture, &worker, "")).await?;
         assert_eq!(completed, expected);
         passes.push(json!({ "jobs": completed, "seconds": started.elapsed().as_secs_f64() }));
     }

@@ -83,6 +83,10 @@ pub(crate) fn audited_instant(value: &Value) -> Result<Option<StoredInstant>, Re
     }
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "Idempotency compares normalized JSON numbers for exact equality"
+)]
 pub(crate) fn same_json(left: &Value, right: &Value) -> bool {
     if left == right {
         return true;
@@ -152,9 +156,14 @@ fn numeric(value: &Value) -> Option<f64> {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "The next power of two is the exact exclusive binary64 bound and only integral values are converted"
+)]
 fn same_mixed(integer: i128, value: &Value) -> bool {
     numeric(value).is_some_and(|value| {
-        value.trunc() == value
+        value.fract() == 0.0
             && value >= (i128::MIN as f64)
             && value < (i128::MAX as f64)
             && value as i128 == integer

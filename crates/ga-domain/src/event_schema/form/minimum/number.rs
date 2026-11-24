@@ -135,8 +135,8 @@ impl Decimal {
 
     fn cmp(&self, other: &Self) -> Ordering {
         let shared = self.exponent.min(other.exponent);
-        let left = &self.coefficient * power((self.exponent - shared) as usize);
-        let right = &other.coefficient * power((other.exponent - shared) as usize);
+        let left = &self.coefficient * power(self.exponent.abs_diff(shared) as usize);
+        let right = &other.coefficient * power(other.exponent.abs_diff(shared) as usize);
         left.cmp(&right)
     }
 
@@ -144,7 +144,7 @@ impl Decimal {
         let exponent = self.exponent + places;
         if exponent >= 0 {
             (
-                &self.coefficient * power(exponent as usize),
+                &self.coefficient * power(exponent.unsigned_abs() as usize),
                 BigInt::from(1),
             )
         } else {
@@ -216,8 +216,8 @@ fn fractional(node: &Map<String, Value>, storage: bool) -> Result<usize, FormPro
             else {
                 continue;
             };
-            if !Decimal::parse(&parsed.to_string())
-                .is_some_and(|stored| stored.cmp(&exact) == Ordering::Equal)
+            if Decimal::parse(&parsed.to_string())
+                .is_none_or(|stored| stored.cmp(&exact) != Ordering::Equal)
             {
                 continue;
             }
@@ -226,7 +226,7 @@ fn fractional(node: &Map<String, Value>, storage: bool) -> Result<usize, FormPro
             } else {
                 let digits = digits(&exact.coefficient);
                 let sign = usize::from(exact.coefficient.sign() == Sign::Minus);
-                let places = places as usize;
+                let places = places.unsigned_abs() as usize;
                 let plain = if digits > places {
                     sign + digits + 1
                 } else {

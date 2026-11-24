@@ -20,7 +20,7 @@ const HR_MESSAGE: u16 = 132;
 const HR_EVENT_TIMESTAMP: u8 = 9;
 const HR_EVENT_TIMESTAMP_12: u8 = 10;
 
-/// One compatible ActivityPart value. The source retains the original wire representation.
+/// One compatible `ActivityPart` value. The source retains the original wire representation.
 pub struct FitProjectionMessage {
     pub frame_index: u32,
     pub message_index: u32,
@@ -44,7 +44,10 @@ pub fn visit_fit_projection(
             state = Sequence::default();
             Ok(())
         }
-        WireRecord::Definition(local, definition) => state.define(profile, local, definition),
+        WireRecord::Definition(local, definition) => {
+            state.define(profile, local, definition);
+            Ok(())
+        }
         WireRecord::Message(message) => visit(state.project(profile, message)?),
     })
 }
@@ -58,12 +61,7 @@ struct Sequence {
 }
 
 impl Sequence {
-    fn define(
-        &mut self,
-        profile: &FitProfile,
-        local: u8,
-        definition: &Definition,
-    ) -> Result<(), FitError> {
+    fn define(&mut self, profile: &FitProfile, local: u8, definition: &Definition) {
         let message = profile.messages.get(&definition.global_number);
         for wire_field in definition
             .fields
@@ -86,7 +84,6 @@ impl Sequence {
             }
         }
         self.developers.define(local, &definition.fields);
-        Ok(())
     }
 
     fn project(
@@ -95,9 +92,10 @@ impl Sequence {
         wire: &FitWireMessage,
     ) -> Result<FitProjectionMessage, FitError> {
         let message = profile.messages.get(&wire.global_number);
-        let name = message
-            .map(|message| message.name.clone())
-            .unwrap_or_else(|| format!("unknown_{}", wire.global_number));
+        let name = message.map_or_else(
+            || format!("unknown_{}", wire.global_number),
+            |message| message.name.clone(),
+        );
         let raw: Vec<_> = wire
             .fields
             .iter()
@@ -198,6 +196,10 @@ impl Sequence {
         })
     }
 
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Heart rate timestamp components are combined using FIT binary64 scaling"
+    )]
     fn expand_component(
         &mut self,
         profile: &FitProfile,

@@ -30,9 +30,7 @@ pub(super) async fn available(
     State(state): State<AppState>,
     uri: Uri,
 ) -> Response {
-    let response = if method != Method::GET {
-        method_not_allowed("GET")
-    } else {
+    let response = if method == Method::GET {
         match authorized(&state, &headers, &[Scope::ReadDiary]).await {
             Ok((database, owner)) => database
                 .available_tracker_actions(
@@ -44,6 +42,8 @@ pub(super) async fn available(
                 .map_or_else(action_failure, |rows| Json(rows).into_response()),
             Err(status) => access_failure(status),
         }
+    } else {
+        method_not_allowed("GET")
     };
     private_cache(response, &headers)
 }
@@ -55,9 +55,7 @@ pub(super) async fn event(
     Path(id): Path<String>,
     uri: Uri,
 ) -> Response {
-    let response = if method != Method::GET {
-        method_not_allowed("GET")
-    } else {
+    let response = if method == Method::GET {
         match authorized(&state, &headers, &[Scope::ReadDiary]).await {
             Ok((database, owner)) => match Uuid::parse_str(&id) {
                 Ok(event) => database
@@ -73,6 +71,8 @@ pub(super) async fn event(
             },
             Err(status) => access_failure(status),
         }
+    } else {
+        method_not_allowed("GET")
     };
     private_cache(response, &headers)
 }
@@ -84,9 +84,7 @@ pub(super) async fn form(
     Path(id): Path<String>,
     uri: Uri,
 ) -> Response {
-    let response = if method != Method::GET {
-        method_not_allowed("GET")
-    } else {
+    let response = if method == Method::GET {
         match authorized(&state, &headers, &[Scope::ReadDiary]).await {
             Ok((database, owner)) => database
                 .tracker_generated_form(
@@ -99,6 +97,8 @@ pub(super) async fn form(
                 .map_or_else(action_failure, |form| Json(form).into_response()),
             Err(status) => access_failure(status),
         }
+    } else {
+        method_not_allowed("GET")
     };
     private_cache(response, &headers)
 }
@@ -109,9 +109,7 @@ pub(super) async fn submit(
     request: Request,
 ) -> Response {
     let (head, body) = request.into_parts();
-    let result = if head.method != Method::POST {
-        method_not_allowed("POST")
-    } else {
+    let result = if head.method == Method::POST {
         match authorized(
             &state,
             &head.headers,
@@ -135,6 +133,8 @@ pub(super) async fn submit(
             }
             Err(status) => access_failure(status),
         }
+    } else {
+        method_not_allowed("POST")
     };
     private_cache(result, &head.headers)
 }

@@ -116,6 +116,7 @@ pub enum GarminMiniAppResult {
 }
 
 impl GarminMiniAppResult {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::AlreadyConnected => "already_connected",
@@ -126,6 +127,7 @@ impl GarminMiniAppResult {
 }
 
 impl GarminMiniApp {
+    #[must_use]
     pub fn new(database: Database, settings: GarminMiniAppSettings) -> Self {
         Self {
             database,

@@ -30,6 +30,7 @@ pub struct DefinitionPage<'a> {
 }
 
 impl<'a> DefinitionPage<'a> {
+    #[must_use]
     pub fn parse(arguments: &'a Map<String, Value>) -> Option<Self> {
         if arguments.keys().any(|key| {
             !matches!(

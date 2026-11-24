@@ -114,11 +114,11 @@ fn read_state(directory: &Path) -> Result<Option<Retention>> {
 }
 
 fn save_state(directory: &Path, state: &Retention) -> Result<()> {
-    let mut stage = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(&mut stage, state)?;
-    stage.write_all(b"\n")?;
-    stage.as_file().sync_all()?;
-    stage
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&mut temporary, state)?;
+    temporary.write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary
         .persist(directory.join("state.json"))
         .map_err(|error| Failure::from(error.error))?;
     File::open(directory)?.sync_all()?;

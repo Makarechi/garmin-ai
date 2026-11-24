@@ -231,7 +231,7 @@ pub(super) async fn temporal_features_in(
     if purpose == TemporalPurpose::AsKnown && events.iter().any(|event| cutoff > *event) {
         return Err(HealthAnalysisError::InvalidKnowledgeCutoff);
     }
-    let latest = ordered.last().map(|(clock, _)| *clock).unwrap_or(earliest);
+    let latest = ordered.last().map_or(earliest, |(clock, _)| *clock);
     let mut lower = lower_bound(earliest)?;
     restore_clock_timezone(txn).await?;
     if clock_source == TemporalClock::DatabaseTimezone {

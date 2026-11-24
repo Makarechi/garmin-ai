@@ -255,34 +255,44 @@ impl EventInput {
         Ok(event)
     }
 
+    #[must_use]
     pub fn start(&self) -> StoredInstant {
         self.start
     }
 
+    #[must_use]
     pub fn source_calendar_date(&self) -> Option<time::Date> {
         source_calendar_date(self.start, &self.timezone)
     }
+    #[must_use]
     pub fn end(&self) -> Option<StoredInstant> {
         self.end
     }
+    #[must_use]
     pub fn display_times(&self) -> [Option<&str>; 2] {
         self.display_times.each_ref().map(|time| time.as_deref())
     }
+    #[must_use]
     pub fn timezone(&self) -> &str {
         &self.timezone
     }
+    #[must_use]
     pub fn source(&self) -> EventSource {
         self.source
     }
+    #[must_use]
     pub fn status(&self) -> EventStatus {
         self.status
     }
+    #[must_use]
     pub fn confidence(&self) -> f64 {
         self.confidence
     }
+    #[must_use]
     pub fn original_text(&self) -> Option<&str> {
         self.original_text.as_deref()
     }
+    #[must_use]
     pub fn payload(&self) -> &SystemPayload {
         &self.payload
     }
@@ -307,6 +317,7 @@ impl EventSource {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Manual => "manual",
@@ -335,6 +346,7 @@ impl EventStatus {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Confirmed => "confirmed",
@@ -344,6 +356,7 @@ impl EventStatus {
     }
 }
 
+#[must_use]
 pub fn known_timezone(name: &str) -> bool {
     let database = jiff::tz::db();
     database.get(name).is_ok_and(|zone| {
@@ -354,14 +367,17 @@ pub fn known_timezone(name: &str) -> bool {
     })
 }
 
+#[must_use]
 pub fn source_calendar_date(start: StoredInstant, timezone: &str) -> Option<time::Date> {
     source_calendar_wall_time(start, timezone).map(|(date, _)| date)
 }
 
+#[must_use]
 pub fn source_calendar_clock(start: StoredInstant, timezone: &str) -> Option<(time::Date, u8)> {
     source_calendar_wall_time(start, timezone).map(|(date, clock)| (date, clock.hour()))
 }
 
+#[must_use]
 pub fn source_calendar_wall_time(
     start: StoredInstant,
     timezone: &str,
@@ -386,6 +402,7 @@ pub fn source_calendar_wall_time(
 }
 
 /// Display a stored instant in the owner's zone while retaining its exact offset.
+#[must_use]
 pub fn source_offset_datetime(
     start: StoredInstant,
     timezone: &str,
@@ -397,12 +414,14 @@ pub fn source_offset_datetime(
     time::OffsetDateTime::from(start).checked_to_offset(offset)
 }
 
-/// Interpret local midnight using the first offset at overlaps, as Python ZoneInfo does.
+/// Interpret local midnight using the first offset at overlaps, as Python `ZoneInfo` does.
+#[must_use]
 pub fn local_midnight(day: time::Date, timezone: &str) -> Option<StoredInstant> {
     local_wall_time(day, time::Time::MIDNIGHT, timezone)
 }
 
-/// Interpret a saved wall clock time with Python ZoneInfo's default overlap and gap handling.
+/// Interpret a saved wall clock time with Python `ZoneInfo`'s default overlap and gap handling.
+#[must_use]
 pub fn local_wall_time(
     day: time::Date,
     clock: time::Time,
@@ -412,6 +431,7 @@ pub fn local_wall_time(
 }
 
 /// Resolve the next occurrence of a wall-clock time if a timezone overlap repeats it.
+#[must_use]
 pub fn local_wall_time_after(
     day: time::Date,
     clock: time::Time,
@@ -430,15 +450,15 @@ fn local_wall_instant(
     let zone = jiff::tz::db().get(timezone).ok()?;
     let day = jiff::civil::Date::new(
         i16::try_from(day.year()).ok()?,
-        u8::from(day.month()) as i8,
-        day.day() as i8,
+        day.month() as i8,
+        day.day().try_into().ok()?,
     )
     .ok()?;
     let wall = day.at(
-        clock.hour() as i8,
-        clock.minute() as i8,
-        clock.second() as i8,
-        clock.nanosecond() as i32,
+        clock.hour().try_into().ok()?,
+        clock.minute().try_into().ok()?,
+        clock.second().try_into().ok()?,
+        clock.nanosecond().try_into().ok()?,
     );
     let resolution = zone.to_ambiguous_timestamp(wall);
     let mut instant = resolution.compatible().ok()?.as_microsecond();

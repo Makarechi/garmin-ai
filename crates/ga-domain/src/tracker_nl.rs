@@ -66,6 +66,7 @@ impl TrackerTextRequest {
         })
     }
 
+    #[must_use]
     pub fn document(&self) -> Value {
         json!({"text":self.text,"operation_id":self.operation_id,"selected_event_id":self.selected_event_id.map(|id|id.to_string()),"selected_definition_version_id":self.selected_definition_version_id.map(|id|id.to_string())})
     }
@@ -87,6 +88,7 @@ impl TrackerTextRequest {
         Ok(hashes)
     }
 
+    #[must_use]
     pub fn operation_key(&self, actor: &str) -> String {
         format!(
             "nl-operation:{}",
@@ -108,6 +110,7 @@ pub struct TrackerRelevance {
 }
 
 impl TrackerRelevance {
+    #[must_use]
     pub fn new(text: &str) -> Self {
         Self {
             wanted: terms(text),

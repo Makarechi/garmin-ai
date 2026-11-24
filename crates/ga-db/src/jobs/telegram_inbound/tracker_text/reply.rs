@@ -220,33 +220,30 @@ pub(super) async fn finish_in(
             locale,
         )
         .await;
-        match form {
-            Ok(form) => {
-                let timezone = owner_timezone(txn, timezone)
-                    .await
-                    .map_err(|_| TelegramDiaryCommitError::Database)?;
-                match begin_chat_form(&form, &timezone, locale) {
-                    Ok(start) => {
-                        pending["chat_form"] = start.state;
-                        let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
-                            .fetch_one(&mut **txn)
-                            .await?;
-                        pending["created_at"] = json!(OffsetTimestamp(now).to_string());
-                        pending["prompt_advanced_at"] = json!(OffsetTimestamp(now).to_string());
-                        pending["prompt_order"] = tracker_form::order(txn, lease, envelope).await?;
-                        start.reply
-                    }
-                    Err(ChatFormError::Answer(reply)) => {
-                        keep = false;
-                        reply
-                    }
-                    Err(_) => return Err(TelegramDiaryCommitError::Database),
+        if let Ok(form) = form {
+            let timezone = owner_timezone(txn, timezone)
+                .await
+                .map_err(|_| TelegramDiaryCommitError::Database)?;
+            match begin_chat_form(&form, &timezone, locale) {
+                Ok(start) => {
+                    pending["chat_form"] = start.state;
+                    let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                        .fetch_one(&mut **txn)
+                        .await?;
+                    pending["created_at"] = json!(OffsetTimestamp(now).to_string());
+                    pending["prompt_advanced_at"] = json!(OffsetTimestamp(now).to_string());
+                    pending["prompt_order"] = tracker_form::order(txn, lease, envelope).await?;
+                    start.reply
                 }
+                Err(ChatFormError::Answer(reply)) => {
+                    keep = false;
+                    reply
+                }
+                Err(_) => return Err(TelegramDiaryCommitError::Database),
             }
-            Err(_) => {
-                invalid = true;
-                super::super::diary::UNDO_UNAVAILABLE_REPLY.to_owned()
-            }
+        } else {
+            invalid = true;
+            super::super::diary::UNDO_UNAVAILABLE_REPLY.to_owned()
         }
     } else {
         facts = tracker_form::allowed(txn, envelope, version, true).await?;

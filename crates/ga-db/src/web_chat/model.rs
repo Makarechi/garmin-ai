@@ -93,6 +93,7 @@ pub struct WebChatModelSession {
 }
 
 impl WebChatModelSession {
+    #[must_use]
     pub fn clarification_clock(&self) -> ClarificationClock {
         ClarificationClock {
             message_at: self.at,
@@ -101,6 +102,7 @@ impl WebChatModelSession {
         }
     }
 
+    #[must_use]
     pub fn binding(&self) -> ConversationBinding {
         ConversationBinding {
             owner_id: self.envelope.owner_id(),
@@ -167,8 +169,8 @@ impl Database {
                     lock,
                     envelope,
                     at,
-                    timezone,
                     locale,
+                    timezone,
                     undo_anchor,
                 },
             )))
@@ -298,18 +300,15 @@ async fn render_model_reply(
             )
             .await
             .and_then(|saved| saved_message(&saved));
-            match saved {
-                Some(message) => {
-                    cancel_in(&mut savepoint, session.binding())
-                        .await
-                        .map_err(|_| WebChatError::Database)?;
-                    savepoint.commit().await?;
-                    message
-                }
-                None => {
-                    savepoint.rollback().await?;
-                    return Ok((SAVE_FAILED.to_owned(), Vec::new()));
-                }
+            if let Some(message) = saved {
+                cancel_in(&mut savepoint, session.binding())
+                    .await
+                    .map_err(|_| WebChatError::Database)?;
+                savepoint.commit().await?;
+                message
+            } else {
+                savepoint.rollback().await?;
+                return Ok((SAVE_FAILED.to_owned(), Vec::new()));
             }
         }
         WebChatModelReply::Undo {

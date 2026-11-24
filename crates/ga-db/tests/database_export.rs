@@ -88,9 +88,9 @@ async fn streams_a_current_snapshot_without_activating_or_mutating_storage()
             .await,
         Err(DatabaseExportError::Owner)
     ));
-    assert!(nothing.is_empty());
+    assert_eq!(nothing, [] as [u8; 0]);
 
-    for lock in [72104622_i64, 72104625_i64] {
+    for lock in [72_104_622_i64, 72_104_625_i64] {
         let mut lifecycle = inspect.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock)
@@ -104,7 +104,7 @@ async fn streams_a_current_snapshot_without_activating_or_mutating_storage()
         ));
         lifecycle.rollback().await?;
     }
-    assert!(nothing.is_empty());
+    assert_eq!(nothing, [] as [u8; 0]);
 
     assert!(matches!(
         database.export_database_rows(owner, exported_at, &mut FullDisk).await,
@@ -160,7 +160,7 @@ async fn streams_a_current_snapshot_without_activating_or_mutating_storage()
             ReadinessError::StorageDisabled
         ))
     ));
-    assert!(nothing.is_empty());
+    assert_eq!(nothing, [] as [u8; 0]);
     println!("Validated owner and lifecycle gates, writer failure, and a concurrent commit");
     Ok(())
 }

@@ -110,7 +110,7 @@ async fn processes_shared_evening_workload() -> Result<(), Box<dyn Error>> {
         let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&fixture.inspect)
             .await?;
-        match worker.process_one(now.try_into()?).await? {
+        match Box::pin(worker.process_one(now.try_into()?)).await? {
             GarminQueueStep::Endpoint(EndpointWork::Publication(
                 EndpointPublication::Published(
                     DocumentStatus::Archived | DocumentStatus::Normalized,

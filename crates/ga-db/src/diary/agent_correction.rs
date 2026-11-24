@@ -158,8 +158,8 @@ fn correction_fields(
             "timezone" => {
                 patch.insert(field.clone(), json!(proposed.timezone()));
             }
-            path => {
-                let label = path
+            payload_path => {
+                let label = payload_path
                     .strip_prefix("payload.")
                     .filter(|key| {
                         !matches!(

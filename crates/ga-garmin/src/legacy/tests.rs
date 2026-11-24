@@ -428,7 +428,9 @@ async fn reads_original_data_and_rotates_once_after_a_legacy_resource_rejects_th
             .map_err(|_| io::Error::other("Call trace unavailable"))?;
         assert_eq!(calls.len(), 6);
         for pair in calls.windows(2) {
-            assert!(pair[1].duration_since(pair[0]) >= pacing - Duration::from_millis(15));
+            assert!(
+                pair[1].duration_since(pair[0]) >= pacing.saturating_sub(Duration::from_millis(15))
+            );
         }
     }
     target.mode.store(6, Ordering::Relaxed);

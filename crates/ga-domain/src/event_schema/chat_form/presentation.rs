@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use num_bigint::BigInt;
 use serde_json::{Value, json};
 
@@ -194,17 +196,24 @@ fn minimum_entry_length(form: &Value) -> Result<usize, ChatFormError> {
         .collect::<Vec<_>>();
     let mut total = 2 + required.len().saturating_sub(1);
     for field in required {
-        total += stored_length(&field["name"])? + 1;
+        total = total
+            .saturating_add(stored_length(&field["name"])?)
+            .saturating_add(1);
         let length = if field["has_const"] == true {
             stored_length(&field["const_value"])?
         } else {
             match field["input"].as_str() {
-                Some("text") => 2 + field["min_length"].as_u64().unwrap_or(0) as usize,
+                Some("text") => usize::try_from(field["min_length"].as_u64().unwrap_or(0))
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(2),
                 Some("boolean") => 4,
-                Some("json") => field["min_json_storage_length"]
-                    .as_u64()
-                    .filter(|&n| n > 0)
-                    .unwrap_or(1) as usize,
+                Some("json") => usize::try_from(
+                    field["min_json_storage_length"]
+                        .as_u64()
+                        .unwrap_or(1)
+                        .max(1),
+                )
+                .unwrap_or(usize::MAX),
                 Some("choice") => {
                     let options = field["options"].as_array().ok_or(ChatFormError::Invalid)?;
                     let labels = chat_choice_labels(options)?;
@@ -312,7 +321,7 @@ fn display_time(value: &Value, timezone: &str) -> Result<String, ChatFormError> 
         magnitude % 3600 / 60
     );
     if magnitude % 60 != 0 {
-        result.push_str(&format!(":{:02}", magnitude % 60));
+        let _ = write!(result, ":{:02}", magnitude % 60);
     }
     Ok(result)
 }
@@ -324,7 +333,10 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
         .as_array()
         .ok_or(ChatFormError::Invalid)?;
     let steps = steps(form, order)?;
-    let index = state["step"].as_u64().ok_or(ChatFormError::Invalid)? as usize;
+    let index = state["step"]
+        .as_u64()
+        .and_then(|step| usize::try_from(step).ok())
+        .ok_or(ChatFormError::Invalid)?;
     let step = steps.get(index).ok_or(ChatFormError::Invalid)?;
     let editing = state["action_id"]
         .as_str()
@@ -371,13 +383,14 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
             } else {
                 &state["end"]
             };
-            prompt.push_str(&format!(
+            let _ = write!(
+                prompt,
                 " {}.{keep}",
                 display_time(
                     value,
                     state["timezone"].as_str().ok_or(ChatFormError::Invalid)?
                 )?
-            ));
+            );
         }
         return Ok(prompt);
     }
@@ -389,7 +402,7 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
     let kind = field["input"].as_str().ok_or(ChatFormError::Invalid)?;
     let mut detail = String::new();
     if let Some(unit) = field["unit"].as_str().filter(|unit| !unit.is_empty()) {
-        detail.push_str(&format!(" ({})", literal(unit)));
+        let _ = write!(detail, " ({})", literal(unit));
     }
     if field["has_const"] == true {
         let value = if kind == "json" {
@@ -397,23 +410,25 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
         } else {
             python_string(&field["const_value"])?
         };
-        detail.push_str(&format!(
+        let _ = write!(
+            detail,
             " ({}: {})",
             message(locale, "фиксированное значение", "fixed value"),
             literal(&value)
-        ));
+        );
     }
     if kind == "choice" {
         let labels =
             chat_choice_labels(field["options"].as_array().ok_or(ChatFormError::Invalid)?)?;
-        detail.push_str(&format!(
+        let _ = write!(
+            detail,
             ": {}",
             labels
                 .iter()
                 .map(|s| literal(s))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ));
+        );
     }
     let mut bounds = Vec::new();
     for (bound, exclusive, open, closed) in [
@@ -433,15 +448,15 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
         }
     }
     if !bounds.is_empty() {
-        detail.push_str(&format!(" ({})", bounds.join(", ")));
+        let _ = write!(detail, " ({})", bounds.join(", "));
     }
     if kind == "text" {
         if let Some(min) = field["min_length"].as_u64().filter(|&min| min > 1) {
-            detail.push_str(&if super::russian(locale) {
-                format!(" (от {min} символов)")
+            if super::russian(locale) {
+                let _ = write!(detail, " (от {min} символов)");
             } else {
-                format!(" ({min}+ characters)")
-            });
+                let _ = write!(detail, " ({min}+ characters)");
+            }
         }
         detail.push_str(message(
             locale,
@@ -449,11 +464,11 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
             " (empty: =/empty; literal /empty: ==/empty; prefix other commands with =)",
         ));
         if let Some(max) = field["max_length"].as_u64() {
-            detail.push_str(&if super::russian(locale) {
-                format!(" (до {max} символов)")
+            if super::russian(locale) {
+                let _ = write!(detail, " (до {max} символов)");
             } else {
-                format!(" (up to {max} characters)")
-            });
+                let _ = write!(detail, " (up to {max} characters)");
+            }
         }
     }
     if kind == "json" {
@@ -492,7 +507,7 @@ pub fn chat_form_prompt(form: &Value, state: &Value) -> Result<String, ChatFormE
         } else {
             python_string(current)?
         };
-        prompt.push_str(&format!(" {}.{keep}", literal(&displayed)));
+        let _ = write!(prompt, " {}.{keep}", literal(&displayed));
         if matches!(kind, "text" | "choice") {
             prompt.push_str(equals);
         }
@@ -508,4 +523,26 @@ fn encoded_time(value: &Value) -> Result<Value, ChatFormError> {
     }
     let at = StoredInstant::legacy_input_with_offset(value).ok_or(ChatFormError::Invalid)?;
     Ok(json!(crate::timestamp::OffsetTimestamp(at).to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_an_oversized_required_field_before_prompting() {
+        let form = json!({
+            "action": {"kind": "create_entry"},
+            "submission_id": "synthetic",
+            "fields": [
+                {"name": "note", "input": "text", "required": true, "min_length": u64::MAX},
+                {"name": "follow_up", "input": "boolean", "required": true}
+            ]
+        });
+
+        assert!(matches!(
+            begin_chat_form(&form, "UTC", "en"),
+            Err(ChatFormError::Answer(message)) if message.contains("exceeds 64 KiB")
+        ));
+    }
 }

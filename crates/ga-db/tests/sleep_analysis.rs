@@ -68,7 +68,7 @@ async fn sleep_analysis_matches_main_and_nap_evidence() -> Result<(), Box<dyn Er
                     .ok_or("Missing baseline circular spread")?;
                 match (left.as_f64(), right.as_f64()) {
                     (Some(x), Some(y)) => {
-                        assert!((x - y).abs() < 1e-8, "{index} {name}: {x} / {y}")
+                        assert!((x - y).abs() < 1e-8, "{index} {name}: {x} / {y}");
                     }
                     _ => assert_eq!(left, right, "{index} {name}"),
                 }

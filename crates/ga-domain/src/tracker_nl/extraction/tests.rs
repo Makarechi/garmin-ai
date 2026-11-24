@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 use super::*;
 
 fn byte(text: &str, point: &Value) -> Result<usize, Box<dyn Error>> {
-    let point = point.as_u64().ok_or("Expected source code point")? as usize;
+    let point = point
+        .as_u64()
+        .and_then(|point| usize::try_from(point).ok())
+        .ok_or("Expected source code point")?;
     Ok(from_code_points(text, point..point)
         .ok_or("Expected source offset")?
         .utf8
@@ -138,7 +141,10 @@ fn matches_frozen_value_and_context_evidence() -> Result<(), Box<dyn Error>> {
             }
             "_explicit_offset_matches" => {
                 let quote = args[0].as_str().ok_or("Expected offset quote")?;
-                let seconds = args[1]["seconds"].as_f64().map(|value| value as i32);
+                let seconds = args[1]["seconds"]
+                    .as_number()
+                    .map(|value| value.as_str().trim_end_matches(".0").parse::<i32>())
+                    .transpose()?;
                 json!(calendar::explicit_offset(quote, seconds)?)
             }
             "_datetime_evidence" => {

@@ -28,6 +28,7 @@ pub enum ResourceKind {
 }
 
 impl ResourceKind {
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Events => "events",

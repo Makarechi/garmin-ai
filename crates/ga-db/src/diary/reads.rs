@@ -79,6 +79,7 @@ pub struct DiaryEventRange<'a> {
 }
 
 impl<'a> DiaryEventRange<'a> {
+    #[must_use]
     pub fn from_analysis_arguments(args: &'a serde_json::Map<String, Value>) -> Option<Self> {
         if args
             .keys()

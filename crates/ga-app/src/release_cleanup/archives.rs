@@ -19,7 +19,7 @@ const READ_ARCHIVE: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::NONBLOCK)
     .union(OFlags::CLOEXEC);
-const ARCHIVE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const ARCHIVE_AGE: Duration = Duration::from_hours(24);
 
 pub(crate) fn open_upload(path: &Path) -> Result<Option<File>> {
     let invalid = || {

@@ -36,6 +36,7 @@ pub struct TelegramAckLease {
 }
 
 impl TelegramAckLease {
+    #[must_use]
     pub fn callback_id(&self) -> &str {
         &self.callback_id
     }

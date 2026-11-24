@@ -60,10 +60,12 @@ pub struct CapturedFit {
 }
 
 impl CapturedFit {
+    #[must_use]
     pub fn source_id(&self) -> Uuid {
         self.id
     }
 
+    #[must_use]
     pub fn key(&self) -> &ArchiveKey {
         &self.key
     }
@@ -346,24 +348,23 @@ impl Database {
         .bind(OffsetDateTime::from(request.fetched_at))
         .fetch_optional(&mut *txn)
         .await?;
-        let id = match id {
-            Some(id) => id,
-            None => {
-                let existing = sqlx::query_as::<_, (Uuid, String)>(
-                    "SELECT id, archive_key FROM source_payloads
-                     WHERE source = $1 AND endpoint = $2 AND source_key = $3 AND payload_hash = $4",
-                )
-                .bind(GARMIN_LEGACY_SOURCE)
-                .bind(ENDPOINT)
-                .bind(request.activity_id)
-                .bind(digest)
-                .fetch_one(&mut *txn)
-                .await?;
-                if existing.1 != archive_key {
-                    return Err(FitIngestError::SourceMissing);
-                }
-                existing.0
+        let id = if let Some(id) = id {
+            id
+        } else {
+            let existing = sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, archive_key FROM source_payloads
+                 WHERE source = $1 AND endpoint = $2 AND source_key = $3 AND payload_hash = $4",
+            )
+            .bind(GARMIN_LEGACY_SOURCE)
+            .bind(ENDPOINT)
+            .bind(request.activity_id)
+            .bind(digest)
+            .fetch_one(&mut *txn)
+            .await?;
+            if existing.1 != archive_key {
+                return Err(FitIngestError::SourceMissing);
             }
+            existing.0
         };
         if let Some(lease) = lease {
             lease.check_live(&mut txn).await?;
@@ -584,7 +585,8 @@ fn legacy_archive_kind(
 ) -> Result<ArchiveKind, ArchiveError> {
     let length = size.min((ZIP_END_BYTES + ZIP_COMMENT_BYTES) as u64);
     source.seek(SeekFrom::Start(size - length))?;
-    let mut tail = vec![0; length as usize];
+    let tail_length = usize::try_from(length).map_err(|_| ArchiveError::PayloadTooLarge)?;
+    let mut tail = vec![0; tail_length];
     source.read_exact(&mut tail)?;
     source.seek(SeekFrom::Start(0))?;
     let zip = tail

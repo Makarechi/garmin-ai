@@ -149,18 +149,23 @@ impl CommunityPack {
         })
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }
+    #[must_use]
     pub fn trackers(&self) -> &[TrackerSetupDraft] {
         &self.trackers
     }
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }
+    #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
+    #[must_use]
     pub fn version(&self) -> i64 {
         self.version
     }

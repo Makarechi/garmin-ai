@@ -226,5 +226,5 @@ fn decimal_syntax(token: &str) -> Option<i64> {
     exponent
         .parse::<i64>()
         .ok()?
-        .checked_sub(fraction.len() as i64)
+        .checked_sub(i64::try_from(fraction.len()).ok()?)
 }

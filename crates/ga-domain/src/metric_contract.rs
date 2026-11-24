@@ -166,17 +166,21 @@ impl UserMetricContract {
         })
     }
 
+    #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
+    #[must_use]
     pub fn contract(&self) -> &Value {
         &self.contract
     }
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }
 }
 
+#[must_use]
 pub fn methods_for(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
         "physical_number" => Some(&["latest", "mean", "min", "max", "distribution"]),
@@ -189,6 +193,7 @@ pub fn methods_for(kind: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+#[must_use]
 pub fn metric_unit_dimension(unit: &str) -> Option<&'static str> {
     match unit {
         "1" => Some("dimensionless"),
@@ -220,6 +225,7 @@ fn digits(value: &str) -> bool {
 }
 
 /// Return the pinned Unicode decimal value of a character.
+#[must_use]
 pub fn decimal_value(character: char) -> Option<u8> {
     let codepoint = u32::from(character);
     let ranges = unicode_decimal::DECIMAL_RANGES;
@@ -286,6 +292,10 @@ fn number_or_null(
         .ok_or(error)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Integral legacy numbers are checked against the exclusive upper i64 bound and a positive metric range"
+)]
 fn integer_or_null(
     value: &Value,
     maximum: i64,

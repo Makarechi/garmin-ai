@@ -30,9 +30,9 @@ use crate::{
     resource_catalog::{CatalogError, CatalogEvidence},
 };
 
-pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72104631;
-pub(crate) const MODEL_CONSENT_LOCK: i64 = 72104632;
-pub(crate) const OWNER_ONBOARDING_LOCK: i64 = 72104621;
+pub(crate) const CHANNEL_CONSENT_LOCK: i64 = 72_104_631;
+pub(crate) const MODEL_CONSENT_LOCK: i64 = 72_104_632;
+pub(crate) const OWNER_ONBOARDING_LOCK: i64 = 72_104_621;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]

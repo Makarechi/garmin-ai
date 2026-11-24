@@ -179,16 +179,19 @@ impl CustomEntry {
         })
     }
 
+    #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
 
     /// Attribute a validated local MCP entry to the authenticated transport.
+    #[must_use]
     pub fn into_mcp_entry(mut self) -> Self {
         self.source = "mcp";
         self
     }
 
+    #[must_use]
     pub fn display_times(&self) -> [Option<&str>; 2] {
         self.display_times.each_ref().map(|time| time.as_deref())
     }
@@ -204,9 +207,10 @@ impl CustomEntry {
         let positive = end.is_some_and(|end| end > self.start);
         let topology = match topology {
             "point" if !positive => EventTopology::Point,
-            "bounded_interval" if positive => EventTopology::BoundedInterval,
             "open_interval" if end.is_none() => EventTopology::OpenInterval,
-            "open_interval" | "flexible" if positive => EventTopology::BoundedInterval,
+            "bounded_interval" | "open_interval" | "flexible" if positive => {
+                EventTopology::BoundedInterval
+            }
             "open_interval" | "flexible" => EventTopology::Point,
             _ => return Err(CustomEntryError::Topology),
         };

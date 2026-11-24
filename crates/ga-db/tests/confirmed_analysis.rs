@@ -72,7 +72,10 @@ async fn remembers_only_exact_confirmed_and_current_answers() -> Result<(), Box<
     }
     let events = fixture["events"].as_array().ok_or("Missing cases")?;
     for event in events {
-        let index = event["index"].as_u64().ok_or("Missing message index")? as usize;
+        let index = event["index"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or("Missing message index")?;
         let message = &messages[index];
         let outbox_id = identifier(&message["outbox_id"])?;
         let operation_id = identifier(&message["operation_id"])?;

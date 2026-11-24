@@ -108,12 +108,7 @@ impl Fixture {
         Ok(serde_json::from_str(&value)?)
     }
 
-    fn request<'a>(
-        &self,
-        lease: &'a GarminJobLease,
-        source: Uuid,
-        at: StoredInstant,
-    ) -> PublishEndpoint<'a> {
+    fn request(lease: &GarminJobLease, source: Uuid, at: StoredInstant) -> PublishEndpoint<'_> {
         PublishEndpoint {
             authenticated_fingerprint: ACCOUNT,
             lease,
@@ -265,7 +260,7 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
     .await?;
     assert!(matches!(
         run.database
-            .publish_garmin_endpoint(run.request(&lease, original, initial))
+            .publish_garmin_endpoint(Fixture::request(&lease, original, initial))
             .await,
         Err(EndpointError::Database)
     ));
@@ -286,7 +281,7 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
         .await?;
     assert_eq!(
         run.database
-            .publish_garmin_endpoint(run.request(&lease, original, initial))
+            .publish_garmin_endpoint(Fixture::request(&lease, original, initial))
             .await?,
         EndpointPublication::Published(DocumentStatus::Normalized)
     );
@@ -306,7 +301,7 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
     let future_job = run.enqueue(day, next, true).await?;
     assert_eq!(
         run.database
-            .publish_garmin_endpoint(run.request(&future_job, source, next_at))
+            .publish_garmin_endpoint(Fixture::request(&future_job, source, next_at))
             .await?,
         EndpointPublication::Published(DocumentStatus::Normalized)
     );
@@ -320,7 +315,7 @@ async fn commits_observation_freshness_and_history_under_the_live_job() -> Resul
     let stale_job = run.enqueue(day, next + Duration::seconds(1), true).await?;
     assert_eq!(
         run.database
-            .publish_garmin_endpoint(run.request(&stale_job, stale_raw, initial))
+            .publish_garmin_endpoint(Fixture::request(&stale_job, stale_raw, initial))
             .await?,
         EndpointPublication::Published(DocumentStatus::Stale)
     );

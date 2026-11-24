@@ -130,7 +130,7 @@ fn refuses_damage_and_preserves_prior_backup_when_publish_fails() -> Result<(), 
 fn digest(path: &Path) -> io::Result<[u8; 32]> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = vec![0; 64 * 1024];
     loop {
         let bytes = file.read(&mut buffer)?;
         if bytes == 0 {

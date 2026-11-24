@@ -64,7 +64,7 @@ async fn matches_python_tracker_checkins() -> Result<(), Box<dyn Error>> {
         database
             .queue_tracker_checkins(
                 TrackerReminderRoute {
-                    telegram_chat: 918725,
+                    telegram_chat: 918_725,
                     ..route()
                 },
                 &policy,

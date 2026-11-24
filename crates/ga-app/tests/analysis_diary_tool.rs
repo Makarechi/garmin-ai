@@ -214,12 +214,12 @@ async fn verify_native_ingress(
     let channel = TelegramBinding {
         owner_id,
         instance_id: "allowed",
-        external_owner_id: 900001,
+        external_owner_id: 900_001,
     };
     let arrival = json!({
-        "update_id":900010,
-        "message":{"message_id":900010,"date":OffsetDateTime::from(now).unix_timestamp(),
-            "from":{"id":900001},"chat":{"id":900001,"type":"private"},
+        "update_id":900_010,
+        "message":{"message_id":900_010,"date":OffsetDateTime::from(now).unix_timestamp(),
+            "from":{"id":900_001},"chat":{"id":900_001,"type":"private"},
             "text":"Synthetic question through native ingress"},
     });
     let mut runtime = db.acquire_runtime_lease().await?;

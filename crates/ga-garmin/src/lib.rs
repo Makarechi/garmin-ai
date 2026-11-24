@@ -210,10 +210,10 @@ impl PersonalClient {
         let mut session = self.inner.state.lock().await;
         let mut refreshed = false;
         loop {
-            if !session
+            if session
                 .token
                 .as_ref()
-                .is_some_and(|token| token.renew_at > Instant::now())
+                .is_none_or(|token| token.renew_at <= Instant::now())
             {
                 session.token = None;
                 let token = self.fetch_token(&mut session).await?;
@@ -396,7 +396,7 @@ fn retry_delay(response: &Response) -> Duration {
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(parse_retry_after)
-        .unwrap_or(Duration::from_secs(900))
+        .unwrap_or(Duration::from_mins(15))
 }
 
 fn parse_retry_after(value: &str) -> Option<Duration> {

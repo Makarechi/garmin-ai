@@ -72,9 +72,8 @@ async fn keeps_callback_work_independent_and_reclaims_after_restart() -> Result<
         database.claim_telegram_ack(primary, now),
         database.claim_telegram_ack(primary, now)
     );
-    let first = match (one?, two?) {
-        (Some(lease), None) | (None, Some(lease)) => lease,
-        _ => return Err("Expected exactly one claimant for the primary acknowledgement".into()),
+    let ((Some(first), None) | (None, Some(first))) = (one?, two?) else {
+        return Err("Expected exactly one claimant for the primary acknowledgement".into());
     };
     assert_eq!(first.callback_id(), "synthetic-primary");
 

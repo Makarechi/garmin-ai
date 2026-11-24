@@ -241,7 +241,7 @@ impl ScheduledBackups {
             Ok(estimate) => {
                 database
                     .complete_storage_check(&lease, estimate, at, worker, notify_telegram)
-                    .await?
+                    .await?;
             }
             Err(error) => {
                 let now = clock().map_err(|_| ScheduledBackupError::Clock)?;

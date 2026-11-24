@@ -8,7 +8,7 @@ use crate::{
     check_readiness,
 };
 
-pub(crate) const RUNTIME_LOCK: i64 = 72104620;
+pub(crate) const RUNTIME_LOCK: i64 = 72_104_620;
 const DATABASE_DEADLINE: Duration = Duration::from_millis(750);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);

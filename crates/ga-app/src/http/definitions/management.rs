@@ -71,9 +71,7 @@ async fn manage(
     operation: Result<Operation, uuid::Error>,
 ) -> Response {
     let (parts, body) = request.into_parts();
-    let response = if parts.method != method {
-        method_not_allowed(method)
-    } else {
+    let response = if parts.method == method {
         match authorized(&state, &parts.headers, &[Scope::ManageDefinitions]).await {
             Ok((database, owner)) => match operation {
                 Ok(operation) => store(database, owner, operation, body).await,
@@ -81,19 +79,18 @@ async fn manage(
             },
             Err(status) => access_failure(status),
         }
+    } else {
+        method_not_allowed(method)
     };
     private_cache(response, &parts.headers)
 }
 
 async fn store(database: &Database, owner: Uuid, operation: Operation, body: Body) -> Response {
-    let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(data) => data,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Definition request exceeds the size limit",
-            );
-        }
+    let Ok(data) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Definition request exceeds the size limit",
+        );
     };
     let data = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
     let Ok(value) = serde_json::from_slice::<Value>(data) else {

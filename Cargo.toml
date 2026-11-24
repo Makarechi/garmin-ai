@@ -20,5 +20,18 @@ publish = false
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Keep transactional workflows and end-to-end test scenarios together.
+too_many_lines = "allow"
+# These internal crates share typed error enums across their entry points.
+missing_errors_doc = "allow"
+# Keep query-local row types, constants and imports next to their use.
+items_after_statements = "allow"
+# Capability and consent flags represent independent choices.
+struct_excessive_bools = "allow"
+# Owned request structs and error adapters follow the calling APIs' ownership.
+needless_pass_by_value = "allow"
+# Shared Rust, SQL and wire field names preserve the shape of stored records.
+struct_field_names = "allow"
 expect_used = "deny"
 unwrap_used = "deny"

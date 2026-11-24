@@ -677,12 +677,12 @@ async fn applies_controls_with_their_durable_reply() -> Result<(), Box<dyn Error
         .claim_local_telegram_control(target, now, 60)
         .await?
         .ok_or("Missing invalid goals command")?;
-    let reply = database
+    let invalid_result = database
         .apply_telegram_owner_control(&invalid, 4, "Europe/Bratislava")
         .await?;
     let text: String =
         sqlx::query_scalar("SELECT intent#>>'{blocks,0,text}' FROM outbox_messages WHERE id=$1")
-            .bind(reply.outbox_id)
+            .bind(invalid_result.outbox_id)
             .fetch_one(&pool)
             .await?;
     assert!(text.starts_with("Не удалось выбрать цели."));

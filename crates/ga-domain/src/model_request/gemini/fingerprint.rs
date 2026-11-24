@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn matches_pinned_python_printability_for_every_unicode_scalar() {
         let mut digest = Sha256::new();
-        for character in (0..=0x10ffff).filter_map(char::from_u32) {
+        for character in (0..=0x0010_ffff).filter_map(char::from_u32) {
             digest.update([u8::from(printable(character))]);
         }
         assert_eq!(

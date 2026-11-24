@@ -142,7 +142,7 @@ fn interval_ends(
         return Ok(HashMap::new());
     };
     let gap = gap
-        .checked_mul(1000000)
+        .checked_mul(1_000_000)
         .ok_or(GenericAnalysisError::Calendar)?;
     let mut ends = HashMap::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
@@ -269,8 +269,10 @@ impl GenericAnalysisReader<'_> {
                 "Metric query exceeds 10000 observations",
             ));
         }
-        let identities: HashSet<MeasurementIdentity> =
-            snapshots.iter().map(|row| row.identity()).collect();
+        let identities: HashSet<MeasurementIdentity> = snapshots
+            .iter()
+            .map(measurements::MeasurementSnapshot::identity)
+            .collect();
         let mut input_revisions = Map::new();
         for snapshot in &snapshots {
             if let Some((reference, token)) = &snapshot.evidence {
@@ -281,7 +283,7 @@ impl GenericAnalysisReader<'_> {
             snapshots
                 .into_iter()
                 .filter(|row| !row.deleted && row.quality == "observed" && row.contract == Some(id))
-                .map(|row| row.into_aggregate())
+                .map(measurements::MeasurementSnapshot::into_aggregate)
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let fallback = self
@@ -301,16 +303,15 @@ impl GenericAnalysisReader<'_> {
             }
         }
         let available: BTreeSet<_> = rows.iter().map(|row| row.source.as_str()).collect();
-        let selected = match spec.document()["source"].as_str() {
-            Some(source) => Some(source.to_owned()),
-            None => {
-                if available.len() > 1 {
-                    return Err(GenericAnalysisError::Value(
-                        "Multiple metric sources; select one source",
-                    ));
-                }
-                available.into_iter().next().map(str::to_owned)
+        let selected = if let Some(source) = spec.document()["source"].as_str() {
+            Some(source.to_owned())
+        } else {
+            if available.len() > 1 {
+                return Err(GenericAnalysisError::Value(
+                    "Multiple metric sources; select one source",
+                ));
             }
+            available.into_iter().next().map(str::to_owned)
         };
         if let Some(source) = &selected {
             rows.retain(|row| row.source == *source);
@@ -371,8 +372,7 @@ impl GenericAnalysisReader<'_> {
             .iter()
             .map(|row| {
                 row.source_ref
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "None".to_owned())
+                    .map_or_else(|| "None".to_owned(), |id| id.to_string())
             })
             .collect();
         let latest = rows

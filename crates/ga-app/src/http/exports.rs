@@ -45,12 +45,12 @@ async fn export(state: AppState, headers: &HeaderMap, uri: &Uri) -> Response {
         form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()).collect();
     let mut errors = Vec::new();
     let start = instant(
-        parameters.get("start").map(|value| value.as_ref()),
+        parameters.get("start").map(std::convert::AsRef::as_ref),
         "start",
         &mut errors,
     );
     let end = instant(
-        parameters.get("end").map(|value| value.as_ref()),
+        parameters.get("end").map(std::convert::AsRef::as_ref),
         "end",
         &mut errors,
     );
@@ -74,7 +74,7 @@ async fn export(state: AppState, headers: &HeaderMap, uri: &Uri) -> Response {
     let Some(database) = state.database else {
         return storage_unavailable();
     };
-    let timezone = parameters.get("timezone").map(|value| value.as_ref());
+    let timezone = parameters.get("timezone").map(std::convert::AsRef::as_ref);
     let result = match database
         .export_diary(start, end, timezone, &state.configured_timezone)
         .await
@@ -206,7 +206,7 @@ fn csv(result: &Value) -> Option<String> {
                 },
             });
         }
-        csv_row(&mut output, values.iter().map(|part| part.as_ref()));
+        csv_row(&mut output, values.iter().map(std::convert::AsRef::as_ref));
     }
     Some(output)
 }

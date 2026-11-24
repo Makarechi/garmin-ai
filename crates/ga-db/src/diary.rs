@@ -64,7 +64,7 @@ use crate::{
     system_definitions::{DefinitionStoreError, ensure_system_definition_in},
 };
 
-const MUTATION_LOCK: i64 = 72104619;
+const MUTATION_LOCK: i64 = 72_104_619;
 
 pub struct CreateSystemEvent<'a> {
     pub owner_id: Uuid,
@@ -246,7 +246,9 @@ impl Database {
         .bind(
             provenance
                 .clock_uncertainty_seconds
-                .map(|value| value as i32),
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| DiaryWriteError::Clock(InvalidClockUncertainty))?,
         )
         .bind(provenance.assertion_kind)
         .bind(provenance.producer)

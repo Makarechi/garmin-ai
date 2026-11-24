@@ -126,6 +126,7 @@ pub(super) async fn series_in(
     let maximum = contract["maximum"].as_f64();
     let gap = contract["max_gap_seconds"]
         .as_i64()
+        .and_then(|seconds| i32::try_from(seconds).ok())
         .ok_or(SeriesReadError::Invalid)?;
     let mut results = sqlx::query_as::<_, SeriesRow>(include_str!("series.sql"))
         .bind(metric)
@@ -134,7 +135,7 @@ pub(super) async fn series_in(
         .bind(maximum)
         .bind(start)
         .bind(end)
-        .bind(gap as f64)
+        .bind(f64::from(gap))
         .bind(f64::from(minutes) * 60.0)
         .bind(origin)
         .bind(aggregation == "time_weighted_mean")

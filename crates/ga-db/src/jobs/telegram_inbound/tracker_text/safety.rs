@@ -15,6 +15,7 @@ pub enum TrackerSafetyStatus {
 }
 
 impl TrackerSafetyStatus {
+    #[must_use]
     pub fn from_stored(value: &str) -> Option<Self> {
         match value {
             "checked" => Some(Self::Checked),
@@ -24,6 +25,7 @@ impl TrackerSafetyStatus {
         }
     }
 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Checked => "checked",

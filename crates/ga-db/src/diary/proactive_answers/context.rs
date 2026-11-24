@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use futures_util::TryStreamExt;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
@@ -153,18 +155,19 @@ pub(crate) fn display(instant: OffsetDateTime) -> String {
     let date = instant.date();
     let mut output = format!("{date}T{hour:02}:{minute:02}:{second:02}");
     if microseconds != 0 {
-        output.push_str(&format!(".{microseconds:06}"));
+        let _ = write!(output, ".{microseconds:06}");
     }
     let offset = instant.offset();
     let sign = if offset.is_negative() { '-' } else { '+' };
     let (h, m, s) = offset.as_hms();
-    output.push_str(&format!(
+    let _ = write!(
+        output,
         "{sign}{:02}:{:02}",
         h.unsigned_abs(),
         m.unsigned_abs()
-    ));
+    );
     if s != 0 {
-        output.push_str(&format!(":{:02}", s.unsigned_abs()));
+        let _ = write!(output, ":{:02}", s.unsigned_abs());
     }
     output
 }

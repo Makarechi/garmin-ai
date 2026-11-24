@@ -33,6 +33,7 @@ impl ModelCategories {
             .filter_map(move |(bit, name)| (self.0 & (1 << bit) != 0).then_some(name))
     }
 
+    #[must_use]
     pub fn covers(self, requested: Self) -> bool {
         self.0 & requested.0 == requested.0
     }
@@ -54,6 +55,7 @@ pub enum ModelOperation {
 }
 
 impl ModelOperation {
+    #[must_use]
     pub fn categories(self) -> ModelCategories {
         match self {
             Self::Configure => ModelCategories::default(),

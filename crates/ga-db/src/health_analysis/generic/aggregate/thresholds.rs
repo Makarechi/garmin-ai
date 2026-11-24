@@ -235,6 +235,10 @@ impl GenericAnalysisReader<'_> {
         })
     }
 
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Durations in microseconds are reported as fractional seconds"
+    )]
     pub async fn threshold_segments(
         mut self,
         spec: &AnalysisSpec,
@@ -259,7 +263,7 @@ impl GenericAnalysisReader<'_> {
                 matching += (row.right - row.left) as f64 / 1_000_000.0;
                 if let Some(last) = segments.last_mut().filter(|last| last.right == row.left) {
                     last.right = row.right;
-                    last.right_display = row.right_display.clone();
+                    last.right_display.clone_from(&row.right_display);
                     if row.value > last.value {
                         last.value = row.value;
                     }
@@ -285,10 +289,10 @@ impl GenericAnalysisReader<'_> {
                     / ((microseconds(spec.end()) - microseconds(spec.start())) as f64
                         / 1_000_000.0)
             );
-            payload["matching_seconds"] = if covered != 0.0 {
-                json!(matching)
-            } else {
+            payload["matching_seconds"] = if covered == 0.0 {
                 Value::Null
+            } else {
+                json!(matching)
             };
             payload["segments"] = json!(segments);
             payload["limitations"] = json!([
@@ -340,9 +344,9 @@ impl GenericAnalysisReader<'_> {
                         "hour": hour,
                         "scheduled_seconds": scheduled[hour],
                         "covered_seconds": covered[hour],
-                        "matching_seconds": if covered[hour]!=0.0 {Some(matching[hour])} else {None},
-                        "matching_ratio": if covered[hour]!=0.0 {Some(matching[hour]/covered[hour])} else {None},
-                        "coverage_ratio": if scheduled[hour]!=0.0 {Some(covered[hour]/scheduled[hour])} else {None},
+                        "matching_seconds": if covered[hour] == 0.0 {None} else {Some(matching[hour])},
+                        "matching_ratio": if covered[hour] == 0.0 {None} else {Some(matching[hour]/covered[hour])},
+                        "coverage_ratio": if scheduled[hour] == 0.0 {None} else {Some(covered[hour]/scheduled[hour])},
                         "observed_days": days[hour].len(),
                     })
                 })
@@ -369,8 +373,7 @@ fn threshold_metadata(spec: &AnalysisSpec, snapshot: &ThresholdSnapshot) -> Valu
         .unwrap_or_default();
     let cutoff = cutoff
         .strip_suffix('Z')
-        .map(|value| format!("{value}+00:00"))
-        .unwrap_or_else(|| cutoff.to_owned());
+        .map_or_else(|| cutoff.to_owned(), |value| format!("{value}+00:00"));
     json!({"spec_hash":spec.hash(),"metric":spec.document()["metric_key"],
         "metric_version":snapshot.contract["version"],"unit":snapshot.contract["unit"],
         "scale_id":snapshot.contract["scale_id"],"scale_version":snapshot.contract["scale_version"],

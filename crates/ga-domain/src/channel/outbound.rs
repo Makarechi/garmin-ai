@@ -156,26 +156,32 @@ impl OutboundIntent {
         })
     }
 
+    #[must_use]
     pub fn intent_id(&self) -> Uuid {
         self.intent_id
     }
 
+    #[must_use]
     pub fn owner_id(&self) -> Uuid {
         self.owner_id
     }
 
+    #[must_use]
     pub fn conversation_id(&self) -> Uuid {
         self.conversation_id
     }
 
+    #[must_use]
     pub fn channel(&self) -> &ChannelInstance {
         &self.channel
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }
 
+    #[must_use]
     pub fn into_document(self) -> Value {
         self.document
     }

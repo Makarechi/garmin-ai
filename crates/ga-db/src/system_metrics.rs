@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::{Database, ReadinessError, check_readiness};
 
-const METRIC_REGISTRY_LOCK: i64 = 72104629;
-const DIARY_WRITER_LOCK: i64 = 72104619;
+const METRIC_REGISTRY_LOCK: i64 = 72_104_629;
+const DIARY_WRITER_LOCK: i64 = 72_104_619;
 
 #[derive(Debug)]
 pub enum MetricRegistryError {

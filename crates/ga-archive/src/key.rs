@@ -26,6 +26,7 @@ pub struct ArchiveKey {
 }
 
 impl ArchiveKey {
+    #[must_use]
     pub fn digest_hex(&self) -> String {
         hex::encode(self.digest)
     }

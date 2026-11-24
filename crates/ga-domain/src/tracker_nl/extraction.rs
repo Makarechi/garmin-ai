@@ -162,6 +162,7 @@ impl TrackerExtraction {
         Ok(Self { document })
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }

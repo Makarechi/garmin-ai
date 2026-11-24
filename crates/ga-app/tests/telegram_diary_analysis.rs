@@ -1,4 +1,4 @@
-use std::{env, error::Error, str::FromStr};
+use std::{collections::BTreeSet, env, error::Error, str::FromStr};
 
 use ga_app::telegram_input::TelegramBinding;
 use ga_db::{
@@ -130,7 +130,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
             },
         })
         .await?;
-    assert!(context.events.entries.is_empty());
+    assert_eq!(context.events.entries, [] as [serde_json::Value; 0]);
     let digest = context.digest()?;
     let policy = TelegramModelContext {
         model_instance: model_id,
@@ -187,7 +187,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
                 policy,
                 goals_revision,
                 &[first],
-                &Default::default(),
+                &BTreeSet::default(),
                 reply()?
             )
             .await,
@@ -207,7 +207,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
                 policy,
                 goals_revision,
                 &[current_evidence],
-                &Default::default(),
+                &BTreeSet::default(),
                 reply()?
             )
             .await,
@@ -225,7 +225,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
             policy,
             goals_revision,
             &[read().await?],
-            &Default::default(),
+            &BTreeSet::default(),
             reply()?,
         )
         .await?;

@@ -6,6 +6,11 @@ use time::Date;
 
 /// Match the maximum number of episode days to distinct same-weekday controls,
 /// then minimize total calendar distance with the legacy deterministic tie order.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Distances and column indexes come from bounded date windows and form binary64 costs"
+)]
 pub fn match_weekday_controls(episodes: &[Date], controls: &[Date]) -> Vec<(usize, usize)> {
     let penalty = ((episodes.len() + 1) * 57) as f64;
     let cost = |row: usize, column: usize| {
@@ -30,6 +35,10 @@ pub fn match_weekday_controls(episodes: &[Date], controls: &[Date]) -> Vec<(usiz
 
 // This app's matrix is always wide and finite, with one dummy column per row.
 // Evaluate its entries on demand so the 200-day query needs linear working memory.
+#[expect(
+    clippy::float_cmp,
+    reason = "Exact ties need deterministic ordering to match SciPy assignments"
+)]
 fn minimum_cost_assignment(
     rows: usize,
     columns: usize,

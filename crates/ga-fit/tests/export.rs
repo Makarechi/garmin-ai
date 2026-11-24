@@ -39,7 +39,7 @@ fn verify(raw: &[u8], budget: ExportLimits) -> Result<ExportInventory, FitError>
     verify_activity_export(Cursor::new(raw), budget, || false, |_| {})
 }
 
-fn signature(raw: &[u8], magic: &[u8; 4]) -> Result<usize, io::Error> {
+fn signature(raw: &[u8], magic: [u8; 4]) -> Result<usize, io::Error> {
     raw.windows(4)
         .position(|data| data == magic)
         .ok_or_else(|| io::Error::other("Missing synthetic ZIP signature"))
@@ -125,7 +125,7 @@ fn rejects_paths_symlinks_and_counts_unselected_members_before_inflation()
 fn requires_both_zip_and_fit_checksums_and_bounds_actual_member_bytes() -> Result<(), Box<dyn Error>>
 {
     let archive = zip(&[("activity.fit", FIT)], CompressionMethod::Stored)?;
-    let central = signature(&archive, b"PK\x01\x02")?;
+    let central = signature(&archive, *b"PK\x01\x02")?;
     let mut crc = archive.clone();
     crc[14] ^= 1;
     crc[central + 16] ^= 1;
@@ -313,7 +313,7 @@ fn enforces_single_member_boundary_at_every_small_zip_size() -> Result<(), Box<d
             };
             let inventory = verify(&raw, accepted)?;
             assert_eq!(inventory.fit_members, fit_members);
-            assert_eq!(inventory.frames, fit_members as u32);
+            assert_eq!(inventory.frames, u32::try_from(fit_members)?);
             assert_eq!(inventory.fit_bytes, (fit_members * FIT.len()) as u64);
             let denied = ExportLimits {
                 max_zip_entries: NonZeroUsize::try_from(entries.len() - 1)?,

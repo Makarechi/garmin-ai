@@ -97,6 +97,7 @@ impl fmt::Display for EndpointError {
 impl Error for EndpointError {}
 
 impl EndpointError {
+    #[must_use]
     pub fn storage_busy(&self) -> bool {
         matches!(
             self,
@@ -345,7 +346,7 @@ impl Database {
             let result = self
                 .begin_endpoint_once(endpoint, account, lease, at, lease_read)
                 .await;
-            if !result.as_ref().is_err_and(|error| error.storage_busy())
+            if !result.as_ref().is_err_and(EndpointError::storage_busy)
                 || Instant::now() >= deadline
             {
                 return result;
@@ -385,7 +386,7 @@ impl Database {
         match lease_read {
             LeaseRead::Observe => lease.observe_live(&mut txn).await?,
             LeaseRead::Lock | LeaseRead::Publication => lease.check_live(&mut txn).await?,
-        };
+        }
         if matches!(lease_read, LeaseRead::Publication) {
             // The row stays locked through publication, and a rollback restores the prior lease.
             lease

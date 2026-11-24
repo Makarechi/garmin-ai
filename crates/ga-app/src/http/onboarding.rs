@@ -66,14 +66,11 @@ pub(super) async fn tracker_profile(
 }
 
 async fn apply(database: &Database, owner: Uuid, headers: &HeaderMap, body: Body) -> Response {
-    let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(data) => data,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Setup request exceeds the size limit",
-            );
-        }
+    let Ok(data) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Setup request exceeds the size limit",
+        );
     };
     let value = match request_json::parse_object(&data, headers) {
         Ok(value) => value,

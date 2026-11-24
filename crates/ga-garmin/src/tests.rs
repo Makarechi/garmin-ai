@@ -254,7 +254,7 @@ async fn cooldown_and_status_errors_do_not_leak_upstream_body_or_repeat_calls()
     assert_eq!(state.counts(), (1, 3));
     assert_eq!(
         parse_retry_after("18446744073709551615"),
-        Some(Duration::MAX - Duration::from_nanos(999_999_999))
+        Duration::MAX.checked_sub(Duration::from_nanos(999_999_999))
     );
     assert_eq!(
         parse_retry_after("Sat, 01 Jan 2000 00:00:00 GMT"),

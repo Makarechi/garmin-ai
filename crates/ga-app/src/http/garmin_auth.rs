@@ -216,10 +216,6 @@ fn failure(error: GarminMiniAppError, completing: bool) -> Response {
             S::UNAUTHORIZED,
             "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect.",
         ),
-        GarminMiniAppError::Database(GarminReauthError::Publication) if completing => (
-            S::SERVICE_UNAVAILABLE,
-            "Не удалось завершить вход в Garmin. Попробуйте ещё раз.",
-        ),
         GarminMiniAppError::Database(
             GarminReauthError::Channel(_)
             | GarminReauthError::Integration(_)

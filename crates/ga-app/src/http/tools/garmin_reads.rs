@@ -73,19 +73,18 @@ pub(crate) async fn read_garmin(
 ) -> Result<JsonDocument, GarminReadError> {
     if tool == ReadTool::Sleep && arguments.get("timing_only") == Some(&Value::Bool(true)) {
         let (start, end, policy, _) = sleep_input(arguments).ok_or(GarminReadError::Arguments)?;
-        let value = match mcp_owner {
-            Some(owner) => database
+        let value = if let Some(owner) = mcp_owner {
+            database
                 .model_main_sleep_timing(owner, start, end, configured_timezone, policy)
                 .await?
-                .ok_or(GarminReadError::Permission)?,
-            None => {
-                if start != end || policy != NapPolicy::Separate {
-                    return Err(GarminReadError::Value);
-                }
-                database
-                    .owner_main_sleep_timing(start, configured_timezone)
-                    .await?
+                .ok_or(GarminReadError::Permission)?
+        } else {
+            if start != end || policy != NapPolicy::Separate {
+                return Err(GarminReadError::Value);
             }
+            database
+                .owner_main_sleep_timing(start, configured_timezone)
+                .await?
         };
         return spool(value);
     }

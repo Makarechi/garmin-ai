@@ -66,6 +66,11 @@ pub fn activity_identity(document: &Value) -> Result<String, InvalidGarminSummar
 
 /// Interpret Garmin start times for fields explicitly designated GMT. Epoch
 /// numbers use the legacy seconds/milliseconds threshold.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Preserve legacy ties-to-even rounding of fractional seconds to microseconds"
+)]
 pub fn gmt_instant(value: &Value) -> Option<StoredInstant> {
     let micros = match value {
         Value::Number(number) => {
@@ -184,6 +189,10 @@ fn extract_fields(document: &Value) -> Result<FieldsAndTiming, InvalidGarminSumm
     Ok((fields, timing))
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Activity elapsed seconds are rounded to whole microseconds for the stored end time"
+)]
 fn summary_timing<'a>(
     find: impl Fn(&str) -> Option<&'a Value>,
 ) -> Result<(StoredInstant, StoredInstant), InvalidGarminSummary> {
@@ -217,7 +226,7 @@ fn nested_object(
     value: Option<&Value>,
 ) -> Result<Option<&Map<String, Value>>, InvalidGarminSummary> {
     match value {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
+        None | Some(Value::Null | Value::Bool(false)) => Ok(None),
         Some(Value::Object(fields)) => Ok(Some(fields).filter(|fields| !fields.is_empty())),
         _ => Err(InvalidGarminSummary::Shape),
     }
@@ -233,7 +242,7 @@ fn store_text(
         Some(Value::String(value)) if !omit_empty || !value.is_empty() => {
             fields.insert(key.to_owned(), json!(value));
         }
-        None | Some(Value::Null) | Some(Value::String(_)) => (),
+        None | Some(Value::Null | Value::String(_)) => (),
         _ => return Err(InvalidGarminSummary::Shape),
     }
     Ok(())

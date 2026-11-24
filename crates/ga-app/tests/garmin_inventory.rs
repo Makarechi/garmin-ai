@@ -12,7 +12,7 @@ fn inventory_matches_the_frozen_cli_without_configuration() -> Result<(), Box<dy
         .output()?;
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert_eq!(
         output.stdout,
         include_bytes!("../../../migration/contracts/garmin-legacy-inventory.tsv")

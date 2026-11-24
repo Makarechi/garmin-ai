@@ -36,7 +36,7 @@ pub(super) fn tokens(
         let minute = matched.get(2);
         clocks.push([
             hour.start(),
-            minute.as_ref().map_or(hour.end(), |value| value.end()),
+            minute.as_ref().map_or(hour.end(), fancy_regex::Match::end),
             number(hour.as_str())?,
             minute
                 .map(|value| number(value.as_str()))

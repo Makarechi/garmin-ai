@@ -510,7 +510,10 @@ async fn advance(
             let mut following = page.payload.clone();
             let offset = page
                 .offset
-                .checked_add(ACTIVITY_PAGE_SIZE as u32)
+                .checked_add(
+                    u32::try_from(ACTIVITY_PAGE_SIZE)
+                        .map_err(|_| ActivityScanError::InvalidState)?,
+                )
                 .ok_or(ActivityScanError::InvalidState)?;
             following["offset"] = json!(offset);
             let date = OffsetDateTime::from(request.requested_at).date();

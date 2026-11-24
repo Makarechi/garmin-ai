@@ -67,34 +67,33 @@ impl MeasurementSnapshot {
                 "measurement:{}",
                 ascii_json(&json!([observed_display, metric, source]))?
             );
-            let token = match id {
-                Some(id) => id.to_string(),
-                None => {
-                    let details: String = row.try_get("details")?;
-                    let mut payload = json!({
-                        "value":value,"unit":unit,"source_ref":source_ref.map(|id|id.to_string()),
-                        "quality":quality,"details":null,"ingested_at":ingested_display,
-                    });
-                    payload["details"] = serde_json::from_str(&details)
-                        .map_err(|_| GenericAnalysisError::Database)?;
-                    let mut encoded = ascii_json(&payload)?;
-                    // Python's revision token retains nonfinite legacy doubles.
-                    // The sorted root object's last field is always `value`.
-                    if !value.is_finite() {
-                        let prefix = encoded
-                            .strip_suffix("null}")
-                            .ok_or(GenericAnalysisError::Database)?;
-                        let number = if value.is_nan() {
-                            "NaN"
-                        } else if value.is_sign_negative() {
-                            "-Infinity"
-                        } else {
-                            "Infinity"
-                        };
-                        encoded = format!("{prefix}{number}}}");
-                    }
-                    format!("legacy:{}", sha256_hex(encoded.as_bytes()))
+            let token = if let Some(id) = id {
+                id.to_string()
+            } else {
+                let details: String = row.try_get("details")?;
+                let mut payload = json!({
+                    "value":value,"unit":unit,"source_ref":source_ref.map(|id|id.to_string()),
+                    "quality":quality,"details":null,"ingested_at":ingested_display,
+                });
+                payload["details"] =
+                    serde_json::from_str(&details).map_err(|_| GenericAnalysisError::Database)?;
+                let mut encoded = ascii_json(&payload)?;
+                // Python's revision token retains nonfinite legacy doubles.
+                // The sorted root object's last field is always `value`.
+                if !value.is_finite() {
+                    let prefix = encoded
+                        .strip_suffix("null}")
+                        .ok_or(GenericAnalysisError::Database)?;
+                    let number = if value.is_nan() {
+                        "NaN"
+                    } else if value.is_sign_negative() {
+                        "-Infinity"
+                    } else {
+                        "Infinity"
+                    };
+                    encoded = format!("{prefix}{number}}}");
                 }
+                format!("legacy:{}", sha256_hex(encoded.as_bytes()))
             };
             Some((reference, token))
         } else {
@@ -128,8 +127,7 @@ impl MeasurementSnapshot {
             id: format!(
                 "measurement-revision:{}",
                 self.id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "legacy".to_owned())
+                    .map_or_else(|| "legacy".to_owned(), |id| id.to_string())
             ),
             value: floating(self.value)?,
             observed: self.observed,

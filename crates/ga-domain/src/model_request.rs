@@ -108,6 +108,7 @@ impl ExtensionModelRequest {
         Ok(Self { params, schema })
     }
 
+    #[must_use]
     pub fn params(&self) -> &Value {
         &self.params
     }
@@ -170,10 +171,12 @@ impl StructuredModelRequest {
         })
     }
 
+    #[must_use]
     pub fn provider(&self) -> StructuredProvider {
         self.provider
     }
 
+    #[must_use]
     pub fn body(&self) -> &Value {
         &self.body
     }

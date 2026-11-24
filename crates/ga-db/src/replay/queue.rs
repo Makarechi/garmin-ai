@@ -31,6 +31,7 @@ pub struct ReplaySchedule {
 }
 
 impl ReplaySchedule {
+    #[must_use]
     pub fn plan_again_soon(self) -> bool {
         self.scan_incomplete || self.postponed
     }

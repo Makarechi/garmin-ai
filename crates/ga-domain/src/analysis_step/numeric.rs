@@ -14,7 +14,7 @@ mod tests {
 
     #[test]
     fn matches_pinned_python_across_unicode() {
-        let numbers: Vec<_> = (0..=0x10ffff)
+        let numbers: Vec<_> = (0..=0x0010_ffff)
             .filter_map(char::from_u32)
             .filter(|&character| is_numeric(character))
             .flat_map(|character| u32::from(character).to_be_bytes())

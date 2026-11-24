@@ -336,6 +336,10 @@ fn intersect(base: &mut Map<String, Value>, siblings: &Map<String, Value>, exclu
     }
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "Tracker literals require exact equality across JSON number spellings"
+)]
 fn same_literal(first: &Value, second: &Value) -> bool {
     let numeric = |value: &Value| {
         value

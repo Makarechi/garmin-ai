@@ -33,6 +33,10 @@ impl FallbackRuntime for Fixture<'_> {
         self.at
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn attempt(&mut self, model: Option<&str>) -> Result<Self::Output, FallbackError> {
         self.attempted.push(model.map(str::to_owned));
         match self.responses.pop_front() {
@@ -71,6 +75,10 @@ impl FallbackRuntime for Fixture<'_> {
         ]));
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Keep the async trait method deferred until the returned future is polled"
+    )]
     async fn checkpoint(&mut self, invalid: &[Option<&str>]) -> bool {
         if self.job {
             self.writes.push(json!(["checkpoint", invalid]));

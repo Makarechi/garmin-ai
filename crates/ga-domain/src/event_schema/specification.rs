@@ -80,9 +80,10 @@ impl CustomDefinition {
                 )
             })
             .ok_or(CustomDefinitionError::Shape)?;
-        let schema = match (input.get("schema"), input.get("payload_schema")) {
-            (Some(schema), None) | (None, Some(schema)) => schema,
-            _ => return Err(CustomDefinitionError::Shape),
+        let ((Some(schema), None) | (None, Some(schema))) =
+            (input.get("schema"), input.get("payload_schema"))
+        else {
+            return Err(CustomDefinitionError::Shape);
         };
         validate_custom_schema(schema).map_err(CustomDefinitionError::Schema)?;
         let properties = schema["properties"]
@@ -150,14 +151,17 @@ impl CustomDefinition {
         })
     }
 
+    #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
 
+    #[must_use]
     pub fn contract(&self) -> &Value {
         &self.contract
     }
 
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }

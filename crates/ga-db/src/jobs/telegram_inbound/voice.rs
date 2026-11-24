@@ -39,10 +39,12 @@ impl TelegramInboundLease {
         }
     }
 
+    #[must_use]
     pub fn has_voice_text(&self) -> bool {
         self.voice_text.is_some()
     }
 
+    #[must_use]
     pub fn diary_source(&self) -> EventSource {
         if self.has_voice_text() {
             EventSource::TelegramVoice

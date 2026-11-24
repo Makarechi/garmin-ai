@@ -60,14 +60,11 @@ pub(super) async fn preferences(State(state): State<AppState>, request: Request)
 }
 
 async fn store(database: &Database, owner: Uuid, headers: &HeaderMap, body: Body) -> Response {
-    let data = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(data) => data,
-        Err(_) => {
-            return detail(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Goal preferences request exceeds the size limit",
-            );
-        }
+    let Ok(data) = to_bytes(body, MAX_REQUEST_BYTES).await else {
+        return detail(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Goal preferences request exceeds the size limit",
+        );
     };
     let value = match super::request_json::parse(&data, headers) {
         Ok(value) => value,

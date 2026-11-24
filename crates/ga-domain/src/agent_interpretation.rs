@@ -185,36 +185,47 @@ impl AgentInterpretation {
         })
     }
 
+    #[must_use]
     pub fn intent(&self) -> AgentIntent {
         self.intent
     }
+    #[must_use]
     pub fn events(&self) -> &[EventInput] {
         &self.events
     }
+    #[must_use]
     pub fn draft_links(&self) -> &[DraftLink] {
         &self.draft_links
     }
+    #[must_use]
     pub fn target_event_id(&self) -> Option<Uuid> {
         self.target_event_id
     }
+    #[must_use]
     pub fn target_question_id(&self) -> Option<Uuid> {
         self.target_question_id
     }
+    #[must_use]
     pub fn question_context_ids(&self) -> &[Uuid] {
         &self.question_context_ids
     }
+    #[must_use]
     pub fn clarification(&self) -> Option<&str> {
         self.clarification.as_deref()
     }
+    #[must_use]
     pub fn capability_answer(&self) -> Option<&str> {
         self.capability_answer.as_deref()
     }
+    #[must_use]
     pub fn confidence(&self) -> f64 {
         self.confidence
     }
+    #[must_use]
     pub fn response_language(&self) -> Option<&str> {
         self.response_language.as_deref()
     }
+    #[must_use]
     pub fn changed_fields(&self) -> &[String] {
         &self.changed_fields
     }

@@ -173,7 +173,7 @@ async fn read_window(
         .bind(interval.0)
         .bind(interval.1)
         .bind(Option::<&str>::None)
-        .bind(limit as i64)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .bind(audience.model)
         .bind(audience.channel)
         .bind(&audience.pack_denials)

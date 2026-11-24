@@ -31,7 +31,10 @@ async fn asset(State(page): State<Bytes>, method: Method, uri: Uri) -> Response 
     if method != Method::GET {
         return StatusCode::NOT_IMPLEMENTED.into_response();
     }
-    let (content_type, bytes) = match uri.path_and_query().map(|target| target.as_str()) {
+    let (content_type, bytes) = match uri
+        .path_and_query()
+        .map(axum::http::uri::PathAndQuery::as_str)
+    {
         Some("/dashboard") => ("text/html; charset=utf-8", page),
         Some("/dashboard-assets/app.js") => (
             "text/javascript; charset=utf-8",

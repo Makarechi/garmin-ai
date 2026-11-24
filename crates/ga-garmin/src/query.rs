@@ -36,6 +36,7 @@ impl DateRange {
         Ok(Self { start, end })
     }
 
+    #[must_use]
     pub fn contains(self, date: Date) -> bool {
         (self.start..=self.end).contains(&date)
     }
@@ -72,7 +73,7 @@ pub enum PersonalRead {
 impl PersonalRead {
     pub(crate) fn url(self, base: &Url) -> Result<Url, GarminError> {
         let join = |path: &str| base.join(path).map_err(|_| GarminError::InvalidRequest);
-        let dated = |path: &str, name: &str, date: Date| {
+        let single_day = |path: &str, name: &str, date: Date| {
             if !(1..=9999).contains(&date.year()) {
                 return Err(GarminError::InvalidRequest);
             }
@@ -85,16 +86,16 @@ impl PersonalRead {
 
         match self {
             Self::ProfileSettings => join("userprofile-service/userprofile/settings"),
-            Self::Daily(date) => dated(
+            Self::Daily(date) => single_day(
                 "usersummary-service/usersummary/daily",
                 "calendarDate",
                 date,
             ),
             Self::DailySteps(dates) => range("usersummary-service/stats/steps/daily", dates),
             Self::HeartRate(date) => {
-                dated("wellness-service/wellness/dailyHeartRate", "date", date)
+                single_day("wellness-service/wellness/dailyHeartRate", "date", date)
             }
-            Self::Sleep(date) => dated("sleep-service/sleep/dailySleep", "date", date),
+            Self::Sleep(date) => single_day("sleep-service/sleep/dailySleep", "date", date),
             Self::Hrv(date) => {
                 if !(1..=9999).contains(&date.year()) {
                     return Err(GarminError::InvalidRequest);

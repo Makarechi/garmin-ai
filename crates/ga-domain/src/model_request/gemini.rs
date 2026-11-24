@@ -106,6 +106,7 @@ impl GeminiModelRequest {
         Ok(())
     }
 
+    #[must_use]
     pub fn body(&self) -> &Value {
         &self.body
     }

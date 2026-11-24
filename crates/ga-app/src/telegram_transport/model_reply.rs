@@ -126,7 +126,8 @@ pub async fn publish_telegram_interpretation(
         let key = match error {
             TelegramDiaryCommitError::TimeClarification(
                 TimeClarification::MissingTargetTimezone,
-            ) => "agent.record_details",
+            )
+            | TelegramDiaryCommitError::ClarificationRequired => "agent.record_details",
             TelegramDiaryCommitError::TimeClarification(TimeClarification::TimezoneMismatch) => {
                 "agent.timezone_mismatch"
             }
@@ -137,7 +138,6 @@ pub async fn publish_telegram_interpretation(
                 "agent.future_time"
             }
             TelegramDiaryCommitError::MedicationEvidenceRequired => "agent.medication_confirm",
-            TelegramDiaryCommitError::ClarificationRequired => "agent.record_details",
             _ => return Err(error),
         };
         let question = catalog_text(language, key).ok_or(TelegramDiaryCommitError::Reply)?;
@@ -218,7 +218,7 @@ fn event_label(kind: &str, fields: &Value, language: &str) -> Option<String> {
                 .or_else(|| fallback("agent.medication_unknown_name"))?;
             let dose = fields["dose"]
                 .as_number()
-                .map(|dose| dose.as_str())
+                .map(serde_json::Number::as_str)
                 .or_else(|| fallback("agent.medication_unknown_dose"))?;
             let unit = fields["unit"]
                 .as_str()

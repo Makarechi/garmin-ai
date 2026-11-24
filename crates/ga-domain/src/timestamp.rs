@@ -21,16 +21,19 @@ impl Error for InvalidStoredInstant {}
 
 impl StoredInstant {
     /// Parse an aware legacy Python cursor timestamp at its retained microsecond precision.
+    #[must_use]
     pub fn from_python_isoformat(value: &str) -> Option<Self> {
         Self::from_unix_microseconds(python_isoformat_microseconds(value)?).ok()
     }
 
     /// Interpret a timestamp using the legacy typed application input contract.
+    #[must_use]
     pub fn from_legacy_input(value: &serde_json::Value) -> Option<Self> {
         crate::event_time::aware(value)
     }
 
     /// Interpret a timestamp and keep its display offset for a timeline boundary.
+    #[must_use]
     pub fn legacy_input_with_offset(value: &serde_json::Value) -> Option<OffsetDateTime> {
         let parsed = crate::event_time::parse_aware_datetime(value)?;
         let offset = UtcOffset::from_whole_seconds(parsed.time.tz_offset?).ok()?;
@@ -39,6 +42,7 @@ impl StoredInstant {
     }
 
     /// Interpret a typed timestamp while retaining its legacy JSON display form.
+    #[must_use]
     pub fn legacy_input_with_json(value: &serde_json::Value) -> Option<(Self, String)> {
         let parsed = crate::event_time::parse_aware_datetime(value)?;
         Some((
@@ -53,6 +57,7 @@ impl StoredInstant {
         time.try_into()
     }
 
+    #[must_use]
     pub fn unix_microseconds(self) -> i64 {
         // Years 1 through 9999 fit in an i64 at microsecond precision.
         self.0.unix_timestamp() * 1_000_000 + i64::from(self.0.microsecond())
@@ -77,11 +82,13 @@ impl TryFrom<OffsetDateTime> for StoredInstant {
 }
 
 /// Parse a legacy cursor's UTC position, including offsets crossing the storage calendar bounds.
+#[must_use]
 pub fn python_isoformat_microseconds(value: &str) -> Option<i64> {
     Some(python_isoformat::parse(value)?.utc_microseconds())
 }
 
 /// Parse the UTC position and retain Python's ISO spelling for a carried-forward cursor.
+#[must_use]
 pub fn python_isoformat_with_display(value: &str) -> Option<(i64, String)> {
     let parsed = python_isoformat::parse(value)?;
     Some((parsed.utc_microseconds(), parsed.to_string()))
@@ -152,6 +159,7 @@ fn fmt_offset(f: &mut fmt::Formatter<'_>, offset: i64) -> fmt::Result {
 }
 
 /// Resolve a regional wall clock using Python's first-fold and pre-gap offsets.
+#[must_use]
 pub fn regional_clock_instant(
     clock: time::PrimitiveDateTime,
     timezone: &str,
@@ -160,10 +168,10 @@ pub fn regional_clock_instant(
     let civil = jiff::civil::DateTime::new(
         clock.year().try_into().ok()?,
         clock.month() as i8,
-        clock.day() as i8,
-        clock.hour() as i8,
-        clock.minute() as i8,
-        clock.second() as i8,
+        clock.day().try_into().ok()?,
+        clock.hour().try_into().ok()?,
+        clock.minute().try_into().ok()?,
+        clock.second().try_into().ok()?,
         clock.nanosecond().try_into().ok()?,
     )
     .ok()?;
@@ -171,7 +179,8 @@ pub fn regional_clock_instant(
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(timestamp.as_microsecond()) * 1000).ok()
 }
 
-/// Match timezone keys supported by the reference PostgreSQL driver's ZoneInfo lookup.
+/// Match timezone keys supported by the reference PostgreSQL driver's `ZoneInfo` lookup.
+#[must_use]
 pub fn source_timezone_available(name: &str) -> bool {
     python_timezone(name).is_some()
 }

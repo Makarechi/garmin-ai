@@ -17,7 +17,7 @@ use crate::{
     raw_capture::required_packs,
 };
 
-const MUTATION_LOCK: i64 = 72104619;
+const MUTATION_LOCK: i64 = 72_104_619;
 const MAX_HORIZON: u16 = 3660;
 const SCAN_DAYS: i64 = 3661;
 const DAYS_PER_PASS: i64 = 2;
@@ -224,21 +224,18 @@ async fn schedule_windows(
             .bind(&key)
             .fetch_optional(&mut **txn)
             .await?;
-    let mut plan: Value = match saved {
-        Some(ref saved) => {
-            serde_json::from_str(saved).map_err(|_| HistoryScheduleError::InvalidState)?
-        }
-        None => {
-            let start = yesterday
-                .checked_sub(Duration::days(i64::from(horizon) - 1))
-                .ok_or(HistoryScheduleError::InvalidRange)?;
-            json!({
-                "account": scope.account, "history_start": start.to_string(),
-                "history_next": yesterday.to_string(), "recent_through": yesterday.to_string(),
-                "created_at": scope.now.to_string(), "horizon_days": horizon,
-                "endpoint_generation": generation,
-            })
-        }
+    let mut plan: Value = if let Some(ref saved) = saved {
+        serde_json::from_str(saved).map_err(|_| HistoryScheduleError::InvalidState)?
+    } else {
+        let start = yesterday
+            .checked_sub(Duration::days(i64::from(horizon) - 1))
+            .ok_or(HistoryScheduleError::InvalidRange)?;
+        json!({
+            "account": scope.account, "history_start": start.to_string(),
+            "history_next": yesterday.to_string(), "recent_through": yesterday.to_string(),
+            "created_at": scope.now.to_string(), "horizon_days": horizon,
+            "endpoint_generation": generation,
+        })
     };
     let mut recent = stored_date(&plan["recent_through"])?;
     let mut cursor = stored_date(&plan["history_next"])?;

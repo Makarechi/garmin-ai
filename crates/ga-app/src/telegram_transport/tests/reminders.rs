@@ -224,7 +224,7 @@ async fn tracker_worker_retries_refusal_and_holds_uncertain() -> Result<(), Box<
         let (mut first, _) = listener.accept().await?;
         let sent = request(&mut first).await?;
         assert_eq!(sent["endpoint"], "sendMessage");
-        assert_eq!(sent["fields"]["chat_id"], 918724);
+        assert_eq!(sent["fields"]["chat_id"], 918_724);
         assert_eq!(
             sent["fields"]["text"],
             "Напоминание: Синтетическая запись private_fixture."

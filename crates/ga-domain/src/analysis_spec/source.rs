@@ -69,7 +69,9 @@ fn item(chars: &mut Peekable<Chars<'_>>) -> Result<String, InvalidAnalysisSpec> 
                                 .next()
                                 .and_then(|value| value.to_digit(16))
                                 .ok_or(InvalidAnalysisSpec::Validation)?;
-                            value = value * 16 + hex as u16;
+                            value = value * 16
+                                + u16::try_from(hex)
+                                    .map_err(|_| InvalidAnalysisSpec::Validation)?;
                         }
                         value
                     }
@@ -98,7 +100,9 @@ fn write_unit(output: &mut String, unit: u16) -> Result<(), InvalidAnalysisSpec>
         10 => output.push_str("\\n"),
         13 => output.push_str("\\r"),
         9 => output.push_str("\\t"),
-        32..=126 => output.push(char::from(unit as u8)),
+        32..=126 => output.push(char::from(
+            u8::try_from(unit).map_err(|_| InvalidAnalysisSpec::Validation)?,
+        )),
         _ => write!(output, "\\u{unit:04x}").map_err(|_| InvalidAnalysisSpec::Validation)?,
     }
     Ok(())

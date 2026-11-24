@@ -52,7 +52,7 @@ async fn claims_preserve_epochs_and_fence_superseded_work() -> Result<(), Box<dy
     let message = |id: i64, text: &str| {
         json!({
             "message_id": id, "from": {"id": 42}, "chat": {"type": "private", "id": 42},
-            "date": 1794916800, "text": text,
+            "date": 1_794_916_800, "text": text,
         })
     };
     let older = binding

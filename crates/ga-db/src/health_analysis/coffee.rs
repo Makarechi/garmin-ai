@@ -70,7 +70,6 @@ pub(super) async fn coffee_sleep_in(
     let period = HealthPeriod::new(start, end)?;
     let hours = late_hours.unwrap_or(6.0);
     if period.days() > 31
-        || !hours.is_finite()
         || !(0.0 < hours && hours <= 24.0)
         || !matches!(outcome, "sleep_score" | "sleep_seconds")
     {
@@ -184,7 +183,7 @@ pub(super) async fn coffee_sleep_in(
             .map_err(|_| HealthAnalysisError::Database)?;
         let result = json!({
             "spec":spec,"status":if sufficient {"exploratory"} else {"insufficient_evidence"},
-            "rows":rows,"eligible":eligible,"excluded":period.days()-eligible as i64,
+            "rows":rows,"eligible":eligible,"excluded":period.days()-i64::try_from(eligible).unwrap_or(i64::MAX),
             "cohorts":{"late":description(&late),"not_late":description(&not_late)},
             "comparison":comparison,
             "limitations":[
@@ -207,6 +206,10 @@ pub(super) async fn coffee_sleep_in(
         .map_err(|_| HealthAnalysisError::Database)?
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The result reports the microsecond interval in fractional hours"
+)]
 fn populate_row(
     row: &mut Value,
     night: &Night,
@@ -367,6 +370,11 @@ fn json_value(text: &str) -> Result<Value, HealthAnalysisError> {
     serde_json::from_str(text).map_err(|_| HealthAnalysisError::Database)
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::float_cmp,
+    reason = "The bounded hour input uses the legacy microsecond rounding with exact half detection"
+)]
 fn late_window(hours: f64) -> time::Duration {
     let fractional = hours.fract() * 3_600_000_000.0;
     let mut micros = hours.trunc() as i64 * 3_600_000_000 + fractional.trunc() as i64;

@@ -24,8 +24,8 @@ struct Decision {
 const SENSITIVE: Uuid = Uuid::from_u128(2);
 const DEFINITION: Uuid = Uuid::from_u128(44);
 const CHANNEL: &str = "telegram:primary";
-const CHANNEL_LOCK: i64 = 72104631;
-const REPLAY_LOCK: i64 = 72104619;
+const CHANNEL_LOCK: i64 = 72_104_631;
+const REPLAY_LOCK: i64 = 72_104_619;
 
 #[tokio::test]
 #[ignore = "requires the synthetic tracker consent fixture on disposable TimescaleDB"]

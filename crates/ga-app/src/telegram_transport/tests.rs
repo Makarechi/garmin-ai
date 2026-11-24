@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use std::{env, error::Error, fs, io, time::Duration};
 
 use serde_json::{Value, json};
@@ -65,7 +67,7 @@ async fn acknowledges_a_callback_while_polling_waits() -> Result<(), Box<dyn Err
         assert_eq!(request(&mut poll).await?["endpoint"], "getUpdates");
         started
             .send(())
-            .map_err(|_| io::Error::other("Polling did not start"))?;
+            .map_err(|()| io::Error::other("Polling did not start"))?;
         let (mut ack, _) = timeout(Duration::from_secs(2), listener.accept()).await??;
         assert_eq!(request(&mut ack).await?["endpoint"], "answerCallbackQuery");
         respond(&mut ack, "200 OK", &[], r#"{"ok":true,"result":true}"#).await?;
@@ -260,7 +262,7 @@ pub(super) async fn respond(
         body.len()
     );
     for (name, value) in extra {
-        headers.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(headers, "{name}: {value}\r\n");
     }
     headers.push_str("\r\n");
     stream.write_all(headers.as_bytes()).await?;

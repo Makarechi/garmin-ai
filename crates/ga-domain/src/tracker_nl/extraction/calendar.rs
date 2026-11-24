@@ -204,13 +204,31 @@ pub(super) fn local_datetime(
         return Err(ExtractionError::Invalid);
     }
     let civil = jiff::civil::DateTime::new(
-        local.year() as i16,
-        u8::from(local.month()) as i8,
-        local.day() as i8,
-        local.hour() as i8,
-        local.minute() as i8,
-        local.second() as i8,
-        local.nanosecond() as i32,
+        local
+            .year()
+            .try_into()
+            .map_err(|_| ExtractionError::Invalid)?,
+        local.month() as i8,
+        local
+            .day()
+            .try_into()
+            .map_err(|_| ExtractionError::Invalid)?,
+        local
+            .hour()
+            .try_into()
+            .map_err(|_| ExtractionError::Invalid)?,
+        local
+            .minute()
+            .try_into()
+            .map_err(|_| ExtractionError::Invalid)?,
+        local
+            .second()
+            .try_into()
+            .map_err(|_| ExtractionError::Invalid)?,
+        local
+            .nanosecond()
+            .try_into()
+            .map_err(|_| ExtractionError::Invalid)?,
     )
     .map_err(|_| ExtractionError::Invalid)?;
     Ok((local, civil))
@@ -258,7 +276,7 @@ pub(super) fn evidence(
                 local.hour() as usize,
                 local.minute() as usize,
             ]];
-            matching = clocks.clone();
+            matching.clone_from(&clocks);
         }
     } else if local.second() != 0 || local.nanosecond() != 0 {
         return Ok(report("contradictory", None, "unsupported_clock_precision"));
@@ -335,9 +353,15 @@ pub(super) fn evidence(
     for matched in regex("local_day")?.captures_iter(quote) {
         let matched = matched?;
         let day = jiff::civil::Date::new(
-            clock::number(&matched[3])? as i16,
-            clock::number(&matched[2])? as i8,
-            clock::number(&matched[1])? as i8,
+            clock::number(&matched[3])?
+                .try_into()
+                .map_err(|_| ExtractionError::Invalid)?,
+            clock::number(&matched[2])?
+                .try_into()
+                .map_err(|_| ExtractionError::Invalid)?,
+            clock::number(&matched[1])?
+                .try_into()
+                .map_err(|_| ExtractionError::Invalid)?,
         )
         .ok();
         let Some(day) = day.filter(|day| day.year() >= 1) else {

@@ -146,12 +146,9 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
             }
             return;
         }
-        let envelope = match lease.processing_envelope() {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                self.finish(lease, &locale, Disposition::Gone).await;
-                return;
-            }
+        let Ok(envelope) = lease.processing_envelope() else {
+            self.finish(lease, &locale, Disposition::Gone).await;
+            return;
         };
         let binding = ConversationBinding {
             owner_id: envelope.owner_id(),
@@ -214,7 +211,7 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
             }
             Err(error) => {
                 self.finish(lease, language, commit_disposition(error))
-                    .await
+                    .await;
             }
         }
     }

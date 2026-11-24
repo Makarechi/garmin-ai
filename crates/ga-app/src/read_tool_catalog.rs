@@ -74,6 +74,7 @@ impl ReadTool {
         Self::DeviceHistory,
     ];
 
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Snapshot => "health_snapshot",
@@ -102,6 +103,7 @@ impl ReadTool {
         }
     }
 
+    #[must_use]
     pub fn catalog_entry(self) -> Value {
         let date = |title| json!({"format": "date", "title": title, "type": "string"});
         let datetime = |title| json!({"format": "date-time", "title": title, "type": "string"});
@@ -303,6 +305,7 @@ impl ReadTool {
         })
     }
 
+    #[must_use]
     pub fn permits(self, scopes: Scopes) -> bool {
         scopes.permits_tool(self.name(), ReadToolInput::Discovery)
     }

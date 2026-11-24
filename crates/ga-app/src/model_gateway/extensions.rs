@@ -27,6 +27,7 @@ struct ModelCapabilities {
 }
 
 /// Check the structured capability in a versioned model descriptor.
+#[must_use]
 pub fn extension_structured_capability(capabilities: Value) -> bool {
     serde_json::from_value::<ModelCapabilities>(capabilities)
         .is_ok_and(|capabilities| capabilities.structured_output)

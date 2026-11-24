@@ -29,18 +29,23 @@ impl DerivedAnalysisSpec {
         })
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }
+    #[must_use]
     pub fn start_microseconds(&self) -> i64 {
         self.start
     }
+    #[must_use]
     pub fn end_microseconds(&self) -> i64 {
         self.end
     }
+    #[must_use]
     pub fn knowledge_cutoff_microseconds(&self) -> i64 {
         self.cutoff
     }
@@ -102,7 +107,9 @@ mod tests {
             let actual = actual.start_before_seconds(seconds.parse()?);
             if let Some(error) = expected["error"].as_str() {
                 assert_eq!(
-                    actual.err().map(|error| error.class_name()),
+                    actual
+                        .err()
+                        .map(super::super::InvalidAnalysisSpec::class_name),
                     Some(error),
                     "shift {index} {seconds}"
                 );

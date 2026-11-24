@@ -80,7 +80,8 @@ impl WearableMark {
                 value
                     .as_u64()
                     .filter(|value| *value <= MAX_CLOCK_UNCERTAINTY)
-                    .ok_or(InvalidWearableBatch)? as u32,
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(InvalidWearableBatch)?,
             ),
         };
         let payload = fields.remove("payload").ok_or(InvalidWearableBatch)?;
@@ -118,22 +119,27 @@ impl WearableMark {
         })
     }
 
+    #[must_use]
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    #[must_use]
     pub fn device_time(&self) -> &str {
         &self.device_time
     }
 
+    #[must_use]
     pub fn clock_uncertainty_seconds(&self) -> Option<u32> {
         self.clock_uncertainty_seconds
     }
 
+    #[must_use]
     pub fn digest(&self) -> &str {
         &self.digest
     }
 
+    #[must_use]
     pub fn report(&self) -> &EventInput {
         &self.report
     }

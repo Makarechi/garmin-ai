@@ -1,5 +1,6 @@
 //! Verify model citations against values returned by trusted read tools.
 
+use std::fmt::Write;
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use jiff::Timestamp;
@@ -121,7 +122,7 @@ pub fn verified_timestamps(
             let sign = if seconds < 0 { '-' } else { '+' };
             let mut offset = format!("{sign}{:02}{:02}", magnitude / 3600, magnitude % 3600 / 60);
             if magnitude % 60 != 0 {
-                offset.push_str(&format!("{:02}", magnitude % 60));
+                let _ = write!(offset, "{:02}", magnitude % 60);
             }
             Ok(format!("{label}: {clock} ({timezone}, {offset})."))
         })
@@ -199,7 +200,8 @@ fn cited_value<'a, 'claim>(
             }
             value.as_object().and_then(|object| object.get(key))
         } else if let Some(index) = segment.as_u64().filter(|index| *index <= 10_000) {
-            value.as_array().and_then(|items| items.get(index as usize))
+            let index = usize::try_from(index).map_err(|_| ClaimError::InvalidClaim)?;
+            value.as_array().and_then(|items| items.get(index))
         } else {
             return Err(ClaimError::InvalidClaim);
         }
@@ -243,6 +245,10 @@ impl ObservedNumber {
         }
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "Numeric citations must match the observed value exactly"
+    )]
     fn matches(&self, proposed: &Self) -> bool {
         match (self, proposed) {
             (Self::Integer(left), Self::Integer(right)) => left == right,

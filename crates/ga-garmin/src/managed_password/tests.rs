@@ -41,7 +41,7 @@ async fn only_reads_the_pinned_version_using_a_bounded_authenticated_response()
         )
         .route(
             "/secrets/projects/synthetic/secrets/password/versions/3:access",
-            get(|| async { "x".repeat(RESPONSE_LIMIT as usize + 1) }),
+            get(|| async { "x".repeat(RESPONSE_LIMIT + 1) }),
         )
         .route(
             "/unexpected",

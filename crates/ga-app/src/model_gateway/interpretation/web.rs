@@ -105,7 +105,7 @@ impl ModelGateway<'_> {
                         .ok_or(WebChatError::Database)?,
                     expected,
                 },
-                _ => WebChatModelReply::Unverified,
+                AgentIntent::Acknowledge => WebChatModelReply::Unverified,
             }
         } else {
             WebChatModelReply::Unverified

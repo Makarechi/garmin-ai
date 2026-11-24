@@ -115,6 +115,7 @@ impl<'a> DiaryAnalysisTools<'a> {
         self
     }
 
+    #[must_use]
     pub fn offered_tools(&self) -> Vec<OfferedReadTool<'static>> {
         let mut offered = vec![
             OfferedReadTool {

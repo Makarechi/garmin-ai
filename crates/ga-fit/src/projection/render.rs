@@ -10,7 +10,7 @@ use crate::{
 
 use super::developer::DeveloperField;
 
-const FIT_EPOCH_UNIX: i64 = 631_065_600;
+const FIT_EPOCH_UNIX: f64 = 631_065_600.0;
 const MIN_ABSOLUTE_TIMESTAMP: f64 = 268_435_456.0;
 
 #[derive(Serialize)]
@@ -118,6 +118,10 @@ pub(super) fn label(profile: &FitProfile, field: &Field, raw: &RawFitValue) -> R
         .map_or_else(|| raw.clone(), |label| Text(label.clone()))
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "FIT scaling uses binary64 arithmetic"
+)]
 pub(super) fn scale(value: RawFitValue, divisor: Option<f64>, offset: Option<i64>) -> RawFitValue {
     let divisor = divisor.filter(|divisor| *divisor != 0.0);
     let offset = offset.filter(|offset| *offset != 0);
@@ -156,6 +160,10 @@ pub(super) fn scale(value: RawFitValue, divisor: Option<f64>, offset: Option<i64
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The floating representation is only used when the integer variants cannot represent the result"
+)]
 fn signed_or_unsigned(value: i128) -> RawFitValue {
     if let Ok(value) = u64::try_from(value) {
         Unsigned(value)
@@ -166,14 +174,18 @@ fn signed_or_unsigned(value: i128) -> RawFitValue {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The float is checked for integrality and i64 range"
+)]
 pub(super) fn integer(value: &RawFitValue) -> Option<i64> {
     match value {
         Signed(value) => Some(*value),
         Unsigned(value) => i64::try_from(*value).ok(),
         Float(value)
-            if value.trunc() == *value
-                && *value < (i64::MAX as f64)
-                && *value >= (i64::MIN as f64) =>
+            if value.fract() == 0.0
+                && *value < 9_223_372_036_854_775_808.0
+                && *value >= -9_223_372_036_854_775_808.0 =>
         {
             Some(*value as i64)
         }
@@ -189,6 +201,10 @@ pub(super) fn unsigned(value: &RawFitValue) -> Option<u64> {
     }
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "FIT scaling and time projections use binary64 arithmetic"
+)]
 pub(super) fn number(value: &RawFitValue) -> Option<f64> {
     match value {
         Unsigned(value) => Some(*value as f64),
@@ -225,17 +241,22 @@ pub(super) fn pack_component_value(
                     _ => return Err(FitError::InvalidRecord),
                 };
                 let sum = carry + value;
-                bytes.push(sum.rem_euclid(256) as u8);
+                // The low byte is the residue modulo 256, including for negative values.
+                bytes.push(sum.to_le_bytes()[0]);
                 carry = sum.div_euclid(256);
             }
             read_bits(&bytes, offset, width).map(Unsigned)
         }
-        Unsigned(raw) => Some(Unsigned(raw.checked_shr(offset as u32).unwrap_or(0) & mask)),
+        Unsigned(raw) => Some(Unsigned(
+            raw.checked_shr(u32::from(component.bit_offset))
+                .unwrap_or(0)
+                & mask,
+        )),
         Signed(raw) => {
             let shifted = raw
-                .checked_shr(offset as u32)
+                .checked_shr(u32::from(component.bit_offset))
                 .unwrap_or(if *raw < 0 { -1 } else { 0 });
-            Some(Unsigned(shifted as u64 & mask))
+            Some(Unsigned(shifted.cast_unsigned() & mask))
         }
         _ => Some(value.clone()),
     };
@@ -312,11 +333,15 @@ fn process_type(
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The timestamp and fractional microseconds are rounded before conversion and checked as an instant"
+)]
 pub(super) fn timestamp(seconds: f64) -> Result<Value, FitError> {
     if !seconds.is_finite() {
         return Err(FitError::InvalidRecord);
     }
-    let unix = seconds + FIT_EPOCH_UNIX as f64;
+    let unix = seconds + FIT_EPOCH_UNIX;
     let whole_seconds = unix.floor();
     let micros = ((unix - whole_seconds) * 1_000_000.0).round_ties_even() as i128;
     let nanos = (whole_seconds as i128)

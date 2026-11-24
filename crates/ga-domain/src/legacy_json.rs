@@ -6,6 +6,7 @@ mod numbers;
 pub use numbers::{integer_argument, multiply_numbers, sum_numbers};
 
 /// Match the Python API boolean argument conversion.
+#[must_use]
 pub fn boolean_argument(value: &serde_json::Value) -> Option<bool> {
     match value {
         serde_json::Value::Bool(value) => Some(*value),
@@ -73,7 +74,7 @@ pub fn encode(input: &[u8], layout: Utf8Layout, max_bytes: usize) -> Result<Vec<
     Ok(out)
 }
 
-/// Match Python's ensure_ascii option for protocols that hash escaped text.
+/// Match Python's `ensure_ascii` option for protocols that hash escaped text.
 pub fn encode_ascii(
     input: &[u8],
     layout: Utf8Layout,

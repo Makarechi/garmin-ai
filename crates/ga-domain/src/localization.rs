@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 use serde_json::Value;
 
 /// Read the application catalog for the language and fall back to English.
+#[must_use]
 pub fn catalog_text(locale: &str, key: &str) -> Option<&'static str> {
     static EN: LazyLock<Value> = LazyLock::new(|| {
         serde_json::from_str(include_str!("../../../src/garmin_ai/locales/en.json"))

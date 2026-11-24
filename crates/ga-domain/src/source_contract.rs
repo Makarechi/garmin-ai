@@ -20,7 +20,7 @@ use crate::{
 const MAX_PAYLOAD_BYTES: usize = 16_384;
 const MAX_COLLECTION_ITEMS: usize = 256;
 const MAX_DEPTH: u8 = 8;
-const MAX_RECORDS: usize = 1000;
+const MAX_RECORDS: u16 = 1000;
 const MAX_CURSOR_HISTORY: usize = 1000;
 const MAX_ENCODED_RECORD: usize = 64_000;
 
@@ -65,6 +65,7 @@ pub enum SourceOperation {
 }
 
 impl SourceOperation {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Upsert => "upsert",
@@ -93,15 +94,18 @@ pub struct SourceTimestamp {
 }
 
 impl SourceTimestamp {
+    #[must_use]
     pub fn instant(self) -> StoredInstant {
         self.instant
     }
 
     /// The wire form preserves the supplied offset and six fractional digits when needed.
+    #[must_use]
     pub fn model_json(self) -> String {
         self.original.to_string()
     }
 
+    #[must_use]
     pub fn isoformat(self) -> String {
         let mut value = self.model_json();
         if value.ends_with('Z') {
@@ -183,6 +187,10 @@ impl SourceRecord {
 pub struct SourcePayload<'a>(JsonValue<'a>);
 
 impl SourcePayload<'_> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "The integer is bounded to the exact binary64 range before conversion"
+    )]
     pub fn numeric_field(
         &self,
         value_path: &[String],
@@ -285,8 +293,13 @@ impl SourceCapabilities {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "The page size is checked for integrality and bounded to the supported positive page range"
+)]
 fn page_size(value: &Value) -> Option<usize> {
-    let valid = 1.0..=MAX_RECORDS as f64;
+    let valid = 1.0..=f64::from(MAX_RECORDS);
     let number = match value {
         Value::Bool(value) => f64::from(u8::from(*value)),
         Value::String(value) => {
@@ -319,7 +332,7 @@ pub struct SourceRequest<'a> {
 impl SourcePage {
     /// Validate provider JSON and preserve each normalized private raw record exactly.
     pub fn from_json(input: &[u8], max_records: usize) -> Result<Self, SourceContractError> {
-        if max_records > MAX_RECORDS
+        if max_records > usize::from(MAX_RECORDS)
             || input.len() > (max_records.saturating_add(1)) * MAX_ENCODED_RECORD
         {
             return Err(SourceContractError::Capacity);
@@ -385,7 +398,7 @@ impl SourcePage {
         }
         if !declared.observations
             || declared.max_page_size == 0
-            || declared.max_page_size > MAX_RECORDS
+            || declared.max_page_size > usize::from(MAX_RECORDS)
             || self.records.len() > declared.max_page_size.min(100)
         {
             return Err(SourceContractError::Capacity);

@@ -47,6 +47,7 @@ pub enum InvalidAnalysisSpec {
 }
 
 impl InvalidAnalysisSpec {
+    #[must_use]
     pub fn class_name(self) -> &'static str {
         match self {
             Self::Validation => "ValidationError",
@@ -77,6 +78,7 @@ pub struct AnalysisSpec {
 
 impl AnalysisSpec {
     /// Describe typed field errors for the legacy HTTP validation response.
+    #[must_use]
     pub fn field_errors(input: &Value) -> Vec<Value> {
         validation::field_errors(input)
     }
@@ -263,24 +265,31 @@ impl AnalysisSpec {
         })
     }
 
+    #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
     }
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }
+    #[must_use]
     pub fn operation(&self) -> AnalysisOperation {
         self.operation
     }
+    #[must_use]
     pub fn start(&self) -> OffsetDateTime {
         self.start
     }
+    #[must_use]
     pub fn end(&self) -> OffsetDateTime {
         self.end
     }
+    #[must_use]
     pub fn knowledge_cutoff_microseconds(&self) -> i64 {
         self.cutoff
     }
+    #[must_use]
     pub fn comparison_microseconds(&self) -> Option<(i64, i64)> {
         self.comparison
     }
@@ -399,7 +408,7 @@ mod tests {
             let actual = AnalysisSpec::from_json(&case["input"]);
             if let Some(error) = case.get("error") {
                 assert_eq!(
-                    actual.err().map(|error| error.class_name()),
+                    actual.err().map(super::InvalidAnalysisSpec::class_name),
                     error.as_str(),
                     "error class {index} input {}",
                     case["input"]

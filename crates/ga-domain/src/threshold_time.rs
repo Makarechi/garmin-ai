@@ -22,6 +22,10 @@ fn local(at: i64, zone: &TimeZone) -> Result<jiff::ZonedDateTime, ThresholdCalen
 }
 
 /// Match the reference's hour boundaries, including partial-hour offset changes.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The duration in microseconds is reported as fractional seconds"
+)]
 pub fn local_hour_slices(
     start: i64,
     end: i64,

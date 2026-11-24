@@ -69,9 +69,8 @@ async fn apply(state: &AppState, request: Request, confirm: bool) -> Response {
                 return too_large();
             }
         }
-        let body = match to_bytes(body, limit).await {
-            Ok(body) => body,
-            Err(_) => return too_large(),
+        let Ok(body) = to_bytes(body, limit).await else {
+            return too_large();
         };
         let (database, owner_id) =
             match authorized(state, &head.headers, &[Scope::ManageDefinitions]).await {

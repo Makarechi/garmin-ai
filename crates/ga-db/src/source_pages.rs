@@ -25,7 +25,7 @@ use crate::{
     raw_capture::CaptureError,
 };
 
-const WRITER_LOCK: i64 = 72104619;
+const WRITER_LOCK: i64 = 72_104_619;
 const CURSOR_LIMIT: usize = 1000;
 
 #[derive(Debug)]
@@ -91,9 +91,11 @@ pub struct PreparedSourcePoll {
 }
 
 impl PreparedSourcePoll {
+    #[must_use]
     pub fn window(&self) -> (StoredInstant, StoredInstant) {
         (self.start, self.end)
     }
+    #[must_use]
     pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
     }

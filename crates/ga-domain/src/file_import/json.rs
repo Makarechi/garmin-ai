@@ -57,6 +57,7 @@ pub enum JsonRowIssue {
 }
 
 impl JsonRowIssue {
+    #[must_use]
     pub fn code(self) -> &'static str {
         match self {
             Self::NullCharacter => "jsonb_null_character",
@@ -76,6 +77,7 @@ pub type JsonRow = Result<FileObjectRow, JsonRowIssue>;
 pub struct FileObjectRow(Map<String, Value>);
 
 impl FileObjectRow {
+    #[must_use]
     pub fn fields(&self) -> &Map<String, Value> {
         &self.0
     }
