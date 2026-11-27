@@ -249,7 +249,11 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             timezone: "UTC",
             locale: "en",
         };
-        if question == UNVERIFIED_SLEEP_REVIEW {
+        let measured_start =
+            StoredInstant::try_from(OffsetDateTime::from(now) + time::Duration::milliseconds(250))?;
+        let process = pin!(worker.process(&lease, now));
+        let timing = latency_event(&lease, measured_start, "model_text", process);
+        let recorded = if question == UNVERIFIED_SLEEP_REVIEW {
             let mut lock = pool.begin().await?;
             sqlx::query("LOCK TABLE timeline_intervals IN ACCESS EXCLUSIVE MODE")
                 .execute(&mut *lock)
@@ -269,10 +273,48 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
                 lock.rollback().await?;
                 Ok::<_, Box<dyn Error>>(())
             };
-            let ((), released) = tokio::join!(worker.process(&lease, now), release_after_timeout);
+            let (recorded, released) = tokio::join!(timing, release_after_timeout);
             released?;
+            recorded
         } else {
-            worker.process(&lease, now).await;
+            timing.await
+        };
+        assert_eq!(recorded["event"], "telegram_request_latency");
+        assert_eq!(recorded["phase"], "model_text");
+        assert_eq!(
+            recorded["inbound_message_id"],
+            lease.message_id().to_string()
+        );
+        assert_eq!(recorded["queue_wait_ms"], 250);
+        assert_eq!(recorded["inbox_age_ms"], 250);
+        assert!(!recorded.to_string().contains(question));
+        let stages = recorded["timing"]["stages"]
+            .as_array()
+            .ok_or("Missing recorded stages")?;
+        assert_eq!(
+            stages
+                .iter()
+                .filter(|stage| stage["stage"] == "gemini_http")
+                .count(),
+            sender.calls.load(Ordering::SeqCst)
+        );
+        if question == UNVERIFIED_SLEEP_REVIEW {
+            assert!(stages.iter().any(|stage| {
+                stage["stage"] == "postgres_sleep_query"
+                    && stage["attempt"] == 1
+                    && stage["outcome"] == "query_canceled"
+                    && stage["duration_ms"].as_u64().is_some_and(|ms| ms >= 700)
+            }));
+            assert!(stages.iter().any(|stage| {
+                stage["stage"] == "postgres_sleep_query"
+                    && stage["attempt"] == 2
+                    && stage["outcome"] == "ok"
+            }));
+            assert!(
+                stages
+                    .iter()
+                    .any(|stage| stage["stage"] == "postgres_analysis_read")
+            );
         }
         let (reply, body, protected, completed): (Uuid, String, bool, bool) = sqlx::query_as(
             "SELECT o.id,o.intent#>>'{blocks,0,text}',o.memory_fence IS NOT NULL,

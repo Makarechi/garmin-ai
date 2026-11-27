@@ -8,7 +8,10 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{HealthAnalysisError, HealthPeriod, sleep_analysis::reported_naps};
-use crate::activity_documents::PARSER_VERSION;
+use crate::{
+    activity_documents::PARSER_VERSION,
+    observability::request_latency::{Outcome, Stage, Timer},
+};
 
 const METRICS: [&str; 8] = [
     "duration_minutes",
@@ -38,6 +41,17 @@ pub(super) async fn sleep_review_in(
     end: Date,
     timezone: &str,
 ) -> Result<Value, HealthAnalysisError> {
+    let timer = Timer::start(Stage::PostgresSleepRead, None);
+    let result = read_sleep_review(txn, start, end, timezone).await;
+    timer.finish(result, |_| Outcome::Error)
+}
+
+async fn read_sleep_review(
+    txn: &mut Transaction<'_, Postgres>,
+    start: Date,
+    end: Date,
+    timezone: &str,
+) -> Result<Value, HealthAnalysisError> {
     if HealthPeriod::new(start, end)?.days() > 31 {
         return Err(HealthAnalysisError::SleepRange);
     }
@@ -51,10 +65,10 @@ pub(super) async fn sleep_review_in(
     // PostgreSQL cancels the first statement at the existing deadline. Retry once
     // in the same read snapshot, where the completed index reads are now cached.
     let mut attempt = txn.begin().await?;
-    let stored = match read_sleep_window(&mut attempt, history_start, start, end).await {
+    let stored = match read_sleep_window(&mut attempt, history_start, start, end, 1).await {
         Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("57014") => {
             attempt.rollback().await?;
-            read_sleep_window(txn, history_start, start, end).await?
+            read_sleep_window(txn, history_start, start, end, 2).await?
         }
         result => {
             let rows = result?;
@@ -119,14 +133,22 @@ async fn read_sleep_window(
     history_start: Date,
     start: Date,
     end: Date,
+    attempt: u8,
 ) -> Result<Vec<StoredNight>, sqlx::Error> {
-    sqlx::query_as(include_str!("sleep_review.sql"))
+    let timer = Timer::start(Stage::PostgresSleepQuery, Some(attempt));
+    let result = sqlx::query_as(include_str!("sleep_review.sql"))
         .bind(history_start)
         .bind(end)
         .bind(PARSER_VERSION)
         .bind(start)
         .fetch_all(&mut **txn)
-        .await
+        .await;
+    timer.finish(result, |error| match error {
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("57014") => {
+            Outcome::QueryCanceled
+        }
+        _ => Outcome::Error,
+    })
 }
 
 fn night_document(
