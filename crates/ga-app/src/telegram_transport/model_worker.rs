@@ -4,8 +4,8 @@ use ga_db::{
     Database, WorkTopic,
     conversation_memory::{AnalysisReadContext, ConversationBinding, MemoryError},
     jobs::telegram_inbound::{
-        TelegramDiaryCommitError, TelegramInboundLease, TelegramInboundTarget,
-        TelegramModelAdmission,
+        TelegramAnalysisPublication, TelegramDiaryCommitError, TelegramInboundLease,
+        TelegramInboundTarget, TelegramModelAdmission,
     },
     model_gate::ModelGateError,
     outbox_enqueue::QueueIntentError,
@@ -31,10 +31,10 @@ use super::{
 };
 use crate::{
     model_gateway::{
-        ActiveModelJob, AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisResult,
-        ConfiguredModel, DiaryAnalysisTools, DiaryInterpretationError, GatewayError, ModelGateway,
-        ReplySafetyIntent, Sender, TelegramDiaryInterpretation, analysis_conversation,
-        format_analysis_answer, sleep_review_period,
+        ActiveModelJob, AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisReadTools,
+        AnalysisResult, ConfiguredModel, DiaryAnalysisTools, DiaryInterpretationError,
+        GatewayError, ModelGateway, ReplySafetyIntent, Sender, TelegramDiaryInterpretation,
+        analysis_conversation, format_analysis_answer, sleep_review_period,
     },
     telegram_settings::TelegramIngressSettings,
     urgent_screen::urgent_notice,
@@ -387,8 +387,14 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                 self.database
                     .queue_telegram_diary_analysis(
                         lease,
-                        interpretation.publication_context(self.timezone),
-                        goals.revision,
+                        TelegramAnalysisPublication {
+                            model: interpretation.publication_context(self.timezone),
+                            goals_revision: goals.revision,
+                            scoped_sleep_memory: tools
+                                .selected_read()
+                                .is_some()
+                                .then_some(&memory.fence),
+                        },
                         &used_evidence,
                         &schema_versions,
                         intent,

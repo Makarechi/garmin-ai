@@ -9,7 +9,8 @@ use ga_db::{
         UpdateSystemEvent,
     },
     jobs::telegram_inbound::{
-        TelegramDiaryCommitError, TelegramInboundTarget, TelegramModelContext,
+        TelegramAnalysisPublication, TelegramDiaryCommitError, TelegramInboundTarget,
+        TelegramModelContext,
     },
     outbox_claims::{ReplyDestination, ReplyDispatchResult},
     share_policy::{DestinationKind, ShareDestination},
@@ -180,12 +181,16 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
             "blocks":[{"text":"Synthetic cited answer"}],
         }))
     };
+    let publication = || TelegramAnalysisPublication {
+        model: policy,
+        goals_revision,
+        scoped_sleep_memory: None,
+    };
     assert!(matches!(
         database
             .queue_telegram_diary_analysis(
                 &lease,
-                policy,
-                goals_revision,
+                publication(),
                 &[first],
                 &BTreeSet::default(),
                 reply()?
@@ -204,8 +209,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
         database
             .queue_telegram_diary_analysis(
                 &lease,
-                policy,
-                goals_revision,
+                publication(),
                 &[current_evidence],
                 &BTreeSet::default(),
                 reply()?
@@ -222,8 +226,7 @@ async fn analysis_rejects_edited_historical_data_before_queue_and_before_send()
     let queued = database
         .queue_telegram_diary_analysis(
             &lease,
-            policy,
-            goals_revision,
+            publication(),
             &[read().await?],
             &BTreeSet::default(),
             reply()?,

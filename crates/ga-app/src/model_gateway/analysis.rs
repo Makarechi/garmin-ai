@@ -39,6 +39,8 @@ use super::{
 };
 
 const PROMPT: &str = include_str!("../../../../src/garmin_ai/prompts/analysis_answer.txt");
+const SLEEP_PROMPT: &str =
+    include_str!("../../../../src/garmin_ai/prompts/sleep_review_answer.txt");
 const MAX_PROMPT_JSON: usize = 96_000;
 const MAX_TOOL_ARGUMENTS: usize = 16_000;
 const MAX_ROUNDS: u8 = 6;
@@ -126,6 +128,17 @@ pub trait AnalysisReadTools: Sync {
 
     fn quality_report(&self) -> impl Future<Output = Option<(Value, bool)>> + Send {
         std::future::ready(None)
+    }
+}
+
+fn instruction_for(tools: &impl AnalysisReadTools) -> &'static str {
+    if tools
+        .selected_read()
+        .is_some_and(|(tool, _)| tool == SLEEP_REVIEW)
+    {
+        SLEEP_PROMPT.trim()
+    } else {
+        PROMPT.trim()
     }
 }
 
@@ -293,7 +306,7 @@ impl ModelGateway<'_> {
                         .execute_with_context(
                             ModelInput::Structured {
                                 contract: ApprovedModelSchema::AgentStep,
-                                instruction: PROMPT.trim(),
+                                instruction: instruction_for(tools),
                                 prompt: &prompt,
                                 categories,
                             },
@@ -336,6 +349,7 @@ where
     let mut quality_loaded = false;
     let mut replaying = question.replay_notice.is_some();
     let selected_read = tools.selected_read();
+    let selected_sleep = selected_read.is_some_and(|(tool, _)| tool == SLEEP_REVIEW);
     if let Some((name, arguments)) = selected_read {
         check_context(tools, budget).await?;
         budget.record_tool_call(Instant::now())?;
@@ -437,7 +451,7 @@ where
         }))?;
         let remaining = budget.record_model_call(
             AnalysisStage::Answer,
-            PROMPT.trim(),
+            instruction_for(tools),
             &prompt,
             Instant::now(),
         )?;
@@ -501,8 +515,14 @@ where
         )
         .await
         .map_err(|_| AnalysisBudgetError::Timeout)??;
-        let step = AnalysisStep::from_value(&output).map_err(AnalysisError::Step)?;
-        let response_language = step.language(&language).to_owned();
+        let step = AnalysisStep::from_value(&output);
+        if !selected_sleep && let Err(error) = step {
+            return Err(AnalysisError::Step(error));
+        }
+        let response_language = step
+            .as_ref()
+            .map_or(language.as_str(), |step| step.language(&language))
+            .to_owned();
         let selected = evidence
             .iter()
             .enumerate()
@@ -513,15 +533,27 @@ where
             })
             .collect::<Vec<_>>();
         check_context(tools, budget).await?;
-        match step
-            .action(
+        let action = step.as_ref().map_err(|error| *error).and_then(|step| {
+            step.action(
                 answer_only,
                 &selected,
                 question.timezone,
                 &response_language,
             )
-            .map_err(AnalysisError::Step)?
-        {
+        });
+        if selected_sleep && matches!(action, Err(_) | Ok(AnalysisStepAction::NoAnswer)) {
+            return Ok(AnalysisResult::Answer {
+                language: language.clone(),
+                narrative: Some(sleep_review::unverified_explanation(&language).to_owned()),
+                numbers: Vec::new(),
+                timestamps: Vec::new(),
+                freshness: None,
+                used_evidence: evidence,
+                tracker_versions,
+                schema_versions,
+            });
+        }
+        match action.map_err(AnalysisError::Step)? {
             AnalysisStepAction::Safety { language } => {
                 return Ok(AnalysisResult::Safety {
                     language: language.to_owned(),

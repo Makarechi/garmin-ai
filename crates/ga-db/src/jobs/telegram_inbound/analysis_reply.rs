@@ -11,25 +11,33 @@ use uuid::Uuid;
 use super::{
     TelegramDiaryCommitError, TelegramInboundLease, TelegramModelContext,
     diary::{complete_reply, text_envelope},
-    model_publication::{queue, verify},
+    model_publication::{CurrentTelegramModelContext, queue, verify, verify_session},
 };
 use crate::{
-    Database, conversation_memory::ConversationBinding,
-    diary::analysis_evidence::DiaryAnalysisFence, outbox_enqueue::QueuedIntent,
+    Database,
+    conversation_memory::{ConversationBinding, MemoryFence},
+    diary::analysis_evidence::DiaryAnalysisFence,
+    outbox_enqueue::QueuedIntent,
     share_policy::schema_answer_references,
 };
+
+pub struct TelegramAnalysisPublication<'a> {
+    pub model: TelegramModelContext<'a>,
+    pub goals_revision: u64,
+    pub scoped_sleep_memory: Option<&'a MemoryFence>,
+}
 
 impl Database {
     /// Revalidate cited diary reads and attach their exact dependencies to the durable answer.
     pub async fn queue_telegram_diary_analysis(
         &self,
         lease: &TelegramInboundLease,
-        expected: TelegramModelContext<'_>,
-        goals_revision: u64,
+        publication: TelegramAnalysisPublication<'_>,
         evidence: &[Value],
         schema_versions: &BTreeSet<Uuid>,
         intent: OutboundIntent,
     ) -> Result<QueuedIntent, TelegramDiaryCommitError> {
+        let expected = publication.model;
         let envelope = text_envelope(lease)?;
         let binding = ConversationBinding {
             owner_id: envelope.owner_id(),
@@ -46,14 +54,22 @@ impl Database {
             expected.model_instance,
             expected.timezone,
             expected.configured_timezone,
-            goals_revision,
+            publication.goals_revision,
             evidence,
             schema_versions,
         )
         .ok_or(TelegramDiaryCommitError::Reply)?;
         tokio::time::timeout(Duration::from_millis(1800), async {
             let mut txn = self.begin_telegram_text(lease, &envelope).await?;
-            let mut context = verify(&mut txn, lease, &envelope, expected, ModelCategories::DIARY).await?;
+            let mut context = if let Some(memory) = publication.scoped_sleep_memory {
+                if !fence.only_sleep_reviews() {
+                    return Err(TelegramDiaryCommitError::Reply);
+                }
+                verify_session(&mut txn, lease, &envelope, expected, ModelCategories::HEALTH_AND_DIARY).await?;
+                CurrentTelegramModelContext::scoped_analysis(memory)
+            } else {
+                verify(&mut txn, lease, &envelope, expected, ModelCategories::DIARY).await?
+            };
             let current = fence.check(&mut txn, binding, lease.message_id(), lease.operation_id(), &context.memory)
                 .await?.ok_or(TelegramDiaryCommitError::ModelContextChanged)?;
             context.versions.extend(current);

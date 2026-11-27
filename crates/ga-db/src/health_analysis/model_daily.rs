@@ -563,6 +563,10 @@ pub struct DailyAnalysisEvidence {
 }
 
 impl DailyAnalysisEvidence {
+    pub(crate) fn sleep_review(&self) -> bool {
+        matches!(self.query, DailyAnalysisQuery::SleepReview { .. })
+    }
+
     #[must_use]
     pub fn is_daily_tool(tool: &str) -> bool {
         matches!(

@@ -206,6 +206,24 @@ fn render_sleep_review<'a>(
         if !details.is_empty() {
             lines.push(details.join(" · "));
         }
+        let duration_deviation = row["deviations"].as_array().and_then(|deviations| {
+            deviations
+                .iter()
+                .find(|deviation| deviation["metric"] == "duration_minutes")
+        });
+        let duration_label = match (
+            russian,
+            duration_deviation.and_then(|deviation| deviation["direction"].as_str()),
+        ) {
+            (true, Some("above")) => Some("Длительность сна выше вашего обычного диапазона"),
+            (true, Some("below")) => Some("Длительность сна ниже вашего обычного диапазона"),
+            (false, Some("above")) => Some("Sleep duration was above your usual range"),
+            (false, Some("below")) => Some("Sleep duration was below your usual range"),
+            _ => None,
+        };
+        if let Some(label) = duration_label {
+            lines.push(label.to_owned());
+        }
         if rows.len() == 2
             && let Some(delta) =
                 row["change_from_previous_requested_night"]["duration_minutes"].as_f64()
@@ -258,6 +276,14 @@ fn russian(language: &str) -> bool {
         .split('-')
         .next()
         .is_some_and(|code| code.eq_ignore_ascii_case("ru"))
+}
+
+pub(super) fn unverified_explanation(language: &str) -> &'static str {
+    if russian(language) {
+        "Комментарий Gemini не прошёл проверку."
+    } else {
+        "Gemini's explanation could not be verified."
+    }
 }
 
 fn minutes(input: &Value, russian: bool) -> Option<String> {

@@ -3,7 +3,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use serde_json::{Map, Value, json};
-use sqlx::{Postgres, Transaction};
+use sqlx::{Acquire, Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
@@ -48,13 +48,20 @@ pub(super) async fn sleep_review_in(
     let history_end = start
         .previous_day()
         .ok_or(HealthAnalysisError::SleepRange)?;
-    let stored: Vec<StoredNight> = sqlx::query_as(include_str!("sleep_review.sql"))
-        .bind(history_start)
-        .bind(end)
-        .bind(PARSER_VERSION)
-        .bind(start)
-        .fetch_all(&mut **txn)
-        .await?;
+    // PostgreSQL cancels the first statement at the existing deadline. Retry once
+    // in the same read snapshot, where the completed index reads are now cached.
+    let mut attempt = txn.begin().await?;
+    let stored = match read_sleep_window(&mut attempt, history_start, start, end).await {
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("57014") => {
+            attempt.rollback().await?;
+            read_sleep_window(txn, history_start, start, end).await?
+        }
+        result => {
+            let rows = result?;
+            attempt.commit().await?;
+            rows
+        }
+    };
     let nights = stored
         .into_iter()
         .map(|row| night_document(row, timezone, start))
@@ -105,6 +112,21 @@ pub(super) async fn sleep_review_in(
         "baseline":{"start":history_start.to_string(),"end":history_end.to_string(),
             "metrics":baseline,"minimum_nights_for_deviation":MIN_BASELINE}
     }))
+}
+
+async fn read_sleep_window(
+    txn: &mut Transaction<'_, Postgres>,
+    history_start: Date,
+    start: Date,
+    end: Date,
+) -> Result<Vec<StoredNight>, sqlx::Error> {
+    sqlx::query_as(include_str!("sleep_review.sql"))
+        .bind(history_start)
+        .bind(end)
+        .bind(PARSER_VERSION)
+        .bind(start)
+        .fetch_all(&mut **txn)
+        .await
 }
 
 fn night_document(
