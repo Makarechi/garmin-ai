@@ -12,10 +12,13 @@ use ga_domain::{
     agent_interpretation::{AgentIntent, AgentInterpretation},
     analysis_budget::AnalysisBudget,
     channel::{InboundEnvelope, InboundKind},
+    event_input::source_offset_datetime,
     timestamp::StoredInstant,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
+
+use crate::model_gateway::sleep_review_period;
 
 use super::{
     ActiveModelJob, CurrentModelPolicy, DiaryInterpretationError, DiaryInterpretationRequest,
@@ -124,6 +127,29 @@ impl ModelGateway<'_> {
             .await
             .map_err(DiaryInterpretationError::Read)?;
         let digest = context.digest().map_err(DiaryInterpretationError::Read)?;
+        if let Some(at) = source_offset_datetime(clock.message_at, timezone)
+            && sleep_review_period(text, at.date()).is_some()
+        {
+            let language = if text.chars().any(|letter| ('А'..='я').contains(&letter)) {
+                "ru"
+            } else {
+                "en"
+            };
+            let command = AgentInterpretation::from_value(&json!({
+                "intent":"question","confidence":1.0,"response_language":language
+            }))
+            .map_err(DiaryInterpretationError::Response)?;
+            return Ok(TelegramDiaryInterpretation {
+                command,
+                memory: context.memory_fence,
+                channel_versions: BTreeSet::new(),
+                model_versions: BTreeSet::new(),
+                instance: self.binding().instance_id.to_owned(),
+                timezone: timezone.to_owned(),
+                mentioned,
+                digest,
+            });
+        }
         let InterpretationContext {
             channel,
             mut events,

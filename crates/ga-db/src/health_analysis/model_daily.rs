@@ -34,6 +34,7 @@ use super::{
     running::running_efficiency_in,
     series::metric_series_in,
     sleep_analysis::sleep_analysis_in,
+    sleep_review::sleep_review_in,
     stress::stress_hours_in,
 };
 use crate::{
@@ -49,6 +50,7 @@ use crate::{
 pub const PERSONAL_BASELINE: &str = "personal_baseline";
 pub const PERIOD_COMPARISON: &str = "analysis_compare_periods";
 pub const SLEEP_ANALYSIS: &str = "analysis_sleep";
+pub const SLEEP_REVIEW: &str = "analysis_sleep_review";
 pub const DATA_FRESHNESS: &str = "data_freshness";
 pub const LAGGED_ASSOCIATION: &str = "analysis_lagged_association";
 pub const HEALTH_SNAPSHOT: &str = "health_snapshot";
@@ -96,6 +98,8 @@ pub enum DailyAnalysisQuery {
         #[serde(default)]
         timing_only: bool,
     },
+    #[serde(rename = "analysis_sleep_review")]
+    SleepReview { start: String, end: String },
     #[serde(rename = "data_freshness")]
     Freshness {},
     #[serde(rename = "analysis_lagged_association")]
@@ -238,6 +242,15 @@ impl DailyAnalysisQuery {
             return model_freshness_in(txn, context.binding().owner_id, at, &timezone)
                 .await
                 .map(|(report, _)| Some(report));
+        }
+        if let Self::SleepReview { start, end } = self {
+            if !permits_timing_in(txn).await? {
+                return Ok(None);
+            }
+            let timezone = owner_timezone(txn, configured_timezone).await?;
+            return sleep_review_in(txn, parse_day(start)?, parse_day(end)?, &timezone)
+                .await
+                .map(Some);
         }
         if let Self::Sleep {
             start,
@@ -514,7 +527,9 @@ impl DailyAnalysisQuery {
                 )
                 .await?
             }
-            Self::Sleep { .. } => return Err(HealthAnalysisError::SleepRange),
+            Self::Sleep { .. } | Self::SleepReview { .. } => {
+                return Err(HealthAnalysisError::SleepRange);
+            }
             Self::Freshness {} | Self::Wellbeing { .. } => return Ok(None),
         };
         Ok(Some(result))
@@ -553,6 +568,7 @@ impl DailyAnalysisEvidence {
             PERSONAL_BASELINE
                 | PERIOD_COMPARISON
                 | SLEEP_ANALYSIS
+                | SLEEP_REVIEW
                 | DATA_FRESHNESS
                 | LAGGED_ASSOCIATION
                 | MIGRAINE_WINDOWS
@@ -590,7 +606,9 @@ impl DailyAnalysisEvidence {
             return None;
         }
         let (timezone, checked_at) = match &query {
-            DailyAnalysisQuery::Sleep { .. } => (Some(result["timezone"].as_str()?.into()), None),
+            DailyAnalysisQuery::Sleep { .. } | DailyAnalysisQuery::SleepReview { .. } => {
+                (Some(result["timezone"].as_str()?.into()), None)
+            }
             DailyAnalysisQuery::Migraine { .. } | DailyAnalysisQuery::StressHours { .. } => {
                 (Some(timezone.into()), None)
             }
@@ -618,6 +636,7 @@ impl DailyAnalysisEvidence {
         if matches!(
             self.query,
             DailyAnalysisQuery::Sleep { .. }
+                | DailyAnalysisQuery::SleepReview { .. }
                 | DailyAnalysisQuery::Freshness {}
                 | DailyAnalysisQuery::Migraine { .. }
                 | DailyAnalysisQuery::StressHours { .. }
