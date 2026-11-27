@@ -10,8 +10,16 @@ use ga_db::{
 
 const SLEEP_REVIEW_QUESTION: &str = "Расскажи подробно, как я спал вчера и сегодня";
 const REVOKED_SLEEP_REVIEW: &str = "Сравни мой сон вчера и сегодня";
+const UNVERIFIED_SLEEP_REVIEW: &str = "Как я спал вчера и сегодня?";
 const SLEEP_INTERPRETATION: &str =
     "Сегодня сон был заметно дольше. Стоит понаблюдать за временем отхода ко сну.";
+
+fn sleep_review_question(text: &str) -> bool {
+    matches!(
+        text,
+        SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW | UNVERIFIED_SLEEP_REVIEW
+    )
+}
 
 struct CapabilityModel {
     question: &'static str,
@@ -41,9 +49,14 @@ impl Sender for CapabilityModel {
                 .ok_or(ModelTransportError::InvalidConfiguration)?,
         )
         .map_err(|_| ModelTransportError::InvalidConfiguration)?;
-        let result = if matches!(self.question, SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW)
-            && call == 0
-        {
+        let result = if sleep_review_question(self.question) && call == 0 {
+            assert!(
+                request.body()["system_instruction"]
+                    .as_str()
+                    .is_some_and(|instruction| {
+                        instruction.contains("only qualitative prose without any digits")
+                    })
+            );
             assert_eq!(prompt["question"], self.question);
             assert_eq!(prompt["tools"], json!([]));
             assert_eq!(prompt["planning_only"], false);
@@ -82,7 +95,12 @@ impl Sender for CapabilityModel {
                         .any(|value| value["metric"] == "duration_minutes"
                             && value["direction"] == "above"))
             );
-            json!({"answer":SLEEP_INTERPRETATION,"evidence_ids":[1],"response_language":"ru"})
+            let answer = if self.question == UNVERIFIED_SLEEP_REVIEW {
+                "Сегодня вы спали 20 часов."
+            } else {
+                SLEEP_INTERPRETATION
+            };
+            json!({"answer":answer,"evidence_ids":[1],"response_language":"ru"})
         } else if self.answer.is_none() && call == 1 {
             assert_eq!(prompt["question"], self.question);
             return Err(ModelTransportError::Unavailable {
@@ -188,7 +206,8 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
         ),
         (203, SLEEP_REVIEW_QUESTION, "ru", None),
         (204, REVOKED_SLEEP_REVIEW, "ru", None),
-        (205, "Сравни тестовый сон за прошлую неделю", "ru", None),
+        (205, UNVERIFIED_SLEEP_REVIEW, "ru", None),
+        (206, "Сравни тестовый сон за прошлую неделю", "ru", None),
     ] {
         binding
             .accept_polled_update(
@@ -230,7 +249,31 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             timezone: "UTC",
             locale: "en",
         };
-        worker.process(&lease, now).await;
+        if question == UNVERIFIED_SLEEP_REVIEW {
+            let mut lock = pool.begin().await?;
+            sqlx::query("LOCK TABLE timeline_intervals IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *lock)
+                .await?;
+            let release_after_timeout = async {
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    loop {
+                        let blocked: bool = sqlx::query_scalar(
+                            "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database()
+                             AND wait_event_type='Lock' AND query LIKE 'SELECT dates.day,%')",
+                        ).fetch_one(&pool).await?;
+                        if blocked { return Ok::<_, sqlx::Error>(()); }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await??;
+                tokio::time::sleep(Duration::from_millis(820)).await;
+                lock.rollback().await?;
+                Ok::<_, Box<dyn Error>>(())
+            };
+            let ((), released) = tokio::join!(worker.process(&lease, now), release_after_timeout);
+            released?;
+        } else {
+            worker.process(&lease, now).await;
+        }
         let (reply, body, protected, completed): (Uuid, String, bool, bool) = sqlx::query_as(
             "SELECT o.id,o.intent#>>'{blocks,0,text}',o.memory_fence IS NOT NULL,
                     i.status='processed' AND j.status='done'
@@ -242,10 +285,17 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
         .fetch_optional(&pool)
         .await?
         .ok_or_else(|| format!("Expected a reply for synthetic update {id}"))?;
-        let sleep_review = matches!(question, SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW);
+        let sleep_review = sleep_review_question(question);
         if sleep_review {
             assert!(body.contains("Сон 6 ч 40 мин") && body.contains("Сон 8 ч 40 мин"));
-            assert!(body.contains("REM") && body.contains(SLEEP_INTERPRETATION));
+            assert!(body.contains("REM"));
+            if question == UNVERIFIED_SLEEP_REVIEW {
+                assert!(body.contains("Комментарий Gemini не прошёл проверку."));
+                assert!(body.contains("Длительность сна выше вашего обычного диапазона"));
+                assert!(!body.contains("20 часов"));
+            } else {
+                assert!(body.contains(SLEEP_INTERPRETATION));
+            }
             assert!(body.contains("Больше сна, чем в предыдущую ночь — 2 ч 0 мин"));
             assert!(body.contains("Медианная длительность сна — 7 ч 0 мин"));
         } else {

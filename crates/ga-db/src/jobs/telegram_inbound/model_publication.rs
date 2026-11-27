@@ -48,15 +48,26 @@ impl CurrentTelegramModelContext {
     pub(super) fn active_clarification(&self) -> Option<Value> {
         self.pending_clarification.clone()
     }
+
+    pub(super) fn scoped_analysis(memory: &MemoryFence) -> Self {
+        Self {
+            memory: memory.clone(),
+            offered: Vec::new(),
+            questions: Vec::new(),
+            versions: BTreeSet::new(),
+            pending_clarification: None,
+            selection_unavailable: false,
+        }
+    }
 }
 
-pub(super) async fn verify(
+pub(super) async fn verify_session(
     txn: &mut Transaction<'_, Postgres>,
     lease: &Lease,
     envelope: &InboundEnvelope,
     expected: TelegramModelContext<'_>,
     required_categories: ModelCategories,
-) -> Result<CurrentTelegramModelContext, TelegramDiaryCommitError> {
+) -> Result<(ConversationBinding, StoredInstant), TelegramDiaryCommitError> {
     use TelegramDiaryCommitError::{Database, ModelContextChanged};
     lock_clarification(txn)
         .await
@@ -76,8 +87,6 @@ pub(super) async fn verify(
     if timezone != expected.timezone || !onboarding_allows_model(txn, required_categories).await? {
         return Err(ModelContextChanged);
     }
-    let model = ShareDestination::new(DestinationKind::Model, expected.model_instance)
-        .map_err(|_| ModelContextChanged)?;
     let at: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut **txn)
         .await?;
@@ -90,6 +99,20 @@ pub(super) async fn verify(
     if local_prompt.guided_form || local_prompt.draft.is_some() || local_prompt.notice.is_some() {
         return Err(ModelContextChanged);
     }
+    Ok((binding, at))
+}
+
+pub(super) async fn verify(
+    txn: &mut Transaction<'_, Postgres>,
+    lease: &Lease,
+    envelope: &InboundEnvelope,
+    expected: TelegramModelContext<'_>,
+    required_categories: ModelCategories,
+) -> Result<CurrentTelegramModelContext, TelegramDiaryCommitError> {
+    use TelegramDiaryCommitError::{Database, ModelContextChanged};
+    let model = ShareDestination::new(DestinationKind::Model, expected.model_instance)
+        .map_err(|_| ModelContextChanged)?;
+    let (binding, at) = verify_session(txn, lease, envelope, expected, required_categories).await?;
     let message_at =
         StoredInstant::try_from(envelope.occurred_at().unwrap_or(envelope.received_at()))
             .map_err(|_| ModelContextChanged)?;

@@ -72,6 +72,14 @@ struct DiaryReadFence {
 }
 
 impl DiaryAnalysisFence {
+    pub(crate) fn only_sleep_reviews(&self) -> bool {
+        !self.reads.is_empty()
+            && self
+                .reads
+                .iter()
+                .all(|read| matches!(read, AnalysisReadFence::Daily(read) if read.sleep_review()))
+    }
+
     pub(crate) fn single_sleep_timing(&self) -> bool {
         matches!(self.reads.as_slice(), [AnalysisReadFence::Daily(read)] if read.single_sleep_timing())
     }

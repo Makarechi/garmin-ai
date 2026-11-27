@@ -16,6 +16,7 @@ pub use tracker_text::{
 };
 pub use voice::TelegramVoice;
 
+pub use analysis_reply::TelegramAnalysisPublication;
 pub use control::TelegramControlError;
 pub use diary::TelegramDiaryCommitError;
 pub(crate) use history::resolve_legacy_history;
