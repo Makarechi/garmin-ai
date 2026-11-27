@@ -361,8 +361,12 @@ where
                 && item["arguments"]["timing_only"] == true
                 && item["result"]["algorithm_version"] == "main-sleep-timing-v1"
         );
-        let sleep_review = evidence.iter().any(|item| item["tool"] == SLEEP_REVIEW);
-        if turn > 0 && !point && !sleep_review && !quality_loaded {
+        let sleep_only = !evidence.is_empty()
+            && evidence.iter().all(|item| {
+                item["tool"] == SLEEP_REVIEW
+                    && item["result"]["algorithm_version"] == "sleep-review-v1"
+            });
+        if turn > 0 && !point && !sleep_only && !quality_loaded {
             let remaining = budget.remaining(Instant::now())?;
             if let Some((report, ready)) = tokio::time::timeout(remaining, tools.quality_report())
                 .await
@@ -709,11 +713,7 @@ pub(crate) fn format_analysis_answer(
     timestamps: Vec<String>,
     evidence: &[Value],
 ) -> String {
-    let sleep = evidence
-        .iter()
-        .find(|item| item["tool"] == SLEEP_REVIEW)
-        .map(|item| sleep_review::render_sleep_review(&item["result"], language))
-        .unwrap_or_default();
+    let sleep = sleep_review::render_sleep_reviews(evidence, language);
     let body = [
         freshness.unwrap_or_default(),
         sleep,

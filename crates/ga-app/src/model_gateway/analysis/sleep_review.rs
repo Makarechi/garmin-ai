@@ -1,6 +1,10 @@
+use std::collections::BTreeSet;
+
 use ga_domain::{event_input::source_offset_datetime, timestamp::StoredInstant};
 use serde_json::{Map, Value, json};
 use time::{Date, format_description::well_known::Iso8601};
+
+use super::SLEEP_REVIEW;
 
 /// Claim only unambiguous sleep-only questions. Mixed topics and other date
 /// expressions go through the ordinary plan and can still select this reader.
@@ -72,13 +76,42 @@ pub(crate) fn sleep_review_period(question: &str, today: Date) -> Option<Map<Str
     ]))
 }
 
-pub(super) fn render_sleep_review(result: &Value, language: &str) -> String {
-    let russian = language
-        .split('-')
-        .next()
-        .is_some_and(|code| code.eq_ignore_ascii_case("ru"));
+pub(super) fn render_sleep_reviews(evidence: &[Value], language: &str) -> String {
+    let reviews: Vec<_> = evidence
+        .iter()
+        .filter(|item| item["tool"] == SLEEP_REVIEW && item["result"]["rows"].is_array())
+        .map(|item| &item["result"])
+        .collect();
+    let multiple = reviews.len() > 1;
+    let mut displayed_days = BTreeSet::new();
+    let mut displayed_histories = BTreeSet::new();
+    reviews
+        .into_iter()
+        .filter_map(|result| {
+            let history = &result["baseline"];
+            let dates = history["start"].as_str().zip(history["end"].as_str());
+            let mut lines = render_sleep_review(result, language, &mut displayed_days);
+            if dates.is_none_or(|dates| displayed_histories.insert(dates)) {
+                lines.extend(render_history(
+                    history,
+                    language,
+                    dates.filter(|_| multiple),
+                ));
+            }
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_sleep_review<'a>(
+    result: &'a Value,
+    language: &str,
+    displayed_days: &mut BTreeSet<&'a str>,
+) -> Vec<String> {
+    let russian = russian(language);
     let Some(rows) = result["rows"].as_array() else {
-        return String::new();
+        return Vec::new();
     };
     let timezone = result["timezone"].as_str().unwrap_or("UTC");
     let mut lines = Vec::new();
@@ -104,7 +137,10 @@ pub(super) fn render_sleep_review(result: &Value, language: &str) -> String {
         ]
     };
     for row in rows {
-        let Some(date) = row["day"].as_str() else {
+        let Some(date) = row["day"]
+            .as_str()
+            .filter(|date| displayed_days.insert(date))
+        else {
             continue;
         };
         if row["available"] != true && row["reported_naps"].is_null() {
@@ -185,7 +221,13 @@ pub(super) fn render_sleep_review(result: &Value, language: &str) -> String {
             lines.push(format!("{label} — {value}"));
         }
     }
-    let baseline = &result["baseline"]["metrics"]["duration_minutes"];
+    lines
+}
+
+fn render_history(history: &Value, language: &str, dates: Option<(&str, &str)>) -> Vec<String> {
+    let russian = russian(language);
+    let mut lines = Vec::new();
+    let baseline = &history["metrics"]["duration_minutes"];
     if let Some(count) = baseline["nights"].as_u64()
         && count > 0
     {
@@ -194,7 +236,11 @@ pub(super) fn render_sleep_review(result: &Value, language: &str) -> String {
         } else {
             "Nights with duration data over the preceding 28 days"
         };
-        lines.push(format!("{label} — {count}"));
+        if let Some((start, end)) = dates {
+            lines.push(format!("{label} ({start}–{end}) — {count}"));
+        } else {
+            lines.push(format!("{label} — {count}"));
+        }
         if let Some(median) = minutes(&baseline["median"], russian) {
             let label = if russian {
                 "Медианная длительность сна"
@@ -204,7 +250,14 @@ pub(super) fn render_sleep_review(result: &Value, language: &str) -> String {
             lines.push(format!("{label} — {median}"));
         }
     }
-    lines.join("\n")
+    lines
+}
+
+fn russian(language: &str) -> bool {
+    language
+        .split('-')
+        .next()
+        .is_some_and(|code| code.eq_ignore_ascii_case("ru"))
 }
 
 fn minutes(input: &Value, russian: bool) -> Option<String> {
