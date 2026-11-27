@@ -3,7 +3,8 @@ use ga_domain::model_consent::ModelConsentError;
 
 use super::{
     ActiveModelJob, Disposition, GatewayError, ModelDiaryWorker, Sender, TelegramDiaryCommitError,
-    TelegramInboundLease, TelegramTransport, commit_disposition, model_disposition, wall_clock,
+    TelegramInboundLease, TelegramTransport, commit_disposition, model_disposition,
+    provider_notice, wall_clock,
 };
 use crate::{model_gateway::ModelInput, telegram_transport::TelegramTransportError};
 use ga_db::share_policy::{DestinationKind, ShareDestination};
@@ -96,6 +97,18 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                         self.locale,
                         TelegramInboundState::Processed,
                         |locale| super::template(locale, key),
+                    )
+                    .await;
+            }
+            Err(Disposition::Provider(error)) => {
+                let provider = self.gateway.binding().provider;
+                let _ = self
+                    .database
+                    .finish_telegram_voice_notice(
+                        lease,
+                        self.locale,
+                        TelegramInboundState::Processed,
+                        |locale| provider_notice(locale, provider, error),
                     )
                     .await;
             }

@@ -15,9 +15,13 @@ use ga_domain::{
     analysis_budget::{AnalysisBudget, AnalysisBudgetError},
     event_input::source_offset_datetime,
     localization::catalog_text,
+    model_consent::ModelProvider,
+    model_response::{ModelResponseError, StructuredProvider},
     timestamp::StoredInstant,
 };
-use ga_model::fallback::FallbackError;
+use ga_model::{
+    ModelFailureDetail, ModelTransportError, ModelUnavailability, fallback::FallbackError,
+};
 use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 
@@ -404,6 +408,13 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     .finish_telegram_model_notice(lease, template(language, key))
                     .await;
             }
+            Disposition::Provider(error) => {
+                let message = provider_notice(language, self.gateway.binding().provider, error);
+                let _ = self
+                    .database
+                    .finish_telegram_model_notice(lease, &message)
+                    .await;
+            }
             Disposition::Retry(delay) => {
                 if let Ok(now) = wall_clock() {
                     let delay = i64::try_from(delay.as_micros()).unwrap_or(i64::MAX);
@@ -435,6 +446,7 @@ enum Disposition {
     VoiceUnavailable,
     Retry(Duration),
     Text(&'static str),
+    Provider(ModelTransportError),
 }
 
 fn template(language: &str, key: &str) -> &'static str {
@@ -484,10 +496,63 @@ fn model_disposition(error: GatewayError) -> Disposition {
         GatewayError::State(ModelGateError::Busy) => Disposition::Retry(IDLE),
         GatewayError::State(ModelGateError::LeaseLost) => Disposition::Gone,
         GatewayError::Attempt(FallbackError::Deadline) => Disposition::Text("agent.timeout"),
+        GatewayError::Attempt(FallbackError::Provider(error)) => Disposition::Provider(error),
+        GatewayError::Attempt(FallbackError::NoEligibleModel) => {
+            Disposition::Text("agent.provider_no_model")
+        }
         GatewayError::Consent(_) | GatewayError::Attempt(FallbackError::ConsentRequired) => {
             Disposition::Text("agent.data_changed")
         }
         _ => Disposition::Text("agent.answer_unverified"),
+    }
+}
+
+fn provider_notice(locale: &str, provider: ModelProvider, error: ModelTransportError) -> String {
+    let provider = match provider {
+        ModelProvider::Gemini => "Gemini",
+        ModelProvider::Structured(StructuredProvider::OpenAi) => "OpenAI",
+        ModelProvider::Structured(StructuredProvider::Anthropic) => "Anthropic",
+        ModelProvider::Extension => template(locale, "agent.provider_extension"),
+    };
+    let (key, status) = match error {
+        ModelTransportError::InvalidConfiguration => ("agent.provider_configuration", None),
+        ModelTransportError::RequestRejected(status) => ("agent.provider_rejected", status),
+        ModelTransportError::Unavailable { reason, detail, .. } => {
+            let key = match (reason, detail) {
+                (ModelUnavailability::Authorization, _) => "agent.provider_auth",
+                (ModelUnavailability::MissingModel, _) => "agent.provider_missing_model",
+                (ModelUnavailability::RateLimited, _) => "agent.provider_rate_limit",
+                (_, ModelFailureDetail::Timeout) => "agent.provider_timeout",
+                (_, ModelFailureDetail::HttpStatus(status)) if status.as_u16() == 408 => {
+                    "agent.provider_timeout"
+                }
+                (_, ModelFailureDetail::Connection) => "agent.provider_connection",
+                (_, ModelFailureDetail::Network) => "agent.provider_network",
+                (_, ModelFailureDetail::ProviderResponse) => "agent.provider_incomplete",
+                _ => "agent.provider_unavailable",
+            };
+            let status = match detail {
+                ModelFailureDetail::HttpStatus(status) => Some(status),
+                _ => None,
+            };
+            (key, status)
+        }
+        ModelTransportError::Response(error) => {
+            let key = match error {
+                ModelResponseError::Refused => "agent.provider_refused",
+                ModelResponseError::Incomplete | ModelResponseError::Unavailable => {
+                    "agent.provider_incomplete"
+                }
+                ModelResponseError::TooLarge => "agent.provider_large_response",
+                _ => "agent.provider_invalid_response",
+            };
+            (key, None)
+        }
+    };
+    let reason = template(locale, key);
+    match status {
+        Some(status) => format!("{reason} ({provider}, HTTP {}).", status.as_u16()),
+        None => format!("{reason} ({provider})."),
     }
 }
 

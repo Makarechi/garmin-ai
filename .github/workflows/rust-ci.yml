@@ -97,6 +97,12 @@ jobs:
             esac
             cargo test --locked -p ga-app --lib "telegram_transport::tests::$fixture::$test_name" -- --exact --ignored --nocapture
           done
+      - name: Verify Telegram diagnostics for model provider failures
+        run: |
+          docker exec "${{ job.services.postgres.id }}" createdb -U garmin telegram_provider_notices_test
+          export GA_TEST_DATABASE_URL="${GA_TEST_DATABASE_URL%/*}/telegram_provider_notices_test"
+          GA_DATABASE_URL="$GA_TEST_DATABASE_URL" target/release/garmin-ai-rust migrate
+          cargo test --locked -p ga-app --lib telegram_transport::model_worker::tests::capability_answers::publishes_multilingual_capability_answers_and_provider_errors -- --exact --ignored
       - name: Skip archive scans for empty trend notification polls
         run: |
           docker exec "${{ job.services.postgres.id }}" createdb -U garmin trend_notifications_test

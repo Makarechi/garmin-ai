@@ -170,12 +170,12 @@ impl Database {
         Ok(true)
     }
 
-    pub async fn finish_telegram_voice_notice(
+    pub async fn finish_telegram_voice_notice<T: AsRef<str> + Send>(
         &self,
         lease: &TelegramInboundLease,
         configured_locale: &str,
         state: TelegramInboundState,
-        message: impl FnOnce(&str) -> &'static str + Send,
+        message: impl FnOnce(&str) -> T + Send,
     ) -> Result<(), TelegramDiaryCommitError> {
         let envelope = InboundEnvelope::parse(lease.envelope_json().as_bytes())
             .map_err(|_| TelegramDiaryCommitError::UnsupportedMessage)?;
@@ -191,7 +191,8 @@ impl Database {
         };
         let locale =
             super::local_text::preferred_locale(&mut txn, binding, configured_locale).await?;
-        super::model_reply::queue_local_notice(&mut txn, lease, &envelope, message(&locale), state)
+        let message = message(&locale);
+        super::model_reply::queue_local_notice(&mut txn, lease, &envelope, message.as_ref(), state)
             .await?;
         txn.commit().await?;
         Ok(())

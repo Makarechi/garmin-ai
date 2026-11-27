@@ -113,12 +113,14 @@ impl Sender for Mock {
                 return Err(ModelTransportError::Unavailable {
                     reason: ModelUnavailability::RateLimited,
                     retry_after: Duration::from_secs(120),
+                    detail: ga_model::ModelFailureDetail::Unspecified,
                 });
             }
             (Responses::UnavailableThenSuccess, true) => {
                 return Err(ModelTransportError::Unavailable {
                     reason: ModelUnavailability::MissingModel,
                     retry_after: Duration::from_secs(120),
+                    detail: ga_model::ModelFailureDetail::Unspecified,
                 });
             }
             _ => {}

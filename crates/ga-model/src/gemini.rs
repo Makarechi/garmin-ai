@@ -72,7 +72,8 @@ impl GeminiTransport {
                 StatusCode::TOO_MANY_REQUESTS | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
             ) && invalid_api_key(response).await
             {
-                return Err(ModelUnavailability::Authorization.with_retry(retry));
+                return Err(ModelUnavailability::Authorization
+                    .with_retry(retry, crate::ModelFailureDetail::HttpStatus(status)));
             }
             return Err(http_failure(status, retry));
         }

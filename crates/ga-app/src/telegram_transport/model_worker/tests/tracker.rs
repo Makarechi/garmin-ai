@@ -33,7 +33,7 @@ impl Sender for LegacyTrackerProvider {
             match self.safety_outcome.load(Ordering::SeqCst) {
                 0 => json!({"urgent":false,"response_language":"en"}),
                 1 => json!({"urgent":true,"response_language":"en"}),
-                _ => return Err(ModelTransportError::RequestRejected),
+                _ => return Err(ModelTransportError::RequestRejected(None)),
             }
         } else {
             let prompt: Value = serde_json::from_str(
@@ -46,7 +46,7 @@ impl Sender for LegacyTrackerProvider {
                 .as_str()
                 .ok_or(ModelTransportError::InvalidConfiguration)?;
             if text.contains("provider-unavailable") {
-                return Err(ModelTransportError::RequestRejected);
+                return Err(ModelTransportError::RequestRejected(None));
             }
             assert_eq!(
                 prompt["candidate_trackers"]
