@@ -1,5 +1,7 @@
 mod diary;
+mod sleep_review;
 pub use diary::DiaryAnalysisTools;
+pub(crate) use sleep_review::sleep_review_period;
 
 use std::{collections::BTreeSet, error::Error, fmt, future::Future, io, time::Instant};
 
@@ -8,7 +10,7 @@ use ga_db::{
     diary::{DefinitionReadFence, EVENT_DEFINITIONS, TimelineReadFence},
     health_analysis::{
         COFFEE_SLEEP, DATA_FRESHNESS, DailyAnalysisEvidence, EVENT_WINDOWS, INSIGHTS_LIST,
-        MIGRAINE_WINDOWS, SLEEP_ANALYSIS, TIMELINE, WELLBEING_OBSERVATIONS,
+        MIGRAINE_WINDOWS, SLEEP_ANALYSIS, SLEEP_REVIEW, TIMELINE, WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisEvidence},
     },
     resource_catalog::{CatalogEvidence, RESOURCE_CATALOG},
@@ -111,6 +113,9 @@ impl Error for AnalysisReadError {}
 pub trait AnalysisReadTools: Sync {
     fn categories(&self) -> ModelCategories;
     fn context_current(&self) -> impl Future<Output = bool> + Send;
+    fn selected_read(&self) -> Option<(&'static str, &Map<String, Value>)> {
+        None
+    }
     /// `None` preserves argument/access rejection. Storage failures must stop
     /// the attempt instead of asking the model to revise valid arguments.
     fn read(
@@ -330,6 +335,25 @@ where
     let mut quality = None;
     let mut quality_loaded = false;
     let mut replaying = question.replay_notice.is_some();
+    let selected_read = tools.selected_read();
+    if let Some((name, arguments)) = selected_read {
+        check_context(tools, budget).await?;
+        budget.record_tool_call(Instant::now())?;
+        let read = tokio::time::timeout(
+            budget.remaining(Instant::now())?,
+            tools.read(name, arguments),
+        )
+        .await
+        .map_err(|_| AnalysisBudgetError::Timeout)?
+        .map_err(AnalysisError::Read)?;
+        let Some(read) = read else {
+            return Ok(AnalysisResult::NoAnswer { language });
+        };
+        tracker_versions.extend(read.tracker_versions);
+        schema_versions.extend(read.schema_versions);
+        budget.check_evidence(&ordered(&read.value)?)?;
+        evidence.push(json!({"id":1,"tool":name,"arguments":arguments,"result":read.value}));
+    }
     for turn in 0..MAX_ROUNDS {
         check_context(tools, budget).await?;
         let point = matches!(evidence.as_slice(), [item] if
@@ -337,7 +361,12 @@ where
                 && item["arguments"]["timing_only"] == true
                 && item["result"]["algorithm_version"] == "main-sleep-timing-v1"
         );
-        if turn > 0 && !point && !quality_loaded {
+        let sleep_only = !evidence.is_empty()
+            && evidence.iter().all(|item| {
+                item["tool"] == SLEEP_REVIEW
+                    && item["result"]["algorithm_version"] == "sleep-review-v1"
+            });
+        if turn > 0 && !point && !sleep_only && !quality_loaded {
             let remaining = budget.remaining(Instant::now())?;
             if let Some((report, ready)) = tokio::time::timeout(remaining, tools.quality_report())
                 .await
@@ -355,7 +384,11 @@ where
             }
             quality_loaded = true;
         }
-        let mut conversation = question.conversation.clone();
+        let mut conversation = if selected_read.is_some() {
+            json!({})
+        } else {
+            question.conversation.clone()
+        };
         let replay_notice = if replaying {
             if conversation.is_object() {
                 conversation["turns"] = json!([]);
@@ -364,7 +397,11 @@ where
         } else {
             None
         };
-        let rounds = budget.remaining_tool_rounds(turn);
+        let rounds = if selected_read.is_some() {
+            0
+        } else {
+            budget.remaining_tool_rounds(turn)
+        };
         let answer_only = rounds == 0;
         let can_offer = |name| {
             !replaying
@@ -390,11 +427,11 @@ where
             "conversation": conversation,
             "quality_context": quality.as_ref().map_or_else(|| json!({}), |value| value["result"]["channels"].clone()),
             "tools": descriptions,
-            "personal_goals": question.personal_goals,
+            "personal_goals": if selected_read.is_some() { Value::Null } else { question.personal_goals.clone() },
             "remaining_tool_rounds": rounds,
             "remaining_tool_calls": budget.remaining_tool_calls(),
             "answer_only": answer_only,
-            "planning_only": turn == 0,
+            "planning_only": turn == 0 && selected_read.is_none(),
             "garmin_replay_notice": replay_notice,
             "evidence": evidence,
         }))?;
@@ -676,8 +713,10 @@ pub(crate) fn format_analysis_answer(
     timestamps: Vec<String>,
     evidence: &[Value],
 ) -> String {
+    let sleep = sleep_review::render_sleep_reviews(evidence, language);
     let body = [
         freshness.unwrap_or_default(),
+        sleep,
         narrative.unwrap_or_default(),
         numbers.join("\n"),
         timestamps.join("\n"),
@@ -721,6 +760,10 @@ pub(crate) fn format_analysis_answer(
                 ))
             || (item["tool"] == SLEEP_ANALYSIS
                 && item["result"]["algorithm_version"] == "sleep-analysis-v1")
+            || (item["tool"] == SLEEP_REVIEW
+                && item["result"]["rows"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|row| !row["reported_naps"].is_null())))
     }) {
         sources.push(message("agent.source.diary"));
     }

@@ -9,7 +9,7 @@ use ga_db::{
         DEVICE_HISTORY, DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery,
         EVENT_WINDOWS, HEALTH_RANGE, HEALTH_SNAPSHOT, HealthAnalysisError, INSIGHTS_LIST,
         LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS, PERIOD_COMPARISON, PERSONAL_BASELINE,
-        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS, TIMELINE, TimelineError,
+        RUNNING_EFFICIENCY, SLEEP_ANALYSIS, SLEEP_REVIEW, STRESS_HOURS, TIMELINE, TimelineError,
         WELLBEING_OBSERVATIONS,
         generic::{GENERIC_ANALYSIS, GenericAnalysisError, GenericAnalysisEvidence},
     },
@@ -33,6 +33,14 @@ static DESCRIPTION: LazyLock<Value> = LazyLock::new(|| model_description(ReadToo
 static BASELINE: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Baseline));
 static COMPARISON: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::ComparePeriods));
 static SLEEP: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Sleep));
+static REVIEW: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "name":SLEEP_REVIEW,
+        "description":"Detailed Garmin sleep review for up to 31 inclusive wake dates. Includes confirmed naps in the request and statistical summaries of the immediately preceding 28 days. Prefer for summaries, differences and unusual sleep.",
+        "schema":{"type":"object","properties":{"start":{"type":"string","format":"date"},
+            "end":{"type":"string","format":"date"}},"required":["start","end"],"additionalProperties":false}
+    })
+});
 static FRESHNESS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::Freshness));
 static GENERIC: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::GenericAnalysis));
 static LAGS: LazyLock<Value> = LazyLock::new(|| model_description(ReadTool::LaggedAssociation));
@@ -65,6 +73,8 @@ pub struct DiaryAnalysisTools<'a> {
     model: ShareDestination<'a>,
     daily_read: Option<(&'a str, StoredInstant, DailyAnalysisAccess)>,
     wellbeing_read: Option<(&'a str, StoredInstant)>,
+    telegram_sleep_review: bool,
+    sleep_period: Option<Map<String, Value>>,
 }
 
 impl<'a> DiaryAnalysisTools<'a> {
@@ -79,7 +89,19 @@ impl<'a> DiaryAnalysisTools<'a> {
             model: ShareDestination::new(DestinationKind::Model, model_instance)?,
             daily_read: None,
             wellbeing_read: None,
+            telegram_sleep_review: false,
+            sleep_period: None,
         })
+    }
+
+    pub(crate) fn with_telegram_sleep_review(mut self, period: Option<Map<String, Value>>) -> Self {
+        self.telegram_sleep_review = true;
+        self.sleep_period = period.filter(|_| {
+            self.daily_read
+                .as_ref()
+                .is_some_and(|(_, _, access)| access.sleep)
+        });
+        self
     }
 
     pub async fn with_daily_access(
@@ -192,6 +214,12 @@ impl<'a> DiaryAnalysisTools<'a> {
                     name: SLEEP_ANALYSIS,
                     description: &SLEEP,
                 });
+                if self.telegram_sleep_review {
+                    offered.push(OfferedReadTool {
+                        name: SLEEP_REVIEW,
+                        description: &REVIEW,
+                    });
+                }
             }
             if access.coffee_sleep {
                 offered.push(OfferedReadTool {
@@ -250,6 +278,12 @@ impl<'a> DiaryAnalysisTools<'a> {
 }
 
 impl AnalysisReadTools for DiaryAnalysisTools<'_> {
+    fn selected_read(&self) -> Option<(&'static str, &Map<String, Value>)> {
+        self.sleep_period
+            .as_ref()
+            .map(|period| (SLEEP_REVIEW, period))
+    }
+
     fn categories(&self) -> ModelCategories {
         if self.daily_read.is_some() {
             ModelCategories::HEALTH_AND_DIARY

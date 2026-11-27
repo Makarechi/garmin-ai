@@ -17,6 +17,7 @@ mod series;
 mod stress;
 pub use series::SeriesReadError;
 mod sleep_analysis;
+mod sleep_review;
 mod sleep_timing;
 
 pub use activity_reads::ActivityReadError;
@@ -26,8 +27,8 @@ pub use model_daily::{
     ACTIVITIES, ACTIVITY_DETAILS, COFFEE_SLEEP, DATA_FRESHNESS, DEVICE_HISTORY,
     DailyAnalysisAccess, DailyAnalysisEvidence, DailyAnalysisQuery, EVENT_WINDOWS, HEALTH_RANGE,
     HEALTH_SNAPSHOT, INSIGHTS_LIST, LAGGED_ASSOCIATION, METRIC_SERIES, MIGRAINE_WINDOWS,
-    PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, STRESS_HOURS,
-    WELLBEING_OBSERVATIONS,
+    PERIOD_COMPARISON, PERSONAL_BASELINE, RUNNING_EFFICIENCY, SLEEP_ANALYSIS, SLEEP_REVIEW,
+    STRESS_HOURS, WELLBEING_OBSERVATIONS,
 };
 pub use read_daily::DailyHealthReader;
 pub use sleep_analysis::NapPolicy;

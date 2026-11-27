@@ -298,6 +298,27 @@ async fn naps(
     Ok(by_day)
 }
 
+pub(super) async fn reported_naps(
+    txn: &mut Transaction<'_, Postgres>,
+    start: Date,
+    end: Date,
+) -> Result<BTreeMap<Date, Value>, HealthAnalysisError> {
+    Ok(naps(txn, start, end)
+        .await?
+        .into_iter()
+        .map(|(day, naps)| {
+            let mut intervals = naps.iter().filter_map(Nap::interval).collect::<Vec<_>>();
+            intervals.sort_unstable();
+            let minutes = if intervals.len() == naps.len() {
+                merged_seconds(&intervals).map(|seconds| (seconds / 60.0).round())
+            } else {
+                None
+            };
+            (day, json!({"count":naps.len(),"duration_minutes":minutes}))
+        })
+        .collect())
+}
+
 async fn overlapping_nights(
     txn: &mut Transaction<'_, Postgres>,
     naps: &BTreeMap<Date, Vec<Nap>>,

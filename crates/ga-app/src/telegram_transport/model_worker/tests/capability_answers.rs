@@ -1,11 +1,17 @@
 use super::*;
 use ga_db::{
     diary::InterpretationContextQuery,
+    outbox_claims::{ReplyObservation, ReplySendOutcome},
     share_policy::{DestinationKind, ShareDestination},
     web_chat::{
         WebChatInterpretationContext, WebChatModelPreparation, WebChatModelReply, WebChatSubmission,
     },
 };
+
+const SLEEP_REVIEW_QUESTION: &str = "Расскажи подробно, как я спал вчера и сегодня";
+const REVOKED_SLEEP_REVIEW: &str = "Сравни мой сон вчера и сегодня";
+const SLEEP_INTERPRETATION: &str =
+    "Сегодня сон был заметно дольше. Стоит понаблюдать за временем отхода ко сну.";
 
 struct CapabilityModel {
     question: &'static str,
@@ -35,23 +41,66 @@ impl Sender for CapabilityModel {
                 .ok_or(ModelTransportError::InvalidConfiguration)?,
         )
         .map_err(|_| ModelTransportError::InvalidConfiguration)?;
-        if self.answer.is_none() && call == 1 {
+        let result = if matches!(self.question, SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW)
+            && call == 0
+        {
+            assert_eq!(prompt["question"], self.question);
+            assert_eq!(prompt["tools"], json!([]));
+            assert_eq!(prompt["planning_only"], false);
+            assert_eq!(prompt["answer_only"], true);
+            assert_eq!(prompt["conversation"], json!({}));
+            assert_eq!(prompt["evidence"].as_array().map(Vec::len), Some(1));
+            assert_eq!(prompt["evidence"][0]["tool"], "analysis_sleep_review");
+            let review = &prompt["evidence"][0]["result"];
+            assert_eq!(review["rows"].as_array().map(Vec::len), Some(2));
+            assert_eq!(
+                review["rows"][0]["values"]["duration_minutes"].as_f64(),
+                Some(400.0)
+            );
+            assert_eq!(
+                review["rows"][1]["values"]["duration_minutes"].as_f64(),
+                Some(520.0)
+            );
+            assert!(review["rows"][1]["main_interval"]["start"].is_string());
+            assert_eq!(
+                review["rows"][1]["change_from_previous_requested_night"]["duration_minutes"],
+                120.0
+            );
+            assert_eq!(
+                review["baseline"]["metrics"]["duration_minutes"]["nights"],
+                27
+            );
+            assert_eq!(
+                review["baseline"]["metrics"]["duration_minutes"]["median"],
+                420.0
+            );
+            assert!(
+                review["rows"][1]["deviations"]
+                    .as_array()
+                    .is_some_and(|values| values
+                        .iter()
+                        .any(|value| value["metric"] == "duration_minutes"
+                            && value["direction"] == "above"))
+            );
+            json!({"answer":SLEEP_INTERPRETATION,"evidence_ids":[1],"response_language":"ru"})
+        } else if self.answer.is_none() && call == 1 {
             assert_eq!(prompt["question"], self.question);
             return Err(ModelTransportError::Unavailable {
                 reason: ModelUnavailability::Upstream,
                 retry_after: Duration::from_secs(60),
                 detail: ModelFailureDetail::HttpStatus(reqwest::StatusCode::SERVICE_UNAVAILABLE),
             });
-        }
-        assert_eq!(call, 0);
-        assert_eq!(prompt["text"], self.question);
-        assert!(
-            request.body()["system_instruction"]
-                .as_str()
-                .is_some_and(|instruction| instruction.contains("/history opens the diary"))
-        );
-        let result = json!({"intent":"question","confidence":0.97,
-            "response_language":self.language,"capability_answer":self.answer});
+        } else {
+            assert_eq!(call, 0);
+            assert_eq!(prompt["text"], self.question);
+            assert!(
+                request.body()["system_instruction"]
+                    .as_str()
+                    .is_some_and(|instruction| instruction.contains("/history opens the diary"))
+            );
+            json!({"intent":"question","confidence":0.97,
+                "response_language":self.language,"capability_answer":self.answer})
+        };
         let response = json!({"status":"completed","steps":[{"type":"model_output",
             "content":[{"type":"text","text":result.to_string()}]}]});
         request
@@ -99,6 +148,20 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
     }), |_| Ok(None))?.ok_or("Missing fixture model")?;
     let configured = model.configured();
     let database = Database::connect_lazy(&url).map_err(|_| "Invalid fixture connection")?;
+    database.scenario_packs(owner_id, true).await?;
+    sqlx::query(
+        "UPDATE module_configs SET llm_enabled=true WHERE owner_id=$1 AND pack_key='sleep'",
+    )
+    .bind(owner_id)
+    .execute(&pool)
+    .await?;
+    seed_sleep_review(&pool, at.date()).await?;
+    assert!(
+        !database
+            .replay_status(ga_db::replay::GARMIN_PARSER_VERSION)
+            .await?
+            .ready
+    );
     let gateway = configured.gateway(database.clone(), false, now)?;
     let mut runtime = database.acquire_runtime_lease().await?;
     let binding = TelegramBinding {
@@ -123,7 +186,9 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             "sk",
             Some("Môžem zaznamenávať a spätne prehliadať záznamy v denníku."),
         ),
-        (203, "Сравни мой тестовый сон вчера и сегодня", "ru", None),
+        (203, SLEEP_REVIEW_QUESTION, "ru", None),
+        (204, REVOKED_SLEEP_REVIEW, "ru", None),
+        (205, "Сравни тестовый сон за прошлую неделю", "ru", None),
     ] {
         binding
             .accept_polled_update(
@@ -166,24 +231,92 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             locale: "en",
         };
         worker.process(&lease, now).await;
-        let (body, protected, completed): (String, bool, bool) = sqlx::query_as(
-            "SELECT o.intent#>>'{blocks,0,text}',o.memory_fence IS NOT NULL,
+        let (reply, body, protected, completed): (Uuid, String, bool, bool) = sqlx::query_as(
+            "SELECT o.id,o.intent#>>'{blocks,0,text}',o.memory_fence IS NOT NULL,
                     i.status='processed' AND j.status='done'
              FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
              JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id)
              WHERE i.normalized_text=$1",
         )
         .bind(question)
-        .fetch_one(&pool)
-        .await?;
-        let expected = answer.unwrap_or("Сервис модели временно недоступен (Gemini, HTTP 503).");
-        assert_eq!(body, expected);
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| format!("Expected a reply for synthetic update {id}"))?;
+        let sleep_review = matches!(question, SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW);
+        if sleep_review {
+            assert!(body.contains("Сон 6 ч 40 мин") && body.contains("Сон 8 ч 40 мин"));
+            assert!(body.contains("REM") && body.contains(SLEEP_INTERPRETATION));
+            assert!(body.contains("Больше сна, чем в предыдущую ночь — 2 ч 0 мин"));
+            assert!(body.contains("Медианная длительность сна — 7 ч 0 мин"));
+        } else {
+            let expected =
+                answer.unwrap_or("Сервис модели временно недоступен (Gemini, HTTP 503).");
+            assert_eq!(body, expected);
+        }
         assert!(completed);
-        assert_eq!(protected, answer.is_some());
+        assert_eq!(protected, answer.is_some() || sleep_review);
         assert_eq!(
             sender.calls.load(Ordering::SeqCst),
-            if answer.is_some() { 1 } else { 2 }
+            if answer.is_some() || sleep_review {
+                1
+            } else {
+                2
+            }
         );
+        let destination = || ReplyDestination {
+            owner_id,
+            channel: "telegram",
+            instance_id: "primary",
+        };
+        let claim = database
+            .claim_outbox_reply(destination(), now, LEASE)
+            .await?
+            .ok_or("Expected a queued reply")?;
+        assert_eq!(claim.outbox_id, reply);
+        if question == REVOKED_SLEEP_REVIEW {
+            sqlx::query("UPDATE module_configs SET llm_enabled=false WHERE owner_id=$1 AND pack_key='sleep'")
+                .bind(owner_id)
+                .execute(&pool)
+                .await?;
+            assert_eq!(
+                database
+                    .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
+                        panic!("A revoked sleep review must never be sent")
+                    })
+                    .await?,
+                ReplyDispatchResult::Cancelled
+            );
+            sqlx::query(
+                "UPDATE module_configs SET llm_enabled=true WHERE owner_id=$1 AND pack_key='sleep'",
+            )
+            .bind(owner_id)
+            .execute(&pool)
+            .await?;
+            continue;
+        }
+        assert!(matches!(
+            database
+                .dispatch_telegram_outbox_reply(
+                    destination(),
+                    42,
+                    claim,
+                    &[],
+                    |intent| async move {
+                        assert_eq!(intent["blocks"][0]["text"], body);
+                        Some(ReplySendOutcome::Observation(ReplyObservation {
+                            state: DeliveryState::ProviderAccepted,
+                            observed_at: now,
+                            provider_reference: Some((810_000 + id).to_string()),
+                            detail: None,
+                        }))
+                    }
+                )
+                .await?,
+            ReplyDispatchResult::Recorded {
+                state: DeliveryState::ProviderAccepted,
+                ..
+            }
+        ));
     }
     let writes: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
         .fetch_one(&pool)
@@ -235,5 +368,44 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
         body.extend(chunk);
     }
     assert!(String::from_utf8(body)?.contains(answer));
+    Ok(())
+}
+
+async fn seed_sleep_review(pool: &PgPool, today: time::Date) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH nights AS MATERIALIZED (
+            SELECT gen_random_uuid() AS id, $1::date-offset_days AS day,
+                   CASE offset_days WHEN 0 THEN 520 WHEN 1 THEN 400 WHEN 30 THEN 999 ELSE 420 END AS minutes,
+                   CASE offset_days WHEN 20 THEN $2-1 ELSE $2 END AS parser_version,
+                   (($1::date-offset_days)::timestamp - interval '2 hours') AT TIME ZONE 'UTC' AS bedtime,
+                   (($1::date-offset_days)::timestamp + interval '7 hours') AT TIME ZONE 'UTC' AS wake_time
+            FROM generate_series(-1,30) AS offsets(offset_days)
+        ), payloads AS (
+            INSERT INTO source_payloads (id,source,endpoint,source_key,payload_hash,archive_key,payload,fetched_at,parser_version,status)
+            SELECT id,'garmin_connect','sleep',day::text,repeat('b',64),'synthetic/sleep.json',
+                   jsonb_build_object('dailySleepDTO',jsonb_build_object(
+                       'calendarDate',day::text,'sleepStartTimestampGMT',(extract(epoch from bedtime)*1000)::bigint,
+                       'sleepEndTimestampGMT',(extract(epoch from wake_time)*1000)::bigint)),
+                   wake_time,parser_version,'normalized'
+            FROM nights
+        ), watermarks AS (
+            INSERT INTO app_state(key,value)
+            SELECT concat('ingest:garmin_connect:sleep:',day),
+                   jsonb_build_object('source_ref',id::text,'hash',repeat('b',64),'status','normalized') FROM nights
+        ), intervals AS (
+            INSERT INTO timeline_intervals (id,start,\"end\",label,source,confidence,confirmed,evidence)
+            SELECT concat('sleep:',day),bedtime,wake_time,'sleep','garmin_connect',1,true,
+                   jsonb_build_object('source_ref',id::text) FROM nights
+        )
+        INSERT INTO health_days (day,sleep_seconds,sleep_score,deep_seconds,rem_seconds,light_seconds,awake_seconds,sources)
+        SELECT day,minutes*60,81,3600,5400,(minutes-150)*60,1800,jsonb_build_object(
+            'field:sleep_seconds',id::text,'field:sleep_score',id::text,'field:deep_seconds',id::text,
+            'field:rem_seconds',id::text,'field:light_seconds',id::text,'field:awake_seconds',id::text)
+        FROM nights",
+    )
+    .bind(today)
+    .bind(ga_db::replay::GARMIN_PARSER_VERSION)
+    .execute(pool)
+    .await?;
     Ok(())
 }

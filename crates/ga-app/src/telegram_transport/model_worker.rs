@@ -34,7 +34,7 @@ use crate::{
         ActiveModelJob, AnalysisDestination, AnalysisError, AnalysisQuestion, AnalysisResult,
         ConfiguredModel, DiaryAnalysisTools, DiaryInterpretationError, GatewayError, ModelGateway,
         ReplySafetyIntent, Sender, TelegramDiaryInterpretation, analysis_conversation,
-        format_analysis_answer,
+        format_analysis_answer, sleep_review_period,
     },
     telegram_settings::TelegramIngressSettings,
     urgent_screen::urgent_notice,
@@ -313,7 +313,11 @@ impl<S: Sender> ModelDiaryWorker<'_, '_, S> {
                     self.timezone,
                     question_clock,
                 )
-                .await;
+                .await
+                .with_telegram_sleep_review(
+                    source_offset_datetime(question_clock, timezone)
+                        .and_then(|at| sleep_review_period(text, at.date())),
+                );
         let conversation = analysis_conversation(memory.turns);
         let (id, lease_token) = lease.job_identity();
         let analysis = self
