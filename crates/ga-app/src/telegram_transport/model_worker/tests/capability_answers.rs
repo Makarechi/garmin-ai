@@ -9,6 +9,7 @@ use ga_db::{
 };
 
 const SLEEP_REVIEW_QUESTION: &str = "Расскажи подробно, как я спал вчера и сегодня";
+const REVOKED_SLEEP_REVIEW: &str = "Сравни мой сон вчера и сегодня";
 const SLEEP_INTERPRETATION: &str =
     "Сегодня сон был заметно дольше. Стоит понаблюдать за временем отхода ко сну.";
 
@@ -40,7 +41,9 @@ impl Sender for CapabilityModel {
                 .ok_or(ModelTransportError::InvalidConfiguration)?,
         )
         .map_err(|_| ModelTransportError::InvalidConfiguration)?;
-        let result = if self.question == SLEEP_REVIEW_QUESTION && call == 0 {
+        let result = if matches!(self.question, SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW)
+            && call == 0
+        {
             assert_eq!(prompt["question"], self.question);
             assert_eq!(prompt["tools"], json!([]));
             assert_eq!(prompt["planning_only"], false);
@@ -184,7 +187,8 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             Some("Môžem zaznamenávať a spätne prehliadať záznamy v denníku."),
         ),
         (203, SLEEP_REVIEW_QUESTION, "ru", None),
-        (204, "Сравни тестовый сон за прошлую неделю", "ru", None),
+        (204, REVOKED_SLEEP_REVIEW, "ru", None),
+        (205, "Сравни тестовый сон за прошлую неделю", "ru", None),
     ] {
         binding
             .accept_polled_update(
@@ -235,9 +239,11 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
              WHERE i.normalized_text=$1",
         )
         .bind(question)
-        .fetch_one(&pool)
-        .await?;
-        if question == SLEEP_REVIEW_QUESTION {
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| format!("Expected a reply for synthetic update {id}"))?;
+        let sleep_review = matches!(question, SLEEP_REVIEW_QUESTION | REVOKED_SLEEP_REVIEW);
+        if sleep_review {
             assert!(body.contains("Сон 6 ч 40 мин") && body.contains("Сон 8 ч 40 мин"));
             assert!(body.contains("REM") && body.contains(SLEEP_INTERPRETATION));
             assert!(body.contains("Больше сна, чем в предыдущую ночь — 2 ч 0 мин"));
@@ -248,13 +254,10 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             assert_eq!(body, expected);
         }
         assert!(completed);
-        assert_eq!(
-            protected,
-            answer.is_some() || question == SLEEP_REVIEW_QUESTION
-        );
+        assert_eq!(protected, answer.is_some() || sleep_review);
         assert_eq!(
             sender.calls.load(Ordering::SeqCst),
-            if answer.is_some() || question == SLEEP_REVIEW_QUESTION {
+            if answer.is_some() || sleep_review {
                 1
             } else {
                 2
@@ -270,6 +273,27 @@ async fn publishes_multilingual_capability_answers_and_provider_errors()
             .await?
             .ok_or("Expected a queued reply")?;
         assert_eq!(claim.outbox_id, reply);
+        if question == REVOKED_SLEEP_REVIEW {
+            sqlx::query("UPDATE module_configs SET llm_enabled=false WHERE owner_id=$1 AND pack_key='sleep'")
+                .bind(owner_id)
+                .execute(&pool)
+                .await?;
+            assert_eq!(
+                database
+                    .dispatch_telegram_outbox_reply(destination(), 42, claim, &[], |_| async {
+                        panic!("A revoked sleep review must never be sent")
+                    })
+                    .await?,
+                ReplyDispatchResult::Cancelled
+            );
+            sqlx::query(
+                "UPDATE module_configs SET llm_enabled=true WHERE owner_id=$1 AND pack_key='sleep'",
+            )
+            .bind(owner_id)
+            .execute(&pool)
+            .await?;
+            continue;
+        }
         assert!(matches!(
             database
                 .dispatch_telegram_outbox_reply(

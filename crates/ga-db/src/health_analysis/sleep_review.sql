@@ -29,19 +29,20 @@ LEFT JOIN LATERAL (
     SELECT r.id, CASE WHEN dates.day >= $4::date THEN r.payload->'dailySleepDTO' END AS dto
     FROM source_payloads AS r
     WHERE r.id=CASE
-    WHEN pg_input_is_valid(w.value->>'source_ref','uuid') THEN (w.value->>'source_ref')::uuid END
-  AND r.source='garmin_connect' AND r.endpoint='sleep' AND r.source_key=dates.day::text
-  AND r.status='normalized' AND r.parser_version=$3
-  AND w.value->'hash'=to_jsonb(r.payload_hash)
-  AND w.value->>'status' IN ('normalized','empty')
-  AND (w.value->'latest_attempt' IS NULL OR jsonb_typeof(w.value->'latest_attempt')='object')
-  AND w.value->'latest_attempt'->>'status' IS DISTINCT FROM 'error'
-  AND w.value->'latest_attempt'->>'status' IS DISTINCT FROM 'pending'
+        WHEN pg_input_is_valid(w.value->>'source_ref','uuid') THEN (w.value->>'source_ref')::uuid
+    END
+      AND r.source='garmin_connect' AND r.endpoint='sleep' AND r.source_key=dates.day::text
+      AND r.status='normalized' AND r.parser_version=$3
+      AND w.value->'hash'=to_jsonb(r.payload_hash)
+      AND w.value->>'status' IN ('normalized','empty')
+      AND (w.value->'latest_attempt' IS NULL OR jsonb_typeof(w.value->'latest_attempt')='object')
+      AND w.value->'latest_attempt'->>'status' IS DISTINCT FROM 'error'
+      AND w.value->'latest_attempt'->>'status' IS DISTINCT FROM 'pending'
       AND CASE WHEN dates.day >= $4::date THEN jsonb_typeof(r.payload->'dailySleepDTO')='object' ELSE true END
-  AND NOT EXISTS (
-    SELECT FROM app_state AS m WHERE m.key=concat('ingest-meta:',r.id)
-      AND (jsonb_typeof(m.value) IS DISTINCT FROM 'object' OR m.value->'failed_parser_version'=to_jsonb($3))
-  )
+      AND NOT EXISTS (
+        SELECT FROM app_state AS m WHERE m.key=concat('ingest-meta:',r.id)
+          AND (jsonb_typeof(m.value) IS DISTINCT FROM 'object' OR m.value->'failed_parser_version'=to_jsonb($3))
+      )
     LIMIT 1
 ) AS raw ON true
 LEFT JOIN LATERAL (

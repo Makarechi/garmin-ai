@@ -244,7 +244,9 @@ impl DailyAnalysisQuery {
                 .map(|(report, _)| Some(report));
         }
         if let Self::SleepReview { start, end } = self {
-            if !permits_timing_in(txn).await? {
+            if !permits_timing_in(txn).await?
+                || !model_packs_allowed(txn, context.binding().owner_id, &["sleep"]).await?
+            {
                 return Ok(None);
             }
             let timezone = owner_timezone(txn, configured_timezone).await?;
