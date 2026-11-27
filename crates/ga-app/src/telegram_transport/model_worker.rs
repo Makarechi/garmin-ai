@@ -1,4 +1,9 @@
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    io::{self, Write},
+    pin::pin,
+    time::{Duration, Instant},
+};
 
 use ga_db::{
     Database, WorkTopic,
@@ -8,6 +13,7 @@ use ga_db::{
         TelegramInboundTarget, TelegramModelAdmission,
     },
     model_gate::ModelGateError,
+    observability::request_latency,
     outbox_enqueue::QueueIntentError,
     share_policy::{DestinationKind, ShareDestination},
 };
@@ -79,12 +85,19 @@ impl TelegramTransport {
                 };
                 match database.claim_telegram_model_text(target, now, LEASE).await {
                     Ok(Some(lease)) => {
-                        worker.process(&lease, now).await;
+                        log_latency(&lease, now, "model_text", pin!(worker.process(&lease, now)))
+                            .await;
                         continue;
                     }
                     Ok(None) => match database.claim_telegram_voice(target, now, LEASE).await {
                         Ok(Some(lease)) => {
-                            worker.process_voice(self, &lease, now).await;
+                            log_latency(
+                                &lease,
+                                now,
+                                "voice_transcription",
+                                pin!(worker.process_voice(self, &lease, now)),
+                            )
+                            .await;
                             continue;
                         }
                         Ok(None) => idle = true,
@@ -100,6 +113,37 @@ impl TelegramTransport {
             }
         }
     }
+}
+
+async fn log_latency(
+    lease: &TelegramInboundLease,
+    claim_time: StoredInstant,
+    phase: &'static str,
+    process: impl Future<Output = ()>,
+) {
+    let event = latency_event(lease, wall_clock().unwrap_or(claim_time), phase, process).await;
+    let _ = writeln!(io::stderr().lock(), "{event}");
+}
+
+async fn latency_event(
+    lease: &TelegramInboundLease,
+    worker_started: StoredInstant,
+    phase: &'static str,
+    process: impl Future<Output = ()>,
+) -> serde_json::Value {
+    let worker_started = time::OffsetDateTime::from(worker_started);
+    let age_ms = |at: time::OffsetDateTime| {
+        u64::try_from((worker_started - at).whole_milliseconds()).unwrap_or_default()
+    };
+    let ((), timing) = request_latency::collect(process).await;
+    serde_json::json!({
+        "event": "telegram_request_latency",
+        "phase": phase,
+        "inbound_message_id": lease.message_id().to_string(),
+        "queue_wait_ms": age_ms(lease.eligible_at()),
+        "inbox_age_ms": age_ms(lease.received_at()),
+        "timing": timing,
+    })
 }
 
 struct ModelDiaryWorker<'a, 'c, S> {

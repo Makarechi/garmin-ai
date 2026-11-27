@@ -8,6 +8,8 @@ use time::OffsetDateTime;
 
 use crate::{Database, check_readiness};
 
+pub mod request_latency;
+
 const JOB_KINDS: &[&str] = &[
     "garmin_endpoint",
     "garmin_activities",

@@ -4,6 +4,7 @@ use ga_db::{
     model_gate::{
         ModelGateError, ModelGateOutcomeReason, ModelGateSession, ModelResume, RecordModelGate,
     },
+    observability::request_latency::{Outcome, Stage, Timer},
     share_policy::{
         DestinationKind, ModelChannelSharing, ShareDestination, SharePolicyError, ShareRequirement,
     },
@@ -17,7 +18,7 @@ use ga_domain::{
     timestamp::StoredInstant,
 };
 use ga_model::{
-    ModelTransportError,
+    ModelFailureDetail, ModelTransportError,
     fallback::{FallbackError, FallbackRuntime, GateUpdate, ModelFallback},
 };
 use tokio::time::Instant;
@@ -278,10 +279,20 @@ where
                         if remaining.is_zero() {
                             return Err(FallbackError::Deadline);
                         }
-                        self.sender
-                            .send(&self.prepared, remaining)
-                            .await
-                            .map_err(FallbackError::Provider)
+                        let timer = matches!(self.prepared, PreparedRequest::Gemini(_))
+                            .then(|| Timer::start(Stage::GeminiHttp, None));
+                        let result = self.sender.send(&self.prepared, remaining).await;
+                        let result = match timer {
+                            Some(timer) => timer.finish(result, |error| match error {
+                                ModelTransportError::Unavailable {
+                                    detail: ModelFailureDetail::Timeout,
+                                    ..
+                                } => Outcome::Timeout,
+                                _ => Outcome::Error,
+                            }),
+                            None => result,
+                        };
+                        result.map_err(FallbackError::Provider)
                     },
                 )
                 .await

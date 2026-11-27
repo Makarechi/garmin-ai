@@ -55,6 +55,8 @@ pub struct TelegramInboundLease {
     operation_id: Uuid,
     token: Uuid,
     expires_at: OffsetDateTime,
+    received_at: OffsetDateTime,
+    eligible_at: OffsetDateTime,
     envelope: String,
     voice_text: Option<String>,
     voice_duration_seconds: Option<u64>,
@@ -64,6 +66,8 @@ type ClaimedTelegramInbound = (
     Uuid,
     Uuid,
     Uuid,
+    OffsetDateTime,
+    OffsetDateTime,
     OffsetDateTime,
     String,
     Option<String>,
@@ -89,6 +93,16 @@ impl TelegramInboundLease {
     #[must_use]
     pub fn expires_at(&self) -> OffsetDateTime {
         self.expires_at
+    }
+
+    #[must_use]
+    pub fn received_at(&self) -> OffsetDateTime {
+        self.received_at
+    }
+
+    #[must_use]
+    pub fn eligible_at(&self) -> OffsetDateTime {
+        self.eligible_at
     }
 
     #[must_use]
@@ -384,6 +398,8 @@ impl Database {
             let found: Option<ClaimedTelegramInbound> = sqlx::query_as(
                 concat!("WITH oldest AS (
                      SELECT j.id,i.id AS message_id,i.operation_id,i.envelope,
+                            i.received_at,
+                            CASE WHEN j.status='running' THEN j.lease_until ELSE j.run_at END AS eligible_at,
                             CASE WHEN j.payload->>'voice_transcribed'='true' THEN i.normalized_text END AS voice_text
                      FROM jobs j JOIN inbound_messages i
                        ON j.dedup_key=concat('telegram:inbound:native:',i.id)
@@ -485,6 +501,7 @@ impl Database {
                    AND ((j.status='pending' AND j.run_at<=$4)
                          OR (j.status='running' AND j.lease_until<$4))
                  RETURNING j.id AS job_id,oldest.message_id,oldest.operation_id,j.lease_until,
+                           oldest.received_at,oldest.eligible_at,
                            oldest.envelope::text AS envelope,oldest.voice_text,
                            j.payload->>'voice_duration_seconds' AS voice_duration"),
             )
@@ -503,20 +520,21 @@ impl Database {
             .bind(work.allows_voice_before_transcription())
             .fetch_optional(&mut *txn)
             .await?;
-            let mut result = found.map(
-                |(job_id, message_id, operation_id, expires_at, envelope, voice_text, duration)| {
-                    TelegramInboundLease {
-                        job_id,
-                        message_id,
-                        operation_id,
-                        token,
-                        expires_at,
-                        envelope,
-                        voice_text,
-                        voice_duration_seconds: duration.and_then(|seconds| seconds.parse().ok()),
-                    }
-                },
-            );
+            let mut result = found.map(|found| {
+                let (job_id, message_id, operation_id, expires_at, received_at, eligible_at, envelope, voice_text, voice_duration) = found;
+                TelegramInboundLease {
+                    job_id,
+                    message_id,
+                    operation_id,
+                    token,
+                    expires_at,
+                    received_at,
+                    eligible_at,
+                    envelope,
+                    voice_text,
+                    voice_duration_seconds: voice_duration.and_then(|seconds| seconds.parse().ok()),
+                }
+            });
             if let Some(lease) = result.as_ref()
                 && superseded(&mut txn, lease.message_id).await?
             {

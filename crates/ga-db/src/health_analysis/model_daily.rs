@@ -45,6 +45,7 @@ use crate::{
         wellbeing::{require_model_wellbeing_in, wellbeing_observations_in},
     },
     model_gate::onboarding::onboarding_allows_model,
+    observability::request_latency::{Outcome, Stage, Timer},
 };
 
 pub const PERSONAL_BASELINE: &str = "personal_baseline";
@@ -754,7 +755,8 @@ impl Database {
         configured_timezone: &str,
         at: StoredInstant,
     ) -> Result<Option<Value>, HealthAnalysisError> {
-        timeout_read(async {
+        let timer = Timer::start(Stage::PostgresAnalysisRead, None);
+        let read = timeout_read(async {
             let mut txn = begin_daily_analysis(&self.work).await?;
             let result = query
                 .read_in(&mut txn, context, configured_timezone, Some(at))
@@ -762,7 +764,8 @@ impl Database {
             txn.commit().await?;
             Ok(result)
         })
-        .await
+        .await;
+        timer.finish(read, |_| Outcome::Error)
     }
 
     pub async fn read_analysis_quality(
