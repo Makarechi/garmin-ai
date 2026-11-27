@@ -158,27 +158,31 @@ async fn classifies_status_retry_after_and_structured_failures()
     let transport =
         ModelTransport::connect(provider, SYNTHETIC_KEY, Duration::from_secs(5), false)?;
     let request = prepared(provider).map_err(|_| "Unable to prepare fixture request")?;
-    let retry = |reason, seconds| ModelTransportError::Unavailable {
-        reason,
-        retry_after: Duration::from_secs(seconds),
-    };
-    let rejected = ModelTransportError::RequestRejected;
-    for (status, headers, expected) in [
-        (301, "location: /provider-test\r\n", rejected),
-        (400, "retry-after: 3000\r\n", rejected),
-        (401, "", retry(Authorization, 1800)),
-        (403, "retry-after: 2000.25\r\n", retry(Authorization, 2001)),
-        (404, "", retry(MissingModel, 1800)),
-        (408, "", retry(Upstream, 60)),
-        (422, "", rejected),
-        (429, "", retry(RateLimited, 120)),
-        (429, "retry-after: 180.1\r\n", retry(RateLimited, 181)),
-        (429, "retry-after: 4\r\n", retry(RateLimited, 120)),
-        (429, "retry-after: 1e100\r\n", retry(RateLimited, 120)),
-        (500, "", retry(Upstream, 60)),
-        (503, "retry-after: 240\r\n", retry(Upstream, 240)),
-        (599, "", retry(Upstream, 60)),
+    for (status, headers, failure) in [
+        (301, "location: /provider-test\r\n", None),
+        (400, "retry-after: 3000\r\n", None),
+        (401, "", Some((Authorization, 1800))),
+        (403, "retry-after: 2000.25\r\n", Some((Authorization, 2001))),
+        (404, "", Some((MissingModel, 1800))),
+        (408, "", Some((Upstream, 60))),
+        (422, "", None),
+        (429, "", Some((RateLimited, 120))),
+        (429, "retry-after: 180.1\r\n", Some((RateLimited, 181))),
+        (429, "retry-after: 4\r\n", Some((RateLimited, 120))),
+        (429, "retry-after: 1e100\r\n", Some((RateLimited, 120))),
+        (500, "", Some((Upstream, 60))),
+        (503, "retry-after: 240\r\n", Some((Upstream, 240))),
+        (599, "", Some((Upstream, 60))),
     ] {
+        let code = StatusCode::from_u16(status)?;
+        let expected = match failure {
+            Some((reason, seconds)) => ModelTransportError::Unavailable {
+                reason,
+                retry_after: Duration::from_secs(seconds),
+                detail: ModelFailureDetail::HttpStatus(code),
+            },
+            None => ModelTransportError::RequestRejected(Some(code)),
+        };
         let result = exchange(
             &transport,
             &request,
@@ -190,7 +194,10 @@ async fn classifies_status_retry_after_and_structured_failures()
         assert!(!format!("{expected:?} {expected}").contains("synthetic"));
     }
     for (body, error) in [
-        ("{\"status\":\"failed\"}", retry(Upstream, 60)),
+        (
+            "{\"status\":\"failed\"}",
+            Upstream.with_retry(None, ModelFailureDetail::ProviderResponse),
+        ),
         (
             "{\"status\":\"incomplete\"}",
             ModelTransportError::Response(ModelResponseError::Incomplete),
@@ -214,7 +221,8 @@ async fn bounds_download_and_classifies_interrupted_or_slow_body()
         ModelTransport::connect(provider, SYNTHETIC_KEY, Duration::from_secs(1), false)?;
     let request = prepared(provider).map_err(|_| "Unable to prepare fixture request")?;
     let too_large = ModelTransportError::Response(ModelResponseError::TooLarge);
-    let upstream = ModelUnavailability::Upstream.with_retry(None);
+    let interrupted = ModelUnavailability::Upstream.with_retry(None, ModelFailureDetail::Network);
+    let timed_out = ModelUnavailability::Upstream.with_retry(None, ModelFailureDetail::Timeout);
     let declared_large = format!(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
         MAX_RESPONSE_BYTES + 1
@@ -236,7 +244,7 @@ async fn bounds_download_and_classifies_interrupted_or_slow_body()
         exchange(&transport, &request, incomplete, false)
             .await?
             .err(),
-        Some(upstream)
+        Some(interrupted)
     );
     assert_eq!(
         exchange(
@@ -268,7 +276,7 @@ async fn bounds_download_and_classifies_interrupted_or_slow_body()
         transport.send_to(&request, &endpoint),
     )
     .await?;
-    assert_eq!(error.err(), Some(upstream));
+    assert_eq!(error.err(), Some(timed_out));
     server.abort();
     assert!(server.await.is_err_and(|error| error.is_cancelled()));
     Ok(())
@@ -397,29 +405,45 @@ async fn handles_gemini_error_envelopes_without_leaking_details()
         (
             400,
             error,
-            ModelUnavailability::Authorization.with_retry(Some(Duration::from_secs(1900))),
+            ModelUnavailability::Authorization.with_retry(
+                Some(Duration::from_secs(1900)),
+                ModelFailureDetail::HttpStatus(StatusCode::BAD_REQUEST),
+            ),
         ),
         (
             429,
             error,
-            ModelUnavailability::RateLimited.with_retry(Some(Duration::from_secs(1900))),
+            ModelUnavailability::RateLimited.with_retry(
+                Some(Duration::from_secs(1900)),
+                ModelFailureDetail::HttpStatus(StatusCode::TOO_MANY_REQUESTS),
+            ),
         ),
         (
             404,
             b"{}",
-            ModelUnavailability::MissingModel.with_retry(Some(Duration::from_secs(1900))),
+            ModelUnavailability::MissingModel.with_retry(
+                Some(Duration::from_secs(1900)),
+                ModelFailureDetail::HttpStatus(StatusCode::NOT_FOUND),
+            ),
         ),
         (
             503,
             b"{}",
-            ModelUnavailability::Upstream.with_retry(Some(Duration::from_secs(1900))),
+            ModelUnavailability::Upstream.with_retry(
+                Some(Duration::from_secs(1900)),
+                ModelFailureDetail::HttpStatus(StatusCode::SERVICE_UNAVAILABLE),
+            ),
         ),
         (
             400,
             b"invalid synthetic body",
-            ModelTransportError::RequestRejected,
+            ModelTransportError::RequestRejected(Some(StatusCode::BAD_REQUEST)),
         ),
-        (307, b"", ModelTransportError::RequestRejected),
+        (
+            307,
+            b"",
+            ModelTransportError::RequestRejected(Some(StatusCode::TEMPORARY_REDIRECT)),
+        ),
         (
             200,
             br#"{"status":"budget_exceeded"}"#,
@@ -428,7 +452,7 @@ async fn handles_gemini_error_envelopes_without_leaking_details()
         (
             200,
             br#"{"status":"cancelled"}"#,
-            ModelUnavailability::Upstream.with_retry(None),
+            ModelUnavailability::Upstream.with_retry(None, ModelFailureDetail::ProviderResponse),
         ),
     ];
     for (status, body, expected) in cases {
@@ -446,7 +470,9 @@ async fn handles_gemini_error_envelopes_without_leaking_details()
         gemini_exchange(&request, reply(400, "", &oversized))
             .await?
             .err(),
-        Some(ModelTransportError::RequestRejected)
+        Some(ModelTransportError::RequestRejected(Some(
+            StatusCode::BAD_REQUEST
+        )))
     );
     let oversized = vec![b' '; MAX_RESPONSE_BYTES + 1];
     assert_eq!(
@@ -481,7 +507,7 @@ async fn enforces_gemini_attempt_deadline_on_a_slow_body()
     observed?;
     assert_eq!(
         result.err(),
-        Some(ModelUnavailability::Upstream.with_retry(None))
+        Some(ModelUnavailability::Upstream.with_retry(None, ModelFailureDetail::Timeout))
     );
     assert_eq!(
         transport

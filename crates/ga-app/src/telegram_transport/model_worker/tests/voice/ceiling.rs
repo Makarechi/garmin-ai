@@ -50,6 +50,7 @@ impl Sender for CeilingProvider {
                 Err(ModelTransportError::Unavailable {
                     reason: ModelUnavailability::Upstream,
                     retry_after: Duration::from_secs(60),
+                    detail: ga_model::ModelFailureDetail::Unspecified,
                 })
             }
             1 => {

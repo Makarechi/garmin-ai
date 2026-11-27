@@ -158,6 +158,7 @@ impl ModelFallback<'_> {
                 FallbackError::Provider(ModelTransportError::Unavailable {
                     reason,
                     retry_after,
+                    ..
                 }) => {
                     if reason == ModelUnavailability::Authorization
                         && failures.is_empty()
@@ -251,12 +252,15 @@ impl ModelFallback<'_> {
                 record(runtime, &model_cooldowns, Some(reason), Some(until), None).await;
             }
             if let Some(FallbackError::Provider(ModelTransportError::Unavailable {
-                reason, ..
+                reason,
+                detail,
+                ..
             })) = earliest_failure
             {
                 return Err(FallbackError::Provider(ModelTransportError::Unavailable {
                     reason,
                     retry_after: remaining(until, runtime.now()),
+                    detail,
                 }));
             }
             return Err(cooldown(
@@ -276,6 +280,7 @@ impl ModelFallback<'_> {
             && let FallbackError::Provider(ModelTransportError::Unavailable {
                 reason,
                 retry_after,
+                ..
             }) = failure
         {
             record_global(

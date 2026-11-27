@@ -28,13 +28,22 @@ impl Sender for CapabilityModel {
         let PreparedRequest::Gemini(request) = request else {
             return Err(ModelTransportError::InvalidConfiguration);
         };
-        assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let prompt: Value = serde_json::from_str(
             request.body()["input"]
                 .as_str()
                 .ok_or(ModelTransportError::InvalidConfiguration)?,
         )
         .map_err(|_| ModelTransportError::InvalidConfiguration)?;
+        if self.answer.is_none() && call == 1 {
+            assert_eq!(prompt["question"], self.question);
+            return Err(ModelTransportError::Unavailable {
+                reason: ModelUnavailability::Upstream,
+                retry_after: Duration::from_secs(60),
+                detail: ModelFailureDetail::HttpStatus(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            });
+        }
+        assert_eq!(call, 0);
         assert_eq!(prompt["text"], self.question);
         assert!(
             request.body()["system_instruction"]
@@ -53,7 +62,7 @@ impl Sender for CapabilityModel {
 
 #[tokio::test]
 #[ignore = "uses authenticated Telegram ingress and a disposable TimescaleDB"]
-async fn publishes_multilingual_capability_answers_with_one_model_call()
+async fn publishes_multilingual_capability_answers_and_provider_errors()
 -> Result<(), Box<dyn Error>> {
     let url = env::var("GA_TEST_DATABASE_URL")?;
     let address = url
@@ -114,7 +123,7 @@ async fn publishes_multilingual_capability_answers_with_one_model_call()
             "sk",
             Some("Môžem zaznamenávať a spätne prehliadať záznamy v denníku."),
         ),
-        (203, "¿Cuánto duró mi último entrenamiento?", "es", None),
+        (203, "Сравни мой тестовый сон вчера и сегодня", "ru", None),
     ] {
         binding
             .accept_polled_update(
@@ -148,56 +157,33 @@ async fn publishes_multilingual_capability_answers_with_one_model_call()
             answer,
             calls: AtomicUsize::new(0),
         };
-        if let Some(answer) = answer {
-            let worker = ModelDiaryWorker {
-                database: &database,
-                configured: &configured,
-                gateway: &gateway,
-                sender: &sender,
-                timezone: "UTC",
-                locale: "en",
-            };
-            worker.process(&lease, now).await;
-            let (body, protected, completed): (String, bool, bool) = sqlx::query_as(
-                "SELECT o.intent#>>'{blocks,0,text}',o.memory_fence IS NOT NULL,
-                        i.status='processed' AND j.status='done'
-                 FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
-                 JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id)
-                 WHERE i.normalized_text=$1",
-            )
-            .bind(question)
-            .fetch_one(&pool)
-            .await?;
-            assert_eq!(body, answer);
-            assert!(protected && completed);
-        } else {
-            let command = gateway
-                .interpret_telegram_diary_with(
-                    &lease,
-                    "UTC",
-                    now,
-                    &mut AnalysisBudget::new(Instant::now()),
-                    || configured.current(),
-                    &sender,
-                )
-                .await?;
-            assert!(matches!(
-                publish_telegram_interpretation(
-                    &database,
-                    &lease,
-                    &command,
-                    DiaryReplyPreferences {
-                        configured_timezone: "UTC",
-                        owner_locale: "en",
-                        started: now,
-                        undo_anchor: None,
-                    },
-                )
-                .await?,
-                DiaryReplyOutcome::NeedsAnalysis
-            ));
-        }
-        assert_eq!(sender.calls.load(Ordering::SeqCst), 1);
+        let worker = ModelDiaryWorker {
+            database: &database,
+            configured: &configured,
+            gateway: &gateway,
+            sender: &sender,
+            timezone: "UTC",
+            locale: "en",
+        };
+        worker.process(&lease, now).await;
+        let (body, protected, completed): (String, bool, bool) = sqlx::query_as(
+            "SELECT o.intent#>>'{blocks,0,text}',o.memory_fence IS NOT NULL,
+                    i.status='processed' AND j.status='done'
+             FROM outbox_messages o JOIN inbound_messages i ON i.id=o.inbound_message_id
+             JOIN jobs j ON j.dedup_key=concat('telegram:inbound:native:',i.id)
+             WHERE i.normalized_text=$1",
+        )
+        .bind(question)
+        .fetch_one(&pool)
+        .await?;
+        let expected = answer.unwrap_or("Сервис модели временно недоступен (Gemini, HTTP 503).");
+        assert_eq!(body, expected);
+        assert!(completed);
+        assert_eq!(protected, answer.is_some());
+        assert_eq!(
+            sender.calls.load(Ordering::SeqCst),
+            if answer.is_some() { 1 } else { 2 }
+        );
     }
     let writes: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
         .fetch_one(&pool)

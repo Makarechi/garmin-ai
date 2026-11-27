@@ -43,7 +43,13 @@ impl FallbackRuntime for Fixture<'_> {
             Some("ok") => Ok("synthetic result"),
             Some("auth") => Err(unavailable(ModelUnavailability::Authorization, 1800)),
             Some("quota") => Err(unavailable(ModelUnavailability::RateLimited, 120)),
-            Some("upstream") => Err(unavailable(ModelUnavailability::Upstream, 60)),
+            Some("upstream") => Err(FallbackError::Provider(ModelTransportError::Unavailable {
+                reason: ModelUnavailability::Upstream,
+                retry_after: Duration::from_secs(60),
+                detail: ga_model::ModelFailureDetail::HttpStatus(
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                ),
+            })),
             Some("earlier_equal") => Err(unavailable(ModelUnavailability::MissingModel, 120)),
             Some("invalid") => Err(FallbackError::Provider(ModelTransportError::Response(
                 ModelResponseError::InvalidOutput,
@@ -52,7 +58,7 @@ impl FallbackRuntime for Fixture<'_> {
                 ModelResponseError::Incomplete,
             ))),
             Some("request") => Err(FallbackError::Provider(
-                ModelTransportError::RequestRejected,
+                ModelTransportError::RequestRejected(None),
             )),
             Some("deadline") => Err(FallbackError::Deadline),
             Some("denied") => Err(FallbackError::ConsentRequired),
@@ -89,6 +95,37 @@ impl FallbackRuntime for Fixture<'_> {
     async fn clear_checkpoint(&mut self) {
         self.writes.push(json!(["clear"]));
     }
+}
+
+#[tokio::test]
+async fn preserves_the_http_status_after_all_fallback_models_fail() -> Result<(), Box<dyn Error>> {
+    let mut runtime = Fixture {
+        at: "2026-03-12T12:00:00Z".parse()?,
+        responses: VecDeque::from(["upstream", "upstream"]),
+        attempted: Vec::new(),
+        writes: Vec::new(),
+        job: true,
+        can_checkpoint: true,
+    };
+    let result = ModelFallback {
+        models: &[Some("primary"), Some("secondary")],
+        excluded: &[],
+        prior: ModelGateState::default(),
+    }
+    .run(&mut runtime)
+    .await;
+    assert!(matches!(
+        result,
+        Err(FallbackError::Provider(ModelTransportError::Unavailable {
+            reason: ModelUnavailability::Upstream,
+            detail: ga_model::ModelFailureDetail::HttpStatus(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE
+            ),
+            ..
+        }))
+    ));
+    assert!(runtime.responses.is_empty());
+    Ok(())
 }
 
 #[tokio::test]
@@ -183,6 +220,7 @@ fn unavailable(reason: ModelUnavailability, seconds: u64) -> FallbackError {
     FallbackError::Provider(ModelTransportError::Unavailable {
         reason,
         retry_after: Duration::from_secs(seconds),
+        detail: ga_model::ModelFailureDetail::Unspecified,
     })
 }
 
@@ -198,6 +236,7 @@ fn outcome(result: Result<&'static str, FallbackError>) -> Value {
         Err(FallbackError::Provider(ModelTransportError::Unavailable {
             reason,
             retry_after,
+            ..
         })) => json!([
             match reason {
                 ModelUnavailability::Authorization => "auth",
@@ -213,7 +252,7 @@ fn outcome(result: Result<&'static str, FallbackError>) -> Value {
         Err(FallbackError::Provider(ModelTransportError::Response(
             ModelResponseError::Incomplete,
         ))) => json!(["incomplete"]),
-        Err(FallbackError::Provider(ModelTransportError::RequestRejected)) => json!(["request"]),
+        Err(FallbackError::Provider(ModelTransportError::RequestRejected(_))) => json!(["request"]),
         Err(error) => json!([format!("{error:?}")]),
     }
 }

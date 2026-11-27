@@ -26,6 +26,46 @@ use crate::{
     telegram_input::TelegramBinding,
 };
 
+#[test]
+fn provider_notices_distinguish_http_connection_and_timeout() {
+    let unavailable = |reason, detail| ModelTransportError::Unavailable {
+        reason,
+        detail,
+        retry_after: Duration::from_secs(60),
+    };
+    let provider = ModelProvider::Gemini;
+    assert_eq!(
+        provider_notice(
+            "ru",
+            provider,
+            unavailable(
+                ModelUnavailability::RateLimited,
+                ModelFailureDetail::HttpStatus(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            )
+        ),
+        "Провайдер ограничил частоту запросов или исчерпана квота (Gemini, HTTP 429)."
+    );
+    assert_eq!(
+        provider_notice(
+            "en",
+            provider,
+            unavailable(ModelUnavailability::Upstream, ModelFailureDetail::Timeout,)
+        ),
+        "The model response timed out (Gemini)."
+    );
+    assert_eq!(
+        provider_notice(
+            "en",
+            provider,
+            unavailable(
+                ModelUnavailability::Upstream,
+                ModelFailureDetail::Connection,
+            )
+        ),
+        "The service could not connect to the model provider (Gemini)."
+    );
+}
+
 const HEALTH_QUESTION: &str = "What is the synthetic Garmin sleep baseline?";
 const FRESHNESS_QUESTION: &str = "How recent is the synthetic Garmin sleep summary?";
 const SLEEP_QUESTION: &str = "When did the synthetic sleep interval start?";

@@ -7,7 +7,7 @@ use ga_domain::{
     model_request::ExtensionModelRequest,
     model_response::{MAX_RESPONSE_BYTES, ModelResponseError, StructuredModelOutput},
 };
-use ga_model::{ModelTransportError, ModelUnavailability};
+use ga_model::{ModelFailureDetail, ModelTransportError, ModelUnavailability};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::watch;
@@ -113,6 +113,7 @@ fn unavailable() -> ModelTransportError {
     ModelTransportError::Unavailable {
         reason: ModelUnavailability::Upstream,
         retry_after: RETRY_AFTER,
+        detail: ModelFailureDetail::Unspecified,
     }
 }
 

@@ -43,21 +43,38 @@ impl ModelUnavailability {
         })
     }
 
-    fn with_retry(self, retry: Option<Duration>) -> ModelTransportError {
+    fn with_retry(
+        self,
+        retry: Option<Duration>,
+        detail: ModelFailureDetail,
+    ) -> ModelTransportError {
         ModelTransportError::Unavailable {
             reason: self,
             retry_after: self.default_retry().max(retry.unwrap_or_default()),
+            detail,
         }
     }
+}
+
+/// Provider diagnostics safe to carry across retries and show to the owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelFailureDetail {
+    HttpStatus(StatusCode),
+    Timeout,
+    Connection,
+    Network,
+    ProviderResponse,
+    Unspecified,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelTransportError {
     InvalidConfiguration,
-    RequestRejected,
+    RequestRejected(Option<StatusCode>),
     Unavailable {
         reason: ModelUnavailability,
         retry_after: Duration,
+        detail: ModelFailureDetail,
     },
     Response(ModelResponseError),
 }
@@ -66,7 +83,7 @@ impl fmt::Display for ModelTransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidConfiguration => "Model transport configuration is invalid",
-            Self::RequestRejected => "Model request was rejected",
+            Self::RequestRejected(_) => "Model request was rejected",
             Self::Unavailable { reason, .. } => match reason {
                 ModelUnavailability::Authorization => "Model authorization failed",
                 ModelUnavailability::MissingModel => "Configured model is unavailable",
@@ -194,13 +211,22 @@ fn transport_client(timeout: Duration, https_only: bool) -> Result<Client, Model
         .map_err(|_| invalid)
 }
 
-fn network_failure(_: reqwest::Error) -> ModelTransportError {
-    ModelUnavailability::Upstream.with_retry(None)
+fn network_failure(error: reqwest::Error) -> ModelTransportError {
+    let detail = if error.is_timeout() {
+        ModelFailureDetail::Timeout
+    } else if error.is_connect() {
+        ModelFailureDetail::Connection
+    } else {
+        ModelFailureDetail::Network
+    };
+    ModelUnavailability::Upstream.with_retry(None, detail)
 }
 
 fn response_failure(error: ModelResponseError) -> ModelTransportError {
     match error {
-        ModelResponseError::Unavailable => ModelUnavailability::Upstream.with_retry(None),
+        ModelResponseError::Unavailable => {
+            ModelUnavailability::Upstream.with_retry(None, ModelFailureDetail::ProviderResponse)
+        }
         other => ModelTransportError::Response(other),
     }
 }
@@ -247,9 +273,9 @@ fn http_failure(status: StatusCode, retry: Option<Duration>) -> ModelTransportEr
         StatusCode::TOO_MANY_REQUESTS => ModelUnavailability::RateLimited,
         StatusCode::REQUEST_TIMEOUT => ModelUnavailability::Upstream,
         status if status.as_u16() >= 500 => ModelUnavailability::Upstream,
-        _ => return ModelTransportError::RequestRejected,
+        _ => return ModelTransportError::RequestRejected(Some(status)),
     };
-    reason.with_retry(retry)
+    reason.with_retry(retry, ModelFailureDetail::HttpStatus(status))
 }
 
 fn retry_delay(header: &str, now: SystemTime) -> Option<Duration> {
